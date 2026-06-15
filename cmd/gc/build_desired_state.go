@@ -1084,10 +1084,12 @@ func collectAssignedWorkBeadsWithStores(
 			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
 			// live-session step beads in the same range are skipped untouched.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
@@ -1683,6 +1685,29 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
+}
+
+// appendOpenAssignedMoleculeWorkUnique includes root-only molecule wisps that
+// are direct assignments. Ready() intentionally hides molecule roots from
+// generic work queues, but an assigned root-only wisp is the executable turn
+// for on-demand named sessions such as the Gas Town refinery patrol.
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	for _, b := range beadList {
+		if !isOpenAssignedMoleculeWork(b) {
+			continue
+		}
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+	}
+}
+
+func isOpenAssignedMoleculeWork(b beads.Bead) bool {
+	if b.Status != "open" || strings.TrimSpace(b.Assignee) == "" {
+		return false
+	}
+	if !beads.IsMoleculeType(b.Type) {
+		return false
+	}
+	return b.Ephemeral || b.NoHistory || strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) == "workflow"
 }
 
 // appendOpenRoutedWorkUnique includes open beads that are still releasably

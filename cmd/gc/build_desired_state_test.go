@@ -345,6 +345,65 @@ func TestCollectAssignedWorkBeadsIncludesReadyOpenAssignedWisp(t *testing.T) {
 	}
 }
 
+func TestCollectAssignedWorkBeadsIncludesOpenAssignedRootOnlyMoleculeWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	wisp, err := store.Create(beads.Bead{
+		Title:     "refinery patrol",
+		Type:      "molecule",
+		Status:    "open",
+		Assignee:  "repo/refinery",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root-only wisp: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "repo/refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want assigned root-only molecule wisp %s", got, wisp.ID)
+	}
+}
+
+func TestCollectAssignedWorkBeadsIgnoresOpenAssignedMoleculeContainer(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "workflow container",
+		Type:     "molecule",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	}); err != nil {
+		t.Fatalf("create molecule container: %v", err)
+	}
+	cfg := &config.City{
+		NamedSessions: []config.NamedSession{{
+			Template: "repo/refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want assigned non-wisp molecule container ignored", got)
+	}
+}
+
 func TestCollectAssignedWorkBeadsUsesLiveReadyAfterExternalDependencyClose(t *testing.T) {
 	backing := beads.NewMemStore()
 	blocker, err := backing.Create(beads.Bead{
