@@ -120,6 +120,38 @@ func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
 	}
 }
 
+func TestLocalParallelAllowlistIncludesCGOFlags(t *testing.T) {
+	repoRoot := repoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "test-local-parallel"))
+	if err != nil {
+		t.Fatalf("read test-local-parallel: %v", err)
+	}
+	content := string(script)
+	for _, tc := range []struct {
+		key      string
+		snapshot string
+		envLine  string
+	}{
+		{
+			key:      "CGO_CPPFLAGS",
+			snapshot: `export TEST_LOCAL_CGO_CPPFLAGS="${CGO_CPPFLAGS-}"`,
+			envLine:  `CGO_CPPFLAGS="${TEST_LOCAL_CGO_CPPFLAGS}"`,
+		},
+		{
+			key:      "CGO_LDFLAGS",
+			snapshot: `export TEST_LOCAL_CGO_LDFLAGS="${CGO_LDFLAGS-}"`,
+			envLine:  `CGO_LDFLAGS="${TEST_LOCAL_CGO_LDFLAGS}"`,
+		},
+	} {
+		if !strings.Contains(content, tc.snapshot) {
+			t.Fatalf("test-local-parallel should snapshot %s before launching jobs", tc.key)
+		}
+		if !strings.Contains(content, tc.envLine) {
+			t.Fatalf("test-local-parallel job env should pass through %s", tc.key)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
