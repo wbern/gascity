@@ -148,6 +148,8 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_CGO_CPPFLAGS="${CGO_CPPFLAGS-}"
+export TEST_LOCAL_CGO_LDFLAGS="${CGO_LDFLAGS-}"
 
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs}"
 
@@ -189,6 +191,8 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
+    CGO_CPPFLAGS="${TEST_LOCAL_CGO_CPPFLAGS}" \
+    CGO_LDFLAGS="${TEST_LOCAL_CGO_LDFLAGS}" \
     bash -lc "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
