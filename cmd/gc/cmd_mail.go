@@ -718,15 +718,12 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages)); err != nil {
+			reminder := buildMailInjectReminder(messages)
+			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", reminder.Text); err != nil {
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
-			injectedMessages := messages
-			if len(injectedMessages) > mailInjectMaxMessages {
-				injectedMessages = injectedMessages[:mailInjectMaxMessages]
-			}
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			archiveInjectedAutoHandoffMessages(mp, reminder.InjectedMessages, stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -743,6 +740,11 @@ type injectedAutoHandoffArchiver interface {
 	ArchiveInjectedAutoHandoffs([]string) error
 }
 
+type mailInjectReminder struct {
+	Text             string
+	InjectedMessages []mail.Message
+}
+
 func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
 	archiver, ok := mp.(injectedAutoHandoffArchiver)
 	if !ok {
@@ -757,18 +759,23 @@ func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Messag
 	}
 }
 
-// formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook.
-func formatInjectOutput(messages []mail.Message) string {
-	var sb strings.Builder
-	sb.WriteString("<system-reminder>\n")
-	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
+func buildMailInjectReminder(messages []mail.Message) mailInjectReminder {
 	limit := len(messages)
 	if limit > mailInjectMaxMessages {
 		limit = mailInjectMaxMessages
+	}
+
+	reminder := mailInjectReminder{
+		InjectedMessages: messages[:limit],
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
+	if len(messages) > limit {
 		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
 	}
-	for _, m := range messages[:limit] {
+	for _, m := range reminder.InjectedMessages {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
@@ -794,7 +801,14 @@ func formatInjectOutput(messages []mail.Message) string {
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
-	return sb.String()
+	reminder.Text = sb.String()
+	return reminder
+}
+
+// formatInjectOutput formats messages as a <system-reminder> block for
+// injection into an agent's prompt via a UserPromptSubmit hook.
+func formatInjectOutput(messages []mail.Message) string {
+	return buildMailInjectReminder(messages).Text
 }
 
 func mailInjectSubjectPreview(subject string) (string, bool) {

@@ -3199,6 +3199,32 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 }
 
+func TestBuildMailInjectReminderCapsInjectedMessages(t *testing.T) {
+	messages := []mail.Message{
+		{ID: "gc-1", From: "sender-a", Body: "first"},
+		{ID: "gc-2", From: "sender-b", Body: "second"},
+		{ID: "gc-3", From: "sender-c", Body: "third"},
+		{ID: "gc-4", From: "sender-d", Body: "fourth"},
+	}
+
+	got := buildMailInjectReminder(messages)
+
+	if len(got.InjectedMessages) != mailInjectMaxMessages {
+		t.Fatalf("len(InjectedMessages) = %d, want %d", len(got.InjectedMessages), mailInjectMaxMessages)
+	}
+	for i, want := range []string{"gc-1", "gc-2", "gc-3"} {
+		if got.InjectedMessages[i].ID != want {
+			t.Fatalf("InjectedMessages[%d].ID = %q, want %q", i, got.InjectedMessages[i].ID, want)
+		}
+	}
+	if strings.Contains(got.Text, "gc-4") || strings.Contains(got.Text, "fourth") {
+		t.Fatalf("Text should not include truncated fourth message:\n%s", got.Text)
+	}
+	if !strings.Contains(got.Text, "Showing the first 3 message(s)") {
+		t.Fatalf("Text missing truncation notice:\n%s", got.Text)
+	}
+}
+
 func TestMailCheckInjectTruncatesLongBodies(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
