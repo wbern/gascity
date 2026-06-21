@@ -1020,6 +1020,56 @@ func TestResolveMailTargetsWithConfig_RuntimeNameUsesLiveConfiguredNamedSessionM
 	}
 }
 
+func TestResolveMailTargetsWithConfig_TemplateQualifiedNameUsesRenamedNamedSessionMailbox(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "gas-city-wbern",
+			SessionTemplate: "{{.City}}/{{.Name}}",
+		},
+		Agents: []config.Agent{{
+			Name:         "gas-city-architect",
+			Dir:          "gas-city-wbern",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "architect",
+			Template: "gas-city-architect",
+			Dir:      "gas-city-wbern",
+			Mode:     "on_demand",
+		}},
+	}
+	identity := "gas-city-wbern/architect"
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "gcw/gas-city-architect",
+			"alias_history":             "gas-city-wbern/gas-city-architect",
+			"session_name":              runtimeName,
+			"configured_named_session":  "true",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	target, err := resolveMailTargetsWithConfigCached(t.TempDir(), cfg, store, "gas-city-wbern/gas-city-architect", nil)
+	if err != nil {
+		t.Fatalf("resolveMailTargetsWithConfigCached: %v", err)
+	}
+	if target.display != "gcw/gas-city-architect" {
+		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
+	}
+	want := []string{"gcw/gas-city-architect", b.ID, "gas-city-wbern/gas-city-architect"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
 func TestResolveMailTargetsForCommand_FakeProviderDoesNotResolveHistoricalAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "fake")
@@ -1119,6 +1169,72 @@ mode = "always"
 		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
 	}
 	want := []string{"gcw/gas-city-architect", "gc-1", "gas-city-architect"}
+	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
+	}
+}
+
+func TestResolveMailTargetsForCommand_TemplateQualifiedNameUsesRenamedNamedSessionMailbox(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+
+	cityPath := t.TempDir()
+	cityToml := `[workspace]
+name = "gas-city-wbern"
+session_template = "{{.City}}/{{.Name}}"
+
+[[agent]]
+name = "gas-city-architect"
+dir = "gas-city-wbern"
+provider = "missing-provider"
+
+[providers.missing-provider]
+command = "missing-provider"
+
+[[named_session]]
+name = "architect"
+template = "gas-city-architect"
+dir = "gas-city-wbern"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	identity := "gas-city-wbern/architect"
+	runtimeName := config.NamedSessionRuntimeName("gas-city-wbern", config.Workspace{SessionTemplate: "{{.City}}/{{.Name}}"}, identity)
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":                     "gcw/gas-city-architect",
+			"alias_history":             "gas-city-wbern/gas-city-architect",
+			"session_name":              runtimeName,
+			"configured_named_session":  "true",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+		},
+	}); err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	target, ok := resolveMailTargetsForCommand("gas-city-wbern/gas-city-architect", &stderr, "gc mail inbox")
+	if !ok {
+		t.Fatal("resolveMailTargetsForCommand() = not ok, want ok")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if target.display != "gcw/gas-city-architect" {
+		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
+	}
+	want := []string{"gcw/gas-city-architect", "gc-1", "gas-city-wbern/gas-city-architect"}
 	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
 	}

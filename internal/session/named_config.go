@@ -111,6 +111,8 @@ func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, 
 			match = true
 		case spec.SessionName == target:
 			match = true
+		case ns.TemplateQualifiedName() == target:
+			match = true
 		case !qualified && namedSessionBareName(ns) == target:
 			// Rig-scoped named sessions are only reachable by bare
 			// name from inside the rig, matching the pre-refactor

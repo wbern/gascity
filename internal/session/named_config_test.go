@@ -323,6 +323,35 @@ func TestResolveNamedSessionSpecForConfigTarget_BareNameResolvesV2BoundSession(t
 	}
 }
 
+func TestResolveNamedSessionSpecForConfigTarget_TemplateQualifiedNameResolvesRenamedSession(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}/{{.Name}}"},
+		Agents: []config.Agent{{
+			Name: "gas-city-architect",
+			Dir:  "gas-city-wbern",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "architect",
+			Template: "gas-city-architect",
+			Dir:      "gas-city-wbern",
+		}},
+	}
+
+	spec, ok, err := ResolveNamedSessionSpecForConfigTarget(cfg, "test-city", "gas-city-wbern/gas-city-architect", "")
+	if err != nil {
+		t.Fatalf("ResolveNamedSessionSpecForConfigTarget(template-qualified): %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveNamedSessionSpecForConfigTarget(template-qualified) = false, want true")
+	}
+	if spec.Identity != "gas-city-wbern/architect" {
+		t.Fatalf("spec.Identity = %q, want gas-city-wbern/architect", spec.Identity)
+	}
+	if spec.SessionName != "test-city/architect" {
+		t.Fatalf("spec.SessionName = %q, want test-city/architect", spec.SessionName)
+	}
+}
+
 func TestResolveNamedSessionSpecForConfigTarget_BareNameAmbiguousAcrossBindings(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
