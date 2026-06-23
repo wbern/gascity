@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -286,19 +285,11 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		if !found {
 			return fail("target_resolve_failed", fmt.Sprintf("gc sling: no rig with prefix %q for bead %s", bp, beadOrFormula))
 		}
-		switch {
-		case len(rig.DefaultSlingTargets) > 0:
-			for _, t := range rig.DefaultSlingTargets {
-				if t == "" {
-					return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has an empty entry in default_sling_targets", rig.Name))
-				}
-			}
-			target = rig.DefaultSlingTargets[rand.Intn(len(rig.DefaultSlingTargets))] //nolint:gosec // random target selection, not security-critical
-		case rig.DefaultSlingTarget != "":
-			target = rig.DefaultSlingTarget
-		default:
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has no default_sling_target or default_sling_targets", rig.Name))
+		selected, selErr := selectDefaultSlingTarget(rig, cityPath)
+		if selErr != nil {
+			return fail("target_resolve_failed", "gc sling: "+selErr.Error())
 		}
+		target = selected
 	}
 
 	// Ensure rig paths are absolute before agent/rig context resolution.
