@@ -2454,6 +2454,10 @@
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
         },
+        "default_sling_strategy": {
+          "type": "string",
+          "description": "DefaultSlingStrategy selects how a targetless gc sling picks among\nDefaultSlingTargets. \"random\" (default, or empty) picks an entry at\nrandom each dispatch; \"round_robin\" cycles through the entries in order\nusing a durable per-rig cursor so dispatch is spread evenly. Ignored\nwhen DefaultSlingTargets is unset."
+        },
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",
           "description": "SessionSleep overrides workspace-level idle sleep defaults for agents in\nthis rig."

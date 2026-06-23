@@ -583,6 +583,12 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// DefaultSlingStrategy selects how a targetless gc sling picks among
+	// DefaultSlingTargets. "random" (default, or empty) picks an entry at
+	// random each dispatch; "round_robin" cycles through the entries in order
+	// using a durable per-rig cursor so dispatch is spread evenly. Ignored
+	// when DefaultSlingTargets is unset.
+	DefaultSlingStrategy string `toml:"default_sling_strategy,omitempty"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -4770,6 +4776,12 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
 		seenPrefixes[prefix] = r.Name
+
+		switch strings.TrimSpace(r.DefaultSlingStrategy) {
+		case "", "random", "round_robin":
+		default:
+			return fmt.Errorf("rig %q: invalid default_sling_strategy %q (want \"random\" or \"round_robin\")", r.Name, r.DefaultSlingStrategy)
+		}
 	}
 	return nil
 }
