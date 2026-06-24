@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -465,7 +466,11 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 
 		sessName := explicitName
 		if sessName == "" {
-			sessName = sessionNameFor(b.ID)
+			if alias != "" {
+				sessName = agent.SanitizeQualifiedNameForSession(alias)
+			} else {
+				sessName = sessionNameFor(b.ID)
+			}
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
 				_ = m.store.Close(b.ID)
 				return fmt.Errorf("storing session name: %w", err)
@@ -729,7 +734,11 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 
 		sessName := explicitName
 		if sessName == "" {
-			sessName = sessionNameFor(b.ID)
+			if alias != "" {
+				sessName = agent.SanitizeQualifiedNameForSession(alias)
+			} else {
+				sessName = sessionNameFor(b.ID)
+			}
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
 				_ = m.store.Close(b.ID)
 				return fmt.Errorf("storing session name: %w", err)
