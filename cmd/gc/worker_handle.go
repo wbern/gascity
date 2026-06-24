@@ -70,8 +70,10 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		Provider:              sp,
 		CityPath:              cityPath,
 		SearchPaths:           searchPaths,
+		UsageSink:             usageSinkForCity(cfg, cityPath),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		Pricing:               cfg.PricingRegistry(),
 	})
 }
 

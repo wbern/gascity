@@ -81,6 +81,16 @@ func ControlDispatcherStartCommandFor(qualifiedName string) string {
 	return `sh -c '` + controlDispatcherTraceInit + `; ` + controlDispatcherTraceDirInit + `; exec "${GC_BIN:-gc}" convoy control --serve --follow ` + qualifiedName + `'`
 }
 
+// IsDeterministicControlDispatcher reports whether an agent is the providerless
+// control-dispatcher worker that runs the deterministic control loop.
+func IsDeterministicControlDispatcher(agent *Agent) bool {
+	return agent != nil &&
+		agent.Name == ControlDispatcherAgentName &&
+		strings.TrimSpace(agent.StartCommand) != "" &&
+		strings.TrimSpace(agent.Provider) == "" &&
+		strings.Contains(agent.StartCommand, "convoy control --serve")
+}
+
 // BindingQualifiedName returns the binding-qualified agent identity without a
 // rig prefix. Examples: "polecat", "gastown.polecat", or "gastown.mayor".
 func (a *Agent) BindingQualifiedName() string {
@@ -170,6 +180,10 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
+	// Upstreams defines named model-serving endpoint presets selectable per
+	// agent via the Upstream axis (Phase C). Each maps a name → serving env
+	// (base URL + credential refs); see UpstreamSpec.
+	Upstreams map[string]UpstreamSpec `toml:"upstreams,omitempty"`
 	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	//
 	// Legacy pack source map, accepted for migration and fetch/list
@@ -203,6 +217,8 @@ type City struct {
 	Mail MailConfig `toml:"mail,omitempty"`
 	// Events configures the events provider backend.
 	Events EventsConfig `toml:"events,omitempty"`
+	// Usage configures the usage-fact sink backend.
+	Usage UsageConfig `toml:"usage,omitempty"`
 	// Dolt configures optional dolt server connection overrides.
 	Dolt DoltConfig `toml:"dolt,omitempty"`
 	// Formulas is the legacy [formulas] table; authored [formulas].dir is
@@ -311,6 +327,12 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// Runtimes maps pack-declared runtime selection names ([runtimes.<name>]
+	// in pack.toml) to their resolved declarations, composed during city and
+	// rig expansion. Selection is city-wide, so rig-imported runtime packs
+	// land here too; conflicting re-declarations are composition errors.
+	// Runtime-only.
+	Runtimes map[string]DiscoveredRuntime `toml:"-" json:"-"`
 	// PackSkills holds binding-qualified shared skill catalogs composed
 	// from city-level imported packs. Runtime-only.
 	PackSkills []DiscoveredSkillCatalog `toml:"-" json:"-"`
@@ -378,7 +400,9 @@ type NamedSession struct {
 	// target imported agents via "binding.agent".
 	Template string `toml:"template" jsonschema:"required"`
 	// Scope defines where this named session is instantiated in pack
-	// expansion: "city" (one per city) or "rig" (one per rig).
+	// expansion: "city" (one per city) or "rig" (one per rig). Omit the
+	// field for an unscoped session instantiated in both city and rig
+	// expansion contexts.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Dir is the identity prefix for rig-scoped named sessions after pack
 	// expansion. Empty means city-scoped.
@@ -618,6 +642,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
 	// the pack-defined args; set to an empty list to clear them; set to a
 	// populated list to replace them entirely (full replace, not append).
@@ -1023,6 +1049,24 @@ type PackDoctorEntry struct {
 	// scan. Default false. The check still runs on demand via `gc doctor`
 	// regardless of this flag.
 	Warmup bool `toml:"warmup,omitempty"`
+}
+
+// PackRuntimeEntry declares a pack-shipped runtime provider executable
+// under [runtimes.<name>] in pack.toml. The executable speaks the Runtime
+// Provider Protocol (docs/reference/exec-session-provider.md); city
+// composition registers the name into the runtime selection registry so
+// `[session] provider = "<name>"` resolves to it. Name collisions with
+// builtin runtimes (or other packs) are composition errors — see the
+// RUNTIME-SEL rows in internal/runtime/REQUIREMENTS.md.
+type PackRuntimeEntry struct {
+	// Command is the runtime executable: a path relative to the pack
+	// directory (anything containing a path separator) or a bare name
+	// resolved on PATH at session start.
+	Command string `toml:"command" jsonschema:"required"`
+	// Protocol is the RPP version the executable speaks. Version 0 is
+	// the only version today; the declaration exists so future protocol
+	// bumps fail at composition instead of at session start.
+	Protocol int `toml:"protocol,omitempty"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -1655,6 +1699,15 @@ type EventsConfig struct {
 	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
 }
 
+// UsageConfig holds usage-fact sink settings.
+type UsageConfig struct {
+	// Provider selects the usage sink backend:
+	//   - "discard" / "fake" → drop all facts
+	//   - "exec:<script>" → user-supplied script (JSON fact per line on stdin)
+	//   - "" / "local" → durable file-backed JSONL at .gc/usage.jsonl (default)
+	Provider string `toml:"provider,omitempty"`
+}
+
 const (
 	// DefaultEventsRotationMaxSizeBytes is the default active events.jsonl
 	// size threshold before auto-rotation.
@@ -1736,7 +1789,21 @@ const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
 	DefaultDoltMaxConnections = 256
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
-	DefaultDoltReadTimeoutMillis = 30000
+	// Managed multi-agent cities open a short-lived bd/dolt-sql client
+	// connection per operation and frequently SIGKILL it on a client-side
+	// deadline (e.g. agents wrap `gc hook` in `timeout 10`), so the server
+	// orphans the socket in Sleep until read_timeout fires. Lowering this from
+	// the former 30s reaps those dead per-call connections sooner, before they
+	// accumulate into a store-wide read collapse under load. read_timeout is the
+	// listener socket idle/produce timeout: it reaps idle (Sleep) connections
+	// and bounds the inter-row produce gap (go-mysql-server ErrRowTimeout
+	// re-arms per row), not total query wall-clock — so it does not cut a long
+	// but steadily-producing query. Do NOT drop it to/below the client kill
+	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
+	// with slower live operations raise it via city.toml [dolt]
+	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
+	// (30s->15s).
+	DefaultDoltReadTimeoutMillis = 15000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
 )
@@ -1764,7 +1831,7 @@ type DoltConfig struct {
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
@@ -2226,17 +2293,16 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
-	// formulaV2Set keeps DaemonConfig non-zero when a file explicitly sets
-	// formula_v2=false, so the TOML encoder preserves that operator choice.
-	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
-
-	// FormulaV2 enables formula compiler v2 workflow infrastructure: the
-	// control-dispatcher implicit agent and on-demand named session,
-	// compiler-v2 workflow compilation, and batch graph-apply bead creation.
-	// The implicit dispatcher follows normal session idle-sleep policy.
-	// Requires bd with --graph support. Default: true. Set false only for cities
-	// pinned to formula compiler v1.
-	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
+	// FormulaV2 enables formula compiler v2 workflow infrastructure:
+	// compiler-v2 workflow compilation, batch graph-apply bead creation, and
+	// routing to the core pack's control-dispatcher worker.
+	// Requires bd with --graph support. Default: ENABLED. A nil pointer means
+	// the default-on behavior and is OMITTED from generated configs (so
+	// auto-generated city.toml files never pin the default and never
+	// accidentally write formula_v2=false); an explicit formula_v2=false (or
+	// the deprecated graph_workflows=false alias) is preserved as a non-nil
+	// false. Read the effective value via FormulaV2Enabled(), never the field.
+	FormulaV2 *bool `toml:"formula_v2,omitempty" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
@@ -2793,6 +2859,10 @@ type AgentDefaults struct {
 	// (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at
 	// runtime. Agents with their own model override would take precedence.
 	Model string `toml:"model,omitempty"`
+	// Upstream is the default model-serving endpoint (a key in [upstreams])
+	// for agents that do not set their own upstream (Phase C — the Upstream
+	// axis). Applied to agents with an empty Upstream by ApplyAgentDefaults.
+	Upstream string `toml:"upstream,omitempty"`
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
@@ -2832,6 +2902,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "model") {
 		dst.Model = src.Model
+	}
+	if !meta.IsDefined("agent_defaults", "upstream") {
+		dst.Upstream = src.Upstream
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
@@ -2913,8 +2986,9 @@ type Agent struct {
 	// tmux_alias. When no --alias is supplied, work_dir templates that use
 	// {{.Agent}} see the resolved tmux_alias as the concrete session identity.
 	TmuxAlias string `toml:"tmux_alias,omitempty"`
-	// Scope defines where this agent is instantiated: "city" (one per city)
-	// or "rig" (one per rig, the default). Only meaningful for pack-defined
+	// Scope defines where this agent is instantiated: "city" (one per city) or
+	// "rig" (one per rig). Omit the field for an unscoped agent instantiated in
+	// both city and rig expansion contexts. Only meaningful for pack-defined
 	// agents; inline agents in city.toml use Dir directly.
 	Scope string `toml:"scope,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume.
@@ -2939,6 +3013,11 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
+	// this agent — WHO serves the model. "" (default) falls back to
+	// agent_defaults.upstream; if still empty, no upstream env is injected
+	// (ambient behavior). Switching it relaunches the agent in the warm box.
+	Upstream string `toml:"upstream,omitempty"`
 	// InheritedProvider records the pack-scoped default provider for agents
 	// loaded from imported packs. Runtime-only.
 	InheritedProvider string `toml:"-" json:"-"`
@@ -4053,7 +4132,6 @@ func InjectImplicitAgents(cfg *City) {
 
 	configured := configuredProviders(cfg)
 	if len(configured) == 0 {
-		injectControlDispatcherAgents(cfg, existing)
 		return
 	}
 
@@ -4105,8 +4183,39 @@ func InjectImplicitAgents(cfg *City) {
 			})
 		}
 	}
+}
 
-	injectControlDispatcherAgents(cfg, existing)
+// implicitAgentIdentities returns the set of (dir, name) keys for agents that
+// InjectImplicitAgents would create given the current config state. This is
+// used by compose.go to partition [[patches.agent]] blocks so that patches
+// targeting not-yet-injected implicit agents can be deferred until after
+// InjectImplicitAgents runs.
+func implicitAgentIdentities(cfg *City) map[agentKey]bool {
+	configured := configuredProviders(cfg)
+	if len(configured) == 0 {
+		return nil
+	}
+	providers := configuredProviderOrder(configured)
+
+	existing := make(map[agentKey]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		existing[agentKey{a.Dir, a.Name}] = true
+	}
+
+	result := make(map[agentKey]bool)
+	for _, name := range providers {
+		if !existing[agentKey{"", name}] {
+			result[agentKey{"", name}] = true
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		for _, name := range providers {
+			if !existing[agentKey{rig.Name, name}] {
+				result[agentKey{rig.Name, name}] = true
+			}
+		}
+	}
+	return result
 }
 
 // ApplyAgentDefaults applies [agent_defaults] values to all agents that
@@ -4150,6 +4259,19 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 			if cfg.Agents[i].DefaultSlingFormula == nil && cfg.Agents[i].InheritedDefaultSlingFormula == nil {
 				cfg.Agents[i].DefaultSlingFormula = &formula
+			}
+		}
+	}
+
+	// Upstream axis (Phase C): agents with no explicit upstream inherit the
+	// city-level default so model-serving selection can be set once city-wide.
+	if upstream := cfg.AgentDefaults.Upstream; upstream != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].Upstream == "" {
+				cfg.Agents[i].Upstream = upstream
 			}
 		}
 	}
@@ -4267,6 +4389,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 		}
 		dst.Model = src.Model
 	}
+	if src.Upstream != "" {
+		if prov != nil && dst.Upstream != "" && dst.Upstream != src.Upstream {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.upstream redefined by %q", label))
+		}
+		dst.Upstream = src.Upstream
+	}
 	if src.WakeMode != "" {
 		if prov != nil && dst.WakeMode != "" && dst.WakeMode != src.WakeMode {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.wake_mode redefined by %q", label))
@@ -4294,62 +4422,6 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 	if len(src.MCP) > 0 {
 		dst.MCP = appendUnique(dst.MCP, src.MCP...)
 	}
-}
-
-// injectControlDispatcherAgents adds city-scoped and rig-scoped control-dispatcher
-// agents and named sessions when formula_v2 is enabled and no explicit
-// entry exists. Using named sessions ensures the reconciler reopens the
-// existing session bead on restart instead of creating a new one (which
-// would conflict on the session alias).
-func injectControlDispatcherAgents(cfg *City, existing map[agentKey]bool) {
-	if !cfg.Daemon.FormulaV2 {
-		return
-	}
-	existingNS := make(map[string]bool, len(cfg.NamedSessions))
-	for _, ns := range cfg.NamedSessions {
-		existingNS[ns.QualifiedName()] = true
-	}
-	if !existing[agentKey{"", ControlDispatcherAgentName}] {
-		cfg.Agents = append(cfg.Agents, newControlDispatcherAgent(""))
-		if !existingNS[ControlDispatcherAgentName] {
-			cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
-				Template: ControlDispatcherAgentName,
-				Mode:     "on_demand",
-			})
-		}
-	}
-	for _, rig := range cfg.Rigs {
-		if !existing[agentKey{rig.Name, ControlDispatcherAgentName}] {
-			cfg.Agents = append(cfg.Agents, newControlDispatcherAgent(rig.Name))
-			qn := rig.Name + "/" + ControlDispatcherAgentName
-			if !existingNS[qn] {
-				cfg.NamedSessions = append(cfg.NamedSessions, NamedSession{
-					Template: ControlDispatcherAgentName,
-					Dir:      rig.Name,
-					Mode:     "on_demand",
-				})
-			}
-		}
-	}
-}
-
-// newControlDispatcherAgent creates a control-dispatcher agent for the given scope.
-func newControlDispatcherAgent(dir string) Agent {
-	qualifiedName := ControlDispatcherAgentName
-	if dir != "" {
-		qualifiedName = dir + "/" + ControlDispatcherAgentName
-	}
-	one := 1
-	a := Agent{
-		Name:              ControlDispatcherAgentName,
-		Dir:               dir,
-		Description:       "Built-in deterministic compiler-v2 workflow control worker",
-		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
-		ProcessNames:      []string{"gc"},
-		MaxActiveSessions: &one,
-		Implicit:          true,
-	}
-	return a
 }
 
 // configuredProviders returns the providers that are explicitly configured in
@@ -4719,7 +4791,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
-		Daemon:        DaemonConfig{FormulaV2: true},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -4798,7 +4869,6 @@ func WizardCityWithProviders(name, defaultProvider string, providers []string) C
 	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
 	return City{
 		Workspace: ws,
-		Daemon:    DaemonConfig{FormulaV2: true},
 		Providers: builtinProviderAliases(providers),
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
@@ -4874,7 +4944,6 @@ func gastownCityWithWorkspace(_ string, ws Workspace, providers map[string]Provi
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
-			FormulaV2:       true,
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
 			RestartWindow:   "1h",
@@ -4961,20 +5030,30 @@ func Parse(data []byte) (*City, error) {
 	return &cfg, nil
 }
 
+// FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by
+// default: a nil pointer (the absent/omitted state) means enabled; only an
+// explicit formula_v2=false (or the deprecated graph_workflows=false alias)
+// disables it. Always read the effective value through this helper, never the
+// raw pointer field.
+func (d DaemonConfig) FormulaV2Enabled() bool {
+	return d.FormulaV2 == nil || *d.FormulaV2
+}
+
 func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
 	if cfg == nil {
 		return
 	}
+	// An explicit formula_v2 always wins: the decoder already populated the
+	// pointer (&true or &false), so leave it untouched.
 	if md.IsDefined("daemon", "formula_v2") {
-		cfg.Daemon.formulaV2Set = true
 		return
 	}
+	// Honor the deprecated graph_workflows alias only when formula_v2 is absent.
 	if md.IsDefined("daemon", "graph_workflows") {
-		cfg.Daemon.FormulaV2 = cfg.Daemon.GraphWorkflows
-		if !cfg.Daemon.FormulaV2 {
-			cfg.Daemon.formulaV2Set = true
-		}
+		v := cfg.Daemon.GraphWorkflows
+		cfg.Daemon.FormulaV2 = &v
 		return
 	}
-	cfg.Daemon.FormulaV2 = true
+	// Neither set: leave FormulaV2 nil so it stays default-on (via
+	// FormulaV2Enabled) and is omitted from any generated/round-tripped config.
 }

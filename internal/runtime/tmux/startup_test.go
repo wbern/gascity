@@ -45,6 +45,8 @@ type fakeStartOps struct {
 	createErrs []error
 	createIdx  int
 
+	respawnErr error
+
 	isSessionRunningResult     *bool
 	isRuntimeRunningResult     bool
 	killErr                    error
@@ -65,6 +67,7 @@ type fakeStartOps struct {
 	sendKeysErr                error
 	capturePaneText            string
 	capturePaneErr             error
+	recordStartCrashPath       string
 }
 
 type errReader struct{}
@@ -87,6 +90,16 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 		return err
 	}
 	return nil
+}
+
+func (f *fakeStartOps) respawnAgent(name, workDir, command string) error {
+	f.calls = append(f.calls, startCall{
+		method:  "respawnAgent",
+		name:    name,
+		workDir: workDir,
+		command: command,
+	})
+	return f.respawnErr
 }
 
 func (f *fakeStartOps) isSessionRunning(name string) bool {
@@ -176,6 +189,11 @@ func (f *fakeStartOps) disableMouseAndActivity(name string) error {
 func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	f.calls = append(f.calls, startCall{method: "capturePane", name: name})
 	return f.capturePaneText, f.capturePaneErr
+}
+
+func (f *fakeStartOps) recordStartCrash(name, _ string) string {
+	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
+	return f.recordStartCrashPath
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -680,6 +698,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -718,6 +737,7 @@ func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -757,6 +777,47 @@ func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"recordStartCrash",
+	})
+}
+
+func TestDoStartSession_DeadPaneRecordsDurableDiagnostic(t *testing.T) {
+	running := false
+	ops := &fakeStartOps{
+		hasSessionResult:       true,
+		isSessionRunningResult: &running,
+		capturePaneText:        "panic: startup failed\nPane is dead",
+		recordStartCrashPath:   "/city/.gc/runtime/sessions/mayor/start-stderr.log",
+	}
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+
+	err := doStartSession(context.Background(), ops, "mayor", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	for _, want := range []string{"diagnostic written to", "start-stderr.log", "startup failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"disableMouseAndActivity",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+		"isSessionRunning",
+		"capturePane",
+		"recordStartCrash",
 	})
 }
 
@@ -1772,6 +1833,119 @@ func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// doRelaunchSession tests (the un-weld relaunch-into-a-warm-box path, B1)
+// ---------------------------------------------------------------------------
+
+// A managed relaunch respawns the agent in the existing box and re-runs the
+// post-launch orchestration — WITHOUT createSession/setRemainOnExit/
+// disableMouseAndActivity (those are box/provision-half, already applied).
+func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	cfg := runtime.Config{
+		WorkDir:           "/proj",
+		Command:           "claude",
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"claude", "node"},
+	}
+
+	if err := doRelaunchSession(context.Background(), ops, "gc-city-agent-a", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"hasSession", // box must already exist
+		"respawnAgent",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession", // step 5: verify survived
+		"isSessionRunning",
+	})
+
+	respawn := callsByMethod(t, ops, "respawnAgent", 1)[0]
+	if respawn.name != "gc-city-agent-a" {
+		t.Errorf("respawnAgent name = %q, want %q", respawn.name, "gc-city-agent-a")
+	}
+	if respawn.workDir != "/proj" {
+		t.Errorf("respawnAgent workDir = %q, want %q", respawn.workDir, "/proj")
+	}
+	if respawn.command != "claude" {
+		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "claude")
+	}
+}
+
+// A missing box is an error (not a silent re-provision), and the agent is NOT
+// respawned — the caller must Provision first.
+func TestDoRelaunchSession_MissingBoxIsError(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: false}
+
+	err := doRelaunchSession(context.Background(), ops, "gone", runtime.Config{Command: "claude"}, DefaultConfig().SetupTimeout)
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("error = %v, want wrapping ErrSessionNotFound", err)
+	}
+	assertCallSequence(t, ops, []string{"hasSession"})
+}
+
+// A respawn failure surfaces and stops before the orchestration runs.
+func TestDoRelaunchSession_RespawnErrorSurfaces(t *testing.T) {
+	sentinel := errors.New("respawn boom")
+	ops := &fakeStartOps{hasSessionResult: true, respawnErr: sentinel}
+
+	cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}}
+	err := doRelaunchSession(context.Background(), ops, "sess", cfg, DefaultConfig().SetupTimeout)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want wrapping %v", err, sentinel)
+	}
+	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent"})
+}
+
+// A one-shot relaunch respawns then returns — the same lifecycle gating as Start,
+// so no post-launch orchestration.
+func TestDoRelaunchSession_OneShotSkipsOrchestration(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	cfg := runtime.Config{Command: "claude --once", Lifecycle: runtime.LifecycleOneShot, ProcessNames: []string{"claude"}}
+	if err := doRelaunchSession(context.Background(), ops, "sess", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent"})
+}
+
+// With no managed startup hints the relaunch is fire-and-forget after respawn.
+func TestDoRelaunchSession_FireAndForget(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	if err := doRelaunchSession(context.Background(), ops, "sess", runtime.Config{Command: "sleep 300"}, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent"})
+}
+
+// The relaunch reuses buildLaunchCommand, so a long prompt is respawned via the
+// $(cat ...) file-expansion form — identical to box creation.
+func TestDoRelaunchSession_LongPromptUsesFileExpansion(t *testing.T) {
+	workDir := t.TempDir()
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	cfg := runtime.Config{
+		WorkDir:      workDir,
+		Command:      "claude",
+		PromptFlag:   "-p",
+		PromptSuffix: "'" + strings.Repeat("x", maxInlinePromptLen+100) + "'",
+	}
+	if err := doRelaunchSession(context.Background(), ops, "sess", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	respawn := callsByMethod(t, ops, "respawnAgent", 1)[0]
+	if !strings.Contains(respawn.command, "$(cat") {
+		t.Errorf("respawnAgent command = %q, want $(cat ...) file expansion", respawn.command)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ensureFreshSession tests
 // ---------------------------------------------------------------------------
 
@@ -2445,5 +2619,62 @@ func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(tmpDir, "prestart-marker")); err != nil {
 		t.Fatalf("prestart-marker not created in GC_DIR: %v", err)
+	}
+}
+
+func TestPaneDeadInfoParsesStatusAndSignal(t *testing.T) {
+	tm := NewTmux()
+	exec := &fakeExecutor{out: "139|SIGSEGV\n"}
+	tm.exec = exec
+
+	status, signal := tm.PaneDeadInfo("mayor")
+	if status != "139" || signal != "SIGSEGV" {
+		t.Fatalf("PaneDeadInfo = (%q, %q), want (139, SIGSEGV)", status, signal)
+	}
+	if len(exec.calls) == 0 {
+		t.Fatal("no tmux call recorded")
+	}
+	last := exec.calls[len(exec.calls)-1]
+	if joined := strings.Join(last, " "); !strings.Contains(joined, "#{pane_dead_status}|#{pane_dead_signal}") {
+		t.Fatalf("display-message args = %v, want pane_dead format", last)
+	}
+}
+
+func TestPaneDeadInfoErrorReturnsEmpty(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{err: errors.New("no such pane")}
+	if status, signal := tm.PaneDeadInfo("mayor"); status != "" || signal != "" {
+		t.Fatalf("PaneDeadInfo = (%q, %q), want empty on error", status, signal)
+	}
+}
+
+func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
+	dir := t.TempDir()
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
+	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
+
+	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
+	want := filepath.Join(dir, "sessions", "mayor", "start-stderr.log")
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading artifact: %v", err)
+	}
+	for _, sub := range []string{"session: mayor", "exit-status: 139", "signal: SIGSEGV", "panic: startup failed", "Pane is dead"} {
+		if !strings.Contains(string(data), sub) {
+			t.Fatalf("artifact = %q, want substring %q", data, sub)
+		}
+	}
+}
+
+func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
+	o := &tmuxStartOps{tm: tm, runtimeDir: ""}
+	if path := o.recordStartCrash("mayor", "x"); path != "" {
+		t.Fatalf("path = %q, want empty when runtimeDir unset", path)
 	}
 }

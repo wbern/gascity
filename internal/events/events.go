@@ -26,17 +26,23 @@ const (
 	BeadUpdated             = "bead.updated"
 	BeadWorktreeReaped      = "bead.worktree.reaped"
 	BeadWorktreeReapSkipped = "bead.worktree.reap_skipped"
-	MailSent                = "mail.sent"
-	MailRead                = "mail.read"
-	MailArchived            = "mail.archived"
-	MailMarkedRead          = "mail.marked_read"
-	MailMarkedUnread        = "mail.marked_unread"
-	MailReplied             = "mail.replied"
-	MailDeleted             = "mail.deleted"
-	SessionDraining         = "session.draining"
-	SessionUndrained        = "session.undrained"
-	SessionQuarantined      = "session.quarantined"
-	SessionIdleKilled       = "session.idle_killed"
+	// BeadClaimRejected fires when a worker attempts to claim a work bead that
+	// is already live-claimed by a different worker — the claim is rejected as
+	// an idempotent no-op rather than fanning out a second concurrent claim.
+	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
+	// concurrent polecat claims) into an observable signal. ADR-0009.
+	BeadClaimRejected  = "bead.claim_rejected"
+	MailSent           = "mail.sent"
+	MailRead           = "mail.read"
+	MailArchived       = "mail.archived"
+	MailMarkedRead     = "mail.marked_read"
+	MailMarkedUnread   = "mail.marked_unread"
+	MailReplied        = "mail.replied"
+	MailDeleted        = "mail.deleted"
+	SessionDraining    = "session.draining"
+	SessionUndrained   = "session.undrained"
+	SessionQuarantined = "session.quarantined"
+	SessionIdleKilled  = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -131,6 +137,12 @@ const (
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
 
+	// ExtMsgOutboundChannelMismatch fires when a session attempts to publish
+	// to a conversation that is bound to a different session. The publish is
+	// rejected; this event turns that otherwise-silent cross-wire into an
+	// observable signal (RCA gc-5aie6: per-PL Slack channel cross-wiring).
+	ExtMsgOutboundChannelMismatch = "extmsg.outbound_channel_mismatch"
+
 	// EventsRotated is the forensic anchor written as the first event in
 	// a freshly-rotated active log. Its payload carries the prior
 	// archive's filename and seq range so log readers can stitch back
@@ -187,6 +199,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
+	BeadClaimRejected,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -202,6 +215,7 @@ var KnownEventTypes = []string{
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	ExtMsgOutboundChannelMismatch,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
@@ -215,14 +229,23 @@ var KnownEventTypes = []string{
 }
 
 // Event is a single recorded occurrence in the system.
+//
+// RunID/SessionID are opaque correlation ids stamped at the record site (run
+// root via the bead metadata run-chain; session bead id), used by downstream
+// consumers to join an event to its run/session. They are additive and
+// omitempty: old records lack them and unmarshal as "". They are NOT derived
+// from Payload — the redacted export forwards them as typed primitives, never by
+// decoding the free-form payload.
 type Event struct {
-	Seq     uint64          `json:"seq"`
-	Type    string          `json:"type"`
-	Ts      time.Time       `json:"ts"`
-	Actor   string          `json:"actor"`
-	Subject string          `json:"subject,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Seq       uint64          `json:"seq"`
+	Type      string          `json:"type"`
+	Ts        time.Time       `json:"ts"`
+	Actor     string          `json:"actor"`
+	Subject   string          `json:"subject,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	RunID     string          `json:"run_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // Recorder records events. Safe for concurrent use. Best-effort.

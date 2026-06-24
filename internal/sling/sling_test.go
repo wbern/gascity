@@ -2562,13 +2562,22 @@ func graphV2SlingTestConfig(t *testing.T, formulaDir string) *config.City {
 	formulatest.EnableV2ForTest(t)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{formulaDir},
 		},
+		Agents: []config.Agent{slingControlDispatcherAgent()},
 	}
-	config.InjectImplicitAgents(cfg)
 	return cfg
+}
+
+func slingControlDispatcherAgent() config.Agent {
+	return config.Agent{
+		Name:              config.ControlDispatcherAgentName,
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		ProcessNames:      []string{"gc"},
+		MaxActiveSessions: intPtr(1),
+	}
 }
 
 func TestSlingAttachGraphFormulaRejectsExistingLiveRoot(t *testing.T) {
@@ -2587,13 +2596,13 @@ title = "Do work"
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{formulaDir},
 		},
+		Agents: []config.Agent{slingControlDispatcherAgent()},
 	}
 	formulatest.EnableV2ForTest(t)
-	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
 	if err != nil {
@@ -2733,6 +2742,41 @@ func TestSlingExpandConvoy(t *testing.T) {
 	}
 	if len(result.Children) != 2 {
 		t.Fatalf("Children = %d, want 2", len(result.Children))
+	}
+}
+
+// TestExpandConvoyNoFormulaSuppressesDefaultFormula is a regression test for
+// the bug where ExpandConvoy did not propagate NoFormula into DoSlingBatch,
+// causing the default_sling_formula to fire even when --no-formula was set.
+func TestExpandConvoyNoFormulaSuppressesDefaultFormula(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+
+	// Agent with a default_sling_formula configured.
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+
+	bead, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// NoFormula=true: formula must NOT be invoked.
+	result, err := s.ExpandConvoy(context.Background(), bead.ID, a, RouteOpts{NoFormula: true}, store)
+	if err != nil {
+		t.Fatalf("ExpandConvoy with NoFormula=true: %v", err)
+	}
+	if result.WispRootID != "" || result.WorkflowID != "" {
+		t.Errorf("expected no formula attachment; WispRootID=%q WorkflowID=%q", result.WispRootID, result.WorkflowID)
+	}
+	if len(runner.calls) != 1 {
+		t.Errorf("expected 1 route call, got %d", len(runner.calls))
 	}
 }
 

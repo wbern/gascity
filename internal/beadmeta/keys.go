@@ -4,9 +4,9 @@
 //
 // Before beadmeta, these keys were ~126 raw string literals scattered across
 // ~70 files with no central declaration: the real interface between modules was
-// folklore. This package makes the seam named and compiler-checked. It is a
-// zero-dependency leaf (it imports nothing) so every workflow package can import
-// it without risk of an import cycle, mirroring internal/events.
+// folklore. This package makes the seam named and compiler-checked. It imports
+// only the standard library, so every workflow package can import it without
+// risk of an import cycle, mirroring internal/events.
 //
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
@@ -57,6 +57,7 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	CurrentRunIDMetadataKey              = "gc.current_run_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -97,6 +98,7 @@ const (
 	FormulaHashMetadataKey               = "gc.formula_hash"
 	FormulaNameMetadataKey               = "gc.formula_name"
 	FormulaSourceMetadataKey             = "gc.formula_source"
+	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
@@ -164,9 +166,35 @@ const (
 	TerminalMetadataKey                  = "gc.terminal"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
+	WorkBranchMetadataKey                = "gc.work_branch"
+	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
+	WorkOutcomeMetadataKey               = "gc.work_outcome"
+	WorkVerificationMetadataKey          = "gc.work_verification"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
+
+// Work-record metadata keys (ADR-0009). These bind a work bead to its claim
+// and its outcome so observability/eval can answer "what work was done, by
+// whom, with what artifact, to what end":
+//
+//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
+//     worker is on; the durable handle from the bead to its work. Stamped at
+//     claim time alongside WorkDirMetadataKey and read by the close gate.
+//   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
+//     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
+//     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
+//     result ("pass"/"fail"/"skipped") read by internal/dispatch, a disjoint
+//     vocabulary that must not be overloaded.
+//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA that satisfied
+//     the bead; required when the outcome is "shipped" and validated reachable
+//     on WorkBranchMetadataKey by the close gate. Named in the gc.work_* family
+//     (not a bare "gc.commit") to avoid collision with future commit concepts.
+//   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
+//     record (gate result, "manual", or a link) backing a shipped outcome.
+//
+// The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
+// commit on the branch" rule live with the close gate in cmd/gc.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
@@ -216,6 +244,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CurrentRunIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -256,6 +285,7 @@ var KnownMetadataKeys = []string{
 	FormulaHashMetadataKey,
 	FormulaNameMetadataKey,
 	FormulaSourceMetadataKey,
+	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
@@ -323,7 +353,11 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
+	WorkBranchMetadataKey,
+	WorkCommitMetadataKey,
 	WorkDirMetadataKey,
+	WorkOutcomeMetadataKey,
+	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
 }
 

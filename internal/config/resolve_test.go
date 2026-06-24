@@ -172,6 +172,59 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := BasePrefixBuiltin + "codex"
+	providers := map[string]ProviderSpec{
+		"codex": {
+			Base:               &base,
+			OptionsSchemaMerge: "by_key",
+			OptionDefaults: map[string]string{
+				"effort": "low",
+				"model":  "gpt-5.4-mini",
+			},
+			OptionsSchema: []ProviderOption{{
+				Key:     "model",
+				Label:   "Model",
+				Type:    "select",
+				Default: "",
+				Choices: []OptionChoice{{
+					Value:       "gpt-5.4-mini",
+					Label:       "GPT-5.4 Mini",
+					FlagArgs:    []string{"--model", "gpt-5.4-mini"},
+					FlagAliases: [][]string{{"-m", "gpt-5.4-mini"}},
+				}},
+			}},
+		},
+	}
+
+	defaultResolved, err := ResolveProvider(&Agent{Name: "worker"}, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider default agent: %v", err)
+	}
+	defaultArgs := strings.Join(defaultResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "--model gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing city-added default model", defaultResolved.ResolveDefaultArgs())
+	}
+
+	optInAgent := &Agent{
+		Name: "polecat",
+		OptionDefaults: map[string]string{
+			"model": "gpt-5.5",
+		},
+	}
+	optInResolved, err := ResolveProvider(optInAgent, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider opt-in agent: %v", err)
+	}
+	optInArgs := strings.Join(optInResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(optInArgs, "--model gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing preserved built-in opt-in model", optInResolved.ResolveDefaultArgs())
+	}
+	if strings.Contains(optInArgs, "gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, default model survived agent override", optInResolved.ResolveDefaultArgs())
+	}
+}
+
 func TestResolveProviderRequiresExplicitBuiltinCatalogEntry(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
 	_, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
@@ -190,7 +243,7 @@ func TestAgentProcessNamesResolvesExplicitProvider(t *testing.T) {
 	}
 
 	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
-	want := []string{"codex"}
+	want := []string{"codex", "codex-raw"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
 	}
@@ -1484,6 +1537,54 @@ func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
 	}
 }
 
+func TestMergeProviderOverBuiltinOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := ProviderSpec{
+		OptionsSchema: []ProviderOption{{
+			Key:     "model",
+			Label:   "Base Model",
+			Type:    "select",
+			Default: "opus",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "Old Opus", FlagArgs: []string{"--model", "old-opus"}},
+				{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+			},
+		}},
+	}
+	city := ProviderSpec{
+		OptionsSchemaMerge: "by_key",
+		OptionsSchema: []ProviderOption{{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+				{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+			},
+		}},
+	}
+
+	merged := MergeProviderOverBuiltin(base, city)
+	if len(merged.OptionsSchema) != 1 {
+		t.Fatalf("option count = %d, want 1", len(merged.OptionsSchema))
+	}
+	model := merged.OptionsSchema[0]
+	if model.Label != "Base Model" {
+		t.Errorf("label = %q, want inherited Base Model", model.Label)
+	}
+	if model.Type != "select" {
+		t.Errorf("type = %q, want inherited select", model.Type)
+	}
+	if model.Default != "opus" {
+		t.Errorf("default = %q, want inherited opus", model.Default)
+	}
+	wantChoices := []OptionChoice{
+		{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+		{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+		{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+	}
+	if !reflect.DeepEqual(model.Choices, wantChoices) {
+		t.Fatalf("choices = %#v, want %#v", model.Choices, wantChoices)
+	}
+}
+
 func optionKeys(opts []ProviderOption) []string {
 	keys := make([]string, 0, len(opts))
 	for _, opt := range opts {
@@ -1810,12 +1911,15 @@ func TestResolveInstallHooksNilWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveInstallHooksImplicitControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
-	agent := &Agent{Name: ControlDispatcherAgentName, Implicit: true}
+func TestResolveInstallHooksControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
+	agent := &Agent{
+		Name:         ControlDispatcherAgentName,
+		StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+	}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini"}}
 	got := ResolveInstallHooks(agent, ws)
 	if len(got) != 0 {
-		t.Fatalf("ResolveInstallHooks implicit control-dispatcher = %v, want none", got)
+		t.Fatalf("ResolveInstallHooks control-dispatcher = %v, want none", got)
 	}
 }
 
@@ -2065,6 +2169,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PermissionModes:        map[string]string{"yolo": "--yolo"},
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
+		UpstreamEnv:            UpstreamEnvBinding{BaseURL: "X_BASE_URL", APIKey: "X_API_KEY", AuthToken: "X_AUTH_TOKEN"},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",
