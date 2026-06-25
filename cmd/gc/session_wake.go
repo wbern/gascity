@@ -25,6 +25,36 @@ import (
 // different incarnation and this drain/stop is stale.
 var errTokenMismatch = errors.New("instance token mismatch")
 
+// startPathWriteTimeout bounds a single start-path metadata write at the call
+// site, below the bd-exec general timeout (~120s), so a write stalled by a
+// saturated backing store fails fast. The reconciler then releases the
+// per-session mutation lock and retries on the next tick instead of wedging
+// new-session starts permanently. (gcw-7te)
+const startPathWriteTimeout = 20 * time.Second
+
+// errStartWriteTimedOut is returned by setMetadataBatchBounded when a
+// start-path metadata write exceeds its deadline. It is transient: the start
+// fails this tick and is retried fresh on the next.
+var errStartWriteTimedOut = errors.New("start-path metadata write timed out")
+
+// setMetadataBatchBounded runs store.SetMetadataBatch with a wall-clock
+// deadline. On timeout it returns errStartWriteTimedOut and stops waiting on
+// the write goroutine; the underlying bd-exec carries its own timeout, so that
+// goroutine drains rather than leaking unboundedly. This bounds only the start
+// path — the shared beads.Store interface is intentionally left unchanged.
+func setMetadataBatchBounded(store beads.Store, id string, kvs map[string]string, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- store.SetMetadataBatch(id, kvs) }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errStartWriteTimedOut
+	}
+}
+
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
 // Returns the new generation and instance token on success.
@@ -65,7 +95,7 @@ func preWakeCommit(
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
 	})
-	if writeErr := store.SetMetadataBatch(session.ID, batch); writeErr != nil {
+	if writeErr := setMetadataBatchBounded(store, session.ID, batch, startPathWriteTimeout); writeErr != nil {
 		return 0, "", fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
 	traceFreshWakeMetadataReset(name, session.Metadata, batch, freshWake)
