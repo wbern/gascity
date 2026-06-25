@@ -6419,6 +6419,69 @@ func TestPrepareStartCandidate_NonEmptyBeadAliasOverridesTemplate(t *testing.T) 
 	}
 }
 
+// startStallFailingStore wraps a MemStore but fails every SetMetadataBatch,
+// simulating a backing-store stall during the start-result commit.
+type startStallFailingStore struct {
+	*beads.MemStore
+}
+
+func (s *startStallFailingStore) SetMetadataBatch(_ string, _ map[string]string) error {
+	return fmt.Errorf("simulated store stall")
+}
+
+func TestCommitStartResult_EmitsStartStalledWhenStateWriteFails(t *testing.T) {
+	// The runtime has spawned, but persisting the state->active transition
+	// fails (store stall). Today this non-advance is silent (stderr only);
+	// the reconciler must emit a loud SessionStartStalled event so a
+	// store-induced start wedge is observable. (gcw-7te slice 1)
+	mem := beads.NewMemStore()
+	session, err := mem.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &startStallFailingStore{MemStore: mem}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp:      TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+			},
+			coreHash: "core-abc",
+			liveHash: "live-xyz",
+		},
+		outcome:  "success",
+		started:  time.Unix(100, 0),
+		finished: time.Unix(101, 0),
+	}
+	rec := events.NewFake()
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	if ok {
+		t.Fatal("commitStartResult returned true despite a failing state write")
+	}
+	var found *events.Event
+	for i := range rec.Events {
+		if rec.Events[i].Type == events.SessionStartStalled {
+			found = &rec.Events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a %s event, got %d events: %+v", events.SessionStartStalled, len(rec.Events), rec.Events)
+	}
+	if found.Subject != "worker-1" {
+		t.Errorf("event Subject = %q, want %q", found.Subject, "worker-1")
+	}
+}
+
 func TestConfirmPendingStart(t *testing.T) {
 	// commitStartResultTraced must transition freshly-spawned pool
 	// session beads from the pending states ("", creating, asleep,
