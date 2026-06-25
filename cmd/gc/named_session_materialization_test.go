@@ -55,7 +55,7 @@ func TestCmdSessionNew_NamedSessionGetsOriginNamed(t *testing.T) {
 	writeSimpleNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"kenneth"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"kenneth"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -100,7 +100,7 @@ func TestCmdSessionNew_NonNamedSessionKeepsOriginManual(t *testing.T) {
 	// matches only when the agent IS in named_sessions AND no user alias is provided
 	// — so passing alias="my-mayor" will NOT trigger Fix B.
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "my-mayor", "", "", true, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "my-mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
