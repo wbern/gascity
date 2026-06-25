@@ -178,6 +178,20 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// SessionStartStalled fires when a session start fails to advance to
+	// active after the runtime spawn — e.g. the state->active metadata write
+	// fails (or hangs, once bounded) during a backing-store stall. Today this
+	// non-advance is silent (stderr only); the event makes it observable so a
+	// store-induced start wedge is no longer invisible. Per-session; the
+	// envelope Subject carries the session name. (gcw-7te)
+	//
+	// Like ProviderHealthGateAlert, this is intentionally omitted from
+	// KnownEventTypes for now: its typed SSE payload is not yet registered in
+	// internal/api, so subscribers receive it via the custom-event envelope.
+	// Adding the typed projection (and KnownEventTypes membership) is a
+	// follow-up.
+	SessionStartStalled = "session.start_stalled"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"

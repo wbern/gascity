@@ -1821,6 +1821,16 @@ func commitStartResultTraced(
 		// (including the state transition to active). Report failure so
 		// the reconciler retries on the next tick rather than leaving
 		// the session stuck in "creating" where it gets orphan-drained.
+		// Emit a loud event so this store-induced non-advance is observable
+		// instead of silent (stderr only) — the core symptom of the start
+		// wedge in gcw-7te.
+		rec.Record(events.Event{
+			Type:      events.SessionStartStalled,
+			Actor:     "controller",
+			Subject:   name,
+			SessionID: session.ID,
+			Message:   fmt.Sprintf("session %q start stalled: persisting state failed: %v", name, err),
+		})
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
