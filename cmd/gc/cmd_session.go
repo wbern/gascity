@@ -144,9 +144,16 @@ session_name. --alias still sets the public command and mail alias.`,
 	cmd.Flags().StringVar(&titleHint, "title-hint", "", "text to auto-generate a session title from")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "how long to wait for the session to start (0 = no timeout)")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultSessionNewWaitTimeout, "max time to wait for the reconciler to start the session before attaching")
 	return cmd
 }
+
+// defaultSessionNewWaitTimeout bounds how long "gc session new" waits for the
+// reconciler to start the session before attaching. The session is created
+// asynchronously, so this only bounds the attach step; a fresh-wake session on
+// a busy controller can take longer than the previous 30s. Override per
+// invocation with --wait-timeout.
+const defaultSessionNewWaitTimeout = 120 * time.Second
 
 // cmdSessionNew is the CLI entry point for "gc session new".
 //
@@ -154,6 +161,9 @@ session_name. --alias still sets the public command and mail alias.`,
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
 func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, waitTimeout time.Duration, stdout, stderr io.Writer) int {
+	if waitTimeout <= 0 {
+		waitTimeout = defaultSessionNewWaitTimeout
+	}
 	templateName := args[0]
 	if jsonOutput && !noAttach {
 		fmt.Fprintln(stderr, "gc session new: --json requires --no-attach because attaching is interactive") //nolint:errcheck // best-effort stderr
@@ -802,7 +812,7 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
@@ -814,9 +824,10 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 		}
 		target := sessionViewTarget(s)
 		title := sessionViewTitle(s)
+		workDir := sessionViewWorkDir(s)
 		age := sessionViewAge(s.CreatedAt)
 		lastActive := sessionViewLastActive(s.LastActive)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
@@ -848,6 +859,10 @@ func sessionViewTitle(s SessionView) string {
 		return title[:27] + "..."
 	}
 	return title
+}
+
+func sessionViewWorkDir(s SessionView) string {
+	return sessionListDisplayValue(s.WorkDir)
 }
 
 // sessionViewAge formats a CreatedAt RFC3339 string the same way the
@@ -989,7 +1004,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
@@ -998,6 +1013,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		reason := sessionReason(s, beadIndex, cfg, cachedSP, poolDesired, readyWaitSet)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
+		workDir := sessionListWorkDir(s)
 		age := formatDuration(time.Since(s.CreatedAt))
 		lastActive := "-"
 		if !s.LastActive.IsZero() {
@@ -1007,7 +1023,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if !s.LastNudgeDeliveredAt.IsZero() {
 			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -1179,6 +1195,18 @@ func sessionListTitle(s session.Info) string {
 		title = title[:27] + "..."
 	}
 	return title
+}
+
+func sessionListWorkDir(s session.Info) string {
+	return sessionListDisplayValue(s.WorkDir)
+}
+
+func sessionListDisplayValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 // attachmentCachingProvider wraps a runtime.Provider and caches IsAttached
