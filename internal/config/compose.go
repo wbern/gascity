@@ -1031,6 +1031,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("orders") {
 		base.Orders = fragment.Orders
 	}
+	if fragMeta.IsDefined("extmsg", "default_route") {
+		base.ExtMsg.DefaultRoutes = append(base.ExtMsg.DefaultRoutes, fragment.ExtMsg.DefaultRoutes...)
+	}
 	if fragMeta.IsDefined("api") {
 		base.API = fragment.API
 	}

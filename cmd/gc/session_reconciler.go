@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -3554,12 +3555,11 @@ func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead
 	if agentCfg == nil {
 		return
 	}
-	rawOvr := session.Metadata["template_overrides"]
-	if rawOvr == "" || tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
+	if tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
 		return
 	}
-	var ovr map[string]string
-	if err := json.Unmarshal([]byte(rawOvr), &ovr); err != nil || len(ovr) == 0 {
+	ovr, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	if err != nil || len(ovr) == 0 {
 		return
 	}
 	fullOptions := make(map[string]string)
@@ -3864,10 +3864,10 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 	return ""
 }
 
-const dispatchOptionMetadataPrefix = "opt_"
-
+// dispatchOptionMetadataKey returns the bead-metadata key carrying a
+// per-dispatch provider option choice for the given OptionsSchema key.
 func dispatchOptionMetadataKey(key string) string {
-	return dispatchOptionMetadataPrefix + key
+	return beadmeta.OptionMetadataPrefix + key
 }
 
 // resolveTaskOptionOverrides returns provider option choices requested by the
@@ -4159,10 +4159,25 @@ func rebaselineLaunchDriftHashes(session *beads.Bead, store beads.Store, agentCf
 }
 
 // resolveSessionCommand returns the command to use when starting a session.
-// On a fresh provider start (first boot or wake_mode=fresh), it uses
-// SessionIDFlag to create a new provider conversation with the given key as
-// its ID. Otherwise it resumes the existing conversation.
-func resolveSessionCommand(command, sessionKey string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
+// Precedence on a first start: fork (parentSID present + provider supports it)
+// > fresh (SessionIDFlag) > resume. The fork form resumes a parent brain
+// session, forks it into a new conversation, and binds gc's own session key so
+// all downstream tracking treats the child as a normal session. On any
+// subsequent wake (firstStart=false) the fork branch is skipped and the forked
+// child resumes via its own key. wake_mode=fresh still mints a new conversation
+// via SessionIDFlag. Fork preconditions (provider support, parent staleness,
+// wake_mode) are validated upstream in buildPreparedStartWithWorkDirResolver,
+// which fails loud rather than ever silently degrading a fork to a fresh start.
+func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) string {
+	// forceFresh is part of the fork guard so this branch is self-contained: a
+	// fork resumes the parent brain, which contradicts the "discard context, start
+	// new" intent of wake_mode=fresh. validateForkLaunch already fails loud on a
+	// forceFresh fork upstream, but keeping the guard here means the function
+	// honors its own docstring in isolation and is not a trap for future callers.
+	if firstStart && !forceFresh && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "" {
+		return command + " " + rp.ResumeFlag + " " + parentSID +
+			" " + rp.ForkFlag + " " + rp.SessionIDFlag + " " + sessionKey
+	}
 	if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}
