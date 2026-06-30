@@ -101,6 +101,41 @@ reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
 the city — though quiescing writers still makes the GC faster and more
 thorough.
 
+### Recovery procedure for a stranded, quarantined database
+
+Use this sequence when scheduled compaction keeps skipping one database and
+`gc dolt compact --gc-only --only-db <database>` refuses to run because a
+quarantine marker is still present.
+
+```bash
+# 1. Quiesce the city first. Run the reclaim during a clean window after agent
+#    work has drained so the same writer race does not immediately re-trigger
+#    the quarantine.
+gc stop <cityPath>
+
+# 2. Archive the quarantine marker instead of deleting it. Keep the original
+#    reason file for audit/debugging, but move it out of the active marker path.
+ts=$(date +%Y%m%d-%H%M%S)
+mv .gc/runtime/packs/dolt/compact-quarantine/<database> \
+  .gc/runtime/packs/dolt/compact-quarantine/<database>.cleared-$ts
+
+# 3. Restart the city so the managed Dolt server is available again.
+gc start <cityPath>
+
+# 4. Reclaim the orphaned oldgen archives on just that database.
+gc dolt compact --gc-only --only-db <database>
+
+# 5. Verify the reclaim and confirm the quarantine did not immediately return.
+gc doctor
+du -sh .beads/dolt/<database>/.dolt
+ls .gc/runtime/packs/dolt/compact-quarantine
+```
+
+If step 4 fails with another quarantine marker, stop again and investigate the
+new reason string before retrying. If the marker stays clear and `gc doctor`
+returns `dolt-noms-size` to **OK**, the database is back on the normal compact
+path.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of
