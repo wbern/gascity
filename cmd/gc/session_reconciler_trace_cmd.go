@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/spf13/cobra"
 )
@@ -792,10 +793,11 @@ func traceControllerUnavailable(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if beads.IsTransientConnError(err) {
+		return true
+	}
 	return strings.Contains(msg, "connecting to controller") ||
 		strings.Contains(msg, "connection closed") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "no such file") ||
 		strings.Contains(msg, "refused")
 }

@@ -328,12 +328,13 @@ func isTransientBridgeError(err error) bool {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
+	if beads.IsTransientConnError(err) {
+		return true
+	}
 
 	msg := strings.ToLower(err.Error())
 	for _, marker := range []string{
 		"connection refused",
-		"connection reset by peer",
-		"broken pipe",
 		"unexpected eof",
 		"eof",
 		"no such host",

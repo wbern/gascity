@@ -1027,13 +1027,14 @@ const (
 )
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+	if beads.IsTransientConnError(err) && !strings.Contains(strings.ToLower(err.Error()), "timed out after") {
+		return true
+	}
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",
 		"dial tcp",
 		"connection refused",
-		"broken pipe",
 		"unexpected eof",
-		"bad connection",
 		"use of closed network connection",
 		// bd silently falls back to opening the on-disk store when it cannot
 		// reach the managed Dolt server. On an empty .beads/dolt/ that fallback

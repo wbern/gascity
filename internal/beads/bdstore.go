@@ -1871,17 +1871,7 @@ func isBdTransientWriteError(err error) bool {
 }
 
 func isBdAmbiguousWriteError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "invalid connection") ||
-		strings.Contains(msg, "bad connection") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "timed out after") ||
-		strings.Contains(msg, "deadline exceeded")
+	return IsTransientConnError(err)
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.
