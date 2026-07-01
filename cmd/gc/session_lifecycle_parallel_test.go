@@ -6502,7 +6502,7 @@ func TestCommitStartResult_EmitsStartStalledWhenStateWriteFails(t *testing.T) {
 		finished: time.Unix(101, 0),
 	}
 	rec := events.NewFake()
-	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	ok := commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
 	if ok {
 		t.Fatal("commitStartResult returned true despite a failing state write")
 	}
