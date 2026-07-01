@@ -1197,6 +1197,37 @@ func TestGastownCity(t *testing.T) {
 	}
 }
 
+// TestGascityCitySeedsRolesDefaultRigImport pins gascity#3832: the gascity
+// template imports the formulas pack at city scope AND seeds the gc-roles pack
+// as a default rig import bound "gc", so every rig added to the city receives
+// the providerless role agents (gc.run-operator, gc.requirements-planner, ...)
+// that the built-in formulas route to. Without this, a fresh city could launch
+// a formula but failed with `agent "gc.run-operator" not found in city.toml`.
+func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
+	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
+
+	// City-scope formulas/skills import is unchanged.
+	if len(c.Imports) != 1 || c.Imports["gascity"].Source != PublicGascityPackSource || c.Imports["gascity"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gascity=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	}
+
+	// Roles ride along as a default rig import, bound "gc" so the formula's
+	// gc.* targets resolve, pinned to the same commit as the formulas pack.
+	roles, ok := c.DefaultRigImports["gc"]
+	if !ok || len(c.DefaultRigImports) != 1 {
+		t.Fatalf("DefaultRigImports = %v, want single gc entry", c.DefaultRigImports)
+	}
+	if roles.Source != PublicGascityRolesPackSource {
+		t.Errorf("roles import source = %q, want %q", roles.Source, PublicGascityRolesPackSource)
+	}
+	if roles.Version != PublicGascityPackVersion {
+		t.Errorf("roles import version = %q, want %q (same commit as the formulas pack)", roles.Version, PublicGascityPackVersion)
+	}
+	if len(c.DefaultRigImportOrder) != 1 || c.DefaultRigImportOrder[0] != "gc" {
+		t.Errorf("DefaultRigImportOrder = %v, want [gc]", c.DefaultRigImportOrder)
+	}
+}
+
 func TestGastownCityStartCommand(t *testing.T) {
 	c := GastownCity("test", "", "my-agent --auto")
 	if c.Workspace.StartCommand != "my-agent --auto" {
@@ -4720,6 +4751,104 @@ func TestValidateRigs_ExplicitPrefixAvoidsCollision(t *testing.T) {
 	}
 	if err := ValidateRigs(rigs, "ci"); err != nil {
 		t.Errorf("ValidateRigs: unexpected error: %v", err)
+	}
+}
+
+// A reserved coordination-class id-prefix is no longer a fatal ValidateRigs
+// error. On a default city the relocated class stores are an identity seam, so
+// the prefix is allowed and surfaced as a non-fatal advisory (see
+// ReservedPrefixWarnings) instead. This keeps an existing city or rig that
+// already uses one able to start and reload.
+func TestValidateRigs_AllowsReservedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	if err := ValidateRigs(rigs, "mc"); err != nil {
+		t.Fatalf("ValidateRigs: reserved rig prefix must be allowed, got error: %v", err)
+	}
+}
+
+func TestValidateRigs_AllowsReservedHQPrefix(t *testing.T) {
+	if err := ValidateRigs(nil, "gco"); err != nil { // reserved orders class prefix
+		t.Fatalf("ValidateRigs: reserved HQ prefix must be allowed, got error: %v", err)
+	}
+}
+
+// An explicit reserved rig prefix is reported as an advisory warning naming the
+// rig and the reserved prefix.
+func TestReservedPrefixWarnings_ExplicitRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "graph") {
+		t.Errorf("warning = %q, want mention of the rig name 'graph'", warnings[0])
+	}
+}
+
+// The derived prefix path also warns: "graph-class-gateway" derives to "gcg"
+// via DeriveBeadsPrefix, shadowing the reserved graph prefix.
+func TestReservedPrefixWarnings_DerivedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph-class-gateway", Path: "/a"}, // derives to "gcg"
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+}
+
+// The effective HQ prefix is warned about too; EffectiveHQPrefix already
+// resolves the site-bound value before this.
+func TestReservedPrefixWarnings_HQPrefix(t *testing.T) {
+	warnings := ReservedPrefixWarnings(nil, "gco") // reserved orders class prefix
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "HQ") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'HQ'", warnings[0])
+	}
+}
+
+// Site-bound HQ prefixes flow through EffectiveHQPrefix before validation, so a
+// site binding that pins a reserved class prefix is warned about through that
+// resolved path too.
+func TestReservedPrefixWarnings_SiteBoundHQPrefix(t *testing.T) {
+	cfg := &City{
+		Workspace:               Workspace{Name: "maintainer-city"},
+		ResolvedWorkspacePrefix: "gcs", // site-bound to the reserved sessions prefix
+	}
+	hqPrefix := EffectiveHQPrefix(cfg)
+	if hqPrefix != "gcs" {
+		t.Fatalf("EffectiveHQPrefix = %q, want site-bound %q", hqPrefix, "gcs")
+	}
+	warnings := ReservedPrefixWarnings(cfg.Rigs, hqPrefix)
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") {
+		t.Errorf("warning = %q, want mention of 'reserved'", warnings[0])
+	}
+}
+
+// A config whose effective HQ and rig prefixes are not reserved produces no
+// warnings.
+func TestReservedPrefixWarnings_NonReservedNoWarnings(t *testing.T) {
+	rigs := []Rig{
+		{Name: "my-cloud", Path: "/a"},              // derives to "mc"
+		{Name: "gascity", Path: "/b", Prefix: "ga"}, // explicit "ga"
+	}
+	if warnings := ReservedPrefixWarnings(rigs, "hq"); len(warnings) != 0 {
+		t.Errorf("ReservedPrefixWarnings = %v, want no warnings for non-reserved prefixes", warnings)
 	}
 }
 
