@@ -373,14 +373,11 @@ func IsTransientControllerError(err error) bool {
 	if isTransientWorkQueryFailure(msg) {
 		return true
 	}
+	if beads.IsTransientConnError(err) {
+		return true
+	}
 	transientNeedles := []string{
-		"i/o timeout",
-		"context deadline exceeded",
-		"invalid connection",
 		"connection refused",
-		"connection reset by peer",
-		"broken pipe",
-		"bad connection",
 		"server has gone away",
 		"too many connections",
 		"lock wait timeout",
