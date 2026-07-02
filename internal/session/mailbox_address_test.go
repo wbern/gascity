@@ -195,3 +195,55 @@ func TestInfoStoreMailboxAddressNotFound(t *testing.T) {
 		t.Errorf("err = %v, want beads.ErrNotFound", err)
 	}
 }
+
+// TestCanonicalizeAssigneeIdentities pins the demand-match canonicalization
+// used to resolve a bead assignee that names a stale mailbox alias (e.g. a
+// prior binding-derived alias) to the configured named-session identity that
+// currently owns it in alias_history — the same MailboxAddresses codec the
+// mail-delivery path already uses (gci-t34).
+func TestCanonicalizeAssigneeIdentities(t *testing.T) {
+	t.Run("stale alias resolves to owning identity", func(t *testing.T) {
+		canonical := map[string]beads.Bead{
+			"gas-city-wbern/architect": {
+				ID: "sess-1",
+				Metadata: map[string]string{
+					"alias":         "gas-city-wbern/architect",
+					"alias_history": "gas-city-wbern/gas-city-architect",
+					"session_name":  "s-architect-canonical",
+				},
+			},
+		}
+		got := CanonicalizeAssigneeIdentities(canonical)
+		if want := "gas-city-wbern/architect"; got["gas-city-wbern/gas-city-architect"] != want {
+			t.Fatalf("got[stale-alias] = %q, want %q (full map %#v)", got["gas-city-wbern/gas-city-architect"], want, got)
+		}
+	})
+
+	t.Run("ambiguous alias resolves to no identity", func(t *testing.T) {
+		canonical := map[string]beads.Bead{
+			"a": {ID: "sess-a", Metadata: map[string]string{"alias": "a", "alias_history": "stale"}},
+			"b": {ID: "sess-b", Metadata: map[string]string{"alias": "b", "alias_history": "stale"}},
+		}
+		got := CanonicalizeAssigneeIdentities(canonical)
+		if identity, ok := got["stale"]; ok {
+			t.Fatalf("got[stale] = %q, ok=true, want no entry (ambiguous match must not adopt any session)", identity)
+		}
+	})
+
+	t.Run("unknown alias produces no entry", func(t *testing.T) {
+		canonical := map[string]beads.Bead{
+			"a": {ID: "sess-a", Metadata: map[string]string{"alias": "a"}},
+		}
+		got := CanonicalizeAssigneeIdentities(canonical)
+		if _, ok := got["unknown"]; ok {
+			t.Fatalf("got[unknown] should not exist, got %#v", got)
+		}
+	})
+
+	t.Run("empty canonical beads map produces empty result", func(t *testing.T) {
+		got := CanonicalizeAssigneeIdentities(nil)
+		if len(got) != 0 {
+			t.Fatalf("got = %#v, want empty", got)
+		}
+	})
+}

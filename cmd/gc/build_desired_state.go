@@ -862,6 +862,20 @@ func buildDesiredStateWithSessionBeads(
 			namedWorkReady[identity] = true
 		}
 	}
+	// Resolve each configured named session's live canonical bead up front so
+	// a stale-alias assignee (e.g. a prior binding-derived alias retained in
+	// alias_history) can be canonicalized to the identity that owns it BEFORE
+	// the demand match below, instead of only accepting the current alias.
+	// This reuses the same MailboxAddresses codec the mail-delivery path
+	// already folds alias_history through (internal/session/mailbox_address.go)
+	// so there is ONE canonicalization, not a second divergent one here.
+	namedCanonicalBeads := make(map[string]beads.Bead, len(namedSpecs))
+	for identity, spec := range namedSpecs {
+		if b, ok := findCanonicalNamedSessionBead(bp.sessionBeads, spec); ok {
+			namedCanonicalBeads[identity] = b
+		}
+	}
+	assigneeCanonicalIdentities := session.CanonicalizeAssigneeIdentities(namedCanonicalBeads)
 	// Check assigned work beads: if any work bead's Assignee matches a named
 	// session's identity, that session has direct demand.
 	//
@@ -889,7 +903,11 @@ func buildDesiredStateWithSessionBeads(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee != identity {
+			matchedIdentity := assignee
+			if resolved, ok := assigneeCanonicalIdentities[assignee]; ok {
+				matchedIdentity = resolved
+			}
+			if matchedIdentity != identity {
 				continue
 			}
 			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
@@ -904,7 +922,7 @@ func buildDesiredStateWithSessionBeads(
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
 	for identity, spec := range namedSpecs {
-		canonicalBead, hasCanonical := findCanonicalNamedSessionBead(bp.sessionBeads, spec)
+		canonicalBead, hasCanonical := namedCanonicalBeads[identity]
 		if !hasCanonical {
 			if _, conflict := findNamedSessionConflict(bp.sessionBeads, spec); conflict {
 				continue

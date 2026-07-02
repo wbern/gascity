@@ -55,6 +55,43 @@ func MailboxAddresses(b beads.Bead) []string {
 	return addresses
 }
 
+// CanonicalizeAssigneeIdentities builds an assignee-address -> named-session-identity
+// map so demand matching can canonicalize a bead's stale-alias assignee through a
+// canonical named session's alias_history, rather than only accepting the current
+// alias. canonicalBeads maps each configured named-session identity to its live
+// canonical session bead (when one exists); identities without a canonical bead
+// contribute no entries.
+//
+// This is the SAME MailboxAddresses codec the mail-delivery path already folds
+// alias_history through (mailbox_address.go), reused here so there is ONE
+// canonicalization instead of a second, divergent one on the demand-match path.
+//
+// An address matched by more than one identity's canonical bead resolves to no
+// identity at all — mirroring the ErrAmbiguous guard in
+// ResolveNamedSessionSpecForConfigTarget, a stale alias must resolve to exactly
+// one live session before it is allowed to adopt that session.
+func CanonicalizeAssigneeIdentities(canonicalBeads map[string]beads.Bead) map[string]string {
+	result := make(map[string]string, len(canonicalBeads))
+	ambiguous := make(map[string]bool)
+	for identity, b := range canonicalBeads {
+		for _, addr := range MailboxAddresses(b) {
+			if addr == identity {
+				continue
+			}
+			if ambiguous[addr] {
+				continue
+			}
+			if existing, ok := result[addr]; ok && existing != identity {
+				ambiguous[addr] = true
+				delete(result, addr)
+				continue
+			}
+			result[addr] = identity
+		}
+	}
+	return result
+}
+
 // ExtmsgHandleSource returns the raw handle source for a session bead used by
 // the external-messaging handle projection: alias if set, else session_name.
 // Unlike MailboxAddress it does NOT fall back to the bead id — it preserves the

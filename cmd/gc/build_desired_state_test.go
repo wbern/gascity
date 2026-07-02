@@ -6897,6 +6897,141 @@ func TestBuildDesiredState_OnDemandNamedSession_InProgressAssigneeMaterializes(t
 	}
 }
 
+// TestBuildDesiredState_StaleAliasAssigneeResumesCanonicalNamedSession pins
+// gci-t34: a bead assigned to a STALE mailbox alias retained in a live
+// canonical named session's alias_history must mark that named session ready
+// and resume the LIVE session (canonical session_name), not spawn a duplicate
+// context-less session under a freshly-derived name.
+func TestBuildDesiredState_StaleAliasAssigneeResumesCanonicalNamedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	canonical, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor", "template:mayor"},
+		Metadata: map[string]string{
+			"template":                   "mayor",
+			"agent_name":                 "mayor",
+			"alias":                      "mayor",
+			"alias_history":              "gas-city-wbern/gas-city-mayor",
+			"session_name":               "s-mayor-canonical",
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "stale-alias assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "gas-city-wbern/gas-city-mayor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "on_demand",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if !dsResult.NamedSessionDemand["mayor"] {
+		t.Fatalf("NamedSessionDemand[mayor] = false for stale-alias assignee; stderr=%q", stderr.String())
+	}
+
+	var mayorEntries []TemplateParams
+	for _, tp := range dsResult.State {
+		if tp.ConfiguredNamedIdentity == "mayor" || tp.TemplateName == "mayor" {
+			mayorEntries = append(mayorEntries, tp)
+		}
+	}
+	if len(mayorEntries) != 1 {
+		t.Fatalf("mayor desired entries = %d, want exactly 1 (no duplicate spawn); got %+v", len(mayorEntries), mayorEntries)
+	}
+	if got := mayorEntries[0].SessionName; got != canonical.Metadata["session_name"] {
+		t.Fatalf("SessionName = %q, want canonical %q (must resume the live session, not spawn a fresh one)", got, canonical.Metadata["session_name"])
+	}
+}
+
+// TestBuildDesiredState_AmbiguousStaleAliasDoesNotAdoptSession pins gci-t34's
+// safety guard: when a stale alias appears in more than one configured named
+// session's alias_history, canonicalization must refuse to pick either —
+// wrong-session adoption is worse than a missed resume.
+func TestBuildDesiredState_AmbiguousStaleAliasDoesNotAdoptSession(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	sharedStale := "shared-stale-alias"
+	for _, identity := range []string{"mayor", "architect"} {
+		if _, err := store.Create(beads.Bead{
+			Title:  identity,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:" + identity, "template:" + identity},
+			Metadata: map[string]string{
+				"template":                   identity,
+				"agent_name":                 identity,
+				"alias":                      identity,
+				"alias_history":              sharedStale,
+				"session_name":               "s-" + identity + "-canonical",
+				"state":                      "awake",
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: identity,
+				namedSessionModeMetadata:     "on_demand",
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "ambiguous stale-alias assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: sharedStale,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true", MaxActiveSessions: intPtr(1), WorkQuery: "printf ''"},
+			{Name: "architect", StartCommand: "true", MaxActiveSessions: intPtr(1), WorkQuery: "printf ''"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "on_demand"},
+			{Template: "architect", Mode: "on_demand"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Errorf("NamedSessionDemand[mayor] = true, want false: ambiguous stale alias must not adopt either session; stderr=%q", stderr.String())
+	}
+	if dsResult.NamedSessionDemand["architect"] {
+		t.Errorf("NamedSessionDemand[architect] = true, want false: ambiguous stale alias must not adopt either session; stderr=%q", stderr.String())
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_AssigneeDemandSignalsPoolDesired(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
