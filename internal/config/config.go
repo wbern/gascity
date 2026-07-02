@@ -2380,6 +2380,19 @@ type DaemonConfig struct {
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
+	// IdleBackoff enables demand-gated controller ticking (Pillar 1 of
+	// engdocs/design/idle-controller-call-rate.md): when a patrol pass
+	// observes no demand delta, the next tick backs off exponentially from
+	// PatrolInterval up to IdleBackoffCeiling, resetting to the base
+	// interval on any wake signal (poke, nudge, mail, reload, control
+	// dispatch). Off by default — the fixed PatrolInterval cadence is used
+	// when disabled.
+	IdleBackoff bool `toml:"idle_backoff,omitempty"`
+	// IdleBackoffCeiling caps the demand-gated backoff interval — the
+	// heartbeat-floor cadence a fully idle controller still ticks at.
+	// Duration string. Only used when IdleBackoff is true. Defaults to "5m"
+	// and is floored at PatrolInterval so it is never shorter than the base.
+	IdleBackoffCeiling string `toml:"idle_backoff_ceiling,omitempty" jsonschema:"default=5m"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
 	// the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.
 	MaxRestarts *int `toml:"max_restarts,omitempty" jsonschema:"default=5"`
@@ -2567,6 +2580,23 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// IdleBackoffCeilingDuration returns the demand-gated backoff ceiling as a
+// time.Duration. Defaults to 5m if empty or unparseable, and is floored at
+// PatrolIntervalDuration so the ceiling is never shorter than the base
+// patrol cadence.
+func (d *DaemonConfig) IdleBackoffCeilingDuration() time.Duration {
+	ceiling := 5 * time.Minute
+	if d.IdleBackoffCeiling != "" {
+		if dur, err := time.ParseDuration(d.IdleBackoffCeiling); err == nil {
+			ceiling = dur
+		}
+	}
+	if base := d.PatrolIntervalDuration(); ceiling < base {
+		ceiling = base
+	}
+	return ceiling
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
