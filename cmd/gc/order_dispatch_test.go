@@ -349,7 +349,7 @@ func TestOrderDispatchResolvesPackBindingForPool(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog", BindingName: "maintenance"},
+			{Name: "dog", BindingName: "maintenance", MinActiveSessions: intPtr(1)},
 		},
 	}
 
@@ -598,8 +598,8 @@ func TestOrderDispatchPrefersCityShadowForPool(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog"},
-			{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance"},
+			{Name: "dog", MinActiveSessions: intPtr(1)},
+			{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance", MinActiveSessions: intPtr(1)},
 		},
 	}
 
@@ -6729,8 +6729,9 @@ pool = "dog"
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
 		Agents: []config.Agent{{
-			Name:        "dog",
-			BindingName: "maintenance",
+			Name:              "dog",
+			BindingName:       "maintenance",
+			MinActiveSessions: intPtr(1),
 		}},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{cityLayer},
@@ -7430,6 +7431,7 @@ name = "test-city"
 [[agent]]
 name = "dog"
 scope = "city"
+min_active_sessions = 1
 `
 	}
 	writeFile(t, filepath.Join(cityDir, "city.toml"), cityToml)
@@ -7463,6 +7465,7 @@ schema = 1
 [[agent]]
 name = "dog"
 scope = "city"
+min_active_sessions = 1
 `)
 		if binding == orderBinding {
 			writeFile(t, filepath.Join(packDir, "orders", "digest.toml"), `
