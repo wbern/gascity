@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -3453,6 +3454,64 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 	if !sp.IsRunning("claude-real-world-app-live") {
 		t.Fatal("assigned pool worker should still be running")
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_RenudgesTmuxLikeIdlePoolSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "polecat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:polecat"},
+		Metadata: map[string]string{
+			"session_name":                    "polecat-slot-1",
+			"template":                        "polecat",
+			"agent_name":                      "polecat",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           "awake",
+			"continuation_epoch":              "1",
+			"generation":                      "1",
+			beadmeta.TriggerBeadIDMetadataKey: "w-1",
+			idleClaimNudgeTriggerKey:          "w-1",
+			idleClaimNudgeCountKey:            "0",
+			idleClaimNudgeAtKey:               time.Now().Add(-idleClaimNudgeGrace - time.Second).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "polecat-slot-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "polecat", Nudge: "Run gc hook --claim --json now; if it returns work, execute the claimed formula immediately."}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := DesiredStateResult{
+		State:            map[string]TemplateParams{},
+		ScaleCheckCounts: map[string]int{"polecat": 0},
+		AssignedWorkBeads: []beads.Bead{
+			{ID: "w-1", Status: "open"},
+		},
+	}
+
+	cr.beadReconcileTick(context.Background(), result, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
+
+	if got := sp.CountCalls("Nudge", "polecat-slot-1"); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1", got)
 	}
 }
 

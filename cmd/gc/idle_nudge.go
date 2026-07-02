@@ -32,15 +32,12 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
-// nudgeStalledPoolClaims is a reconcile-tick backstop for runtimes the
-// controller is blind to (herdr). It re-delivers the claim nudge to a pool slot
-// that is running but whose assigned trigger bead is still UNCLAIMED (open, not
-// in_progress). Under herdr the startup nudge can be missed — a freshly-spawned
-// slot whose submit-CR was swallowed, or a warm slot that survived a `gc
-// restart` and was never re-Started — leaving the polecat idle at its prompt
-// with work it never began. tmux self-heals that through its relaunch/respawn
-// path (and reports activity), so it is gated out at the call site and never
-// runs here.
+// nudgeStalledPoolClaims is a reconcile-tick backstop for pool slots whose
+// startup nudge was delivered but never took. It re-delivers the same claim
+// nudge to a running slot whose assigned trigger bead is still UNCLAIMED
+// (open, not in_progress). This covers swallowed fresh-start nudges on tmux and
+// the controller-blind providers (herdr), plus any other runtime where the slot
+// is alive but still sitting at its prompt with work it never began.
 //
 // Churn-free by construction — it inverts every failure mode that got the #312
 // idle-session nudger reverted:
