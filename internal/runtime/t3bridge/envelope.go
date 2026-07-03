@@ -1,6 +1,9 @@
 package t3bridge
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // AgentKind distinguishes a durable named session from an interchangeable
 // pooled worker.
@@ -115,6 +118,26 @@ func allowThreadReuse(kind AgentKind, wakeMode string) bool {
 	// prefers a fresh process on wake.
 	_ = wakeMode
 	return true
+}
+
+// legacyNamedThreadReuse reports whether an envelope whose resume policy has not
+// been explicitly set should reuse its existing T3 thread. A "legacy named"
+// session — one with a stable session name but no assigned work bead — reuses
+// its durable thread so its T3 conversation persists across restarts.
+//
+// A wake_mode=fresh session is the exception and never reuses: it recreates a
+// fresh thread so the underlying provider launches a new process (e.g. codex
+// starts a fresh session instead of `codex resume`). Reusing the thread resumes
+// the provider process, which for codex/gemini raises a working-directory
+// disambiguation prompt when the process's recorded cwd has drifted away from
+// the launch cwd (as happens for pool workers whose task worktree differs from
+// their session home). Honoring the already-configured wake_mode=fresh avoids
+// that stall entirely.
+func legacyNamedThreadReuse(gcBead, sessionName, wakeMode string) bool {
+	if strings.TrimSpace(wakeMode) == "fresh" {
+		return false
+	}
+	return strings.TrimSpace(gcBead) == "" && strings.TrimSpace(sessionName) != ""
 }
 
 // BuildStartupEnvelope builds the JSON startup envelope described by intent.

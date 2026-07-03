@@ -274,6 +274,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		// GC_WAKE_MODE lets runtime providers honor the agent's configured wake
+		// mode. The t3bridge provider uses it to avoid reusing (resuming) a
+		// wake_mode=fresh worker's thread, which would trigger the codex/gemini
+		// working-directory resume prompt on a drifted cwd.
+		"GC_WAKE_MODE": cfgAgent.EffectiveWakeMode(),
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.

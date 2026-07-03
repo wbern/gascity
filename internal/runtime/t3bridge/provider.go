@@ -2031,11 +2031,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		envelope.Runtime.Model = modelName
 	}
 	if envelope.Resume.Policy == "" && !envelope.Resume.AllowThreadReuse {
-		legacyNamed := strings.TrimSpace(cfg.Env["GC_BEAD"]) == "" && envelope.GC.SessionName != ""
 		envelope.Resume.Policy = "fallback"
 		envelope.Resume.RequiredThreadProvider = envelope.Runtime.Provider
 		envelope.Resume.RequiredThreadModel = envelope.Runtime.Model
-		if legacyNamed {
+		if legacyNamedThreadReuse(cfg.Env["GC_BEAD"], envelope.GC.SessionName, cfg.Env["GC_WAKE_MODE"]) {
 			envelope.Resume.AllowThreadReuse = true
 		}
 	}
