@@ -910,6 +910,20 @@ func buildDesiredStateWithSessionBeads(
 			if matchedIdentity != identity {
 				continue
 			}
+			if spec.Agent.SupportsExpandedSessionIdentities() {
+				// Defense in depth (ga-i1d0tr Candidate B): a bare-template Assignee
+				// is only a legitimate "this IS my identity" match for a template
+				// with exactly one possible live identity. For a template that
+				// supports expanded per-instance identities (a multi-slot pool or
+				// namepool coexisting with this named session), a bare-template
+				// Assignee means some other path wrote the wrong value — a pool
+				// slot's claim, a human running `bd update --assignee=<template>`
+				// directly, or an older client — not a genuine claim by this named
+				// session. Do not treat it as this named session's demand; the
+				// durable fix (claims under the concrete alias, ga-2xqke7) prevents
+				// the pool-claim case from producing this shape going forward.
+				continue
+			}
 			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
 				continue
 			}
