@@ -647,6 +647,7 @@ type t3BridgeTestServer struct {
 	server            *httptest.Server
 	mu                sync.Mutex
 	commands          []string
+	commandPayloads   []map[string]interface{}
 	snapshot          map[string]interface{}
 	authFailures      int
 	authFailureStatus int
@@ -716,7 +717,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				t.Errorf("decode dispatch payload: %v", err)
 				return
 			}
-			ts.recordCommand(commandType(payload))
+			ts.recordCommand(payload)
 		}
 
 		resp := map[string]interface{}{
@@ -742,16 +743,38 @@ func (ts *t3BridgeTestServer) wsURL() string {
 	return "ws" + strings.TrimPrefix(ts.server.URL, "http")
 }
 
-func (ts *t3BridgeTestServer) recordCommand(typ string) {
+func (ts *t3BridgeTestServer) recordCommand(payload map[string]interface{}) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.commands = append(ts.commands, typ)
+	ts.commands = append(ts.commands, commandType(payload))
+	ts.commandPayloads = append(ts.commandPayloads, payload)
 }
 
 func (ts *t3BridgeTestServer) commandTypes() []string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return append([]string(nil), ts.commands...)
+}
+
+func (ts *t3BridgeTestServer) activityPayloads(kind string) []map[string]interface{} {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	var out []map[string]interface{}
+	for _, payload := range ts.commandPayloads {
+		if typ, _ := payload["type"].(string); typ != "thread.activity.append" {
+			continue
+		}
+		activity, _ := payload["activity"].(map[string]interface{})
+		if activity == nil {
+			continue
+		}
+		gotKind, _ := activity["kind"].(string)
+		if gotKind != kind {
+			continue
+		}
+		out = append(out, activity)
+	}
+	return out
 }
 
 func (ts *t3BridgeTestServer) setAuthFailures(count, status int, body string) {

@@ -1226,6 +1226,27 @@ func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[
 	})
 }
 
+func nudgeActivitySource(text string) string {
+	if strings.Contains(text, "<system-reminder>") {
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "- [") {
+				continue
+			}
+			rest := strings.TrimPrefix(line, "- [")
+			end := strings.Index(rest, "]")
+			if end <= 0 {
+				continue
+			}
+			source := strings.TrimSpace(rest[:end])
+			if source != "" {
+				return source
+			}
+		}
+	}
+	return "runtime"
+}
+
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	return p.rpcDispatchCommand(map[string]interface{}{
@@ -2370,7 +2391,14 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if model == "" {
 		model = binding.Model
 	}
-	return p.dispatchTurnStart(binding.ThreadID, text, provider, model)
+	if err := p.dispatchTurnStart(binding.ThreadID, text, provider, model); err != nil {
+		return err
+	}
+	_ = p.dispatchActivity(binding.ThreadID, "gc.nudge.sent", "GC nudge sent", map[string]interface{}{
+		"source":     nudgeActivitySource(text),
+		"textLength": len(text),
+	})
+	return nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto
