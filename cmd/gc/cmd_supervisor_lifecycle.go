@@ -1306,7 +1306,7 @@ func supervisorLaunchdLabel() string {
 
 func supervisorSystemdServiceName() string {
 	if suffix := supervisorServiceSuffix(); suffix != "" {
-		return "gascity-supervisor-" + suffix + ".service"
+		return supervisorSystemdUnitPrefix + suffix + ".service"
 	}
 	return defaultSupervisorSystemdUnit
 }
@@ -1744,6 +1744,7 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1814,6 +1815,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 }
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorLaunchdPlistPath()
 	active := supervisorLaunchdActive(supervisorLaunchdLabel())
 	if sockPath, _ := runningSupervisorSocket(); sockPath != "" {
@@ -1890,8 +1892,10 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	// Check the binary guard before probing systemd so a refused install
-	// emits no systemctl calls.
+	// emits no systemctl calls for the install itself (the stale-service
+	// sweep above may still have issued best-effort systemctl calls).
 	path := supervisorSystemdServicePath()
 	existing, err := os.ReadFile(path)
 	hadCurrent := err == nil
@@ -2083,6 +2087,7 @@ func currentUsernameForSystemdHint() string {
 var currentUserForSystemdHint = osuser.Current
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
 	active := supervisorSystemctlActive(service)
