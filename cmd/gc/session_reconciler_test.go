@@ -4427,6 +4427,114 @@ func TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork(t *testing.
 	}
 }
 
+func TestReconcileSessionBeads_RedeliversConfiguredPoolWorkerNudgeWhenIdle(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints: agent.StartupHints{
+			Nudge: "Run gc hook --claim --drain-ack --json",
+		},
+	}
+
+	session := env.createSessionBead("worker", "worker")
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_slot":            "1",
+		poolManagedMetadataKey: boolMetadata(true),
+		"transport":            "acp",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	var delivered []runtime.Call
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == "worker" {
+			delivered = append(delivered, call)
+		}
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("nudge calls = %d, want 1; calls=%#v", len(delivered), env.sp.SnapshotCalls())
+	}
+	if got := delivered[0].Message; got != "Run gc hook --claim --drain-ack --json" {
+		t.Fatalf("nudge message = %q, want configured nudge", got)
+	}
+}
+
+func TestReconcileSessionBeads_DoesNotRedeliverConfiguredPoolWorkerNudgeInsideBackoff(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints: agent.StartupHints{
+			Nudge: "Run gc hook --claim --drain-ack --json",
+		},
+	}
+
+	session := env.createSessionBead("worker", "worker")
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_slot":                             "1",
+		poolManagedMetadataKey:                  boolMetadata(true),
+		"transport":                             "acp",
+		sessionpkg.MetadataLastNudgeDeliveredAt: env.clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == "worker" {
+			t.Fatalf("unexpected nudge during backoff window; calls=%#v", env.sp.SnapshotCalls())
+		}
+	}
+}
+
+func TestReconcileSessionBeads_RedeliversConfiguredPoolWorkerNudgeForAdoptedLiveRuntime(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints: agent.StartupHints{
+			Nudge: "Run gc hook --claim --drain-ack --json",
+		},
+	}
+
+	session := env.createSessionBead("worker", "worker")
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                string(sessionpkg.StateAsleep),
+		"pool_slot":            "1",
+		poolManagedMetadataKey: boolMetadata(true),
+		"transport":            "acp",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	var delivered []runtime.Call
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == "worker" {
+			delivered = append(delivered, call)
+		}
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("nudge calls = %d, want 1 for adopted live runtime; calls=%#v", len(delivered), env.sp.SnapshotCalls())
+	}
+}
+
 func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

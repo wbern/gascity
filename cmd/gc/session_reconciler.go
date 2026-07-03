@@ -32,7 +32,11 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-const maxIdleSleepProbesPerTick = 3
+const (
+	maxIdleSleepProbesPerTick                 = 3
+	reconcileConfiguredPoolWorkerNudgeSource  = "reconcile-idle"
+	reconcileConfiguredPoolWorkerNudgeBackoff = 30 * time.Second
+)
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -79,6 +83,17 @@ func markDrainAckStopPending(session *beads.Bead, sessFront *sessionpkg.InfoStor
 		session.Metadata[key] = value
 	}
 	return true
+}
+
+func configuredPoolWorkerNudgeBackoffActive(session beads.Bead, now time.Time) bool {
+	if now.IsZero() {
+		return false
+	}
+	lastDelivered, ok := parseRFC3339Metadata(session.Metadata[sessionpkg.MetadataLastNudgeDeliveredAt])
+	if !ok {
+		return false
+	}
+	return now.Sub(lastDelivered) < reconcileConfiguredPoolWorkerNudgeBackoff
 }
 
 func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
@@ -2592,6 +2607,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				_ = sessionFrontDoor(store).SetMarker(target.session.ID, "sleep_intent", "")
 				target.session.Metadata["sleep_intent"] = ""
 			}
+			if isPoolManagedSessionBead(*target.session) &&
+				strings.TrimSpace(target.tp.Hints.Nudge) != "" &&
+				!configuredPoolWorkerNudgeBackoffActive(*target.session, clk.Now()) {
+				hasInProgressWork, assignedErr := sessionHasInProgressAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *target.session)
+				if assignedErr != nil {
+					fmt.Fprintf(stderr, "session reconciler: checking in-progress assigned work before nudge for %s: %v\n", name, assignedErr) //nolint:errcheck
+				} else if !hasInProgressWork {
+					mgr := sessionpkg.NewManagerWithTransportPolicyResolverAndCityPath(store, sp, cityPath, func(_ string, _ string) (string, bool) {
+						if target.tp.IsACP {
+							return "acp", true
+						}
+						return "", false
+					})
+					delivered, nudgeErr := mgr.TryWaitIdleNudge(ctx, target.session.ID, reconcileConfiguredPoolWorkerNudgeSource, target.tp.Hints.Nudge, "", runtime.Config{})
+					if nudgeErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: re-delivering configured nudge for %s: %v\n", name, nudgeErr) //nolint:errcheck
+					} else if delivered {
+						stampLastNudgeDeliveredAt(sessFront, target.session.ID, clk.Now())
+					}
+				}
+			}
 		}
 
 		if !shouldWake && target.alive {
@@ -2829,6 +2865,26 @@ func sessionHasOpenAssignedWorkForConfig(store beads.Store, rigStores map[string
 // not suppress claim-less parked-session recovery.
 func sessionHasInProgressAssignedWorkForConfig(store beads.Store, rigStores map[string]beads.Store, session beads.Bead, cfg *config.City) (bool, error) {
 	return sessionHasAssignedWorkInStoresForStatuses(store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg), []string{"in_progress"})
+}
+
+func sessionHasInProgressAssignedWorkForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session beads.Bead,
+) (bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
+	stores, err := reachableStoresForSession(cityPath, cfg, store, rigStores, session)
+	if err != nil {
+		return false, err
+	}
+	for _, s := range stores {
+		if has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(s, identifiers, []string{"in_progress"}); err != nil || has {
+			return has, err
+		}
+	}
+	return false, nil
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or

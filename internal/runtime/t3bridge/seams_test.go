@@ -159,6 +159,37 @@ func TestSeamsT3Driving(t *testing.T) {
 	}
 }
 
+func TestSeamsT3NudgeEmitsNudgeActivityWithSource(t *testing.T) {
+	rt, tp, server := t3SeamProvider(t)
+	ctx := context.Background()
+
+	place, ok, err := rt.Open(ctx, "agent-a")
+	if err != nil || !ok {
+		t.Fatalf("Open: %v, %v", ok, err)
+	}
+	att, err := tp.Launch(ctx, place, runtime.LaunchSpec{})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+
+	msg := "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [reconcile-idle] Run gc hook --claim --drain-ack --json\n\nHandle them after this turn.\n</system-reminder>\n"
+	if err := att.Nudge(ctx, runtime.TextContent(msg)); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+
+	activities := server.activityPayloads("gc.nudge.sent")
+	if len(activities) != 1 {
+		t.Fatalf("gc.nudge.sent activity count = %d, want 1", len(activities))
+	}
+	payload, _ := activities[0]["payload"].(map[string]interface{})
+	if payload == nil {
+		t.Fatal("gc.nudge.sent payload missing")
+	}
+	if got, _ := payload["source"].(string); got != "reconcile-idle" {
+		t.Fatalf("gc.nudge.sent source = %q, want reconcile-idle", got)
+	}
+}
+
 // TestSeamsT3MetaStore proves the MetaStore seam round-trips through the
 // provider's file-backed meta.
 func TestSeamsT3MetaStore(t *testing.T) {
