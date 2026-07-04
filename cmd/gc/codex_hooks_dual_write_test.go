@@ -187,6 +187,49 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 		}
 	}
 
+	// assertManagedEventsIntact guards the gcw-mnck regression surface. Because
+	// the home-dir staging path now skips the ENTIRE .codex/hooks.json, hooks.Install
+	// must remain the sole, COMPLETE writer: the converged document has to keep the
+	// managed PreCompact (context-cycle handoff) and UserPromptSubmit (mail check +
+	// nudge drain) hooks, not just SessionStart. A future change to the installer's
+	// fresh-write/upgrade path that dropped either event would otherwise slip past
+	// assertSingleBound, which only inspects SessionStart.
+	assertManagedEventsIntact := func(t *testing.T, workDir, when string) {
+		t.Helper()
+		hooksPath := filepath.Join(workDir, ".codex", "hooks.json")
+		data, err := os.ReadFile(hooksPath)
+		if err != nil {
+			t.Fatalf("%s: read %s: %v", when, hooksPath, err)
+		}
+		var doc struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("%s: unmarshal %s: %v", when, hooksPath, err)
+		}
+		commandsFor := func(event string) string {
+			var b strings.Builder
+			for _, e := range doc.Hooks[event] {
+				for _, h := range e.Hooks {
+					b.WriteString(h.Command)
+					b.WriteByte('\n')
+				}
+			}
+			return b.String()
+		}
+		if !strings.Contains(commandsFor("PreCompact"), "handoff") {
+			t.Fatalf("%s: converged doc dropped the managed PreCompact handoff hook\n%s", when, data)
+		}
+		prompt := commandsFor("UserPromptSubmit")
+		if !strings.Contains(prompt, "mail check") || !strings.Contains(prompt, "nudge drain") {
+			t.Fatalf("%s: converged doc dropped managed UserPromptSubmit hooks (want mail check + nudge drain)\n%s", when, data)
+		}
+	}
+
 	// Fixed path: seed the drifted hybrid, then run stage → install → stage.
 	// The file must be converged and bound at EVERY observation point, including
 	// the post-staging states where the legacy path re-drifts.
@@ -195,8 +238,10 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	stageCodex(t, overlaySrc, fixedWork, true)
 	installCodex(t, cityDir, fixedWork)
 	assertSingleBound(t, fixedWork, "fixed after install")
+	assertManagedEventsIntact(t, fixedWork, "fixed after install")
 	stageCodex(t, overlaySrc, fixedWork, true)
 	assertSingleBound(t, fixedWork, "fixed after re-stage")
+	assertManagedEventsIntact(t, fixedWork, "fixed after re-stage")
 
 	// Legacy path: identical sequence with non-skip staging. After the trailing
 	// staging step the unbound overlay entry is merged back in, re-creating the
