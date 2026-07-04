@@ -29,6 +29,13 @@ cmd/gc/.runtime/
 !/.claude/
 /.claude/*
 !/.claude/skills/
+# The Gas City skill vendor materializes ephemeral, machine-absolute runtime
+# SYMLINKS (basics.*, core.*, ...) into .claude/skills/ every session, which
+# otherwise surface as untracked noise under the whitelist above and must never
+# be committed. Ignore everything under skills/ EXCEPT genuinely-committed skill
+# dirs (gcw-iw1l). Add a new `!/.claude/skills/<dir>/` line per committed skill.
+/.claude/skills/*
+!/.claude/skills/gascity-docs/
 
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
