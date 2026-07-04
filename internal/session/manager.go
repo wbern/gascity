@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -427,17 +428,23 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 
 		// Create the bead first to get the ID.
 		meta := map[string]string{
-			"template":           template,
-			"state":              string(StateActive),
-			"provider":           provider,
-			"work_dir":           workDir,
-			"command":            command,
-			"resume_flag":        resume.ResumeFlag,
-			"resume_style":       resume.ResumeStyle,
-			"resume_command":     resume.ResumeCommand,
-			"generation":         fmt.Sprintf("%d", DefaultGeneration),
-			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-			"instance_token":     NewInstanceToken(),
+			"template": template,
+			"state":    string(StateActive),
+			"provider": provider,
+			// work_dir is the legacy key; contract.WorkerDirKey is the
+			// canonical key read by contract.WorkerDirFromMetadata (and
+			// therefore by the resume launch-cwd path). Both are stamped
+			// with the same value so back-compat readers keep working
+			// during the rollout (gcw-xgfk.1).
+			"work_dir":            workDir,
+			contract.WorkerDirKey: workDir,
+			"command":             command,
+			"resume_flag":         resume.ResumeFlag,
+			"resume_style":        resume.ResumeStyle,
+			"resume_command":      resume.ResumeCommand,
+			"generation":          fmt.Sprintf("%d", DefaultGeneration),
+			"continuation_epoch":  fmt.Sprintf("%d", DefaultContinuationEpoch),
+			"instance_token":      NewInstanceToken(),
 		}
 		// provider_kind may be injected via extraMeta when the caller has
 		// resolved the canonical builtin kind for a custom provider alias.
@@ -695,17 +702,20 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 		}
 
 		meta := map[string]string{
-			"template":           template,
-			"state":              string(StateStartPending),
-			"provider":           provider,
-			"work_dir":           workDir,
-			"command":            command,
-			"resume_flag":        resume.ResumeFlag,
-			"resume_style":       resume.ResumeStyle,
-			"resume_command":     resume.ResumeCommand,
-			"generation":         fmt.Sprintf("%d", DefaultGeneration),
-			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-			"instance_token":     NewInstanceToken(),
+			"template": template,
+			"state":    string(StateStartPending),
+			"provider": provider,
+			// See createAliasedNamedWithTransport above: stamp both the
+			// legacy and canonical worker-dir keys (gcw-xgfk.1).
+			"work_dir":            workDir,
+			contract.WorkerDirKey: workDir,
+			"command":             command,
+			"resume_flag":         resume.ResumeFlag,
+			"resume_style":        resume.ResumeStyle,
+			"resume_command":      resume.ResumeCommand,
+			"generation":          fmt.Sprintf("%d", DefaultGeneration),
+			"continuation_epoch":  fmt.Sprintf("%d", DefaultContinuationEpoch),
+			"instance_token":      NewInstanceToken(),
 		}
 		if alias != "" {
 			meta["alias"] = alias

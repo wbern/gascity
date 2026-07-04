@@ -194,6 +194,41 @@ func TestInfoFromPersistedBeadProjectsContinuationAndSleepReason(t *testing.T) {
 	}
 }
 
+// TestInfoFromPersistedBeadResolvesWorkerDirViaCanonicalKey asserts the
+// persisted-bead projection resolves Info.WorkDir (the field the resume
+// launch-cwd path reads) through contract.WorkerDirFromMetadata: the
+// canonical worker_dir key wins when present, and the legacy work_dir key
+// is used as a fallback when the canonical key is absent. This is the
+// resume-read half of gcw-xgfk.1 — a session bead carrying a divergent
+// slug-based legacy work_dir must not override an explicit canonical
+// worker_dir when both are present.
+func TestInfoFromPersistedBeadResolvesWorkerDirViaCanonicalKey(t *testing.T) {
+	t.Run("canonical key present", func(t *testing.T) {
+		b := sessionBeadFixture("s-canon", "open", map[string]string{
+			"session_name": "s-canon",
+			"worker_dir":   "/rigs/gascity/canonical-dir",
+			// Legacy key deliberately diverges (e.g. slug vs no-slug
+			// directory naming) to prove the canonical key wins.
+			"work_dir": "/rigs/gascity/legacy-slug-dir",
+		})
+		info := InfoFromPersistedBead(b)
+		if info.WorkDir != "/rigs/gascity/canonical-dir" {
+			t.Errorf("Info.WorkDir = %q, want canonical worker_dir value", info.WorkDir)
+		}
+	})
+
+	t.Run("legacy-only fallback", func(t *testing.T) {
+		b := sessionBeadFixture("s-legacy", "open", map[string]string{
+			"session_name": "s-legacy",
+			"work_dir":     "/rigs/gascity/legacy-only-dir",
+		})
+		info := InfoFromPersistedBead(b)
+		if info.WorkDir != "/rigs/gascity/legacy-only-dir" {
+			t.Errorf("Info.WorkDir = %q, want legacy work_dir fallback value", info.WorkDir)
+		}
+	})
+}
+
 func infoIDs(in []Info) []string {
 	out := make([]string, 0, len(in))
 	for _, i := range in {

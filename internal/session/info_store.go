@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 // InfoFromPersistedBead projects a persisted session bead onto session.Info
@@ -41,7 +42,7 @@ func InfoFromPersistedBead(b beads.Bead) Info {
 		Provider:      b.Metadata["provider"],
 		Transport:     transportFromMetadata(b),
 		Command:       b.Metadata["command"],
-		WorkDir:       b.Metadata["work_dir"],
+		WorkDir:       contract.WorkerDirFromMetadata(b.Metadata),
 		SessionName:   sessName,
 		SessionKey:    b.Metadata["session_key"],
 		ResumeFlag:    b.Metadata["resume_flag"],

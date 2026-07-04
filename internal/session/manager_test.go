@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -857,6 +858,68 @@ func TestCreateBeadOnly(t *testing.T) {
 	}
 	if b.Metadata["session_name"] == "" {
 		t.Error("bead missing session_name metadata")
+	}
+}
+
+// TestCreateAliasedBeadOnlyNamedStampsCanonicalWorkerDir asserts the
+// bare-provider session-bead-creation path (no pack worktree script involved)
+// stamps the canonical contract.WorkerDirKey alongside the legacy work_dir
+// key with the exact same value, so contract.WorkerDirFromMetadata resolves
+// the worker cwd without depending on the deprecated key (gcw-xgfk.1).
+func TestCreateAliasedBeadOnlyNamedStampsCanonicalWorkerDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := "/tmp/gascity/worktrees/rig-name-abc123"
+	info, err := mgr.CreateAliasedBeadOnlyNamed("", "", "helper", "my chat", "claude", workDir, "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	// Assert the canonical key directly (not via the fallback-aware
+	// helper) so this test actually fails if only the legacy key gets
+	// written.
+	if got := b.Metadata[contract.WorkerDirKey]; got != workDir {
+		t.Errorf("canonical %s metadata = %q, want %q", contract.WorkerDirKey, got, workDir)
+	}
+	if got := contract.WorkerDirFromMetadata(b.Metadata); got != workDir {
+		t.Errorf("contract.WorkerDirFromMetadata = %q, want %q", got, workDir)
+	}
+	// Legacy key must remain intact for back-compat readers.
+	if b.Metadata["work_dir"] != workDir {
+		t.Errorf("legacy work_dir = %q, want %q", b.Metadata["work_dir"], workDir)
+	}
+}
+
+// TestCreateAliasedNamedWithTransportStampsCanonicalWorkerDir mirrors the
+// bead-only test above for the with-transport session-bead-creation path
+// used by non-bare-provider callers.
+func TestCreateAliasedNamedWithTransportStampsCanonicalWorkerDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	workDir := "/tmp/gascity/worktrees/rig-name-abc123"
+	info, err := mgr.CreateAliasedNamedWithTransport(context.Background(), "", "", "helper", "my chat", "claude", workDir, "claude", "", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata[contract.WorkerDirKey]; got != workDir {
+		t.Errorf("canonical %s metadata = %q, want %q", contract.WorkerDirKey, got, workDir)
+	}
+	if got := contract.WorkerDirFromMetadata(b.Metadata); got != workDir {
+		t.Errorf("contract.WorkerDirFromMetadata = %q, want %q", got, workDir)
+	}
+	if b.Metadata["work_dir"] != workDir {
+		t.Errorf("legacy work_dir = %q, want %q", b.Metadata["work_dir"], workDir)
 	}
 }
 
