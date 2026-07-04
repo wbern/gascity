@@ -102,10 +102,34 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 }
 
 // StageProviderOverlayDir copies a provider-aware overlay directory into a
-// work directory and writes nonfatal preservation warnings to warnings.
+// work directory and writes nonfatal preservation warnings to warnings. This is
+// the runtime task-worktree staging path: it stages every overlay file
+// (including reconciler-owned mergeable hook files) because staging is the sole
+// writer for live task sessions — hooks.Install never runs against these dirs.
 func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+	return stageProviderOverlayDir(srcDir, dstDir, providers, nil, warnings)
+}
+
+// StageProviderOverlayDirSkippingMergeable copies a provider-aware overlay
+// directory into a work directory like StageProviderOverlayDir, but skips
+// reconciler-owned mergeable settings/hook files (overlay.IsMergeablePath —
+// .codex/hooks.json, .claude/settings.json, etc.).
+//
+// It is used only by the build_desired_state home-dir staging path (gcw-mnck),
+// which stages overlays and then immediately runs hooks.Install on the SAME
+// directory. Skipping the mergeable files here makes hooks.Install the sole
+// writer, so the two writers can no longer disagree on hook-entry matchers and
+// leave a permanent codex-hooks-drift hybrid.
+func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+	skip := func(relPath string, isDir bool) bool {
+		return !isDir && overlay.IsMergeablePath(relPath)
+	}
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings)
+}
+
+func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip overlay.SkipFunc, warnings io.Writer) error {
 	var stderr bytes.Buffer
-	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+	if err := overlay.CopyDirForProvidersWithSkip(srcDir, dstDir, providers, skip, &stderr); err != nil {
 		return err
 	}
 	nonfatal, fatal := splitOverlayWarnings(stderr.String())
