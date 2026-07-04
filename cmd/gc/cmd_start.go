@@ -1137,7 +1137,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}
