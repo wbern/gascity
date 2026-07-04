@@ -1,4 +1,5 @@
 .DS_Store
+.metadata_never_index
 CLAUDE.local.md
 coverage.txt
 coverage.integration-*.txt
@@ -8,6 +9,7 @@ cmd/gc/.runtime/
 /bin/
 /gc
 /genschema
+/genspec
 /bd
 /br
 /tmp/
