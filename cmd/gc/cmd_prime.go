@@ -578,8 +578,8 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("loading session bead %q: %v", gcSessionID, err)
 		return
 	}
-	if fromHookStdin && sessionProviderFamily(sessionBead) != "codex" {
-		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
+	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(sessionBead)) {
+		warn("hook stdin provider session id is only accepted for codex/claude session %q", gcSessionID)
 		return
 	}
 	if existing := strings.TrimSpace(sessionBead.Metadata["session_key"]); existing != "" {
@@ -587,6 +587,25 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	}
 	if err := sessionFrontDoor(store).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
+	}
+}
+
+// providerAcceptsHookStdinSessionID reports whether a provider family delivers
+// its authoritative resume id on the SessionStart hook's stdin JSON. codex and
+// claude both run through the settings.json `gc prime --hook` path and emit
+// their own session id there, so it is the authoritative resume key. Other CLI
+// providers surface it via env instead (GC_PROVIDER_SESSION_ID for the
+// JS-plugin providers, GEMINI_SESSION_ID for gemini) and are handled above,
+// before this stdin gate. Claude cannot be handed an id up front
+// (`--session-id` is unsupported, so the builtin profile sets no
+// session_id_flag); capturing the hook-delivered id is the only way its
+// wake_mode=resume ever has a conversation to resume (gci-ukg3).
+func providerAcceptsHookStdinSessionID(family string) bool {
+	switch family {
+	case "codex", "claude":
+		return true
+	default:
+		return false
 	}
 }
 
