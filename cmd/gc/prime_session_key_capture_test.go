@@ -76,6 +76,9 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinCaptured(t *testing.T
 	if got != claudeSessionID {
 		t.Fatalf("claude session_key = %q, want %q (hook stdin session id must be captured for claude; stderr=%q)", got, claudeSessionID, stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "persisted resume session_key") {
+		t.Errorf("successful capture must be observable, got stderr=%q", stderr.String())
+	}
 }
 
 // TestPersistPrimeHookProviderSessionKey_CodexHookStdinStillCaptured pins the

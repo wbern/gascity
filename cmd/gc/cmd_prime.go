@@ -587,6 +587,13 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	}
 	if err := sessionFrontDoor(store).SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
+		return
+	}
+	// Observability: this capture only runs once per session (guarded by the
+	// empty-key check above), so a single line records that resume was armed —
+	// the path is otherwise invisible to an operator debugging a fresh wake.
+	if stderr != nil {
+		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(sessionBead), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
 	}
 }
 
