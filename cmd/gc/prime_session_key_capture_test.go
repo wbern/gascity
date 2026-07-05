@@ -122,6 +122,82 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T)
 	}
 }
 
+// TestProviderAcceptsHookStdinSessionID locks the allowlist boundary: only the
+// families whose SessionStart hook delivers their authoritative resume id on
+// stdin (codex, claude) are accepted; every other family is not.
+func TestProviderAcceptsHookStdinSessionID(t *testing.T) {
+	cases := map[string]bool{
+		"codex":    true,
+		"claude":   true,
+		"gemini":   false,
+		"pi":       false,
+		"opencode": false,
+		"unknown":  false,
+		"":         false,
+	}
+	for family, want := range cases {
+		if got := providerAcceptsHookStdinSessionID(family); got != want {
+			t.Errorf("providerAcceptsHookStdinSessionID(%q) = %v, want %v", family, got, want)
+		}
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyHookStdinRejected pins
+// the safety boundary: a family outside the allowlist must NOT capture a
+// hook-stdin session id. Such providers surface their id via env instead, which
+// is handled before this gate.
+func TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyHookStdinRejected(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "gemini")
+	t.Setenv("GC_SESSION_ID", id)
+	isolateProviderSessionEnv(t)
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey("11111111-2222-3333-4444-555555555555", &stderr)
+
+	if got := reloadSessionKey(t, cityDir, id); got != "" {
+		t.Fatalf("gemini session_key = %q, want empty (hook stdin id must not be captured for non-allowlisted families)", got)
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_ClaudeEnvSessionIDCaptured confirms the
+// change is surgical — it touches only the hook-stdin branch. An id delivered
+// via GC_PROVIDER_SESSION_ID (fromHookStdin=false) is captured for claude
+// regardless of the gate, exactly as before.
+func TestPersistPrimeHookProviderSessionKey_ClaudeEnvSessionIDCaptured(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "claude")
+	t.Setenv("GC_SESSION_ID", id)
+	t.Setenv("GEMINI_SESSION_ID", "")
+	t.Setenv("GC_PROVIDER_SESSION_ID_REQUIRED", "1")
+	const envSessionID = "env-1a2b3c4d"
+	t.Setenv("GC_PROVIDER_SESSION_ID", envSessionID)
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey("", &stderr)
+
+	if got := reloadSessionKey(t, cityDir, id); got != envSessionID {
+		t.Fatalf("claude env session_key = %q, want %q (env path must be unaffected by the stdin gate)", got, envSessionID)
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID guards the
+// pre-existing collision check for the claude path: a provider id equal to the
+// gc session id is never stored as a resume key.
+func TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	id := createCaptureSessionBead(t, store, "claude")
+	t.Setenv("GC_SESSION_ID", id)
+	isolateProviderSessionEnv(t)
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey(id, &stderr) // hook id == gc session id
+
+	if got := reloadSessionKey(t, cityDir, id); got != "" {
+		t.Fatalf("session_key = %q, want empty (provider id equal to GC_SESSION_ID must be rejected)", got)
+	}
+}
+
 func reloadSessionKey(t *testing.T, cityDir, id string) string {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
