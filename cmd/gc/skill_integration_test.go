@@ -368,6 +368,43 @@ func TestMergeSkillFingerprintEntries(t *testing.T) {
 	}
 }
 
+// TestMergeSkillFingerprintEntriesIgnoresContent asserts that a byte-level
+// change to a skill's SKILL.md (documentation) does NOT change its
+// fingerprint entry, so a benign skill/doc edit no longer trips a
+// config-fingerprint drift that recycles every session carrying the skill
+// (gci-rgfm: the 2026-07-05 incident where a single SKILL.md rewrite
+// recycled ~every session and destroyed attended context). Set membership
+// (add/remove a skill) must still drift via the keyspace.
+func TestMergeSkillFingerprintEntriesIgnoresContent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "alpha")
+	mustCreateSkill(t, skillDir)
+	desired := []materialize.SkillEntry{{Name: "alpha", Source: skillDir}}
+
+	before := mergeSkillFingerprintEntries(nil, desired)["skills:alpha"]
+
+	// Rewrite the skill's documentation body (mirrors the incident).
+	body := "---\nname: alpha\ndescription: edited\n---\ncompletely different body\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := mergeSkillFingerprintEntries(nil, desired)["skills:alpha"]
+
+	if before != after {
+		t.Errorf("skill content edit changed fingerprint entry (before=%q after=%q); a doc edit must not trigger config-drift", before, after)
+	}
+
+	// Set membership must still drift: adding a skill adds a keyspace entry.
+	betaDir := filepath.Join(tmp, "beta")
+	mustCreateSkill(t, betaDir)
+	withBeta := mergeSkillFingerprintEntries(nil, append(desired,
+		materialize.SkillEntry{Name: "beta", Source: betaDir}))
+	if _, ok := withBeta["skills:beta"]; !ok {
+		t.Errorf("adding a skill must add a keyspace entry (set-membership drift preserved): %+v", withBeta)
+	}
+}
+
 // TestMergeSkillFingerprintEntriesPrefixPartitioning asserts that the
 // "skills:" prefix keeps entries from colliding with other
 // fpExtra keys like "skills_dir" that might conceivably be added later.
