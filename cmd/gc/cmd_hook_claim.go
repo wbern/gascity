@@ -484,11 +484,23 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 }
 
 func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
-	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
+	store := hookClaimBdStoreContext(ctx, sessionPointerStoreDir(dir), env, assignee)
 	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.CurrentRunIDMetadataKey:   runID,
 		beadmeta.ActiveWorkBeadMetadataKey: stepID,
 	}})
+}
+
+// sessionPointerStoreDir resolves the store that holds SESSION beads (the city
+// store) from the work bead's store dir. Session beads are created only in the
+// city store, so a session-pointer update issued against a rig-scoped work
+// bead's store misses the session bead entirely — surfacing as
+// "recording session pointers on session bead <id>: bead not found" — whenever
+// a pool worker claims a rig-scoped bead (the common case). Resolving the city
+// store makes the pointer land where the session bead actually lives. City-scoped
+// work claims are unaffected: cityForStoreDir is idempotent on a city dir.
+func sessionPointerStoreDir(workBeadStoreDir string) string {
+	return cityForStoreDir(workBeadStoreDir)
 }
 
 // hookClaimSessionID returns the session bead id (GC_SESSION_ID) from the claim
