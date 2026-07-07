@@ -366,10 +366,10 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
-		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, cfg, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, cfg, stderr)
 }
 
 func requireWorkflowServeFollowSessionEnv() error {
@@ -464,24 +464,70 @@ type workflowServeDrainResult struct {
 	pendingAny   bool
 }
 
+// workflowServeStoreCandidate pairs a queued control bead with the store
+// path it was selected from, so the caller can process it against its
+// owning store instead of the singleton's own storePath.
+type workflowServeStoreCandidate struct {
+	bead      hookBead
+	storePath string
+}
+
+// workflowServeStorePaths returns the bead-store paths the serve loop must
+// scan for this agent. Ordinary agents keep their existing single-store
+// behavior. The control-dispatcher singleton additionally scans every
+// configured rig store: workflow-finalize (and other) control beads routed
+// to it can be materialized in a rig store (gc.root_store_ref=rig:<name>)
+// while the singleton's own storePath is the city store, and selection
+// against the city store alone strands them forever (#3764 residual).
+func workflowServeStorePaths(agentCfg config.Agent, storePath string, cfg *config.City) []string {
+	paths := []string{storePath}
+	if cfg == nil || !isWorkflowServeControlDispatcherAgent(agentCfg) {
+		return paths
+	}
+	seen := map[string]struct{}{normalizePathForCompare(storePath): {}}
+	for _, rig := range cfg.Rigs {
+		rigPath := strings.TrimSpace(rig.Path)
+		if rigPath == "" {
+			continue
+		}
+		key := normalizePathForCompare(rigPath)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		paths = append(paths, rigPath)
+	}
+	return paths
+}
+
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
 // for a single invocation. Returns whether it advanced a control bead and
 // whether the queue still contains only pending work so the --follow caller
 // can distinguish blocked work from genuine idle.
-func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
+func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, cfg *config.City, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
+	storePaths := workflowServeStorePaths(agentCfg, storePath, cfg)
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
-		queue, err := workflowServeList(serveQuery, storePath, workEnv)
-		if err != nil {
-			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
-			// Surface a killed/timed-out control work query on the event
-			// bus so the reconciler has a named cause to escalate on
-			// rather than the session dying silently (issues #1496/#1497).
-			emitCityWorkQueryFailure(cityPath, stderr,
-				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
-			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
+		var queue []workflowServeStoreCandidate
+		for _, sp := range storePaths {
+			beadsForStore, err := workflowServeList(serveQuery, sp, workEnv)
+			if err != nil {
+				workflowTracef("serve query-error agent=%s store=%s err=%v", agentCfg.QualifiedName(), sp, err)
+				// Surface a killed/timed-out control work query on the event
+				// bus so the reconciler has a named cause to escalate on
+				// rather than the session dying silently (issues #1496/#1497).
+				emitCityWorkQueryFailure(cityPath, stderr,
+					os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
+				return result, fmt.Errorf("querying control work for %s (store %s): %w", agentCfg.QualifiedName(), sp, err)
+			}
+			for _, b := range beadsForStore {
+				queue = append(queue, workflowServeStoreCandidate{bead: b, storePath: sp})
+			}
 		}
 		if len(queue) == 0 {
 			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
@@ -497,9 +543,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		processedThisCycle := false
 		pendingCount := 0
 		for _, candidate := range queue {
-			beadID := candidate.ID
-			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
-			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
+			beadID := candidate.bead.ID
+			candidateStorePath := candidate.storePath
+			kind := strings.TrimSpace(candidate.bead.Metadata[beadmeta.KindMetadataKey])
+			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, candidateStorePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl
 			// chose to no-op (e.g., status != "open"). The caller cannot
@@ -509,7 +556,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
+			if err := controlDispatcherServe(cityPath, candidateStorePath, beadID, io.Discard, stderr); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					result.pendingAny = true
@@ -541,7 +588,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	}
 }
 
-func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) error {
+func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, cfg *config.City, stderr io.Writer) error {
 	ep, err := workflowServeOpenEventsProvider(stderr)
 	if err != nil {
 		return err
@@ -566,7 +613,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	idleSweeps := 0
 	var pendingWakeErr error
 	for {
-		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
+		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, cfg, stderr)
 		if err != nil {
 			// A transient work-query/store failure — most commonly the
 			// work-query timeout (hookWorkQueryTimeout) when the bead store is
