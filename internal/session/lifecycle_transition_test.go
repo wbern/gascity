@@ -56,6 +56,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"instance_token":             "token-3",
 				"continuation_epoch":         "2",
 				"continuation_reset_pending": "",
+				ResetCommittedAtKey:          "",
 				"detached_at":                "",
 				"state":                      string(StateCreating),
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
@@ -80,6 +81,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"instance_token":             "token-4",
 				"continuation_epoch":         "5",
 				"continuation_reset_pending": "",
+				ResetCommittedAtKey:          "",
 				"detached_at":                "",
 				"state":                      string(StateCreating),
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
@@ -440,7 +442,16 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	}
 }
 
-func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
+// TestPreWakePatchClearsResetCommittedAt guards against a false
+// session.reset_stalled storm: reset_committed_at is stamped once by
+// RestartRequestPatch and, before this fix, was never cleared. Any later
+// fresh-drain re-arms continuation_reset_pending (AcknowledgeDrainPatch /
+// CompleteDrainPatch) while the ancient timestamp survived, so the
+// reconciler's elapsed-time check always tripped. PreWakePatch runs when
+// the session is genuinely coming alive, at which point any prior
+// committed reset has by definition succeeded, so the marker must not
+// survive into the next cycle.
+func TestPreWakePatchClearsResetCommittedAt(t *testing.T) {
 	committedAt := "2026-04-15T13:00:00Z"
 	meta := map[string]string{
 		ResetCommittedAtKey: committedAt,
@@ -454,8 +465,50 @@ func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
 		FreshWake:         true,
 	}).Apply(meta)
 
-	if got[ResetCommittedAtKey] != committedAt {
-		t.Fatalf("PreWakePatch should preserve %s, got %q", ResetCommittedAtKey, got[ResetCommittedAtKey])
+	if got[ResetCommittedAtKey] != "" {
+		t.Fatalf("PreWakePatch should clear %s, got %q", ResetCommittedAtKey, got[ResetCommittedAtKey])
+	}
+}
+
+// TestFreshWakeDrainCycleDoesNotResurrectStaleResetCommittedAt reproduces
+// the gcw-8co2 false-stall storm end to end: a wake_mode=fresh session
+// that already completed a committed restart, then goes through repeated
+// fresh drain -> wake cycles. Each fresh drain re-arms
+// continuation_reset_pending, but reset_committed_at must not still be
+// carrying the original (now hours-old) timestamp from the first commit.
+func TestFreshWakeDrainCycleDoesNotResurrectStaleResetCommittedAt(t *testing.T) {
+	restartAt := time.Date(2026, 7, 7, 11, 24, 7, 0, time.UTC)
+	meta := RestartRequestPatch("", restartAt).Apply(nil)
+
+	wakeAt := restartAt.Add(2 * time.Second)
+	meta = PreWakePatch(PreWakePatchInput{
+		Generation:        1,
+		InstanceToken:     "token-1",
+		ContinuationEpoch: 1,
+		Now:               wakeAt,
+		FreshWake:         true,
+	}).Apply(meta)
+
+	for cycle := 0; cycle < 3; cycle++ {
+		drainAt := wakeAt.Add(time.Duration(cycle+1) * time.Hour)
+		meta = CompleteDrainPatch(drainAt, "idle", true).Apply(meta)
+
+		if meta["continuation_reset_pending"] != "true" {
+			t.Fatalf("cycle %d: fresh drain should re-arm continuation_reset_pending", cycle)
+		}
+		if meta[ResetCommittedAtKey] != "" {
+			t.Fatalf("cycle %d: fresh drain must not pair re-armed continuation_reset_pending with a stale %s, got %q",
+				cycle, ResetCommittedAtKey, meta[ResetCommittedAtKey])
+		}
+
+		wakeAt = drainAt.Add(time.Minute)
+		meta = PreWakePatch(PreWakePatchInput{
+			Generation:        cycle + 2,
+			InstanceToken:     "token-1",
+			ContinuationEpoch: cycle + 2,
+			Now:               wakeAt,
+			FreshWake:         true,
+		}).Apply(meta)
 	}
 }
 

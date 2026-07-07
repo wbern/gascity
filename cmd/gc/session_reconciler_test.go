@@ -9146,6 +9146,63 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 }
 
+// TestRecordResetStallIfDue_FreshWakeCycleDoesNotFalseAlarm reproduces the
+// gcw-8co2 storm at the recordResetStallIfDue level: a wake_mode=fresh
+// session that already came alive after a committed restart (PreWakePatch
+// clears ResetCommittedAtKey) must not raise a false session.reset_stalled
+// alarm just because a later fresh drain re-arms continuation_reset_pending.
+// A genuine committed-reset-that-never-came-alive case must still fire.
+func TestRecordResetStallIfDue_FreshWakeCycleDoesNotFalseAlarm(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	startupTimeout := 60 * time.Second
+
+	session := env.createSessionBead("worker", "worker")
+
+	restartAt := env.clk.Now().UTC()
+	meta := sessionpkg.RestartRequestPatch("", restartAt).Apply(nil)
+	wakeAt := restartAt.Add(2 * time.Second)
+	meta = sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+		Generation:        1,
+		InstanceToken:     "token-1",
+		ContinuationEpoch: 1,
+		Now:               wakeAt,
+		FreshWake:         true,
+	}).Apply(meta)
+
+	// Simulate several hours-later fresh drain -> wake cycles, as happens to
+	// a long-lived recycling polecat.
+	drainAt := wakeAt.Add(3 * time.Hour)
+	meta = sessionpkg.CompleteDrainPatch(drainAt, "idle", true).Apply(meta)
+	env.setSessionMetadata(&session, meta)
+
+	// The stale timestamp from the original restart is long gone, so no
+	// false alarm even though continuation_reset_pending was re-armed and
+	// the elapsed time since the original restart vastly exceeds the
+	// startup timeout.
+	recordResetStallIfDue(session, "worker", "worker", false, startupTimeout, drainAt.Add(time.Hour), env.dt, rec, &env.stderr, nil)
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("stale-restart fresh-drain cycle stderr = %q, want no false alarm", got)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("recorded events = %d, want 0 for false-alarm case", len(rec.Events))
+	}
+
+	// A genuine committed reset that never comes alive must still fire.
+	genuineCommittedAt := drainAt.Add(2 * time.Hour)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: genuineCommittedAt.UTC().Format(time.RFC3339),
+	})
+	recordResetStallIfDue(session, "worker", "worker", false, startupTimeout, genuineCommittedAt.Add(75*time.Second), env.dt, rec, &env.stderr, nil)
+	if got := strings.TrimSpace(env.stderr.String()); got == "" {
+		t.Fatal("genuine committed-reset-never-alive case should still emit a reset stalled diagnostic")
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events after genuine stall = %d, want 1", len(rec.Events))
+	}
+}
+
 // TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState
 // verifies the full reconciler-level cycle for on_demand named session
 // recovery: a closed session bead that is still in the desired state

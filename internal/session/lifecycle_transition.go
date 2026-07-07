@@ -123,12 +123,17 @@ type PreWakePatchInput struct {
 // PreWakePatch records the metadata transition for a concrete runtime wake
 // attempt. It intentionally owns the StateStartPending to StateCreating
 // provider-start boundary outside Transition because this patch is the atomic
-// reconciler commit made immediately before runtime start.
+// reconciler commit made immediately before runtime start. It clears
+// ResetCommittedAtKey because the session is genuinely coming alive here, so
+// any prior committed reset has by definition succeeded; leaving the marker
+// in place would let a later fresh-drain's re-armed continuation_reset_pending
+// pair with a stale timestamp and trip a false session.reset_stalled alarm.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	patch := MetadataPatch{
 		"instance_token":             input.InstanceToken,
 		"continuation_epoch":         fmt.Sprintf("%d", input.ContinuationEpoch),
 		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
 		"detached_at":                "",
 		"state":                      string(StateCreating),
 		"pending_create_started_at":  pendingCreateStartedAt(input.Now),
