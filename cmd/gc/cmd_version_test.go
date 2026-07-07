@@ -42,6 +42,28 @@ func TestResolveBuildMetadataUsesModuleVersion(t *testing.T) {
 	}
 }
 
+func TestResolveBuildMetadataUsesForkRevisionForPseudoModuleVersion(t *testing.T) {
+	info := &debug.BuildInfo{
+		Main: debug.Module{
+			Version: "v1.1.1-0.20260706165804-77688848f81f+dirty",
+		},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "77688848f81faba45e6e2e5a4c9e72241c275b25"},
+			{Key: "vcs.time", Value: "2026-07-06T16:58:04Z"},
+		},
+	}
+	version, commit, date := resolveBuildMetadata("dev", "unknown", "unknown", true, info)
+	if version != "fork-77688848f" {
+		t.Fatalf("version = %q, want %q", version, "fork-77688848f")
+	}
+	if commit != "77688848f81faba45e6e2e5a4c9e72241c275b25" {
+		t.Fatalf("commit = %q, want vcs revision", commit)
+	}
+	if date != "2026-07-06T16:58:04Z" {
+		t.Fatalf("date = %q, want vcs time", date)
+	}
+}
+
 func TestResolveBuildMetadataUsesVCSSettings(t *testing.T) {
 	info := &debug.BuildInfo{
 		Settings: []debug.BuildSetting{

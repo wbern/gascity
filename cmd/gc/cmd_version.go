@@ -39,9 +39,6 @@ func resolveBuildMetadata(
 	if !ok || info == nil {
 		return currentVersion, currentCommit, currentDate
 	}
-	if currentVersion == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		currentVersion = normalizeVersion(info.Main.Version)
-	}
 	var dirty bool
 	for _, s := range info.Settings {
 		switch s.Key {
@@ -56,6 +53,11 @@ func resolveBuildMetadata(
 		case "vcs.modified":
 			dirty = s.Value == "true"
 		}
+	}
+	if currentVersion == "dev" && pseudoModuleVersion(info.Main.Version) && currentCommit != "unknown" {
+		currentVersion = "fork-" + shortVersionCommit(currentCommit)
+	} else if currentVersion == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		currentVersion = normalizeVersion(info.Main.Version)
 	}
 	if dirty && currentCommit != "unknown" {
 		currentCommit += "-dirty"
@@ -82,6 +84,28 @@ func normalizeVersion(v string) string {
 		return "dev"
 	}
 	return v
+}
+
+func pseudoModuleVersion(v string) bool {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	for _, re := range goPseudoVersionSuffixRes {
+		if re.MatchString(v) {
+			return true
+		}
+	}
+	return false
+}
+
+func shortVersionCommit(v string) string {
+	v = strings.TrimSuffix(v, "-dirty")
+	if len(v) < 9 {
+		return v
+	}
+	return v[:9]
 }
 
 func newVersionCmd(stdout, stderr io.Writer) *cobra.Command {
