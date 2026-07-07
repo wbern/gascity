@@ -73,3 +73,11 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Gas City
+.mcp.json
+.gemini/settings.json
+.codex/config.toml
+.cursor/mcp.json
+opencode.json
+mimocode.json
