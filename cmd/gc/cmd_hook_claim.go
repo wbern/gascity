@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -483,12 +484,97 @@ func recordHookClaimSessionPointers(bead beads.Bead, opts hookClaimOptions, ops 
 	}
 }
 
-func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error {
-	store := hookClaimBdStoreContext(ctx, sessionPointerStoreDir(dir), env, assignee)
+func hookRecordSessionPointersWithBdStore(ctx context.Context, dir string, _ []string, assignee, sessionBeadID, runID, stepID string) error {
+	cityDir, cityEnv, err := sessionPointerStoreEnv(ctx, dir, assignee)
+	if err != nil {
+		return fmt.Errorf("resolving city store env for session-pointer write: %w", err)
+	}
+	if cityEnv == nil {
+		// The city store could not be confidently resolved, or ctx expired while
+		// building the env. Session beads live only in the city store, so a write
+		// to an unresolved/rig store would miss the bead; skipping this
+		// best-effort bookkeeping is safe and avoids a park-triggering warning.
+		return nil
+	}
+	store := beads.NewBdStore(cityDir, beads.ExecCommandRunnerWithEnvContext(ctx, cityEnv))
 	return store.Update(sessionBeadID, beads.UpdateOpts{Metadata: map[string]string{
 		beadmeta.CurrentRunIDMetadataKey:   runID,
 		beadmeta.ActiveWorkBeadMetadataKey: stepID,
 	}})
+}
+
+// sessionPointerStoreEnv resolves the CITY store dir and a CITY-scoped bd env
+// for a session-pointer write, from the work bead's (possibly rig-scoped) store
+// dir. Session beads live only in the city store, so the write must target the
+// city store's env — not the rig env the hook runs under. The prior fix
+// repointed only the dir (sessionPointerStoreDir) but reused the rig env, so
+// BEADS_DIR/GC_RIG still pointed at the rig store and bd resolved the update
+// there, missing the session bead ("bead not found"). bdRuntimeEnvWithError
+// sets BEADS_DIR to the city .beads and clears GC_RIG/GC_RIG_ROOT; the exec
+// runner merges it over the process env, so PATH/HOME and other ambient vars
+// are preserved.
+//
+// It returns a nil env (a skip signal, with err == nil) in two guarded cases,
+// both safe for this best-effort write:
+//   - the city cannot be confirmed — sessionPointerStoreDir falls back to its
+//     input when GC_CITY is unset and the store sits outside the city tree, and
+//     writing the pointer there would silently target the wrong store; and
+//   - ctx expires while building the env — bdRuntimeEnvWithError is synchronous
+//     and can descend into a managed-Dolt recovery path during an outage, so
+//     the write must not outlive the claim ctx on the hot claim path.
+func sessionPointerStoreEnv(ctx context.Context, workBeadStoreDir, actor string) (string, map[string]string, error) {
+	cityDir := sessionPointerStoreDir(workBeadStoreDir)
+	if !isResolvedCityRoot(cityDir) {
+		return cityDir, nil, nil
+	}
+	env, err := cityStoreEnvBounded(ctx, cityDir)
+	if err != nil {
+		return "", nil, err
+	}
+	if env == nil {
+		return cityDir, nil, nil
+	}
+	if strings.TrimSpace(actor) != "" {
+		env["BEADS_ACTOR"] = actor
+	}
+	return cityDir, env, nil
+}
+
+// isResolvedCityRoot reports whether dir is a real city root, using the SAME
+// markers as the resolver (findCity / validateCityPath): the canonical city.toml
+// OR the .gc/ runtime root. sessionPointerStoreDir returns its input unchanged
+// when it cannot resolve a city, so this distinguishes a genuine city from that
+// fallback — and matching the resolver's predicate avoids skipping a valid
+// .gc/-only city (city roots are not required to carry city.toml).
+func isResolvedCityRoot(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	return citylayout.HasCityConfig(dir) || citylayout.HasRuntimeRoot(dir)
+}
+
+// cityStoreEnvBounded builds the city bd env, abandoning it (nil, nil) if ctx
+// expires first. bdRuntimeEnvWithError is synchronous and can descend into a
+// managed-Dolt recovery path during an outage; this write is best-effort, so it
+// must respect the claim ctx rather than block the hot claim path. The build
+// runs in a goroutine with a buffered result channel, so an abandoned build
+// completes and is garbage-collected without leaking.
+func cityStoreEnvBounded(ctx context.Context, cityDir string) (map[string]string, error) {
+	type envResult struct {
+		env map[string]string
+		err error
+	}
+	ch := make(chan envResult, 1)
+	go func() {
+		env, err := bdRuntimeEnvWithError(cityDir)
+		ch <- envResult{env: env, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, nil
+	case r := <-ch:
+		return r.env, r.err
+	}
 }
 
 // sessionPointerStoreDir resolves the store that holds SESSION beads (the city
