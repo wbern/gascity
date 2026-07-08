@@ -2324,11 +2324,19 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.nudgeDispatchTick(ctx)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
-	// Idle recovery: re-nudge running pool slots that still have an unclaimed
-	// stamped trigger bead. This is keyed on persistent bead state rather than
-	// runtime-specific idle heuristics, so it safely covers tmux alongside the
-	// controller-blind providers. See nudgeStalledPoolClaims for the bounded
-	// state machine.
+	// Idle recovery: re-nudge pool slots that are running but never claimed
+	// their assigned trigger bead. Runs for every runtime, not just herdr.
+	// tmux's relaunch/respawn path only heals a session that DIED; it does
+	// nothing for a session that is alive but idle at its prompt on a trigger
+	// bead it never began (a warm slot resumed onto work whose submit-CR was
+	// swallowed, or that survived a `gc restart` and was never re-Started).
+	// Activity reporting lets the controller SEE such a slot as alive but never
+	// delivers the claim nudge, so tmux has no demand-driven wake for it. The
+	// backstop is churn-free by construction for either runtime: it keys on the
+	// trigger bead still being open (the instant a polecat claims, the bead
+	// flips to in_progress and stops matching), persists its bounded
+	// observe→nudge→backoff state on the session bead, and never spams a tick.
+	// See nudgeStalledPoolClaims for the full invariant.
 	phaseStart = time.Now()
 	nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)

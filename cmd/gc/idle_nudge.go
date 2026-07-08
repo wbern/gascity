@@ -32,12 +32,23 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
-// nudgeStalledPoolClaims is a reconcile-tick backstop for pool slots whose
-// startup nudge was delivered but never took. It re-delivers the same claim
-// nudge to a running slot whose assigned trigger bead is still UNCLAIMED
-// (open, not in_progress). This covers swallowed fresh-start nudges on tmux and
-// the controller-blind providers (herdr), plus any other runtime where the slot
-// is alive but still sitting at its prompt with work it never began.
+// nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
+// runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
+// is running but whose assigned trigger bead is still UNCLAIMED (open, not
+// in_progress). The startup nudge can be missed — a freshly-spawned slot whose
+// submit-CR was swallowed, or a warm slot that survived a `gc restart` and was
+// never re-Started — leaving the polecat idle at its prompt with work it never
+// began. tmux's relaunch/respawn path only heals a session that DIED; a live
+// idle slot needs this demand-driven wake exactly as herdr does (activity
+// reporting makes the controller SEE the slot but never nudges it to claim).
+//
+// SCOPE (trigger-bead-key limitation): this keys on the slot's own
+// gc.trigger_bead_id, so it only rescues a slot the reconciler already bound to
+// a specific bead (resume / wake-known-identity tiers). A bead slung to the
+// pool AFTER the slot went idle and left UNASSIGNED (routed_to=pool, open, no
+// assignee) never stamps trigger_bead_id, so it is invisible here. Widening the
+// key to "any open+routed+unclaimed pool bead past the grace window" is the
+// documented follow-up (see engdocs/design/idle-claim-nudge-followups.md).
 //
 // Churn-free by construction — it inverts every failure mode that got the #312
 // idle-session nudger reverted:
