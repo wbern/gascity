@@ -472,22 +472,40 @@ type workflowServeStoreCandidate struct {
 	storePath string
 }
 
-// workflowServeStorePaths returns the bead-store paths the serve loop must
-// scan for this agent. Ordinary agents keep their existing single-store
+// workflowServeStoreQuery pairs a store's working directory with the
+// work-query env that must accompany it. Passing the wrong env alongside the
+// right dir queries the wrong bead store: the shell command inherits its
+// bead-store contract entirely from env (BEADS_DIR / GC_RIG_ROOT / Dolt
+// coordinates), not from cwd. See workflowServeStores.
+type workflowServeStoreQuery struct {
+	dir string
+	env map[string]string
+}
+
+// workflowServeStores returns the bead-store dir+env pairs the serve loop
+// must scan for this agent. Ordinary agents keep their existing single-store
 // behavior. The control-dispatcher singleton additionally scans every
 // configured rig store: workflow-finalize (and other) control beads routed
 // to it can be materialized in a rig store (gc.root_store_ref=rig:<name>)
 // while the singleton's own storePath is the city store, and selection
 // against the city store alone strands them forever (#3764 residual).
-func workflowServeStorePaths(agentCfg config.Agent, storePath string, cfg *config.City) []string {
-	paths := []string{storePath}
+//
+// Each rig entry rebuilds its own work-query env via controllerWorkQueryEnv
+// with a per-rig agent view (mirroring appendOneRigHookStore in
+// hook_cross_store.go), so BEADS_DIR/GC_RIG_ROOT point at THAT rig's store.
+// An earlier version reused the singleton's own workEnv for every store and
+// only varied the shell cwd, so every iteration still queried the city store
+// regardless of which rig path it changed directory into (gcw-kcm4).
+func workflowServeStores(cityPath string, agentCfg config.Agent, storePath string, workEnv map[string]string, cfg *config.City) []workflowServeStoreQuery {
+	stores := []workflowServeStoreQuery{{dir: storePath, env: workEnv}}
 	if cfg == nil || !isWorkflowServeControlDispatcherAgent(agentCfg) {
-		return paths
+		return stores
 	}
 	seen := map[string]struct{}{normalizePathForCompare(storePath): {}}
 	for _, rig := range cfg.Rigs {
+		rigName := strings.TrimSpace(rig.Name)
 		rigPath := strings.TrimSpace(rig.Path)
-		if rigPath == "" {
+		if rigName == "" || rigPath == "" {
 			continue
 		}
 		key := normalizePathForCompare(rigPath)
@@ -498,9 +516,19 @@ func workflowServeStorePaths(agentCfg config.Agent, storePath string, cfg *confi
 			continue
 		}
 		seen[key] = struct{}{}
-		paths = append(paths, rigPath)
+		view := agentCfg
+		view.Dir = rigName
+		rigEnv, err := controllerWorkQueryEnv(cityPath, cfg, &view)
+		if err != nil || rigEnv == nil {
+			continue
+		}
+		rigDir := agentCommandDir(cityPath, &view, cfg.Rigs)
+		if rigDir == "" {
+			rigDir = rigPath
+		}
+		stores = append(stores, workflowServeStoreQuery{dir: rigDir, env: rigEnv})
 	}
-	return paths
+	return stores
 }
 
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
@@ -510,23 +538,23 @@ func workflowServeStorePaths(agentCfg config.Agent, storePath string, cfg *confi
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, cfg *config.City, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
-	storePaths := workflowServeStorePaths(agentCfg, storePath, cfg)
+	stores := workflowServeStores(cityPath, agentCfg, storePath, workEnv, cfg)
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		var queue []workflowServeStoreCandidate
-		for _, sp := range storePaths {
-			beadsForStore, err := workflowServeList(serveQuery, sp, workEnv)
+		for _, store := range stores {
+			beadsForStore, err := workflowServeList(serveQuery, store.dir, store.env)
 			if err != nil {
-				workflowTracef("serve query-error agent=%s store=%s err=%v", agentCfg.QualifiedName(), sp, err)
+				workflowTracef("serve query-error agent=%s store=%s err=%v", agentCfg.QualifiedName(), store.dir, err)
 				// Surface a killed/timed-out control work query on the event
 				// bus so the reconciler has a named cause to escalate on
 				// rather than the session dying silently (issues #1496/#1497).
 				emitCityWorkQueryFailure(cityPath, stderr,
 					os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
-				return result, fmt.Errorf("querying control work for %s (store %s): %w", agentCfg.QualifiedName(), sp, err)
+				return result, fmt.Errorf("querying control work for %s (store %s): %w", agentCfg.QualifiedName(), store.dir, err)
 			}
 			for _, b := range beadsForStore {
-				queue = append(queue, workflowServeStoreCandidate{bead: b, storePath: sp})
+				queue = append(queue, workflowServeStoreCandidate{bead: b, storePath: store.dir})
 			}
 		}
 		if len(queue) == 0 {
