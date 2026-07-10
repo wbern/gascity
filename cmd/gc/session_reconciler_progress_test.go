@@ -350,6 +350,119 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 	}
 }
 
+// TestReconcileSessionBeads_ClaimHolderStallRecyclesWedgedHolder drives the
+// claim-holder recycler end-to-end: a desired, alive session that HOLDS an
+// in-progress claim but has gone stale (its turn ended on a non-self-clearing
+// provider banner) is recycled when [session] claim_holder_stall_timeout is set —
+// the case the claim-less recycler deliberately exempts and no other mechanism
+// reaps (#4012). The claim-less timeout is disabled here to prove the claim-holder
+// path fires on its own.
+func TestReconcileSessionBeads_ClaimHolderStallRecyclesWedgedHolder(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""       // claim-less recycler OFF
+	env.cfg.Session.ClaimHolderStallTimeout = "20m" // claim-holder recycler ON
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; wedged claim-holder should be recycled", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if !strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want claim-holder-stalled diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ClaimHolderStallOffByDefaultKeepsHolder is the
+// regression guard: with claim_holder_stall_timeout unset (the default), a stale
+// claim-holder is left running exactly as before — the new path is strictly
+// opt-in and does not change behavior for cities that have not enabled it.
+func TestReconcileSessionBeads_ClaimHolderStallOffByDefaultKeepsHolder(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	// ProgressStallTimeout stays "30m" (default env), ClaimHolderStallTimeout unset.
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled; claim-holder must be left running when claim_holder_stall_timeout is unset", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if strings.Contains(env.stderr.String(), "stalled") {
+		t.Fatalf("stderr = %q, want no stall diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ClaimHolderStallRespectsLargerThresholdWithBothSet
+// is the core safety-separation guard: with BOTH timeouts set and the
+// claim-holder timeout deliberately larger, a claim-holder whose activity is
+// past the (smaller) claim-less threshold but still within its own (larger)
+// claim-holder threshold must be left running. This proves the minPositiveDuration
+// gate opens the block for the holder yet the holder is protected until its own,
+// more conservative deadline — the whole point of giving claim-holders a separate
+// timeout, since recycling one discards in-progress work.
+func TestReconcileSessionBeads_ClaimHolderStallRespectsLargerThresholdWithBothSet(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = "30m"    // claim-less
+	env.cfg.Session.ClaimHolderStallTimeout = "45m" // claim-holder, larger
+	// 35m stale: past the 30m gate (so the block runs) but under the 45m
+	// claim-holder threshold (so the holder must not be recycled).
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-35*time.Minute))
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled; claim-holder within its larger threshold must be left running", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if strings.Contains(env.stderr.String(), "stalled") {
+		t.Fatalf("stderr = %q, want no stall diagnostic", env.stderr.String())
+	}
+}
+
 // TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker drives the
 // reconciler's pool-counting branch (not just the extracted predicate): a stale,
 // claimless, healthy session whose pool is at its configured floor
