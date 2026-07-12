@@ -126,6 +126,10 @@ func TestPreflightEligibleOnUnreachableBDContextWhenIdentityVerified(t *testing.
 	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
+	// The result flags that eligibility came via the identity-fallback path.
+	if !result.NativeEligibleViaIdentityFallback {
+		t.Errorf("NativeEligibleViaIdentityFallback = false, want true on the identity-verified upgrade")
+	}
 }
 
 // Without independent identity proof, an unreachable bd context must stay
@@ -164,6 +168,10 @@ func TestPreflightDegradesOnUnreachableBDContextWithoutIdentityProof(t *testing.
 	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
+	// No upgrade happened, so the identity-fallback flag stays false.
+	if result.NativeEligibleViaIdentityFallback {
+		t.Errorf("NativeEligibleViaIdentityFallback = true, want false when the verdict stays DEGRADED")
+	}
 }
 
 func TestPreflightBlocksNativeOnIdentityMismatch(t *testing.T) {

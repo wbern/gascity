@@ -58,15 +58,18 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	// project_id. That direct verification is stronger evidence than bd
 	// context's cross-check, so an inability to also cross-verify via bd's
 	// cwd-sensitive context command must not force the per-call bd fallback.
+	eligibleViaIdentityFallback := false
 	if verdict == PreflightVerdictDegraded && bdCtxErr != nil && degradedOnlyByUnreachableBDContext(checks) {
 		verdict = PreflightVerdictEligible
+		eligibleViaIdentityFallback = true
 	}
 	result := PreflightResult{
-		Verdict:             verdict,
-		Scope:               scope,
-		Checks:              checks,
-		RepairSteps:         preflightRepairSteps(checks),
-		NativeStoreEligible: verdict == PreflightVerdictEligible,
+		Verdict:                           verdict,
+		Scope:                             scope,
+		Checks:                            checks,
+		RepairSteps:                       preflightRepairSteps(checks),
+		NativeStoreEligible:               verdict == PreflightVerdictEligible,
+		NativeEligibleViaIdentityFallback: eligibleViaIdentityFallback,
 	}
 	if verdict != PreflightVerdictEligible {
 		result.Fallback = PreflightFallbackBdStore
