@@ -78,6 +78,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc worktree](#gc-worktree) | Manage worktree state |
 
 ## gc agent
 
@@ -4374,3 +4375,30 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc worktree
+
+Manage worktree state.
+
+Provides report-only and maintenance operations over the city's managed
+worktree roots.
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree scan](#gc-worktree-scan) | List stray worktrees under managed roots |
+
+## gc worktree scan
+
+List stray worktrees under managed roots
+
+```
+gc worktree scan [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
