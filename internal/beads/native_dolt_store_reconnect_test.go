@@ -10,11 +10,11 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
-// transientThenHealthyStorage helpers build a NativeDoltStore whose initial
-// handle fails every read with a transient connection error, plus a healthy
-// replacement handed back by the overridden open. Together they exercise the
-// read-path reconnect: attempt 1 fails transient -> reconnect swaps the dead
-// handle for the healthy one -> attempt 2 succeeds.
+// These tests exercise the native read-path reconnect: a read against the
+// initial (dead) handle fails with a transient connection error, the injected
+// reopen hook hands back a fresh (healthy) handle, and the retry succeeds. The
+// reopen hook stands in for the store factory's real hook, which re-resolves the
+// current managed Dolt port and re-opens against the live server.
 
 func healthySearchStorage(issues ...*beadslib.Issue) *nativeDoltStorageSpy {
 	return &nativeDoltStorageSpy{
@@ -24,25 +24,31 @@ func healthySearchStorage(issues ...*beadslib.Issue) *nativeDoltStorageSpy {
 	}
 }
 
+func deadSearchStorage(err error) *nativeDoltStorageSpy {
+	return &nativeDoltStorageSpy{
+		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			return nil, err
+		},
+	}
+}
+
+// storeWithReopen builds a test NativeDoltStore starting on dead and swapping to
+// fresh via the reopen hook; reopens counts hook invocations.
+func storeWithReopen(dead beadslib.Storage, fresh beadslib.Storage, reopens *int32) *NativeDoltStore {
+	store := newNativeDoltStoreForTest(dead)
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(reopens, 1)
+		return fresh, nil
+	}
+	return store
+}
+
 func TestNativeDoltStoreGetReconnectsAfterTransientConnError(t *testing.T) {
 	healthy := healthySearchStorage(&beadslib.Issue{
 		ID: "gc-1", Title: "recovered", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
 	})
 	var reopens int32
-	oldOpen := nativeDoltOpenBestAvailable
-	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
-	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
-		atomic.AddInt32(&reopens, 1)
-		return healthy, nil
-	}
-
-	dead := &nativeDoltStorageSpy{
-		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			return nil, errors.New("begin read tx: invalid connection")
-		},
-	}
-	store := newNativeDoltStoreForTest(dead)
-	store.scopeRoot = t.TempDir() // enable reconnect
+	store := storeWithReopen(deadSearchStorage(errors.New("begin read tx: dial tcp 127.0.0.1:58216: i/o timeout")), healthy, &reopens)
 
 	got, err := store.Get("gc-1")
 	if err != nil {
@@ -52,7 +58,7 @@ func TestNativeDoltStoreGetReconnectsAfterTransientConnError(t *testing.T) {
 		t.Fatalf("Get.ID = %q, want gc-1", got.ID)
 	}
 	if n := atomic.LoadInt32(&reopens); n == 0 {
-		t.Fatalf("expected a reconnect (nativeDoltOpenBestAvailable call); got %d", n)
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
 	}
 }
 
@@ -61,20 +67,7 @@ func TestNativeDoltStoreListReconnectsAfterTransientConnError(t *testing.T) {
 		ID: "gc-2", Title: "recovered list", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
 	})
 	var reopens int32
-	oldOpen := nativeDoltOpenBestAvailable
-	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
-	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
-		atomic.AddInt32(&reopens, 1)
-		return healthy, nil
-	}
-
-	dead := &nativeDoltStorageSpy{
-		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			return nil, errors.New("[mysql] i/o timeout")
-		},
-	}
-	store := newNativeDoltStoreForTest(dead)
-	store.scopeRoot = t.TempDir()
+	store := storeWithReopen(deadSearchStorage(errors.New("[mysql] i/o timeout")), healthy, &reopens)
 
 	got, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth})
 	if err != nil {
@@ -84,27 +77,13 @@ func TestNativeDoltStoreListReconnectsAfterTransientConnError(t *testing.T) {
 		t.Fatalf("List = %#v, want [gc-2]", got)
 	}
 	if n := atomic.LoadInt32(&reopens); n == 0 {
-		t.Fatalf("expected a reconnect (nativeDoltOpenBestAvailable call); got %d", n)
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
 	}
 }
 
 func TestNativeDoltStoreReadDoesNotRetryNonTransientError(t *testing.T) {
 	var reopens int32
-	oldOpen := nativeDoltOpenBestAvailable
-	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
-	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
-		atomic.AddInt32(&reopens, 1)
-		return nil, errors.New("should not be called")
-	}
-
-	permanent := errors.New("syntax error near 'FROM'")
-	storage := &nativeDoltStorageSpy{
-		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			return nil, permanent
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	store.scopeRoot = t.TempDir()
+	store := storeWithReopen(deadSearchStorage(errors.New("syntax error near 'FROM'")), healthySearchStorage(), &reopens)
 
 	if _, err := store.Get("gc-1"); err == nil || !errContains(err, "syntax error") {
 		t.Fatalf("Get error = %v, want the non-transient syntax error", err)
@@ -114,27 +93,26 @@ func TestNativeDoltStoreReadDoesNotRetryNonTransientError(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreReadWithoutScopeRootDoesNotReconnect(t *testing.T) {
-	var reopens int32
-	oldOpen := nativeDoltOpenBestAvailable
-	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
-	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
-		atomic.AddInt32(&reopens, 1)
-		return nil, errors.New("should not be called")
-	}
-
-	dead := &nativeDoltStorageSpy{
-		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			return nil, errors.New("invalid connection")
-		},
-	}
-	store := newNativeDoltStoreForTest(dead) // scopeRoot empty -> reconnect disabled
+func TestNativeDoltStoreReadWithoutReopenHookDoesNotReconnect(t *testing.T) {
+	// No reopen hook injected -> reconnect disabled, transient error returns as-is.
+	store := newNativeDoltStoreForTest(deadSearchStorage(errors.New("invalid connection")))
 
 	if _, err := store.Get("gc-1"); err == nil || !errContains(err, "invalid connection") {
 		t.Fatalf("Get error = %v, want the transient error returned as-is (fail fast)", err)
 	}
-	if n := atomic.LoadInt32(&reopens); n != 0 {
-		t.Fatalf("a store without a captured scopeRoot must not reconnect; got %d reopens", n)
+}
+
+func TestNativeDoltStoreReconnectReopenErrorIsTerminalWhenNonTransient(t *testing.T) {
+	store := newNativeDoltStoreForTest(deadSearchStorage(errors.New("invalid connection")))
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		return nil, errors.New("permission denied resolving managed dolt port")
+	}
+	_, err := store.Get("gc-1")
+	if err == nil || !errContains(err, "reconnect after transient read error") {
+		t.Fatalf("Get error = %v, want a wrapped reconnect failure", err)
+	}
+	if !errContains(err, "permission denied") {
+		t.Fatalf("Get error = %v, want the reopen cause preserved", err)
 	}
 }
 

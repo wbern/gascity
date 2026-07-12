@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,13 +166,36 @@ type NativeDoltStore struct {
 	actor      string
 	idPrefix   string
 
-	// scopeRoot and openEnv are captured at open so the read path can transparently
-	// re-open the managed Dolt connection after a :3307 hard-kill/rebind. An empty
-	// scopeRoot (e.g. a test store built directly from a storage handle) disables
-	// reconnect and preserves the prior fail-fast behavior.
-	scopeRoot   string
-	openEnv     map[string]string
+	// reopen re-establishes the managed Dolt connection after a transient
+	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
+	// CURRENT managed Dolt port and return a fresh storage handle bound to the
+	// live server — the store's original open env pins the now-dead port, so a
+	// naive re-open of the cached env would keep dialing it. It is injected by
+	// the store factory (which owns managed-Dolt port discovery + restart); a
+	// nil reopen disables reconnect and preserves fail-fast behavior for test
+	// handles built directly from a storage value.
+	reopen      NativeReopenFunc
 	reconnectMu sync.Mutex
+}
+
+// NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
+// It is aliased so a caller (e.g. the store factory) can build a WithNativeReopen
+// hook without importing the upstream beads package directly.
+type NativeStorage = beadslib.Storage
+
+// NativeReopenFunc re-establishes a native Dolt storage handle after a transient
+// connection failure. See WithNativeReopen and NativeDoltStore.reopen.
+type NativeReopenFunc func(context.Context) (NativeStorage, error)
+
+// NativeDoltStoreOption configures a NativeDoltStore at open.
+type NativeDoltStoreOption func(*NativeDoltStore)
+
+// WithNativeReopen injects the reconnect hook the read path uses to recover the
+// managed Dolt connection after a transient failure. The hook must re-resolve
+// the current managed port (the cached open env pins the old one) and return a
+// fresh storage handle. See NativeDoltStore.reopen.
+func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) { s.reopen = reopen }
 }
 
 var (
@@ -200,11 +222,13 @@ func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idP
 
 // OpenNativeDoltStoreAt opens a native Dolt-backed beads store at scopeRoot
 // while projecting the supplied scoped Dolt environment for upstream beads.
-func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
-	return newNativeDoltStoreAt(ctx, scopeRoot, env)
+// Pass WithNativeReopen to arm transparent reconnect across a managed-Dolt
+// rebind.
+func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
+	return newNativeDoltStoreAt(ctx, scopeRoot, env, opts...)
 }
 
-func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
+func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
 	storage, prefix, err := openAndRepairNativeStorage(ctx, scopeRoot, env, true)
@@ -212,9 +236,19 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
-	store.scopeRoot = scopeRoot
-	store.openEnv = maps.Clone(env)
+	for _, opt := range opts {
+		opt(store)
+	}
 	return store, nil
+}
+
+// OpenNativeStorage opens a native Dolt storage handle for the given scope and
+// projected env. It is the building block for a NativeDoltStore reopen hook: a
+// caller that has re-resolved the CURRENT managed Dolt env (fresh port) passes
+// it here to get a fresh handle bound to the live server.
+func OpenNativeStorage(ctx context.Context, scopeRoot string, env map[string]string) (NativeStorage, error) {
+	storage, _, err := openAndRepairNativeStorage(ctx, scopeRoot, env, false)
+	return storage, err
 }
 
 // openAndRepairNativeStorage projects the scoped Dolt env, opens the
@@ -308,24 +342,26 @@ const (
 )
 
 // withReadRetry runs a read against the native storage handle, transparently
-// re-opening the managed Dolt connection and retrying when the handle fails with
-// a transient connection error — the :3307 hard-kill/rebind class ("invalid
-// connection", "i/o timeout", "broken pipe", "dial tcp", "unexpected EOF",
-// "use of closed network connection"). Retrying the same handle is pointless:
-// its *sql.DB pool points at the killed server's port, so each retry first
-// reconnects (openAndRepairNativeStorage re-runs the managed auto-start, which
-// rebinds Dolt to a fresh port and reconnects). Reconnect is single-flight
-// across concurrent readers via the generation guard. The loop is deadline-
-// bounded (nativeReadRetryBudget) rather than a fixed attempt count so it spans
-// the whole rebind window. Non-transient errors (ErrNotFound, decode failures)
-// return immediately, and a store without a captured scopeRoot (test handle)
-// keeps the prior fail-fast behavior.
+// reconnecting and retrying when the handle fails with a transient connection
+// error — the :3307 hard-kill/rebind class ("invalid connection", "i/o timeout",
+// "broken pipe", "dial tcp", "unexpected EOF", "use of closed network
+// connection"). Retrying the same handle is pointless: its *sql.DB pool points
+// at the killed server's port, so each retry first reconnects via the injected
+// reopen hook, which re-resolves the CURRENT managed Dolt port (restarting the
+// server if needed) and returns a fresh handle bound to the live server.
+// Reconnect is single-flight across concurrent readers via the generation guard.
+// The loop is deadline-bounded (nativeReadRetryBudget) rather than a fixed
+// attempt count so it spans the whole rebind window. Non-transient errors
+// (ErrNotFound, decode failures) return immediately, and a store without a
+// reopen hook (test handle built directly from a storage value) keeps the prior
+// fail-fast behavior.
 //
 // This closes the gap #4188 left: runBDTransientRead hardened the bd-CLI read
-// path, but factory.go prefers NativeDoltStore when native preflight passes, and
-// that provider-store read path had no equivalent recovery — so a rig store's
-// reconcile scan / Get surfaced "begin read tx: invalid connection" after a
-// managed-Dolt rebind instead of recovering.
+// path (each bd subprocess re-resolves the port and restarts Dolt), but
+// factory.go prefers NativeDoltStore when native preflight passes, and that
+// long-lived provider-store handle had no equivalent recovery — so a rig store's
+// reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
+// timeout" after a managed-Dolt rebind instead of recovering.
 func (s *NativeDoltStore) withReadRetry(fn func(beadslib.Storage) error) error {
 	deadline := time.Now().Add(nativeReadRetryBudget)
 	for {
@@ -338,7 +374,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(beadslib.Storage) error) error {
 		if opErr == nil {
 			return nil
 		}
-		if !isNativeDoltTransientReadError(opErr) || s.scopeRoot == "" || time.Now().After(deadline) {
+		if !isNativeDoltTransientReadError(opErr) || s.reopen == nil || time.Now().After(deadline) {
 			return opErr
 		}
 		if rcErr := s.reconnect(gen); rcErr != nil {
@@ -388,7 +424,9 @@ func isNativeDoltTransientReadError(err error) bool {
 // transient connection failure, single-flighted so concurrent readers reconnect
 // once. observedGen is the generation the failing read ran under; if another
 // reader already reconnected (generation advanced), this is a no-op and the
-// caller simply retries against the new handle.
+// caller simply retries against the new handle. The fresh handle comes from the
+// injected reopen hook, which re-resolves the CURRENT managed port (the cached
+// open env pins the old, now-dead port) and re-opens against the live server.
 func (s *NativeDoltStore) reconnect(observedGen uint64) error {
 	s.reconnectMu.Lock()
 	defer s.reconnectMu.Unlock()
@@ -396,22 +434,24 @@ func (s *NativeDoltStore) reconnect(observedGen uint64) error {
 	s.mu.RLock()
 	curGen := s.generation
 	old := s.storage
-	scopeRoot := s.scopeRoot
-	env := s.openEnv
+	reopen := s.reopen
 	s.mu.RUnlock()
 
 	if curGen != observedGen {
 		return nil // another reader already reconnected
 	}
-	if scopeRoot == "" {
+	if reopen == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	fresh, _, err := openAndRepairNativeStorage(ctx, scopeRoot, env, false)
+	fresh, err := reopen(ctx)
 	if err != nil {
 		return err
+	}
+	if fresh == nil {
+		return fmt.Errorf("native Dolt reopen returned nil storage")
 	}
 
 	s.mu.Lock()
