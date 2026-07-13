@@ -1411,6 +1411,36 @@ func deleteWorkflowBeads(store beads.Store, ids []string) (int, []error) {
 	return deleted, errs
 }
 
+// deleteWorkflowBeadsBatch removes exactly the given ids using the store's
+// batched delete when the backend implements beads.BatchDeleter (one
+// `bd delete … --force` per chunk, which orphans external dependents and lets
+// the schema's ON DELETE CASCADE drop the deleted beads' own edge rows), and
+// otherwise deletes each bead individually. On the sqlite/Dolt graph store this
+// collapses an O(subprocess-per-edge) closure teardown into O(chunks), which
+// keeps a large wisp-GC purge from blocking the controller tick for minutes.
+// It is not dependent-recursive: beads outside the collected closure that
+// depend on a deleted bead are preserved.
+func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if cd, ok := store.(beads.BatchDeleter); ok {
+		// A policy/capability wrapper advertises BatchDeleter to forward it, but
+		// reports ErrBatchDeleteUnsupported when its own backing lacks the
+		// capability; treat that as "not batchable" and fall through to the
+		// per-bead path rather than surfacing it as a delete failure.
+		if err := cd.DeleteBatch(ids); !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			return err
+		}
+	}
+	for _, id := range ids {
+		if err := deleteWorkflowBead(store, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func deleteWorkflowBead(store beads.Store, id string) error {
 	downDeps, err := store.DepList(id, "down")
 	if err != nil {

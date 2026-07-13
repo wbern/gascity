@@ -911,6 +911,195 @@ func (c *CachingStore) Delete(id string) error {
 	return nil
 }
 
+// DeleteBatch forwards the batched delete capability to the backing store when
+// it implements BatchDeleter, then evicts exactly those ids from the cache in
+// one pass: it installs a deletion fence per id, drops their outgoing deps (via
+// tombstoneLocked), and scrubs stale incoming edges from surviving beads so the
+// cache mirrors the backend's ON DELETE CASCADE cleanup of edge rows. Because
+// the backend orphans external dependents rather than recursively deleting them
+// (see BatchDeleter), beads that merely depend on a deleted bead are preserved.
+// This lets the wisp GC tear down a molecule closure with a single backing call
+// instead of an O(subprocess-per-edge) loop. When the backing store lacks
+// BatchDeleter, DeleteBatch falls back to a per-bead delete that first strips
+// the dependency rows touching each id, so surviving dependents are orphaned
+// rather than left with a dangling edge — the same contract a BatchDeleter
+// backing gets from the schema's ON DELETE CASCADE. It satisfies BatchDeleter.
+func (c *CachingStore) DeleteBatch(ids []string) error {
+	cd, ok := c.backing.(BatchDeleter)
+	if !ok {
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if err := c.deleteOrphaningDeps(id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Snapshot bead.deleted payloads from the cache only. Unlike Delete, which
+	// reads each snapshot from the backing store, forwarding N backing Get calls
+	// here would reintroduce the per-bead subprocess storm this batch path exists
+	// to remove; a bead absent from the cache is still evicted but emits no
+	// event. In practice the wisp GC lists the closure just before deleting it,
+	// so members are warm in the cache.
+	deleted := make(map[string]struct{}, len(ids))
+	c.mu.RLock()
+	events := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		deleted[id] = struct{}{}
+		if b, ok := c.beads[id]; ok {
+			events = append(events, cloneBead(b))
+		}
+	}
+	c.mu.RUnlock()
+
+	if err := cd.DeleteBatch(ids); err != nil {
+		return c.reconcilePartialBatchDelete(err, events)
+	}
+
+	c.mu.Lock()
+	c.evictBatchDeletedLocked(deleted)
+	c.mu.Unlock()
+
+	for _, b := range events {
+		c.notifyChange("bead.deleted", b)
+	}
+	return nil
+}
+
+// evictBatchDeletedLocked removes exactly the ids in deleted from the cache:
+// per-id local-mutation fence + tombstone and dropped dependent ready
+// projections, then a single scrub of inbound edges from survivors — mirroring
+// the backend's ON DELETE CASCADE cleanup of the deleted beads' edge rows.
+// Callers must hold c.mu.
+func (c *CachingStore) evictBatchDeletedLocked(deleted map[string]struct{}) {
+	for id := range deleted {
+		seq := c.noteLocalMutationLocked(id)
+		// Mirror the single-Delete tombstone: drop every cached projection of
+		// the bead and record its deletion sequence. (Upstream #4202 factors
+		// this into c.tombstoneLocked, which rides on the per-bead dirty-overlay
+		// refactor not yet on this branch.)
+		delete(c.beads, id)
+		delete(c.deps, id)
+		delete(c.dirty, id)
+		delete(c.beadSeq, id)
+		delete(c.localBeadAt, id)
+		c.deletedSeq[id] = seq
+		c.clearDependentReadyProjectionsLocked(id)
+	}
+	c.dropIncomingEdgesToDeletedLocked(deleted)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+}
+
+// reconcilePartialBatchDelete handles a backing DeleteBatch error. A
+// chunk-committing backend (BdStore) can durably remove earlier chunks before a
+// later chunk fails, reporting the removed ids via *BatchDeleteError. This
+// evicts exactly those committed ids and fires their bead.deleted events so a
+// mid-batch failure never leaves a deleted bead present-but-stale in the cache,
+// while the uncommitted ids stay resident because the backing did not remove
+// them. The original error is always returned so the caller still sees the
+// failure; a backing that reports no committed ids leaves the cache untouched.
+func (c *CachingStore) reconcilePartialBatchDelete(err error, events []Bead) error {
+	var batchErr *BatchDeleteError
+	if !errors.As(err, &batchErr) || len(batchErr.Committed) == 0 {
+		return err
+	}
+	committed := make(map[string]struct{}, len(batchErr.Committed))
+	for _, id := range batchErr.Committed {
+		if id != "" {
+			committed[id] = struct{}{}
+		}
+	}
+	if len(committed) == 0 {
+		return err
+	}
+	c.mu.Lock()
+	c.evictBatchDeletedLocked(committed)
+	c.mu.Unlock()
+	for _, b := range events {
+		if _, ok := committed[b.ID]; ok {
+			c.notifyChange("bead.deleted", b)
+		}
+	}
+	return err
+}
+
+// deleteOrphaningDeps removes id after stripping every dependency row touching
+// it in both directions, so surviving beads that depend on id are orphaned
+// rather than left with a dangling edge. DeleteBatch uses it as the fallback
+// when the backing store does not implement BatchDeleter: a bare backing Delete
+// (MemStore, FileStore, and other non-BatchDeleter stores) drops only the bead
+// row, so DeleteBatch must clean the edge rows itself to honor the same
+// orphaning contract a BatchDeleter backing gets from the schema's ON DELETE
+// CASCADE. It performs the same edge-strip-then-delete as the per-bead workflow
+// delete (deleteWorkflowBead in cmd/gc), and the DepRemove/Delete methods it
+// calls keep the cache coherent. Unlike deleteWorkflowBead it intentionally does
+// not roll back already-stripped edges when a mid-strip DepRemove or the final
+// Delete fails: this fallback runs only against non-BatchDeleter backings
+// (MemStore/FileStore), whose in-memory edge operations do not fail partway, and
+// the wisp GC re-collects and re-deletes any half-stripped member idempotently
+// on a later tick.
+func (c *CachingStore) deleteOrphaningDeps(id string) error {
+	downDeps, err := c.DepList(id, "down")
+	if err != nil {
+		return fmt.Errorf("list down deps for %s: %w", id, err)
+	}
+	for _, dep := range downDeps {
+		if err := c.DepRemove(id, dep.DependsOnID); err != nil {
+			return fmt.Errorf("remove down dep %s -> %s: %w", id, dep.DependsOnID, err)
+		}
+	}
+	upDeps, err := c.DepList(id, "up")
+	if err != nil {
+		return fmt.Errorf("list up deps for %s: %w", id, err)
+	}
+	for _, dep := range upDeps {
+		if err := c.DepRemove(dep.IssueID, id); err != nil {
+			return fmt.Errorf("remove up dep %s -> %s: %w", dep.IssueID, id, err)
+		}
+	}
+	return c.Delete(id)
+}
+
+// dropIncomingEdgesToDeletedLocked scrubs cached dependency rows that point at a
+// just-deleted bead, mirroring the backend's ON DELETE CASCADE cleanup of the
+// deleted beads' edge rows. Surviving beads are kept; only their now-dangling
+// edges into the deleted set are removed. Callers must hold c.mu.
+func (c *CachingStore) dropIncomingEdgesToDeletedLocked(deleted map[string]struct{}) {
+	for issueID, deps := range c.deps {
+		if _, gone := deleted[issueID]; gone {
+			continue
+		}
+		kept := deps[:0]
+		changed := false
+		for _, d := range deps {
+			if _, gone := deleted[d.DependsOnID]; gone {
+				changed = true
+				continue
+			}
+			kept = append(kept, d)
+		}
+		if !changed {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(c.deps, issueID)
+		} else {
+			c.deps[issueID] = kept
+		}
+		c.clearReadyProjectionLocked(issueID)
+	}
+}
+
 func (c *CachingStore) snapshotBeadBeforeDelete(id string) (Bead, bool) {
 	deleted, err := c.backing.Get(id)
 	if err != nil {
