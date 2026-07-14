@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	_ "modernc.org/sqlite" // pure-Go SQLite driver for fakeRawDBStorage's in-memory *sql.DB
 )
 
 // These tests exercise the native read-path reconnect: a read against the
@@ -382,5 +384,300 @@ func TestNativeDoltStoreConcurrentReadersReopenOnce(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&reopens); got != 1 {
 		t.Fatalf("reopen called %d times, want exactly 1 (single-flight)", got)
+	}
+}
+
+// --- Write-path reconnect (withOpRetry) tests: gcw-ggvd Slice 1 ---
+//
+// These mirror the read-path reconnect tests above but exercise
+// NativeDoltStore's clean-write retry, which is config-gated
+// (writeRetryEnabled) and off by default.
+
+func TestNativeDoltStoreWriteRetryDisabledByDefaultDoesNotReconnect(t *testing.T) {
+	var reopens int32
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return errors.New("invalid connection")
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return healthySearchStorage(), nil
+	}
+	// writeRetryEnabled left at its zero value (false) — the default.
+
+	if err := store.Delete("gc-1"); err == nil || !errContains(err, "invalid connection") {
+		t.Fatalf("Delete error = %v, want the transient error surfaced as-is (gate off)", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Fatalf("write retry disabled must not reconnect; got %d reopens", n)
+	}
+}
+
+func TestNativeDoltStoreDeleteReconnectsWhenWriteRetryEnabled(t *testing.T) {
+	var deleteCalls int32
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return errors.New("invalid connection")
+		},
+	}
+	fresh := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			atomic.AddInt32(&deleteCalls, 1)
+			return nil
+		},
+	}
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	if err := store.Delete("gc-1"); err != nil {
+		t.Fatalf("Delete after transient conn error: %v", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n == 0 {
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
+	}
+	if n := atomic.LoadInt32(&deleteCalls); n != 1 {
+		t.Fatalf("delete applied %d times on the fresh handle, want exactly 1 (no double-apply)", n)
+	}
+}
+
+func TestNativeDoltStoreDeleteToleratesNotFoundOnRetry(t *testing.T) {
+	// Models the ambiguous post-COMMIT case: the first attempt's delete
+	// actually landed server-side before the connection died reading the
+	// ack, so the retried delete sees "not found" — that must be treated as
+	// success, not surfaced as an error.
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return errors.New("invalid connection")
+		},
+	}
+	fresh := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return ErrNotFound
+		},
+	}
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	if err := store.Delete("gc-1"); err != nil {
+		t.Fatalf("Delete retry-not-found = %v, want nil (already applied)", err)
+	}
+}
+
+func TestNativeDoltStoreDeleteNotFoundOnFirstAttemptSurfaces(t *testing.T) {
+	// A not-found on the FIRST attempt (no retry happened) is a genuine
+	// not-found and must surface normally.
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return ErrNotFound
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.writeRetryEnabled = true
+
+	if err := store.Delete("gc-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete first-attempt not-found = %v, want ErrNotFound", err)
+	}
+}
+
+func TestNativeDoltStoreUpdateSingleAppliesOnRetry(t *testing.T) {
+	var freshUpdateCalls int32
+	var deadUpdateCalls int32
+	dead := &nativeDoltStorageSpy{
+		runInTransaction: func(context.Context, string, func(beadslib.Transaction) error) error {
+			// The transient failure happens establishing/running the
+			// transaction itself — the callback (and so UpdateIssue) is
+			// never invoked, mirroring a pre-apply connection death.
+			return errors.New("invalid connection")
+		},
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			atomic.AddInt32(&deadUpdateCalls, 1)
+			return nil
+		},
+	}
+	fresh := &nativeDoltStorageSpy{
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			atomic.AddInt32(&freshUpdateCalls, 1)
+			return nil
+		},
+	}
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	newDescription := "updated after reconnect"
+	if err := store.Update("gc-1", UpdateOpts{Description: &newDescription}); err != nil {
+		t.Fatalf("Update after transient conn error: %v", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n == 0 {
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
+	}
+	if n := atomic.LoadInt32(&deadUpdateCalls); n != 0 {
+		t.Fatalf("update applied %d times on the dead handle, want 0", n)
+	}
+	if n := atomic.LoadInt32(&freshUpdateCalls); n != 1 {
+		t.Fatalf("update applied %d times on the fresh handle, want exactly 1 (no double-apply)", n)
+	}
+}
+
+func TestNativeDoltStoreWriteDoesNotRetryNonTransientError(t *testing.T) {
+	var reopens int32
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return errors.New("syntax error near 'FROM'")
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.writeRetryEnabled = true
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return healthySearchStorage(), nil
+	}
+
+	if err := store.Delete("gc-1"); err == nil || !errContains(err, "syntax error") {
+		t.Fatalf("Delete error = %v, want the non-transient syntax error", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Fatalf("non-transient error must not reconnect; got %d reopens", n)
+	}
+}
+
+func TestNativeDoltStoreCreateIsNeverRetried(t *testing.T) {
+	var reopens int32
+	dead := &nativeDoltStorageSpy{
+		createIssue: func(context.Context, *beadslib.Issue, string) error {
+			return errors.New("invalid connection")
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.writeRetryEnabled = true
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return healthySearchStorage(), nil
+	}
+
+	if _, err := store.Create(Bead{Title: "never retried"}); err == nil || !errContains(err, "invalid connection") {
+		t.Fatalf("Create error = %v, want the transient error surfaced as-is (Create is never retried)", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Fatalf("Create must never trigger write-retry reconnect; got %d reopens", n)
+	}
+}
+
+func TestNativeDoltStoreTxIsNeverRetried(t *testing.T) {
+	var reopens int32
+	dead := &nativeDoltStorageSpy{
+		runInTransaction: func(context.Context, string, func(beadslib.Transaction) error) error {
+			return errors.New("invalid connection")
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.writeRetryEnabled = true
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return healthySearchStorage(), nil
+	}
+
+	err := store.Tx("test tx", func(Tx) error { return nil })
+	if err == nil || !errContains(err, "invalid connection") {
+		t.Fatalf("Tx error = %v, want the transient error surfaced as-is (Tx is never retried)", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Fatalf("Tx must never trigger write-retry reconnect; got %d reopens", n)
+	}
+}
+
+func TestNativeDoltStoreWriteRetryWithoutReopenHookDoesNotReconnect(t *testing.T) {
+	dead := &nativeDoltStorageSpy{
+		deleteIssue: func(context.Context, string) error {
+			return errors.New("invalid connection")
+		},
+	}
+	store := newNativeDoltStoreForTest(dead)
+	store.writeRetryEnabled = true
+	// No reopen hook injected.
+
+	if err := store.Delete("gc-1"); err == nil || !errContains(err, "invalid connection") {
+		t.Fatalf("Delete error = %v, want the transient error returned as-is (fail fast, no reopen hook)", err)
+	}
+}
+
+// fakeRawDBStorage adds a DB() method to nativeDoltStorageSpy so tests can
+// observe pool-hygiene options (WithConnMaxIdleTime) applied to a real
+// *sql.DB via database/sql's SetConnMaxIdleTime, without a live Dolt server.
+// dbCalls counts DB() invocations so tests can assert applyConnMaxIdleTime's
+// disabled (<=0) short-circuit never touches the storage at all.
+type fakeRawDBStorage struct {
+	*nativeDoltStorageSpy
+	db      *sql.DB
+	dbCalls int32
+}
+
+func (f *fakeRawDBStorage) DB() *sql.DB {
+	atomic.AddInt32(&f.dbCalls, 1)
+	return f.db
+}
+
+func newFakeRawDBStorage(t *testing.T) *fakeRawDBStorage {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &fakeRawDBStorage{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{
+			searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+				return []*beadslib.Issue{{
+					ID: "gc-1", Title: "recovered", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
+				}}, nil
+			},
+		},
+		db: db,
+	}
+}
+
+func TestNativeDoltStoreConnMaxIdleTimeAppliedWhenPositive(t *testing.T) {
+	storage := newFakeRawDBStorage(t)
+	store := newNativeDoltStoreForTest(storage)
+	store.connMaxIdleTime = 20 * time.Second
+
+	store.applyConnMaxIdleTime(storage)
+
+	if n := atomic.LoadInt32(&storage.dbCalls); n != 1 {
+		t.Fatalf("DB() calls = %d, want exactly 1 (SetConnMaxIdleTime applied)", n)
+	}
+}
+
+func TestNativeDoltStoreConnMaxIdleTimeDisabledIsNoOp(t *testing.T) {
+	storage := newFakeRawDBStorage(t)
+	store := newNativeDoltStoreForTest(storage)
+	store.connMaxIdleTime = 0
+
+	store.applyConnMaxIdleTime(storage)
+
+	if n := atomic.LoadInt32(&storage.dbCalls); n != 0 {
+		t.Fatalf("DB() calls = %d, want 0 (disabled config must never touch storage)", n)
+	}
+}
+
+func TestNativeDoltStoreConnMaxIdleTimeAppliedOnReconnect(t *testing.T) {
+	freshStorage := newFakeRawDBStorage(t)
+	dead := deadSearchStorage(errors.New("invalid connection"))
+	var reopens int32
+	store := storeWithReopen(dead, freshStorage, &reopens)
+	store.connMaxIdleTime = 15 * time.Second
+
+	if _, err := store.Get("gc-1"); err != nil {
+		t.Fatalf("Get after transient conn error: %v", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n == 0 {
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
+	}
+	if n := atomic.LoadInt32(&freshStorage.dbCalls); n != 1 {
+		t.Fatalf("DB() calls on the fresh post-reconnect handle = %d, want exactly 1", n)
 	}
 }

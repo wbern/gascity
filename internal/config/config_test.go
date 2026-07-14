@@ -8098,3 +8098,115 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 		})
 	}
 }
+
+// --- ConnMaxIdleTime tests (gcw-ggvd Slice 1: pool hygiene) ---
+
+func TestDoltConfigConnMaxIdleTimeDurationDefaultOff(t *testing.T) {
+	d := DoltConfig{}
+	if got := d.ConnMaxIdleTimeDuration(); got != 0 {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 0 (disabled by default)", got)
+	}
+}
+
+func TestDoltConfigConnMaxIdleTimeDurationCustom(t *testing.T) {
+	d := DoltConfig{ConnMaxIdleTime: "20s"}
+	if got := d.ConnMaxIdleTimeDuration(); got != 20*time.Second {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 20s", got)
+	}
+}
+
+func TestDoltConfigConnMaxIdleTimeDurationZeroDisables(t *testing.T) {
+	d := DoltConfig{ConnMaxIdleTime: "0s"}
+	if got := d.ConnMaxIdleTimeDuration(); got != 0 {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 0", got)
+	}
+}
+
+func TestDoltConfigConnMaxIdleTimeDurationNegativeDisables(t *testing.T) {
+	d := DoltConfig{ConnMaxIdleTime: "-5s"}
+	if got := d.ConnMaxIdleTimeDuration(); got != 0 {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 0", got)
+	}
+}
+
+func TestDoltConfigConnMaxIdleTimeDurationInvalidDisables(t *testing.T) {
+	d := DoltConfig{ConnMaxIdleTime: "not-a-duration"}
+	if got := d.ConnMaxIdleTimeDuration(); got != 0 {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 0 (disabled for invalid)", got)
+	}
+}
+
+func TestDoltConfigConnMaxIdleTimeDurationBelowFloorClamps(t *testing.T) {
+	d := DoltConfig{ConnMaxIdleTime: "1s"}
+	if got := d.ConnMaxIdleTimeDuration(); got != DoltConnMaxIdleTimeFloor {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want floor %v", got, DoltConnMaxIdleTimeFloor)
+	}
+}
+
+func TestParseDoltConnMaxIdleTime(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+conn_max_idle_time = "30s"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Dolt.ConnMaxIdleTime != "30s" {
+		t.Errorf("Dolt.ConnMaxIdleTime = %q, want %q", cfg.Dolt.ConnMaxIdleTime, "30s")
+	}
+	if got := cfg.Dolt.ConnMaxIdleTimeDuration(); got != 30*time.Second {
+		t.Errorf("ConnMaxIdleTimeDuration() = %v, want 30s", got)
+	}
+}
+
+// --- WriteRetryEnabled tests (gcw-ggvd Slice 1: idempotency-aware write retry) ---
+
+func TestDoltConfigEffectiveWriteRetryEnabledDefaultOff(t *testing.T) {
+	d := DoltConfig{}
+	if d.EffectiveWriteRetryEnabled() {
+		t.Error("EffectiveWriteRetryEnabled() = true, want false (opt-in default)")
+	}
+}
+
+func TestDoltConfigEffectiveWriteRetryEnabledExplicitTrue(t *testing.T) {
+	enabled := true
+	d := DoltConfig{WriteRetryEnabled: &enabled}
+	if !d.EffectiveWriteRetryEnabled() {
+		t.Error("EffectiveWriteRetryEnabled() = false, want true")
+	}
+}
+
+func TestDoltConfigEffectiveWriteRetryEnabledExplicitFalse(t *testing.T) {
+	enabled := false
+	d := DoltConfig{WriteRetryEnabled: &enabled}
+	if d.EffectiveWriteRetryEnabled() {
+		t.Error("EffectiveWriteRetryEnabled() = true, want false")
+	}
+}
+
+func TestParseDoltWriteRetryEnabled(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[dolt]
+write_retry_enabled = true
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Dolt.WriteRetryEnabled == nil || !*cfg.Dolt.WriteRetryEnabled {
+		t.Errorf("Dolt.WriteRetryEnabled = %v, want true", cfg.Dolt.WriteRetryEnabled)
+	}
+}

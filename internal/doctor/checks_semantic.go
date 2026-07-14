@@ -117,6 +117,11 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 		durationRange{"[daemon]", "drift_drain_timeout", c.cfg.Daemon.DriftDrainTimeout, minTimeout, maxTimeout},
 	)
 
+	// Dolt config.
+	ranges = append(ranges,
+		durationRange{"[dolt]", "conn_max_idle_time", c.cfg.Dolt.ConnMaxIdleTime, config.DoltConnMaxIdleTimeFloor, maxWindow},
+	)
+
 	// Per-agent durations.
 	for _, a := range c.cfg.Agents {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
@@ -134,8 +139,11 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 }
 
 func durationRangeNonPositiveDisables(dr durationRange) bool {
-	return dr.context == "[session]" &&
-		(dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout")
+	if dr.context == "[session]" &&
+		(dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout") {
+		return true
+	}
+	return dr.context == "[dolt]" && dr.field == "conn_max_idle_time"
 }
 
 // CanFix returns false — unreasonable durations must be corrected by the user.

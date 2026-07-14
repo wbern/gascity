@@ -1329,3 +1329,51 @@ func TestPathStrictlyInside(t *testing.T) {
 		}
 	}
 }
+
+func TestDurationRangeCheck_ConnMaxIdleTimeTooSmall(t *testing.T) {
+	cfg := &config.City{
+		Dolt: config.DoltConfig{
+			ConnMaxIdleTime: "1s",
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning", r.Status)
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "conn_max_idle_time") && strings.Contains(d, "below minimum") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected conn_max_idle_time below-minimum warning in details: %v", r.Details)
+	}
+}
+
+func TestDurationRangeCheck_ConnMaxIdleTimeZeroDisables(t *testing.T) {
+	cfg := &config.City{
+		Dolt: config.DoltConfig{
+			ConnMaxIdleTime: "0s",
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; details = %v", r.Status, r.Details)
+	}
+}
+
+func TestDurationRangeCheck_ConnMaxIdleTimeNegativeDisables(t *testing.T) {
+	cfg := &config.City{
+		Dolt: config.DoltConfig{
+			ConnMaxIdleTime: "-5s",
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; details = %v", r.Status, r.Details)
+	}
+}

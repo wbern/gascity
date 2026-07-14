@@ -187,6 +187,17 @@ type NativeDoltStore struct {
 	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
 	// tests set it (to exercise budget exhaustion without a real 90s wait).
 	readRetryBudgetOverride time.Duration
+	// writeRetryEnabled gates withOpRetry's reconnect-and-retry loop for the
+	// clean (idempotent) write path. Config-gated default-off (see
+	// config.DoltConfig.WriteRetryEnabled) — when false, withOpRetry runs the
+	// op exactly once with no retry, preserving today's behavior.
+	writeRetryEnabled bool
+	// connMaxIdleTime, when positive, is applied to the underlying *sql.DB's
+	// SetConnMaxIdleTime on open and on every successful reconnect, so idle
+	// pooled connections are retired before a NAT/firewall idle-flow eviction
+	// window is hit. Zero (the default) leaves the pool's idle lifetime
+	// unbounded, matching prior behavior.
+	connMaxIdleTime time.Duration
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -207,6 +218,20 @@ type NativeDoltStoreOption func(*NativeDoltStore)
 // fresh storage handle. See NativeDoltStore.reopen.
 func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.reopen = reopen }
+}
+
+// WithWriteRetry gates the clean-write reconnect-and-retry loop (withOpRetry).
+// Default is off (see config.DoltConfig.WriteRetryEnabled) — pass true only
+// once the write path has been dogfooded.
+func WithWriteRetry(enabled bool) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) { s.writeRetryEnabled = enabled }
+}
+
+// WithConnMaxIdleTime sets the write pool's idle-connection retirement window
+// (database/sql SetConnMaxIdleTime), applied on open and on every successful
+// reconnect. d <= 0 leaves the pool's idle lifetime unbounded (no-op).
+func WithConnMaxIdleTime(d time.Duration) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) { s.connMaxIdleTime = d }
 }
 
 var (
@@ -250,7 +275,21 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.applyConnMaxIdleTime(storage)
 	return store, nil
+}
+
+// applyConnMaxIdleTime sets the pool's idle-connection retirement window on
+// storage when configured (s.connMaxIdleTime > 0). It is a no-op for storage
+// handles that don't expose the raw *sql.DB (e.g. test spies) and for a
+// disabled (<= 0) configuration.
+func (s *NativeDoltStore) applyConnMaxIdleTime(storage beadslib.Storage) {
+	if s == nil || s.connMaxIdleTime <= 0 || storage == nil {
+		return
+	}
+	if accessor, ok := storage.(rawDBGetter); ok {
+		accessor.DB().SetConnMaxIdleTime(s.connMaxIdleTime)
+	}
 }
 
 // OpenNativeStorage opens a native Dolt storage handle for the given scope and
@@ -436,6 +475,101 @@ func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
 	return fmt.Errorf("native Dolt read retry budget exhausted (%w), last error: %w", ctxErr, lastErr)
 }
 
+const (
+	// nativeWriteRetryBudget bounds the total reconnect-and-retry time for a
+	// single write when write-path retry is enabled (s.writeRetryEnabled).
+	// Mirrors nativeReadRetryBudget's rationale.
+	nativeWriteRetryBudget = 90 * time.Second
+	// nativeWriteRetryBackoff spaces reconnect-and-retry passes on the write path.
+	nativeWriteRetryBackoff = 200 * time.Millisecond
+)
+
+// withOpRetry runs a CLEAN (fully idempotent) write op against the native
+// storage handle, mirroring withReadRetry's single-flight
+// reconnect-and-retry loop and shared transient-error signature set — but
+// ONLY when s.writeRetryEnabled is set (config-gated, default off; see
+// config.DoltConfig.WriteRetryEnabled). When disabled, fn runs exactly once
+// against a fresh per-op context, identical to the pre-existing
+// acquireStorage-then-call behavior every write method used before this.
+//
+// fn receives the 0-based attempt number so an op whose idempotency is
+// slightly weaker than "safe to blindly re-run" (e.g. Delete, which must
+// treat a not-found on a RETRY as "the prior attempt's delete already
+// landed" rather than an error) can special-case retried attempts.
+//
+// Only wrap ops that are safe to re-run in full from scratch: a mid-commit
+// failure is ambiguous (did the write land before the connection died?), so
+// the retry may run against a state where the previous attempt already
+// applied. Update (declarative field-set), Close/Reopen (check current
+// status first, no-op if already applied), Delete (tolerates not-found on
+// retry), DepAdd/DepRemove, and SetMetadataBatch (declarative key overwrite)
+// all qualify. Create and Tx are deliberately NEVER wrapped here: Create's
+// duplicate-on-retry hazard and Tx's arbitrary caller callback make blind
+// whole-op retry unsafe (see gcw-ggvd notes).
+func (s *NativeDoltStore) withOpRetry(fn func(context.Context, beadslib.Storage, int) error) error {
+	if s == nil {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if !s.writeRetryEnabled {
+		storage, release, err := s.acquireStorage()
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return fn(ctx, storage, 0)
+	}
+
+	// One wall-clock context bounds the whole chain, exactly like withReadRetry.
+	ctx, cancel := context.WithTimeout(context.Background(), nativeWriteRetryBudget)
+	defer cancel()
+	attempt := 0
+	for {
+		storage, gen, release, err := s.acquireStorageGen()
+		if err != nil {
+			return err
+		}
+		opErr := fn(ctx, storage, attempt)
+		release()
+		if opErr == nil {
+			return nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nativeWriteRetryBudgetError(ctxErr, opErr)
+		}
+		reopen, closed := s.reopenState()
+		if closed {
+			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+		}
+		if !isNativeDoltTransientReadError(opErr) || reopen == nil {
+			return opErr
+		}
+		if rcErr := s.reconnect(ctx, gen); rcErr != nil {
+			reconnectErr := fmt.Errorf("native Dolt reconnect after transient write error (%w): %w", opErr, rcErr)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nativeWriteRetryBudgetError(ctxErr, reconnectErr)
+			}
+			if !isNativeDoltTransientReadError(rcErr) {
+				return reconnectErr
+			}
+		}
+		attempt++
+		select {
+		case <-ctx.Done():
+			return nativeWriteRetryBudgetError(ctx.Err(), opErr)
+		case <-time.After(nativeWriteRetryBackoff):
+		}
+	}
+}
+
+func nativeWriteRetryBudgetError(ctxErr, lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("native Dolt write retry budget exhausted: %w", ctxErr)
+	}
+	return fmt.Errorf("native Dolt write retry budget exhausted (%w), last error: %w", ctxErr, lastErr)
+}
+
 // reopenState returns the reconnect hook and terminal-close state atomically.
 func (s *NativeDoltStore) reopenState() (NativeReopenFunc, bool) {
 	s.mu.RLock()
@@ -544,6 +678,7 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 	if fresh == nil {
 		return fmt.Errorf("native Dolt reopen returned nil storage")
 	}
+	s.applyConnMaxIdleTime(fresh)
 
 	s.mu.Lock()
 	// Void the install if the store was closed while we were reopening (terminal
@@ -853,20 +988,15 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-		return s.applyUpdateInTx(ctx, tx, id, opts)
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		err := storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
+			return s.applyUpdateInTx(ctx, tx, id, opts)
+		})
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
 	})
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	return nil
 }
 
 // applyUpdateInTx applies an Update against an open beadslib transaction. It is
@@ -1022,50 +1152,40 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 // Close sets a bead's status to closed through the upstream beads storage layer.
 func (s *NativeDoltStore) Close(id string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	current, err := storage.GetIssue(ctx, id)
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	if current.Status == beadslib.StatusClosed {
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		current, err := storage.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if current == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+		if current.Status == beadslib.StatusClosed {
+			return nil
+		}
+		reason := nativeCloseReasonFromIssue(current)
+		if err := storage.CloseIssue(ctx, id, reason, s.actor, ""); err != nil {
+			return nativeStoreError(id, err)
+		}
 		return nil
-	}
-	reason := nativeCloseReasonFromIssue(current)
-	if err := storage.CloseIssue(ctx, id, reason, s.actor, ""); err != nil {
-		return nativeStoreError(id, err)
-	}
-	return nil
+	})
 }
 
 // Reopen sets a closed bead's status back to open.
 func (s *NativeDoltStore) Reopen(id string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	current, err := storage.GetIssue(ctx, id)
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	if current.Status == beadslib.StatusOpen {
-		return nil
-	}
-	return nativeStoreError(id, storage.ReopenIssue(ctx, id, "", s.actor))
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		current, err := storage.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if current == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+		if current.Status == beadslib.StatusOpen {
+			return nil
+		}
+		return nativeStoreError(id, storage.ReopenIssue(ctx, id, "", s.actor))
+	})
 }
 
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
@@ -1280,35 +1400,30 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	issue, err := storage.GetIssue(ctx, id)
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	if issue == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
-	if err != nil {
-		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
-	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		issue, err := storage.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if issue == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+		metadata, err := metadataMapFromNative(issue.Metadata)
+		if err != nil {
+			return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+		}
+		if metadata == nil {
+			metadata = make(map[string]string, len(kvs))
+		}
+		for k, v := range kvs {
+			metadata[k] = v
+		}
+		raw, err := metadataRawFromMap(metadata)
+		if err != nil {
+			return err
+		}
+		return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+	})
 }
 
 // Tx executes fn inside a single native Dolt transaction so every write in the
@@ -1367,15 +1482,17 @@ func (t *nativeDoltTx) Close(id string) error {
 }
 
 // Delete permanently removes a bead from the upstream beads storage layer.
+// A not-found on a RETRIED attempt (attempt > 0) is treated as success: it
+// means the delete already applied on a prior attempt whose connection died
+// before the ack was read, not that the bead never existed.
 func (s *NativeDoltStore) Delete(id string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, attempt int) error {
+		err := nativeStoreError(id, storage.DeleteIssue(ctx, id))
+		if attempt > 0 && errors.Is(err, ErrNotFound) {
+			return nil
+		}
 		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return nativeStoreError(id, storage.DeleteIssue(ctx, id))
+	})
 }
 
 // Ping verifies that the upstream storage is reachable.
@@ -1393,30 +1510,20 @@ func (s *NativeDoltStore) Ping() error {
 
 // DepAdd records a dependency between two beads.
 func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return nativeStoreError(issueID, storage.AddDependency(ctx, &beadslib.Dependency{
-		IssueID:     issueID,
-		DependsOnID: dependsOnID,
-		Type:        beadslib.DependencyType(depType),
-	}, s.actor))
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		return nativeStoreError(issueID, storage.AddDependency(ctx, &beadslib.Dependency{
+			IssueID:     issueID,
+			DependsOnID: dependsOnID,
+			Type:        beadslib.DependencyType(depType),
+		}, s.actor))
+	})
 }
 
 // DepRemove removes a dependency between two beads.
 func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return nativeStoreError(issueID, storage.RemoveDependency(ctx, issueID, dependsOnID, s.actor))
+	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		return nativeStoreError(issueID, storage.RemoveDependency(ctx, issueID, dependsOnID, s.actor))
+	})
 }
 
 // DepList returns dependencies for a bead.
