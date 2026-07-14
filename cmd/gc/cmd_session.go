@@ -2408,7 +2408,7 @@ joined automatically.`,
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
-	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
+	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle (defers when the session is busy or at an interactive prompt), or queue")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }

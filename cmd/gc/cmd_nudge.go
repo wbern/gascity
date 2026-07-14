@@ -95,7 +95,20 @@ var (
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgeWarningWriter             io.Writer = os.Stderr
+	// nudgeTargetAtInteractivePrompt reports whether the target's live pane is
+	// showing an interactive selection/confirmation prompt that a stray Enter
+	// would answer (e.g. an AskUserQuestion option menu). A wait-idle nudge to
+	// such a session must be queued as a deferred reminder rather than injected
+	// as keystrokes, or its Enter submits the focused option — answers the
+	// operator never chose. Fails open (false) on any peek error so delivery
+	// falls back to existing behavior. Overridable in tests. (gascity#2892)
+	nudgeTargetAtInteractivePrompt = workerNudgeTargetAtInteractivePrompt
 )
+
+// nudgeInteractivePromptPeekLines bounds the pane capture used to detect an
+// open interactive prompt; a selection menu and its confirm footer fit well
+// within this window.
+const nudgeInteractivePromptPeekLines = 40
 
 type nudgeDeliveryMode string
 
@@ -743,7 +756,13 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
 	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
-		if obs, obsErr := nudgeObserveTarget(target, store, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+		if obs, obsErr := nudgeObserveTarget(target, store, sp); obsErr == nil && obs.Running &&
+			(nudgeObservationBusy(obs) || nudgeTargetAtInteractivePrompt(target, sp)) {
+			// The session is running but not safe for live delivery: either
+			// actively busy, or parked at an interactive prompt whose default
+			// action is bound to Enter. Queue as a deferred reminder so the
+			// supervisor dispatcher delivers it at the next between-turns
+			// boundary instead of injecting keystrokes into the prompt.
 			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 		}
 	}
@@ -952,6 +971,28 @@ var workerObserveNudgeTargetOnce = workerObserveNudgeTargetImpl
 // number of times on a transient Dolt/bd connection error. On persistent
 // failure the error is returned to the caller rather than swallowed, so it
 // can be logged instead of silently dropping the notice.
+// workerNudgeTargetAtInteractivePrompt peeks the target session's live pane and
+// reports whether it is showing an interactive selection/confirmation prompt.
+// It fails open (false) on a missing name or any peek error so nudge delivery
+// falls back to the existing wait-idle behavior rather than erroring. (gascity#2892)
+func workerNudgeTargetAtInteractivePrompt(target nudgeTarget, sp runtime.Provider) bool {
+	if sp == nil {
+		return false
+	}
+	name := target.sessionName
+	if name == "" {
+		name = target.sessionID
+	}
+	if name == "" {
+		return false
+	}
+	pane, err := sp.Peek(name, nudgeInteractivePromptPeekLines)
+	if err != nil {
+		return false
+	}
+	return runtime.IsAtInteractivePrompt(pane)
+}
+
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
 	var (
 		obs worker.LiveObservation
