@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -545,7 +546,189 @@ func TestNativeDoltStoreWriteDoesNotRetryNonTransientError(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreCreateIsNeverRetried(t *testing.T) {
+type nativeDoltCreateRetryStorage struct {
+	*nativeDoltMemStorage
+	createIssue   func(context.Context, *beadslib.Issue, string) error
+	getIssue      func(context.Context, string) (*beadslib.Issue, error)
+	addDependency func(context.Context, *beadslib.Dependency, string) error
+}
+
+func (s *nativeDoltCreateRetryStorage) CreateIssue(ctx context.Context, issue *beadslib.Issue, actor string) error {
+	if s.createIssue != nil {
+		return s.createIssue(ctx, issue, actor)
+	}
+	return createIssuePreservingClientIDForTest(s.nativeDoltMemStorage.store, issue)
+}
+
+func (s *nativeDoltCreateRetryStorage) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
+	if s.getIssue != nil {
+		return s.getIssue(ctx, id)
+	}
+	return s.nativeDoltMemStorage.GetIssue(ctx, id)
+}
+
+func (s *nativeDoltCreateRetryStorage) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
+	if s.addDependency != nil {
+		return s.addDependency(ctx, dep, actor)
+	}
+	return s.nativeDoltMemStorage.AddDependency(ctx, dep, actor)
+}
+
+func newNativeDoltCreateRetryStorage(shared *MemStore) *nativeDoltCreateRetryStorage {
+	return &nativeDoltCreateRetryStorage{
+		nativeDoltMemStorage: &nativeDoltMemStorage{store: shared},
+	}
+}
+
+func createIssuePreservingClientIDForTest(store *MemStore, issue *beadslib.Issue) error {
+	bead, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	now := time.Now()
+	if bead.Status == "" {
+		bead.Status = "open"
+	}
+	if bead.Type == "" {
+		bead.Type = "task"
+	}
+
+	index := -1
+	for i, existing := range store.beads {
+		if existing.ID == bead.ID && bead.ID != "" {
+			index = i
+			bead.CreatedAt = existing.CreatedAt
+			break
+		}
+	}
+	if bead.ID == "" {
+		store.seq++
+		bead.ID = fmt.Sprintf("gc-%d", store.seq)
+	}
+	if bead.CreatedAt.IsZero() {
+		bead.CreatedAt = now
+	}
+	bead.UpdatedAt = now
+
+	stored := cloneBead(bead)
+	if index >= 0 {
+		store.beads[index] = stored
+	} else {
+		store.beads = append(store.beads, stored)
+	}
+
+	converted, err := nativeIssueFromBead(stored)
+	if err != nil {
+		return err
+	}
+	*issue = *converted
+	return nil
+}
+
+func TestNativeDoltStoreCreateClientIDReconnectsWhenWriteRetryEnabled(t *testing.T) {
+	shared := NewMemStore()
+	dead := newNativeDoltCreateRetryStorage(shared)
+	dead.createIssue = func(context.Context, *beadslib.Issue, string) error {
+		return errors.New("invalid connection")
+	}
+	fresh := newNativeDoltCreateRetryStorage(shared)
+
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	created, err := store.Create(Bead{ID: "gc-client-1", Title: "retry create"})
+	if err != nil {
+		t.Fatalf("Create after transient conn error: %v", err)
+	}
+	if created.ID != "gc-client-1" {
+		t.Fatalf("created.ID = %q, want gc-client-1", created.ID)
+	}
+	if n := atomic.LoadInt32(&reopens); n == 0 {
+		t.Fatalf("expected the reopen hook to fire; got %d", n)
+	}
+	all, err := shared.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List shared store: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != "gc-client-1" {
+		t.Fatalf("shared store beads = %#v, want one gc-client-1 bead", all)
+	}
+}
+
+func TestNativeDoltStoreCreateClientIDRetryDoesNotDuplicatePartialCreate(t *testing.T) {
+	shared := NewMemStore()
+	dead := newNativeDoltCreateRetryStorage(shared)
+	dead.createIssue = func(ctx context.Context, issue *beadslib.Issue, actor string) error {
+		if err := createIssuePreservingClientIDForTest(shared, issue); err != nil {
+			return err
+		}
+		return errors.New("invalid connection")
+	}
+	fresh := newNativeDoltCreateRetryStorage(shared)
+
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	created, err := store.Create(Bead{ID: "gc-client-2", Title: "partial create"})
+	if err != nil {
+		t.Fatalf("Create after partial transient create: %v", err)
+	}
+	if created.ID != "gc-client-2" {
+		t.Fatalf("created.ID = %q, want gc-client-2", created.ID)
+	}
+	all, err := shared.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List shared store: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != "gc-client-2" {
+		t.Fatalf("shared store beads = %#v, want one gc-client-2 bead", all)
+	}
+}
+
+func TestNativeDoltStoreCreateClientIDRetryPersistsDependenciesAfterTransientError(t *testing.T) {
+	shared := NewMemStore()
+	blocker, err := shared.Create(Bead{ID: "gc-blocker", Title: "blocker"})
+	if err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+
+	dead := newNativeDoltCreateRetryStorage(shared)
+	dead.addDependency = func(context.Context, *beadslib.Dependency, string) error {
+		return errors.New("invalid connection")
+	}
+	fresh := newNativeDoltCreateRetryStorage(shared)
+
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	created, err := store.Create(Bead{
+		ID:    "gc-client-3",
+		Title: "dependency retry",
+		Needs: []string{"blocks:" + blocker.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create with dependency retry: %v", err)
+	}
+	deps, err := shared.DepList(created.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", created.ID, err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("dependency count = %d, want 1", len(deps))
+	}
+	if deps[0].DependsOnID != blocker.ID || deps[0].Type != "blocks" {
+		t.Fatalf("dependencies = %#v, want blocks:%s", deps, blocker.ID)
+	}
+}
+
+func TestNativeDoltStoreCreateEmptyIDStillSurfacesTransientWhenWriteRetryEnabled(t *testing.T) {
 	var reopens int32
 	dead := &nativeDoltStorageSpy{
 		createIssue: func(context.Context, *beadslib.Issue, string) error {
@@ -556,14 +739,38 @@ func TestNativeDoltStoreCreateIsNeverRetried(t *testing.T) {
 	store.writeRetryEnabled = true
 	store.reopen = func(context.Context) (beadslib.Storage, error) {
 		atomic.AddInt32(&reopens, 1)
-		return healthySearchStorage(), nil
+		return newNativeDoltMemStorage(), nil
 	}
 
-	if _, err := store.Create(Bead{Title: "never retried"}); err == nil || !errContains(err, "invalid connection") {
-		t.Fatalf("Create error = %v, want the transient error surfaced as-is (Create is never retried)", err)
+	if _, err := store.Create(Bead{Title: "empty id create"}); err == nil || !errContains(err, "invalid connection") {
+		t.Fatalf("Create error = %v, want the transient error surfaced as-is for empty IDs", err)
 	}
 	if n := atomic.LoadInt32(&reopens); n != 0 {
-		t.Fatalf("Create must never trigger write-retry reconnect; got %d reopens", n)
+		t.Fatalf("empty-ID Create must not reconnect; got %d reopens", n)
+	}
+}
+
+func TestNativeDoltStoreCreateRetrySurfacesVerificationReadFailure(t *testing.T) {
+	shared := NewMemStore()
+	dead := newNativeDoltCreateRetryStorage(shared)
+	dead.createIssue = func(context.Context, *beadslib.Issue, string) error {
+		return errors.New("invalid connection")
+	}
+	fresh := newNativeDoltCreateRetryStorage(shared)
+	fresh.getIssue = func(context.Context, string) (*beadslib.Issue, error) {
+		return nil, errors.New("syntax error near 'FROM'")
+	}
+	fresh.createIssue = func(context.Context, *beadslib.Issue, string) error {
+		t.Fatal("retry create must not run when verification read fails")
+		return nil
+	}
+
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+	store.writeRetryEnabled = true
+
+	if _, err := store.Create(Bead{ID: "gc-client-4", Title: "verify before retry"}); err == nil || !errContains(err, "syntax error") {
+		t.Fatalf("Create error = %v, want verification read failure surfaced", err)
 	}
 }
 

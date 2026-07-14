@@ -503,9 +503,10 @@ const (
 // applied. Update (declarative field-set), Close/Reopen (check current
 // status first, no-op if already applied), Delete (tolerates not-found on
 // retry), DepAdd/DepRemove, and SetMetadataBatch (declarative key overwrite)
-// all qualify. Create and Tx are deliberately NEVER wrapped here: Create's
-// duplicate-on-retry hazard and Tx's arbitrary caller callback make blind
-// whole-op retry unsafe (see gcw-ggvd notes).
+// all qualify. Tx is deliberately NEVER wrapped here: its arbitrary caller
+// callback makes blind whole-op retry unsafe. Create uses a separate guarded
+// path that only retries client-set IDs after reconnect and a verification
+// read, so it never relies on blind replay.
 func (s *NativeDoltStore) withOpRetry(fn func(context.Context, beadslib.Storage, int) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
@@ -928,6 +929,13 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 
 // Create persists a new bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	if s.writeRetryEnabled && strings.TrimSpace(b.ID) != "" {
+		return s.createWithRetry(b)
+	}
+	return s.createOnce(b)
+}
+
+func (s *NativeDoltStore) createOnce(b Bead) (Bead, error) {
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err
@@ -958,6 +966,75 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	}
 	issue.Dependencies = createdDependencies
 	return beadFromNativeIssue(issue)
+}
+
+func (s *NativeDoltStore) createWithRetry(b Bead) (Bead, error) {
+	var out Bead
+	err := s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, attempt int) error {
+		created, err := s.createOnStorage(ctx, storage, b, attempt > 0)
+		if err != nil {
+			return err
+		}
+		out = created
+		return nil
+	})
+	return out, err
+}
+
+func (s *NativeDoltStore) createOnStorage(ctx context.Context, storage beadslib.Storage, b Bead, verifyRetry bool) (Bead, error) {
+	issue, err := nativeIssueFromBead(b)
+	if err != nil {
+		return Bead{}, err
+	}
+	pendingDependencies := cloneNativeDependencies(issue.Dependencies)
+	if verifyRetry {
+		if err := s.verifyCreateRetryRead(ctx, storage, issue.ID); err != nil {
+			return Bead{}, err
+		}
+	}
+	if err := s.validateCreatedDependencies(ctx, storage, issue.ID, pendingDependencies); err != nil {
+		return Bead{}, err
+	}
+	if err := storage.CreateIssue(ctx, issue, s.actor); err != nil {
+		return Bead{}, err
+	}
+	createdDependencies, err := s.persistCreatedDependencies(ctx, storage, issue.ID, pendingDependencies)
+	if err != nil {
+		if isNativeDoltTransientReadError(err) {
+			return Bead{}, err
+		}
+		cleanupCtx, cleanupCancel := nativeDoltCleanupContext()
+		cleanupErr := s.compensateFailedCreate(cleanupCtx, storage, issue.ID, createdDependencies)
+		cleanupCancel()
+		if cleanupErr != nil {
+			return Bead{}, errors.Join(err, cleanupErr)
+		}
+		return Bead{}, err
+	}
+	issue.Dependencies = createdDependencies
+	return beadFromNativeIssue(issue)
+}
+
+func (s *NativeDoltStore) verifyCreateRetryRead(ctx context.Context, storage beadslib.Storage, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	issue, err := storage.GetIssue(ctx, id)
+	if err != nil {
+		err = nativeStoreError(id, err)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("verifying native create retry %q: %w", id, err)
+	}
+	if issue == nil {
+		return nil
+	}
+	// Presence alone is not enough to declare success because upstream native
+	// CreateIssue is two-phase: a transient flap can leave the row visible in
+	// the working set before the Dolt commit completes. Re-running the same
+	// client-pinned ID converges both phases without duplicating the bead.
+	return nil
 }
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
