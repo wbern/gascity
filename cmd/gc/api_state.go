@@ -372,7 +372,13 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 				}
 				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
+			opts := []beads.NativeDoltStoreOption{beads.WithNativeReopen(reopen)}
+			if cfg != nil {
+				opts = append(opts,
+					beads.WithConnMaxIdleTime(cfg.Dolt.ConnMaxIdleTimeDuration()),
+					beads.WithWriteRetry(cfg.Dolt.EffectiveWriteRetryEnabled()))
+			}
+			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, opts...)
 		},
 	})
 	if err != nil {

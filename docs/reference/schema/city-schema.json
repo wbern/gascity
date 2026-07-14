@@ -1414,6 +1414,15 @@
           "type": "string",
           "description": "DoltLockReleaseTimeout is how long managed-dolt lifecycle operations\nwait for dolt's on-disk exclusive store locks (the root-level\n`\u003cdata_dir\u003e/.dolt/noms/LOCK` and per-database\n`\u003cdata_dir\u003e/\u003cdb\u003e/.dolt/noms/LOCK` forms) to be released by a prior\nserver process before failing closed. The start path refuses to launch a\nsecond `dolt sql-server` against a data_dir whose lock is still held —\na prior instance that is shutting down holds the lock until its chunk\njournal is flushed, and binding before release corrupts the journal\n(see gastownhall/gascity#3174). The stop path uses the same window to\nwait for lock release after process exit before reporting success.\nDuration string (e.g., \"1m\", \"90s\"). Defaults to \"1m\", which covers\nthe flush window of multi-GB journals on commodity SSDs. Set to \"0s\"\nto probe once with no wait (still fail-closed when held). Negative\nvalues are rejected at config load. The managed lifecycle also\nprojects this value into the gc-beads-bd.sh shell fallback as\nGC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor\nthe configured window.",
           "default": "1m"
+        },
+        "conn_max_idle_time": {
+          "type": "string",
+          "description": "ConnMaxIdleTime sets the native Dolt store's write-pool idle-connection\nretirement window (database/sql SetConnMaxIdleTime). A NAT/firewall UDP\nidle-flow eviction (observed at ~60s+ on a Tailscale direct WireGuard\npath) black-holes an idle pooled connection's return path; retiring the\nconnection before that window is hit means the next checkout dials\nfresh instead of surfacing a transient error on first use. Duration\nstring (e.g. \"20s\", \"30s\"). Empty, unparseable, or nonpositive disables\nit (0 = off, the default). A positive value below 5s is clamped up to\nthe 5s floor so it can't be configured to expire connections faster\nthan they can be reused."
+        },
+        "write_retry_enabled": {
+          "type": "boolean",
+          "description": "WriteRetryEnabled gates idempotency-aware transparent reconnect on the\nnative Dolt store's write path (the read path's withReadRetry is always\non). Only writes proven safe to re-run in full after a pre-apply or\nambiguous-commit transport flap are wrapped (Update, Close, Reopen,\nDelete, DepAdd, DepRemove, SetMetadataBatch); Create and Tx are never\nretried. nil (omitted) defaults to false — opt-in until dogfooded (see\ngcw-ggvd).",
+          "default": false
         }
       },
       "additionalProperties": false,

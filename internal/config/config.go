@@ -1939,6 +1939,25 @@ type DoltConfig struct {
 	// GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor
 	// the configured window.
 	DoltLockReleaseTimeout string `toml:"dolt_lock_release_timeout,omitempty" jsonschema:"default=1m"`
+	// ConnMaxIdleTime sets the native Dolt store's write-pool idle-connection
+	// retirement window (database/sql SetConnMaxIdleTime). A NAT/firewall UDP
+	// idle-flow eviction (observed at ~60s+ on a Tailscale direct WireGuard
+	// path) black-holes an idle pooled connection's return path; retiring the
+	// connection before that window is hit means the next checkout dials
+	// fresh instead of surfacing a transient error on first use. Duration
+	// string (e.g. "20s", "30s"). Empty, unparseable, or nonpositive disables
+	// it (0 = off, the default). A positive value below 5s is clamped up to
+	// the 5s floor so it can't be configured to expire connections faster
+	// than they can be reused.
+	ConnMaxIdleTime string `toml:"conn_max_idle_time,omitempty"`
+	// WriteRetryEnabled gates idempotency-aware transparent reconnect on the
+	// native Dolt store's write path (the read path's withReadRetry is always
+	// on). Only writes proven safe to re-run in full after a pre-apply or
+	// ambiguous-commit transport flap are wrapped (Update, Close, Reopen,
+	// Delete, DepAdd, DepRemove, SetMetadataBatch); Create and Tx are never
+	// retried. nil (omitted) defaults to false — opt-in until dogfooded (see
+	// gcw-ggvd).
+	WriteRetryEnabled *bool `toml:"write_retry_enabled,omitempty" jsonschema:"default=false"`
 }
 
 // EffectiveArchiveLevel returns the configured Dolt archive level, defaulting
@@ -2016,6 +2035,40 @@ func (d *DoltConfig) DoltLockReleaseTimeoutDuration() time.Duration {
 		return DefaultDoltLockReleaseTimeout
 	}
 	return dur
+}
+
+// DoltConnMaxIdleTimeFloor is the minimum positive conn_max_idle_time. A
+// configured value below this is clamped up so pool hygiene can't be
+// misconfigured to retire connections faster than they can be reused.
+const DoltConnMaxIdleTimeFloor = 5 * time.Second
+
+// ConnMaxIdleTimeDuration returns the configured idle-connection retirement
+// window for the native Dolt store's write pool. Empty, unparseable, or
+// nonpositive values disable it (0 = off, the default) so pool hygiene is
+// opt-in. A positive value below DoltConnMaxIdleTimeFloor is clamped up to
+// the floor.
+func (d *DoltConfig) ConnMaxIdleTimeDuration() time.Duration {
+	if d.ConnMaxIdleTime == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(d.ConnMaxIdleTime)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+	if dur < DoltConnMaxIdleTimeFloor {
+		return DoltConnMaxIdleTimeFloor
+	}
+	return dur
+}
+
+// EffectiveWriteRetryEnabled returns whether idempotency-aware write-path
+// retry is enabled for the native Dolt store, defaulting omitted values to
+// false (opt-in; see gcw-ggvd).
+func (d DoltConfig) EffectiveWriteRetryEnabled() bool {
+	if d.WriteRetryEnabled != nil {
+		return *d.WriteRetryEnabled
+	}
+	return false
 }
 
 // FormulasConfig is the legacy [formulas] table with no supported fields:
