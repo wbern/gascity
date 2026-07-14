@@ -196,6 +196,19 @@ func envFingerprintInclude(key string) bool {
 	return envFingerprintAllow[key]
 }
 
+// coreFingerprintExtraInclude reports whether a FingerprintExtra key should
+// contribute to the restart-gating CoreFingerprint (and its Provision half).
+// Excludes the "skills:" keyspace: skill set-membership (add/remove/rename)
+// still needs to reach fpExtra for materialization, but must not force a
+// drain+restart of a live session — skills are re-materialized at the next
+// natural session start. Completes gci-rgfm's content-hash fix (which
+// already stopped skill *content* edits from drifting) for skill *set*
+// changes. All other FingerprintExtra keys (pool.*, wake_mode, mcp:*, etc.)
+// keep drifting as before.
+func coreFingerprintExtraInclude(key string) bool {
+	return !strings.HasPrefix(key, "skills:")
+}
+
 // hashCoreFields writes all config fields except SessionLive to the hash.
 func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
@@ -210,11 +223,12 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// FingerprintExtra carries additional identity fields (pool config, etc.)
 	// that aren't part of the session command but should
 	// trigger a restart on change. Prefixed with "fp:" to avoid collisions
-	// with Env keys.
+	// with Env keys. The "skills:" keyspace is excluded — see
+	// coreFingerprintExtraInclude.
 	if len(cfg.FingerprintExtra) > 0 {
 		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.FingerprintExtra)
+		hashSortedMapIncluded(h, cfg.FingerprintExtra, coreFingerprintExtraInclude)
 	}
 
 	// PreStart
@@ -423,7 +437,7 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			if len(cfg.FingerprintExtra) > 0 {
 				h.Write([]byte("fp"))
 				h.Write([]byte{0})
-				hashSortedMap(h, cfg.FingerprintExtra)
+				hashSortedMapIncluded(h, cfg.FingerprintExtra, coreFingerprintExtraInclude)
 			}
 		}),
 		"PreStart": fieldHash(func(h hash.Hash) {

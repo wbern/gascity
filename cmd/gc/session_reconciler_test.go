@@ -4458,6 +4458,46 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_SkillSetChangeDoesNotDrain is the reconciler-level
+// regression for gcw-nj38: a running session started with one desired skill
+// (skills:A in FPExtra) must NOT be drained when the shared catalog adds a
+// second skill (skills:B) to its desired set on a later tick. Before the
+// coreFingerprintExtraInclude fix, any skills:* keyspace change flipped
+// CoreFingerprint and every session carrying that skill got config-drift
+// drained — recycling the whole city on a benign skill add/remove. Skills
+// are re-materialized at session start, so this is a case for the next
+// natural restart, not an immediate drain.
+func TestReconcileSessionBeads_SkillSetChangeDoesNotDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	startedCfg := runtime.Config{
+		Command:          "test-cmd",
+		FingerprintExtra: map[string]string{"skills:basics.a": "present"},
+	}
+	tp := TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		FPExtra:      map[string]string{"skills:basics.a": "present", "skills:basics.b": "present"},
+	}
+	env.desiredState["worker"] = tp
+	_ = env.sp.Start(context.Background(), "worker", startedCfg)
+
+	session := env.createSessionBead("worker", "worker")
+	startedHash := runtime.CoreFingerprint(startedCfg)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected no config-drift drain for a skills:* set change, got drain=%+v stderr=%s",
+			ds, env.stderr.String())
+	}
+}
+
 // TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork verifies
 // that a pool session with live in-progress work assigned to it is NOT
 // drained when its config_hash drifts. Draining mid-work would orphan the

@@ -120,7 +120,13 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 		h.Write([]byte{0})         //nolint:errcheck
 	}
 
-	// FPExtra (pool config, etc.).
+	// FPExtra (pool config, etc.). Unlike runtime.CoreFingerprint's
+	// hashCoreFields, this intentionally does NOT exclude the "skills:"
+	// keyspace: canonicalConfigHash has no caller today (only its own
+	// tests exercise it) and does not feed any reconciler drift
+	// comparison, so it carries no restart-gating behavior to fix. If a
+	// future caller wires this into drift detection, apply the same
+	// skills:* exclusion runtime.CoreFingerprint uses.
 	if len(params.FPExtra) > 0 {
 		h.Write([]byte("fp")) //nolint:errcheck
 		h.Write([]byte{0})    //nolint:errcheck

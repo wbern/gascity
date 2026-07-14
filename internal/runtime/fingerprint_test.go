@@ -302,6 +302,35 @@ func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
 	}
 }
 
+func TestCoreFingerprintExcludesSkillsKeyspace(t *testing.T) {
+	withoutSkill := Config{
+		Command:          "claude",
+		FingerprintExtra: map[string]string{"pool.max": "5"},
+	}
+	withSkill := Config{
+		Command: "claude",
+		FingerprintExtra: map[string]string{
+			"pool.max":          "5",
+			"skills:basics.foo": "present",
+		},
+	}
+	if CoreFingerprint(withoutSkill) != CoreFingerprint(withSkill) {
+		t.Error("skills:* keys in FingerprintExtra must not affect CoreFingerprint (set-membership changes must not force a restart)")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(withoutSkill), withSkill); len(got) != 0 {
+		t.Errorf("skills:* addition should not be reported as a drift field, got %v", got)
+	}
+
+	// A genuine non-skills FPExtra change must still drift.
+	withDifferentPool := Config{
+		Command:          "claude",
+		FingerprintExtra: map[string]string{"pool.max": "10"},
+	}
+	if CoreFingerprint(withoutSkill) == CoreFingerprint(withDifferentPool) {
+		t.Error("non-skills FingerprintExtra changes must still change CoreFingerprint")
+	}
+}
+
 func TestCoreFingerprintIncludesOverlayProviderIdentity(t *testing.T) {
 	claudeFallback := Config{Command: "agent", ProviderName: "claude"}
 	kiroOverlay := Config{Command: "agent", ProviderName: "claude", ProviderOverlayName: "kiro"}

@@ -65,7 +65,7 @@ func hashProvisionFields(h hash.Hash, cfg Config) {
 	if len(cfg.FingerprintExtra) > 0 {
 		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.FingerprintExtra)
+		hashSortedMapIncluded(h, cfg.FingerprintExtra, coreFingerprintExtraInclude)
 	}
 
 	for _, ps := range cfg.PreStart {
