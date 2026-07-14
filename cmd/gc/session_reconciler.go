@@ -1756,12 +1756,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// store/health queries so they run only for the rare already-stalled
 		// session. Set the restart_requested marker and let the block below
 		// perform the fresh-restart handoff.
-		if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && alive && sessionActivityReportable(sp, name) {
+		claimlessThreshold := cfg.Session.ProgressStallTimeoutDuration()
+		claimHolderThreshold := cfg.Session.ClaimHolderStallTimeoutDuration()
+		if gateThreshold := minPositiveDuration(claimlessThreshold, claimHolderThreshold); gateThreshold > 0 && alive && sessionActivityReportable(sp, name) {
 			lastActivity, lastActivityErr := sp.GetLastActivity(name)
 			if lastActivityErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
-			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
+			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwake(*session, sp, name, clk) ||
 					pendingCreateStartInFlight(*session, clk, startupTimeout)
 				if !exempt {
@@ -1819,20 +1821,38 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				providerHealthy := true
-				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
+				if !exempt && tp.ResolvedProvider != nil {
 					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
 					// (provider RED) takes precedence: never recycle a session whose
 					// provider is red. Fail-open — absent/stale registry → healthy.
+					// Evaluated for claim-holders too, so the claim-holder recycler
+					// below never restarts a holder into a dead provider.
 					if h, present := phSnap.check(tp.ResolvedProvider.Name); present {
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
 					if session.Metadata == nil {
 						session.Metadata = map[string]string{}
 					}
 					session.Metadata["restart_requested"] = "true"
-					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
+					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, claimlessThreshold) //nolint:errcheck
+				}
+				// Claim-holder recycle (#4012): a session HOLDING an in-progress claim
+				// that has gone stale has wedged mid-work on a provider condition it
+				// will not self-clear (e.g. a codex "Selected model is at capacity"
+				// banner) and is invisible to every other liveness surface. Opt-in via
+				// a separate, more conservative [session] claim_holder_stall_timeout,
+				// since recycling a holder discards in-progress work. The activity value
+				// is poke-discounted, so gc's own nudges do not mask the stall. The
+				// diagnostic logs the aged activity so the next wedge is captured with a
+				// real timeline.
+				if sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+					if session.Metadata == nil {
+						session.Metadata = map[string]string{}
+					}
+					session.Metadata["restart_requested"] = "true"
+					fmt.Fprintf(stderr, "session reconciler: %s claim-holder-stalled (holds a claim but no progress for >%s, provider healthy, last activity %s); requesting fresh restart\n", name, claimHolderThreshold, lastActivity.UTC().Format(time.RFC3339)) //nolint:errcheck
 				}
 			}
 		}

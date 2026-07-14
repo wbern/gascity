@@ -69,6 +69,47 @@ func TestProgressStall_MinFloorIdleWorker_NotRecycled(t *testing.T) {
 	}
 }
 
+// TestSessionClaimHolderStalled verifies the claim-holder progress-stall
+// predicate: the mirror of sessionProgressStalled that fires *because* a session
+// holds a claim (not despite it). It recovers an alive claim-holder whose turn
+// ended on a non-self-clearing provider banner (e.g. codex "model at capacity")
+// and which no other mechanism reaps. It keys on the same poke-discounted
+// progress signal but must be gated on its own, more conservative threshold since
+// recycling a claim-holder discards in-progress work.
+func TestSessionClaimHolderStalled(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-time.Hour)    // well past any sane threshold
+	recent := now.Add(-time.Second) // within threshold
+	const threshold = 20 * time.Minute
+
+	tests := []struct {
+		name            string
+		threshold       time.Duration
+		holdsClaim      bool
+		providerHealthy bool
+		exempt          bool
+		lastProgress    time.Time
+		want            bool
+	}{
+		{"stalled: alive, HOLDS claim, healthy, not exempt, old progress", threshold, true, true, false, stale, true},
+		{"disabled when threshold is zero", 0, true, true, false, stale, false},
+		{"not stalled when progress is recent", threshold, true, true, false, recent, false},
+		{"no claim -> not this predicate's job (claim-less reaper handles it)", threshold, false, true, false, stale, false},
+		{"provider unhealthy -> never recycle into a dead provider", threshold, true, false, false, stale, false},
+		{"exempt (attached/interactive/startup) -> left alone", threshold, true, true, true, stale, false},
+		{"unknown progress (zero) -> conservative, not recycled", threshold, true, true, false, time.Time{}, false},
+		{"exactly at threshold is not yet stalled", threshold, true, true, false, now.Add(-threshold), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sessionClaimHolderStalled(tc.threshold, tc.holdsClaim, tc.providerHealthy, tc.exempt, tc.lastProgress, now)
+			if got != tc.want {
+				t.Errorf("sessionClaimHolderStalled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestProgressStall_DemandWorkerLostClaim_IsRecycled verifies that a demand
 // worker (pool with no floor, or pool above its floor) that holds no claim
 // and has stale progress IS recycled by sessionProgressStalled.

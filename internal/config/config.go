@@ -1524,6 +1524,17 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that HOLDS an in-progress claim but has stopped
+	// progressing — the case ProgressStallTimeout deliberately exempts. Such a
+	// session has wedged mid-work on a provider condition it will not self-clear
+	// (e.g. a codex "Selected model is at capacity" banner) and is invisible to
+	// every other liveness surface (#4012). Because recycling a claim-holder
+	// discards in-progress work, set this above the longest legitimate quiet
+	// period a working claim-holder can exhibit — well above ProgressStallTimeout.
+	// Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero
+	// disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1613,6 +1624,30 @@ func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 		return 0
 	}
 	d, err := time.ParseDuration(s.ProgressStallTimeout)
+	if err != nil {
+		return 0
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d < ProgressStallTimeoutMinimum {
+		return ProgressStallTimeoutMinimum
+	}
+	return d
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle timeout,
+// or 0 when unset, zero, negative, or unparseable. Positive values below
+// ProgressStallTimeoutMinimum are clamped to that floor (a claim-holder recycle
+// must not spin faster than the storm-protection backstops can observe). Zero
+// disables claim-holder recycling (the default): only a city that explicitly opts
+// in by setting a duration above its agents' longest legitimate quiet period gets
+// the behavior.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	if s.ClaimHolderStallTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.ClaimHolderStallTimeout)
 	if err != nil {
 		return 0
 	}
