@@ -101,13 +101,21 @@ func (f *extMsgConversationFlags) conversationRefIfSet(cityPath string) (*extmsg
 
 // extMsgClient resolves the city and returns its API client, failing with
 // a uniform message when the API is unavailable.
+//
+// Conversation bindings have no local fallback, so this resolves the client
+// the same way the maintenance commands do (maintenanceAPIClient): a
+// supervisor-managed city omits a standalone [api] port (the supervisor serves
+// the API on its own port via city-scoped routes), so apiClient returns nil
+// even though the controller socket is alive. Routing through maintenanceAPIClient
+// falls through to the supervisor-managed client in that case rather than
+// reporting controller-down. (gci-kij5)
 func extMsgClient(verb string, stderr io.Writer) (*api.Client, string, bool) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return nil, "", false
 	}
-	c := apiClient(cityPath)
+	c, _ := maintenanceAPIClient(cityPath)
 	if c == nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: requires the city API server (no local fallback for conversation bindings)\n", verb) //nolint:errcheck // best-effort stderr
 		return nil, "", false
