@@ -2485,6 +2485,13 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// Install local agent hooks after builtin packs are refreshed.
 	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
 
+	// Install the gc-as-bd shim bin dir so managed worker sessions route bead
+	// ops through the controller (keeps the controller cache authoritative in
+	// every city). Non-fatal: on failure sessions stay on the real gc and bd.
+	if err := ensureCityBdShimbin(cityPath, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': bd shim install: %v\n", cityName, err) //nolint:errcheck
+	}
+
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if err := runStep("starting_bead_store", func() error {

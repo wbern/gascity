@@ -1527,3 +1527,218 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 		Metadata:          record.Metadata,
 	}
 }
+
+// ---- bd-shim v1 client methods (ported from upstream/deploy/sqlite-dispatch-fix @9596b6f08) ----
+// Thin HTTP client methods the bd shim routes through; every genclient endpoint
+// already exists on develop. EphemeralBeads/ReleaseBeadIfCurrent/ClaimBead are
+// intentionally NOT ported in v1 (their endpoints are not yet on this fork).
+
+type EphemeralBeadsOpts struct {
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	Parent   string
+	All      bool
+	Limit    int
+}
+
+// EphemeralBeads reads the ephemeral/wisp tier via GET
+// /v0/city/{cityName}/beads/ephemeral — the routed form of
+// `bd query 'ephemeral=true AND ...'`. Under graph_store=sqlite this reaches
+// wisps resident in the SQLite graph backend through the controller's Router.
+
+type BeadGraphDep struct {
+	From string
+	To   string
+	Kind string
+}
+
+// BeadGraph is a molecule/bead topology — the root, its member/step beads, and
+// their parent-child edges — as returned by GET /beads/graph/{rootID}.
+type BeadGraph struct {
+	Root  beads.Bead
+	Beads []beads.Bead
+	Deps  []BeadGraphDep
+}
+
+// GetBeadGraph fetches the molecule/bead graph rooted at rootID — the routed data
+// source for `bd mol current`/`progress`. Under graph_store=sqlite this reaches
+// molecule topology resident in the SQLite graph backend through the controller's
+// Router (the work-only bd cannot see those steps).
+func (c *Client) GetBeadGraph(rootID string) (BeadGraph, error) {
+	if err := c.requireCityScope(); err != nil {
+		return BeadGraph{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsGraphByRootIdWithResponse(context.Background(), c.cityName, rootID)
+	if err != nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return BeadGraph{}, err
+	}
+	if resp.JSON200 == nil {
+		return BeadGraph{}, &connError{err: fmt.Errorf("empty graph response for %q", rootID)}
+	}
+	g := BeadGraph{Root: beadFromGen(resp.JSON200.Root)}
+	if resp.JSON200.Beads != nil {
+		for _, b := range *resp.JSON200.Beads {
+			g.Beads = append(g.Beads, beadFromGen(b))
+		}
+	}
+	if resp.JSON200.Deps != nil {
+		for _, d := range *resp.JSON200.Deps {
+			kind := ""
+			if d.Kind != nil {
+				kind = *d.Kind
+			}
+			g.Deps = append(g.Deps, BeadGraphDep{From: d.From, To: d.To, Kind: kind})
+		}
+	}
+	return g, nil
+}
+
+// ReadyBeads fetches the city's ready work — the federated ready set across the
+// controller's bead stores — via GET /v0/city/{cityName}/beads/ready. The
+// endpoint applies no assignee/metadata predicates, so callers that need them
+// (e.g. the bd shim's discovery queries) post-filter the returned set
+// client-side.
+func (c *Client) ReadyBeads() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameBeadsReadyParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CloseBead closes a bead via POST /v0/city/{cityName}/bead/{id}/close.
+
+func (c *Client) CloseBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdCloseWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// ReopenBead reopens a closed bead via POST /v0/city/{cityName}/bead/{id}/reopen.
+func (c *Client) ReopenBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdReopenWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// DeleteBead soft-deletes (closes) a bead via DELETE /v0/city/{cityName}/bead/{id}.
+func (c *Client) DeleteBead(id string) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	resp, err := c.cw.DeleteV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id, nil)
+	return checkMutation(resp, err)
+}
+
+// UpdateBead applies a field update via POST /v0/city/{cityName}/bead/{id}/update,
+// mapping beads.UpdateOpts onto the wire body. nil/empty fields are omitted so the
+// server leaves them unchanged.
+func (c *Client) UpdateBead(id string, opts beads.UpdateOpts) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	body := genclient.BeadUpdateBody{
+		Status:      opts.Status,
+		Assignee:    opts.Assignee,
+		Title:       opts.Title,
+		Type:        opts.Type,
+		Description: opts.Description,
+		Parent:      opts.ParentID,
+	}
+	if opts.Priority != nil {
+		p := int64(*opts.Priority)
+		body.Priority = &p
+	}
+	if len(opts.Labels) > 0 {
+		labels := append([]string(nil), opts.Labels...)
+		body.Labels = &labels
+	}
+	if len(opts.RemoveLabels) > 0 {
+		rm := append([]string(nil), opts.RemoveLabels...)
+		body.RemoveLabels = &rm
+	}
+	if len(opts.Metadata) > 0 {
+		md := make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			md[k] = v
+		}
+		body.Metadata = &md
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdUpdateWithResponse(context.Background(), c.cityName, id, nil, body)
+	return checkMutation(resp, err)
+}
+
+func (c *Client) CreateBead(b beads.Bead) (beads.Bead, error) {
+	if err := c.requireCityScope(); err != nil {
+		return beads.Bead{}, err
+	}
+	body := genclient.BeadCreateInputBody{Title: b.Title}
+	if b.Type != "" {
+		body.Type = &b.Type
+	}
+	if b.Assignee != "" {
+		body.Assignee = &b.Assignee
+	}
+	if b.Description != "" {
+		body.Description = &b.Description
+	}
+	if b.ParentID != "" {
+		body.Parent = &b.ParentID
+	}
+	if b.Priority != nil {
+		p := int64(*b.Priority)
+		body.Priority = &p
+	}
+	if b.DeferUntil != nil {
+		body.DeferUntil = b.DeferUntil
+	}
+	if len(b.Labels) > 0 {
+		labels := append([]string(nil), b.Labels...)
+		body.Labels = &labels
+	}
+	if len(b.Metadata) > 0 {
+		md := make(map[string]string, len(b.Metadata))
+		for k, v := range b.Metadata {
+			md[k] = v
+		}
+		body.Metadata = &md
+	}
+	resp, err := c.cw.CreateBeadWithResponse(context.Background(), c.cityName, &genclient.CreateBeadParams{XGCRequest: "gc"}, body)
+	if err != nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return beads.Bead{}, err
+	}
+	if resp.JSON201 == nil {
+		return beads.Bead{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return beadFromGenPtr(resp.JSON201), nil
+}

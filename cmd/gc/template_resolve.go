@@ -307,8 +307,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		agentEnv["GC_BIN"] = exe
+	// GC_BIN points at the city's gc-as-bd shim bin dir when installed (so a
+	// session's `bd` routes through the controller), else the running gc binary.
+	// sessionGCBinForCity also sets GC_BD_REAL when the bd redirect is active.
+	if gcBin := sessionGCBinForCity(p.cityPath, agentEnv); gcBin != "" {
+		agentEnv["GC_BIN"] = gcBin
 	}
 	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
 	if err != nil {
