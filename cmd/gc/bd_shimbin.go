@@ -58,14 +58,19 @@ func ensureCityBdShimZdotdir(cityPath string) error {
 		return fmt.Errorf("creating shim zdotdir %q: %w", dir, err)
 	}
 	shimbin := cityBdShimbinDir(cityPath)
+	// front prepends the shim bin dir on PATH so `bd` routes through the
+	// controller. The idempotent guard (only prepend when it isn't already first)
+	// avoids unbounded PATH growth across nested subshells. It MUST live in
+	// .zshenv because the agent tool shell runs a NON-interactive `zsh -c`, which
+	// sources .zshenv but NOT .zshrc; it is repeated in .zshrc so it also wins in
+	// an interactive shell after the user rc re-prepends a real-bd dir (~/go/bin).
+	front := "# Front the gc-as-bd shim bin dir so `bd` routes through the controller.\n" +
+		"if [ \"${PATH%%:*}\" != \"" + shimbin + "\" ]; then export PATH=\"" + shimbin + ":$PATH\"; fi\n"
 	files := map[string]string{
-		".zshenv":   "[ -f \"$HOME/.zshenv\" ] && source \"$HOME/.zshenv\"\n",
+		".zshenv":   "[ -f \"$HOME/.zshenv\" ] && source \"$HOME/.zshenv\"\n" + front,
 		".zprofile": "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\"\n",
 		".zlogin":   "[ -f \"$HOME/.zlogin\" ] && source \"$HOME/.zlogin\"\n",
-		".zshrc": "[ -f \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\n" +
-			"# Front the gc-as-bd shim bin dir LAST so `bd` routes through the\n" +
-			"# controller even when the user rc re-prepends a real-bd dir (e.g. ~/go/bin).\n" +
-			fmt.Sprintf("export PATH=%q\n", shimbin+":$PATH"),
+		".zshrc":    "[ -f \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\n" + front,
 	}
 	for name, content := range files {
 		if err := atomicWriteFile(filepath.Join(dir, name), []byte(content)); err != nil {

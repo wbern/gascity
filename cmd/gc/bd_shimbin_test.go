@@ -240,22 +240,29 @@ func TestEnsureCityBdShimbinInstallsZdotdir(t *testing.T) {
 			t.Fatalf("zdotdir missing %s: %v", f, err)
 		}
 	}
-	zshrc, err := os.ReadFile(filepath.Join(zdir, ".zshrc"))
-	if err != nil {
-		t.Fatalf("reading .zshrc: %v", err)
-	}
-	body := string(zshrc)
-	if !strings.Contains(body, `source "$HOME/.zshrc"`) {
-		t.Fatalf(".zshrc does not source the user rc:\n%s", body)
-	}
-	// The shim bin dir must be fronted AFTER the user rc is sourced (so it wins).
 	shimbin := cityBdShimbinDir(cityPath)
 	front := `export PATH="` + shimbin + `:$PATH"`
-	if !strings.Contains(body, front) {
-		t.Fatalf(".zshrc does not front the shim bin dir (want %q):\n%s", front, body)
-	}
-	if strings.Index(body, `source "$HOME/.zshrc"`) > strings.Index(body, front) {
-		t.Fatalf(".zshrc fronts shim bin dir BEFORE sourcing user rc (order wrong):\n%s", body)
+	// The shim bin dir must be fronted AFTER the user rc is sourced (so it wins),
+	// in BOTH .zshenv (the agent tool shell is a non-interactive `zsh -c`, which
+	// runs .zshenv but NOT .zshrc) and .zshrc (interactive shells).
+	for rc, userSrc := range map[string]string{
+		".zshenv": `source "$HOME/.zshenv"`,
+		".zshrc":  `source "$HOME/.zshrc"`,
+	} {
+		data, err := os.ReadFile(filepath.Join(zdir, rc))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rc, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, userSrc) {
+			t.Fatalf("%s does not source the user rc:\n%s", rc, body)
+		}
+		if !strings.Contains(body, front) {
+			t.Fatalf("%s does not front the shim bin dir (want %q):\n%s", rc, front, body)
+		}
+		if strings.Index(body, userSrc) > strings.Index(body, front) {
+			t.Fatalf("%s fronts shim bin dir BEFORE sourcing user rc (order wrong):\n%s", rc, body)
+		}
 	}
 }
 
