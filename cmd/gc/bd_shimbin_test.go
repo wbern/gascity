@@ -216,3 +216,63 @@ func TestResolveRealBdExcludingDirSkipsShimbin(t *testing.T) {
 		t.Fatalf("resolved bd = %q, want the real bd %q (not the shimbin one)", got, realBd)
 	}
 }
+
+// TestEnsureCityBdShimbinInstallsZdotdir verifies the install writes the
+// gc-managed ZDOTDIR whose .zshrc sources the user's rc then fronts the shim bin
+// dir on PATH — the mechanism that makes `bd` win in the agent's zsh even when
+// the user rc re-prepends a real-bd dir (gcw-tymu).
+func TestEnsureCityBdShimbinInstallsZdotdir(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+
+	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+		t.Fatalf("ensureCityBdShimbin: %v", err)
+	}
+
+	zdir := cityBdShimZdotdir(cityPath)
+	if !isDir(zdir) {
+		t.Fatalf("shim zdotdir %q not created", zdir)
+	}
+	for _, f := range []string{".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
+		if _, err := os.Stat(filepath.Join(zdir, f)); err != nil {
+			t.Fatalf("zdotdir missing %s: %v", f, err)
+		}
+	}
+	zshrc, err := os.ReadFile(filepath.Join(zdir, ".zshrc"))
+	if err != nil {
+		t.Fatalf("reading .zshrc: %v", err)
+	}
+	body := string(zshrc)
+	if !strings.Contains(body, `source "$HOME/.zshrc"`) {
+		t.Fatalf(".zshrc does not source the user rc:\n%s", body)
+	}
+	// The shim bin dir must be fronted AFTER the user rc is sourced (so it wins).
+	shimbin := cityBdShimbinDir(cityPath)
+	front := `export PATH="` + shimbin + `:$PATH"`
+	if !strings.Contains(body, front) {
+		t.Fatalf(".zshrc does not front the shim bin dir (want %q):\n%s", front, body)
+	}
+	if strings.Index(body, `source "$HOME/.zshrc"`) > strings.Index(body, front) {
+		t.Fatalf(".zshrc fronts shim bin dir BEFORE sourcing user rc (order wrong):\n%s", body)
+	}
+}
+
+// TestSessionGCBinSetsZdotdirWhenInstalled verifies a managed session's env gets
+// ZDOTDIR pointing at the gc-managed dir when the bd redirect is active.
+func TestSessionGCBinSetsZdotdirWhenInstalled(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+
+	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+		t.Fatalf("ensureCityBdShimbin: %v", err)
+	}
+	env := map[string]string{}
+	sessionGCBinForCity(cityPath, env)
+	if env["ZDOTDIR"] != cityBdShimZdotdir(cityPath) {
+		t.Fatalf("ZDOTDIR = %q, want %q", env["ZDOTDIR"], cityBdShimZdotdir(cityPath))
+	}
+}

@@ -29,6 +29,52 @@ func cityBdShimbinGCPath(cityPath string) string {
 	return filepath.Join(cityBdShimbinDir(cityPath), "gc")
 }
 
+// bdShimZdotdirName is the per-city directory, under the runtime root, holding a
+// gc-managed ZDOTDIR for managed worker sessions. It makes the shim bin dir win
+// on PATH in the agent's zsh even when the user's rc re-prepends a real-bd dir.
+const bdShimZdotdirName = "shimzdotdir"
+
+// cityBdShimZdotdir returns the per-city gc-managed ZDOTDIR
+// (<cityPath>/.gc/shimzdotdir).
+func cityBdShimZdotdir(cityPath string) string {
+	return filepath.Join(cityPath, citylayout.RuntimeRoot, bdShimZdotdirName)
+}
+
+// ensureCityBdShimZdotdir writes a gc-managed ZDOTDIR for cityPath so that `bd`
+// resolves to the shim in an agent's zsh even when the user profile re-prepends a
+// real-bd directory (e.g. ~/.zshrc adding ~/go/bin ahead of the shim bin dir,
+// which otherwise buries the shim bin dir the process PATH was fronted with).
+//
+// Each rc file sources the user's real equivalent first (preserving the agent's
+// shell environment), and .zshrc then fronts the shim bin dir on PATH LAST — so
+// the redirect wins in both the pane's login shell and the agent's interactive
+// tool shell, both of which re-run the user rc. sessionGCBinForCity sets ZDOTDIR
+// to this directory only when the bd redirect is active. Errors are returned for
+// the caller to log non-fatally; on error sessions fall back to the user's rc
+// (no PATH-front guarantee) but are otherwise unaffected.
+func ensureCityBdShimZdotdir(cityPath string) error {
+	dir := cityBdShimZdotdir(cityPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating shim zdotdir %q: %w", dir, err)
+	}
+	shimbin := cityBdShimbinDir(cityPath)
+	files := map[string]string{
+		".zshenv":   "[ -f \"$HOME/.zshenv\" ] && source \"$HOME/.zshenv\"\n",
+		".zprofile": "[ -f \"$HOME/.zprofile\" ] && source \"$HOME/.zprofile\"\n",
+		".zlogin":   "[ -f \"$HOME/.zlogin\" ] && source \"$HOME/.zlogin\"\n",
+		".zshrc": "[ -f \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\n" +
+			"# Front the gc-as-bd shim bin dir LAST so `bd` routes through the\n" +
+			"# controller even when the user rc re-prepends a real-bd dir (e.g. ~/go/bin).\n" +
+			fmt.Sprintf("export PATH=%q\n", shimbin+":$PATH"),
+	}
+	for name, content := range files {
+		if err := atomicWriteFile(filepath.Join(dir, name), []byte(content)); err != nil {
+			return fmt.Errorf("writing shim zdotdir %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // ensureCityBdShimbin installs the gc-as-bd shim for cityPath's managed worker
 // sessions. It (re)creates <cityPath>/.gc/shimbin/gc and .../bd as symlinks to
 // the running gc binary, so a worker whose PATH is fronted with the shim bin dir
@@ -72,6 +118,11 @@ func ensureCityBdShimbin(cityPath string, stderr io.Writer) error {
 	if err := atomicSymlinkShimbin(cityBdShimbinGCPath(cityPath), filepath.Join(dir, "bd")); err != nil {
 		return fmt.Errorf("linking bd shim: %w", err)
 	}
+	// With the bd redirect active, install the gc-managed ZDOTDIR so a worker's
+	// zsh fronts the shim bin dir even when the user rc re-prepends a real-bd dir.
+	if err := ensureCityBdShimZdotdir(cityPath); err != nil {
+		return fmt.Errorf("installing shim zdotdir: %w", err)
+	}
 	return nil
 }
 
@@ -102,6 +153,13 @@ func sessionGCBinForCity(cityPath string, agentEnv map[string]string) string {
 		if realBd, err := resolveRealBdExcludingDir(dir); err == nil {
 			agentEnv[realBdEnvVar] = realBd
 		}
+		// Point the worker's zsh at the gc-managed ZDOTDIR so the shim bin dir
+		// wins on PATH even after the user rc re-prepends a real-bd dir. Only set
+		// when the ZDOTDIR is actually present, so a partial install never breaks
+		// the agent's shell startup.
+		if zdotdir := cityBdShimZdotdir(cityPath); isDir(zdotdir) {
+			agentEnv["ZDOTDIR"] = zdotdir
+		}
 	}
 	return gcLink
 }
@@ -129,6 +187,12 @@ func resolveRealBdExcludingDir(excludeDir string) (string, error) {
 		return abs, nil
 	}
 	return "", fmt.Errorf("no executable bd found on PATH outside %s", excludeDir)
+}
+
+// isDir reports whether path is a directory (symlinks followed).
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // isExecutableFile reports whether path is a regular (symlinks followed) file
