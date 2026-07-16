@@ -19,6 +19,8 @@ dolt-topology
 dolt-drift
 config-valid
 legacy-suspended-field
+rollout:beads.conditional_writes
+rollout:daemon.formula_v2
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
@@ -40,6 +42,7 @@ mcp-shared-target
 builtin-pack-imports
 packv2-import-state
 jsonl-archive
+pack-credentials
 tmux-binary
 git-binary
 jq-binary

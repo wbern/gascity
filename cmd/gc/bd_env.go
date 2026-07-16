@@ -389,7 +389,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		}
 		applyCanonicalDoltTargetEnv(env, target)
 		applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-		mirrorBeadsDoltEnv(env)
+		mirrorBeadsDoltScopeEnv(env, target)
 		return true, nil
 	case "doltlite":
 		clearProjectedDoltEnv(env)
@@ -658,7 +658,7 @@ func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot
 	}
 	applyCanonicalDoltTargetEnv(env, target)
 	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 }
 
 func applyCanonicalScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot string) error {
@@ -699,6 +699,12 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_PASSWORD",
+	// BEADS_DOLT_SERVER_TLS is intentionally NOT a projected key: it is an
+	// ambient hosted-gateway credential passthrough (see
+	// hostedBeadsCredentialPassthroughKeys) with no per-scope source, so
+	// mergeRuntimeEnv must not strip it. mirrorBeadsDoltEnv clears it (non-external
+	// scopes) and mirrorBeadsDoltScopeEnv carries it (external endpoints) into the
+	// native-open env instead.
 }
 
 var bdCLIRemoteSyncOptOutEnvKeys = [...]string{
@@ -768,6 +774,7 @@ func appendBdContributorRoutingOptOutEnvKeys(keys []string) []string {
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
+	ambientNativeDoltOpenEnv                  = beads.AmbientNativeDoltOpenEnv
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
@@ -1157,7 +1164,7 @@ func applyResolvedCityDoltEnvContext(ctx context.Context, env map[string]string,
 		fallbackUser = strings.TrimSpace(target.User)
 	}
 	applyResolvedDoltAuthEnv(env, cityPath, fallbackUser)
-	mirrorBeadsDoltEnv(env)
+	mirrorBeadsDoltScopeEnv(env, target)
 	return nil
 }
 
@@ -1224,10 +1231,10 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 	}
 	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
 		clearProjectedPostgresEnv(env)
-		applyLegacyRigExternalTarget(env, *explicitRig)
+		target := applyLegacyRigExternalTarget(env, *explicitRig)
 		clearProjectedDoltPasswordEnv(env)
 		applyResolvedDoltAuthEnv(env, rigPath, "")
-		mirrorBeadsDoltEnv(env)
+		mirrorBeadsDoltScopeEnv(env, target)
 		return nil
 	}
 	// Rigs without local endpoint authority inherit the resolved city target.
@@ -1235,7 +1242,20 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
 }
 
-func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
+// applyLegacyRigExternalTarget projects a legacy config.Rig{DoltHost,DoltPort}
+// external endpoint onto env and returns the resolved external
+// DoltConnectionTarget. A rig that sets an explicit Dolt host/port is an
+// external endpoint by construction — the same way applyCanonicalConfigStateDoltEnv
+// treats an explicit canonical endpoint as External — so callers mirror the
+// returned target through mirrorBeadsDoltScopeEnv. That helper carries the
+// hosted-gateway BEADS_DOLT_SERVER_TLS requirement into the native-open env only
+// for a non-local endpoint (targetCarriesHostedGatewayTLS): a legacy rig that
+// points at a hosted gateway connects with TLS, while an explicit or port-only
+// 127.0.0.1 rig stays plaintext instead of inheriting a controller's ambient
+// TLS=1. Using the non-scoped mirrorBeadsDoltEnv here would clear TLS for the
+// gateway case too and force a TLS-required gateway rig configured through this
+// compatibility path to attempt plaintext.
+func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) contract.DoltConnectionTarget {
 	host, port := configuredExternalDoltTargetForRig(rig)
 	if host != "" {
 		env["GC_DOLT_HOST"] = host
@@ -1243,6 +1263,7 @@ func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
 	if port != "" {
 		env["GC_DOLT_PORT"] = port
 	}
+	return contract.DoltConnectionTarget{Host: host, Port: port, External: true}
 }
 
 func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicitRig *config.Rig) bool {
@@ -1459,11 +1480,27 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 		} else if !usedPostgres {
 			err := applyResolvedCityDoltEnv(source, cityPath, false)
 			if err != nil {
+				// Mirror the postgres-error branch: clearing the projected Dolt
+				// keys alone leaves BEADS_DOLT_SERVER_TLS unset in source, so it
+				// never reaches overrides and preserveHostedBeadsCredentialEnv
+				// re-injects the ambient hosted-gateway TLS=1 onto this
+				// local/plaintext fallback. mirrorBeadsDoltEnv stamps the
+				// non-external TLS="" clear so the fallback stays plaintext.
 				clearProjectedDoltEnv(source)
+				mirrorBeadsDoltEnv(source)
 			}
 		}
-		keys := execProjectedBackendEnvKeys()
-		keys = append(keys, "BEADS_DOLT_AUTO_START")
+		keys := execProjectedBackendCopyKeys()
+		// BEADS_DOLT_AUTO_START and BEADS_DOLT_SERVER_TLS are carried explicitly:
+		// neither is in execProjectedBackendCopyKeys. TLS is deliberately kept out
+		// of projectedDoltEnvKeys because it is a hosted-gateway credential
+		// passthrough (preserveHostedBeadsCredentialEnv must be able to keep an
+		// ambient value), but the scope mirror sets source[BEADS_DOLT_SERVER_TLS]=""
+		// for a non-external/local city. That cleared value has to reach overrides —
+		// present including empty — or preserveHostedBeadsCredentialEnv re-injects
+		// the ambient hosted-gateway TLS=1 and forces TLS against a plaintext local
+		// Dolt server.
+		keys = append(keys, "BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_TLS")
 		for _, key := range keys {
 			if value, ok := source[key]; ok {
 				overrides[key] = value
@@ -1509,7 +1546,50 @@ func applyBdContributorRoutingOptOut(env map[string]string) {
 	}
 }
 
+// mirrorBeadsDoltEnv projects the GC_DOLT_* connection values onto the
+// BEADS_DOLT_SERVER_* names beadslib's in-process native store reads, and clears
+// the native-open TLS requirement. Clearing TLS is the safe default for every
+// non-external scope (doltlite, postgres, managed-local dolt, cleared/error
+// fallbacks): such a scope must never negotiate TLS, including a requirement
+// inherited from a hosted-gateway city env this scope's map was cloned from (rig
+// runtime env is built on top of the city env). A scope that resolves to an
+// external endpoint uses mirrorBeadsDoltScopeEnv instead, which carries TLS only
+// for a non-local hosted-gateway endpoint.
 func mirrorBeadsDoltEnv(env map[string]string) {
+	mirrorBeadsDoltServerEnv(env, false)
+}
+
+// mirrorBeadsDoltScopeEnv is mirrorBeadsDoltEnv keyed on a resolved Dolt target:
+// it carries the hosted-gateway BEADS_DOLT_SERVER_TLS requirement into the
+// native-open env only for a target that actually speaks hosted-gateway TLS — an
+// external endpoint with a non-local host (targetCarriesHostedGatewayTLS).
+// Callers that already hold the resolved DoltConnectionTarget use this so ambient
+// TLS reaches only genuine hosted gateways and never bleeds into a local/plaintext
+// scope, including an explicit or port-only 127.0.0.1 endpoint that resolves
+// External by topology but connects in the clear.
+func mirrorBeadsDoltScopeEnv(env map[string]string, target contract.DoltConnectionTarget) {
+	mirrorBeadsDoltServerEnv(env, targetCarriesHostedGatewayTLS(target))
+}
+
+// targetCarriesHostedGatewayTLS reports whether ambient BEADS_DOLT_SERVER_TLS
+// should be carried into target's native-open env. TLS is transport policy, not
+// endpoint topology: DoltConnectionTarget.External marks every non-managed
+// explicit/city-canonical endpoint — including a plaintext 127.0.0.1 or a
+// port-only legacy rig that populateExternalTarget/canonicalExternalHost default
+// to loopback — so gating the carry on External alone forces TLS onto plaintext
+// local endpoints and breaks them under a controller running with ambient
+// BEADS_DOLT_SERVER_TLS=1 (PR #4008 review finding). A hosted beads-gateway, the
+// only endpoint that terminates client TLS, is remote by construction, so the
+// carry is gated on an external endpoint with a non-local host. This is
+// deliberately narrower than the identity-deferral gate (which stays keyed on
+// External): deferral only Pass-marks and relies on beadslib's open-time identity
+// check, so it is safe for a local endpoint the plaintext probe can already
+// authenticate, whereas forcing TLS onto that same endpoint is not.
+func targetCarriesHostedGatewayTLS(target contract.DoltConnectionTarget) bool {
+	return target.External && !contract.DoltHostIsLocal(target.Host)
+}
+
+func mirrorBeadsDoltServerEnv(env map[string]string, carryAmbientTLS bool) {
 	if env == nil {
 		return
 	}
@@ -1537,6 +1617,87 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 		env["BEADS_DOLT_PASSWORD"] = pass
 	} else {
 		delete(env, "BEADS_DOLT_PASSWORD")
+	}
+	// Carry the hosted beads-gateway credential command into the projected env.
+	// bd authenticates to the gateway by running the helper named in
+	// BEADS_DOLT_CREDENTIAL_COMMAND; without it bd falls back to the static/root
+	// user and the gateway rejects the connection (MySQL Error 1045). That key
+	// contains "CREDENTIAL", so execenv.FilterInherited strips it from every
+	// gc-spawned bd subprocess and agent session. preserveHostedBeadsCredentialEnv
+	// re-adds it on the slice-merge paths (overlayEnvEntries / mergeRuntimeEnv),
+	// but only when it is already present in the pre-filter environ and only on
+	// those paths — the agent session env is built from this projected map, which
+	// does not carry the ambient value, and a controller that exports the helper
+	// under only the non-sensitive GC_DOLT_CRED_CMD (which survives filtering) has
+	// nothing for that pass to preserve. Mirror GC_DOLT_CRED_CMD into
+	// BEADS_DOLT_CREDENTIAL_COMMAND here (map value wins, else the ambient value
+	// of either key) so bd authenticates the same way the in-process native store
+	// does.
+	//
+	// Two intentional asymmetries with the sibling BEADS_DOLT_* branches above,
+	// kept deliberately (do not "normalize" them into the map->map convention):
+	//  1. Ambient fallback via a bare os.Getenv: the external-endpoint TLS branch
+	//     (mirrorNativeDoltTLSEnv) also reads ambient env, but through the
+	//     ambientNativeDoltOpenEnv guard; this credential branch is the only one
+	//     that reads the ambient process env with a bare os.Getenv, because a
+	//     controller commonly exports only the helper and never seeds it into the
+	//     projected map.
+	//  2. Preserve-not-clear: when no source exists this branch leaves any
+	//     existing target value untouched instead of deleting/emptying it. The
+	//     siblings clear their target to defeat stale tmux inheritance; the
+	//     credential key is instead preserved from ambient by
+	//     preserveHostedBeadsCredentialEnv on the slice-merge paths, so clearing
+	//     it here would fight that pass.
+	if cred := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if cred := strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	}
+	mirrorNativeDoltTLSEnv(env, carryAmbientTLS)
+}
+
+// mirrorNativeDoltTLSEnv scopes the BEADS_DOLT_SERVER_TLS native-open requirement
+// to the resolved target, keeping the GC_DOLT_*->BEADS_DOLT_* projection in
+// mirrorBeadsDoltServerEnv flat and the TLS gate readable as one unit. Only a
+// hosted-gateway target (carryAmbientTLS, computed by targetCarriesHostedGatewayTLS)
+// negotiates TLS; every non-carry scope — non-external, and an external-but-local
+// plaintext endpoint — clears it.
+func mirrorNativeDoltTLSEnv(env map[string]string, carryAmbientTLS bool) {
+	if !carryAmbientTLS {
+		// Non-carry scope (non-external, or an external endpoint with a local host
+		// such as an explicit or port-only 127.0.0.1 rig): clear any TLS
+		// requirement — including one inherited from a hosted-gateway city env this
+		// map was cloned from, or a stale ambient value — so the native store, and
+		// the bd fallback built from the same map, connect with the scope's real
+		// (plaintext) transport instead of forcing TLS against a non-TLS server.
+		// Key kept present but empty (like the PORT projection in
+		// mirrorBeadsDoltServerEnv) so a child bd or reused map cannot resurrect it.
+		// TLS is not a DoltConnectionTarget field, so there is no GC_DOLT_* source
+		// to project.
+		env["BEADS_DOLT_SERVER_TLS"] = ""
+		return
+	}
+	// Hosted-gateway endpoint: carry the TLS requirement to the in-process native
+	// store. A hosted beads-gateway terminates client TLS and rejects plaintext
+	// ("TLS required"); the shell-out bd inherits BEADS_DOLT_SERVER_TLS from the
+	// ambient controller env, but the native store opens beadslib against this
+	// projected map, which CityRuntimeEnvMapForRuntimeDir builds fresh without the
+	// ambient value. An explicit scoped value wins; otherwise mirror it from the
+	// ambient process env — the same signal bd reads. Read the ambient value
+	// through the native-open env guard, not a bare os.Getenv: withNativeDoltOpenEnv
+	// mutates BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu, so an unguarded read
+	// here could observe a concurrent cross-scope open's transient TLS rather than
+	// the true ambient value.
+	if tls := strings.TrimSpace(env["BEADS_DOLT_SERVER_TLS"]); tls != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = tls
+	} else if ambient := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS")); ambient != "" {
+		env["BEADS_DOLT_SERVER_TLS"] = ambient
+	} else {
+		env["BEADS_DOLT_SERVER_TLS"] = ""
 	}
 }
 

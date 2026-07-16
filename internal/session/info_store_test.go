@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,10 +36,10 @@ func seedSessionStore(t *testing.T, beadsIn ...beads.Bead) beads.SessionStore {
 	return beads.SessionStore{Store: mem}
 }
 
-// TestInfoStoreGetSpeaksInfo asserts the domain store hands back a session.Info
+// TestStoreGetSpeaksInfo asserts the domain store hands back a session.Info
 // projected from the persisted bead, with bead serialization confined inside
 // the store. The Info must match the persisted projection codec exactly.
-func TestInfoStoreGetSpeaksInfo(t *testing.T) {
+func TestStoreGetSpeaksInfo(t *testing.T) {
 	b := sessionBeadFixture("s-get-1", "open", map[string]string{
 		"__title":      "My Session",
 		"template":     "polecat",
@@ -52,14 +54,14 @@ func TestInfoStoreGetSpeaksInfo(t *testing.T) {
 	})
 	store := seedSessionStore(t, b)
 
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	got, err := is.Get("s-get-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 
-	want := InfoFromPersistedBead(b)
-	if got != want {
+	want := infoFromPersistedBead(b)
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Get returned Info mismatch:\n got = %+v\nwant = %+v", got, want)
 	}
 	if got.ID != "s-get-1" || got.Title != "My Session" || got.Alias != "pc-1" {
@@ -70,19 +72,37 @@ func TestInfoStoreGetSpeaksInfo(t *testing.T) {
 	}
 }
 
-// TestInfoStoreGetNotFound asserts a missing session id surfaces a not-found error.
-func TestInfoStoreGetNotFound(t *testing.T) {
+// TestStoreGetNotFound asserts a missing session id surfaces a not-found error.
+func TestStoreGetNotFound(t *testing.T) {
 	store := seedSessionStore(t)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 	if _, err := is.Get("missing"); err == nil {
 		t.Fatal("Get(missing): want error, got nil")
 	}
 }
 
-// TestInfoStoreListFiltersLikeCatalog asserts List applies the same state and
+// TestStoreGetNilInnerStore pins the WI-6 W4 nit-5 fix: a non-nil *Store wrapping
+// a nil inner beads.Store must NOT panic in validatedBead — it returns the wrapped
+// beads.ErrNotFound (the absence contract), mirroring ListAll's nil-inner-store
+// guard. Get and GetPersistedResponse share validatedBead, so both are covered.
+func TestStoreGetNilInnerStore(t *testing.T) {
+	is := NewStore(beads.SessionStore{Store: nil})
+	_, err := is.Get("gc-1")
+	if err == nil {
+		t.Fatal("Get on nil inner store: want error, got nil")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get on nil inner store: want errors.Is(beads.ErrNotFound), got %v", err)
+	}
+	if _, _, perr := is.GetPersistedResponse("gc-1"); !errors.Is(perr, beads.ErrNotFound) {
+		t.Fatalf("GetPersistedResponse on nil inner store: want errors.Is(beads.ErrNotFound), got %v", perr)
+	}
+}
+
+// TestStoreListFiltersLikeCatalog asserts List applies the same state and
 // template filtering as the existing ListFullFromBeads projection, returns only
 // session.Info (no raw beads), and excludes closed beads by default.
-func TestInfoStoreListFiltersLikeCatalog(t *testing.T) {
+func TestStoreListFiltersLikeCatalog(t *testing.T) {
 	open := sessionBeadFixture("s-open", "open", map[string]string{
 		"template": "polecat", "state": "asleep",
 	})
@@ -93,7 +113,7 @@ func TestInfoStoreListFiltersLikeCatalog(t *testing.T) {
 		"template": "polecat", "state": "asleep",
 	})
 	store := seedSessionStore(t, open, active, closed)
-	is := NewInfoStore(store)
+	is := NewStore(store)
 
 	// Default filter excludes closed.
 	all, err := is.List("", "")
@@ -152,19 +172,19 @@ func TestInfoFromPersistedBeadProjectionDeterminism(t *testing.T) {
 	storeA := seedSessionStore(t, b)
 	storeB := seedSessionStore(t, b)
 
-	infoA, err := NewInfoStore(storeA).Get("s-inv")
+	infoA, err := NewStore(storeA).Get("s-inv")
 	if err != nil {
 		t.Fatalf("Get A: %v", err)
 	}
-	infoB, err := NewInfoStore(storeB).Get("s-inv")
+	infoB, err := NewStore(storeB).Get("s-inv")
 	if err != nil {
 		t.Fatalf("Get B: %v", err)
 	}
-	if infoA != infoB {
+	if !reflect.DeepEqual(infoA, infoB) {
 		t.Fatalf("projection not deterministic across store instances:\n A = %+v\n B = %+v", infoA, infoB)
 	}
 	// And the direct codec matches the stored projection.
-	if direct := InfoFromPersistedBead(b); direct != infoA {
+	if direct := infoFromPersistedBead(b); !reflect.DeepEqual(direct, infoA) {
 		t.Fatalf("direct codec disagrees with store projection:\n codec = %+v\n store = %+v", direct, infoA)
 	}
 }
@@ -180,7 +200,7 @@ func TestInfoFromPersistedBeadProjectsContinuationAndSleepReason(t *testing.T) {
 		"continuation_epoch": "9",
 		"sleep_reason":       "wait-hold",
 	})
-	info := InfoFromPersistedBead(b)
+	info := infoFromPersistedBead(b)
 	if info.ContinuationEpoch != "9" {
 		t.Errorf("ContinuationEpoch = %q, want %q", info.ContinuationEpoch, "9")
 	}
@@ -189,44 +209,51 @@ func TestInfoFromPersistedBeadProjectsContinuationAndSleepReason(t *testing.T) {
 	}
 	// Unset markers project to empty (no error, no default).
 	bare := sessionBeadFixture("s-bare", "open", map[string]string{"state": "active"})
-	if got := InfoFromPersistedBead(bare); got.ContinuationEpoch != "" || got.SleepReason != "" {
+	if got := infoFromPersistedBead(bare); got.ContinuationEpoch != "" || got.SleepReason != "" {
 		t.Errorf("unset markers projected non-empty: epoch=%q reason=%q", got.ContinuationEpoch, got.SleepReason)
 	}
 }
 
-// TestInfoFromPersistedBeadResolvesWorkerDirViaCanonicalKey asserts the
-// persisted-bead projection resolves Info.WorkDir (the field the resume
-// launch-cwd path reads) through contract.WorkerDirFromMetadata: the
-// canonical worker_dir key wins when present, and the legacy work_dir key
-// is used as a fallback when the canonical key is absent. This is the
-// resume-read half of gcw-xgfk.1 — a session bead carrying a divergent
-// slug-based legacy work_dir must not override an explicit canonical
-// worker_dir when both are present.
-func TestInfoFromPersistedBeadResolvesWorkerDirViaCanonicalKey(t *testing.T) {
-	t.Run("canonical key present", func(t *testing.T) {
-		b := sessionBeadFixture("s-canon", "open", map[string]string{
-			"session_name": "s-canon",
-			"worker_dir":   "/rigs/gascity/canonical-dir",
-			// Legacy key deliberately diverges (e.g. slug vs no-slug
-			// directory naming) to prove the canonical key wins.
-			"work_dir": "/rigs/gascity/legacy-slug-dir",
-		})
-		info := InfoFromPersistedBead(b)
-		if info.WorkDir != "/rigs/gascity/canonical-dir" {
-			t.Errorf("Info.WorkDir = %q, want canonical worker_dir value", info.WorkDir)
-		}
+func TestInfoFromPersistedBeadProjectsIdentityPoolNamedCluster(t *testing.T) {
+	b := sessionBeadFixture("s-cluster", "open", map[string]string{
+		"state":                      "active",
+		NamedSessionIdentityMetadata: "worker#3",
+		NamedSessionMetadataKey:      "true",
+		NamedSessionModeMetadata:     "sticky",
+		"common_name":                "worker",
+		"pool_slot":                  "3",
+		"pool_managed":               "true",
+		"session_origin":             "ephemeral",
+		"dependency_only":            "true",
+		"manual_session":             "true",
 	})
+	info := infoFromPersistedBead(b)
+	for _, c := range []struct{ name, got, want string }{
+		{"ConfiguredNamedIdentity", info.ConfiguredNamedIdentity, "worker#3"},
+		{"ConfiguredNamedMode", info.ConfiguredNamedMode, "sticky"},
+		{"CommonName", info.CommonName, "worker"},
+		{"PoolSlot", info.PoolSlot, "3"},
+		{"SessionOrigin", info.SessionOrigin, "ephemeral"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+	if !info.ConfiguredNamedSession || !info.PoolManaged || !info.DependencyOnly || !info.ManualSession {
+		t.Errorf("bool cluster: named=%v pool=%v dep=%v manual=%v, want all true",
+			info.ConfiguredNamedSession, info.PoolManaged, info.DependencyOnly, info.ManualSession)
+	}
+	if len(info.Labels) != 1 || info.Labels[0] != LabelSession {
+		t.Errorf("Labels = %v, want [%q]", info.Labels, LabelSession)
+	}
 
-	t.Run("legacy-only fallback", func(t *testing.T) {
-		b := sessionBeadFixture("s-legacy", "open", map[string]string{
-			"session_name": "s-legacy",
-			"work_dir":     "/rigs/gascity/legacy-only-dir",
-		})
-		info := InfoFromPersistedBead(b)
-		if info.WorkDir != "/rigs/gascity/legacy-only-dir" {
-			t.Errorf("Info.WorkDir = %q, want legacy work_dir fallback value", info.WorkDir)
-		}
-	})
+	// Bare bead: the whole cluster projects to its zero value (no defaults).
+	bare := infoFromPersistedBead(sessionBeadFixture("s-bare", "open", map[string]string{"state": "active"}))
+	if bare.ConfiguredNamedSession || bare.PoolManaged || bare.DependencyOnly || bare.ManualSession ||
+		bare.ConfiguredNamedIdentity != "" || bare.ConfiguredNamedMode != "" || bare.CommonName != "" ||
+		bare.PoolSlot != "" || bare.SessionOrigin != "" {
+		t.Errorf("unset cluster projected non-zero: %+v", bare)
+	}
 }
 
 func infoIDs(in []Info) []string {

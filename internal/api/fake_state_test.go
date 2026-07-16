@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -51,10 +54,12 @@ type fakeState struct {
 	autos             []orders.Order
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
+	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
 	pokeCount         int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
+	usageSink         usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
 	// matching the real implementation's answer for the MemStore fakes most
@@ -103,8 +108,13 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	}
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
-func (f *fakeState) EventProvider() events.Provider        { return f.eventProv }
-func (f *fakeState) UsageSink() usage.Sink                 { return usage.Discard }
+func (f *fakeState) EventProvider() events.Provider { return f.eventProv }
+func (f *fakeState) UsageSink() usage.Sink {
+	if f.usageSink != nil {
+		return f.usageSink
+	}
+	return usage.Discard
+}
 func (f *fakeState) CityName() string                      { return f.cityName }
 func (f *fakeState) CityPath() string                      { return f.cityPath }
 func (f *fakeState) Version() string                       { return "test" }
@@ -154,8 +164,14 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                    { f.pokeCount++ }
-func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
+func (f *fakeState) Poke()                                  { f.pokeCount++ }
+func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
+
+// WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
+// receiver tests can inject a fake dispatcher (or leave it nil to exercise the
+// dispatch-unavailable path).
+func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webhookDispatcher }
+
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
@@ -171,6 +187,30 @@ func (f *fakeState) RawConfig() *config.City {
 type fakeMutatorState struct {
 	*fakeState
 	suspended map[string]bool
+
+	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
+	// so pack handler tests exercise the real per-city write-lock seam and can
+	// assert mutations route through it.
+	serializeMu    sync.Mutex
+	serializeCalls atomic.Int32
+
+	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
+	// or receives — lets a test hold a provision in flight to exercise the
+	// live-index replay path deterministically.
+	provisionGate chan struct{}
+
+	// Rollback/teardown injection for the C4c G14 tests, guarded by provisionMu.
+	// provisionFailN makes the next N ProvisionRigFromGit calls return
+	// provisionErr AFTER emitting a created-dir manifest (a failure once the dir
+	// exists). teardownCalls records every TeardownPartialRig manifest;
+	// teardownErr, when set, makes TeardownPartialRig fail.
+	provisionMu             sync.Mutex
+	provisionCalls          int
+	provisionFailN          int
+	provisionErr            error
+	provisionCtxHadDeadline bool
+	teardownCalls           []RigProvisionManifest
+	teardownErr             error
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -179,6 +219,15 @@ func newFakeMutatorState(t *testing.T) *fakeMutatorState {
 		fakeState: newFakeState(t),
 		suspended: make(map[string]bool),
 	}
+}
+
+// SerializeConfigWrite runs fn under a real lock and counts the call, mirroring
+// the production controllerState seam that shares the configedit.Editor lock.
+func (f *fakeMutatorState) SerializeConfigWrite(fn func() error) error {
+	f.serializeMu.Lock()
+	defer f.serializeMu.Unlock()
+	f.serializeCalls.Add(1)
+	return fn()
 }
 
 func (f *fakeMutatorState) SuspendAgent(name string) error { f.suspended[name] = true; return nil }
@@ -303,6 +352,86 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
+}
+
+// ProvisionRigFromGit is the fake async-clone path: it skips the real
+// clone/SSRF and just appends the rig (emitting synthetic progress) so handler
+// tests can exercise the 202 flow without a network. If onStep is set it emits
+// a clone + done step. onManifest is invoked record-then-create with the
+// created dir so persistence/rollback wiring is exercised. When provisionFailN
+// is set it returns provisionErr after the manifest is reported (a failure once
+// the dir exists), without appending the rig.
+func (f *fakeMutatorState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(RigProvisionManifest)) (config.Rig, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.provisionMu.Lock()
+	f.provisionCtxHadDeadline = hasDeadline
+	f.provisionMu.Unlock()
+	if f.provisionGate != nil {
+		// Honor the caller's deadline while gated so a bounded provisioning context
+		// can terminalize a "stalled clone" instead of blocking forever.
+		select {
+		case <-f.provisionGate:
+		case <-ctx.Done():
+			return config.Rig{}, ctx.Err()
+		}
+	}
+	if onStep != nil {
+		onStep("clone", "cloning "+gitURL, false)
+	}
+	if r.Path == "" {
+		r.Path = "rigs/" + r.Name
+	}
+	// Record-then-create: manifest the dir before "cloning".
+	if onManifest != nil {
+		onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+	}
+
+	f.provisionMu.Lock()
+	f.provisionCalls++
+	fail := f.provisionFailN > 0
+	if fail {
+		f.provisionFailN--
+	}
+	provErr := f.provisionErr
+	f.provisionMu.Unlock()
+	if fail {
+		return config.Rig{}, provErr
+	}
+
+	f.cfg.Rigs = append(f.cfg.Rigs, r)
+	if onManifest != nil {
+		onManifest(RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+	}
+	if onStep != nil {
+		onStep("done", "Rig added.", false)
+	}
+	return r, nil
+}
+
+// TeardownPartialRig records the manifest it was asked to tear down (and,
+// unless teardownErr is set, reports success) so tests can assert the
+// drop-then-mark rollback, the re-clone pre-drop, and the boot sweep invoked it
+// with the right created_dir.
+func (f *fakeMutatorState) TeardownPartialRig(_ context.Context, m RigProvisionManifest) error {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	f.teardownCalls = append(f.teardownCalls, m)
+	return f.teardownErr
+}
+
+// teardownManifests returns a copy of the recorded teardown manifests.
+func (f *fakeMutatorState) teardownManifests() []RigProvisionManifest {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	return append([]RigProvisionManifest(nil), f.teardownCalls...)
+}
+
+// provisionHadDeadline reports whether the last ProvisionRigFromGit was called
+// with a context carrying a deadline (the server-owned provisioning bound).
+func (f *fakeMutatorState) provisionHadDeadline() bool {
+	f.provisionMu.Lock()
+	defer f.provisionMu.Unlock()
+	return f.provisionCtxHadDeadline
 }
 
 func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {

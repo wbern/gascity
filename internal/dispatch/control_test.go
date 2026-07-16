@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1602,7 +1603,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		MemStore: base,
 		err:      errors.New("adding dep: invalid connection: i/o timeout"),
 	}
-	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("first processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1611,7 +1612,7 @@ func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFai
 		t.Fatal("expected graph attach to leave nested spec bead open after outer dep failure")
 	}
 
-	_, err = processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err = processRalphControl(store, mustGet(t, store, control.ID), testProcessOptionsWithControlDispatcher(""))
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
 	}
@@ -1639,6 +1640,9 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: true},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: true},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: true},
+		{name: "dolt breaker open", err: errors.New("Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"), want: true},
+		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
+		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
@@ -2753,6 +2757,94 @@ func TestAttemptLogJSONRoundTrips(t *testing.T) {
 	}
 	if roundTripped[0]["reason"] != "auth_error" {
 		t.Errorf("round-trip log[0].reason = %q, want auth_error", roundTripped[0]["reason"])
+	}
+}
+
+// TestAppendAttemptLogValueCorruptHistoryTracesReset proves the corrupt-log
+// fix: a malformed existing gc.attempt_log is no longer silently discarded — it
+// is traced and a valid fresh entry is written.
+func TestAppendAttemptLogValueCorruptHistoryTracesReset(t *testing.T) {
+	t.Parallel()
+	var traced []string
+	tracef := func(format string, args ...any) {
+		traced = append(traced, fmt.Sprintf(format, args...))
+	}
+
+	out, err := appendAttemptLogValue("{not valid json", 3, "transient", "rate_limited", tracef)
+	if err != nil {
+		t.Fatalf("appendAttemptLogValue: %v", err)
+	}
+	if len(traced) != 1 || !strings.Contains(traced[0], "attempt-log corrupt") {
+		t.Fatalf("expected one corrupt-log trace, got %v", traced)
+	}
+	var log []map[string]string
+	if err := json.Unmarshal([]byte(out), &log); err != nil {
+		t.Fatalf("output not valid JSON: %v (raw=%q)", err, out)
+	}
+	if len(log) != 1 || log[0]["attempt"] != "3" {
+		t.Fatalf("expected fresh single-entry log, got %v", log)
+	}
+}
+
+// TestAppendAttemptLogValueValidHistoryDoesNotTrace guards against noise: a
+// well-formed history appends normally and never fires the corrupt-log trace.
+func TestAppendAttemptLogValueValidHistoryDoesNotTrace(t *testing.T) {
+	t.Parallel()
+	traced := 0
+	tracef := func(string, ...any) { traced++ }
+
+	out, err := appendAttemptLogValue(`[{"attempt":"1","outcome":"transient","action":"retry"}]`, 2, "pass", "", tracef)
+	if err != nil {
+		t.Fatalf("appendAttemptLogValue: %v", err)
+	}
+	if traced != 0 {
+		t.Fatalf("valid history must not trace, got %d traces", traced)
+	}
+	var log []map[string]string
+	if err := json.Unmarshal([]byte(out), &log); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(log) != 2 {
+		t.Fatalf("expected two entries, got %d", len(log))
+	}
+}
+
+// TestRouteConfigSurfacesLoadErrorOnce proves the swallowed city.toml parse
+// error is now surfaced (returned + traced) and that the lazy cache parses at
+// most once per invocation.
+func TestRouteConfigSurfacesLoadErrorOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("key = \"unterminated"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	traces := 0
+	opts := ProcessOptions{
+		CityPath: dir,
+		Tracef:   func(string, ...any) { traces++ },
+		routeCfg: &routeConfigCache{},
+	}
+
+	cfg, err := opts.routeConfig()
+	if err == nil {
+		t.Fatalf("expected the load error to be surfaced, got nil (cfg=%v)", cfg)
+	}
+	if _, err2 := opts.routeConfig(); err2 == nil {
+		t.Fatalf("expected the cached load error on the second call")
+	}
+	if traces != 1 {
+		t.Fatalf("expected exactly one trace across two cached calls, got %d", traces)
+	}
+}
+
+// TestRouteConfigEmptyCityPathIsNilNoError confirms an absent city path stays a
+// legitimate metadata-only route (nil cfg, nil error) — not an error.
+func TestRouteConfigEmptyCityPathIsNilNoError(t *testing.T) {
+	t.Parallel()
+	opts := ProcessOptions{routeCfg: &routeConfigCache{}}
+	cfg, err := opts.routeConfig()
+	if err != nil || cfg != nil {
+		t.Fatalf("empty CityPath must yield (nil,nil), got cfg=%v err=%v", cfg, err)
 	}
 }
 

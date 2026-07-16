@@ -280,6 +280,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			}
 			root.Services = append(packServices, root.Services...)
 		}
+		// Merge root-pack webhooks with pack provenance stamped. The public
+		// pack-guard runs once post-composition; here we only record source.
+		if len(pc.Webhooks) > 0 {
+			root.Webhooks = append(stampWebhookSource(pc.Webhooks, cityRoot), root.Webhooks...)
+		}
 		// Merge pack agent patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
 		if len(pc.Global.SessionLive) > 0 {
@@ -707,6 +712,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
 	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
 
+	// Enforce the default-closed webhook public pack-guard over the fully
+	// composed webhook set (every merge site has stamped SourceDir by now).
+	prov.Warnings = append(prov.Warnings, applyWebhookPackGuard(root, cityRoot)...)
+
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors
 	// (cycles, unknown base, wrapper-resume missing) surface here so
@@ -981,6 +990,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
 
+	// Webhooks: concatenate WITH fragment provenance stamped. A fragment is not
+	// the root city.toml, so its webhooks must not read as operator-trusted
+	// (security review attack #9). Stamping SourceDir here makes the
+	// post-composition public pack-guard cap an unauthorized public fragment
+	// webhook to tenant by default.
+	base.Webhooks = append(base.Webhooks, stampWebhookSource(fragment.Webhooks, filepath.Dir(fragPath))...)
+
 	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
 	// ownership after patches have had a chance to adjust declarations.
 	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
@@ -1012,7 +1028,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
+		// Preserve a rollout-gate field the fragment did not itself set: a
+		// fragment defining any [beads] key would otherwise reset the whole
+		// struct and silently downgrade an explicit conditional_writes opt-in
+		// (mirror of the daemon.formula_v2 preservation below). Capture before
+		// the overwrite; a fragment that DOES set conditional_writes still wins.
+		conditionalWrites := base.Beads.ConditionalWrites
 		base.Beads = fragment.Beads
+		if !fragMeta.IsDefined("beads", "conditional_writes") {
+			base.Beads.ConditionalWrites = conditionalWrites
+		}
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt

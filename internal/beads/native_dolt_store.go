@@ -73,6 +73,7 @@ var nativeDoltOpenReadyStatuses = []beadslib.Status{
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
 	nativeDoltOpenEnvMu         sync.Mutex
+	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
 var nativeDoltOpenEnvKeys = []string{
@@ -108,6 +109,19 @@ func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 	return os.Environ()
+}
+
+// AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
+// under nativeDoltOpenEnvMu so it reflects the restored ambient environment
+// rather than a value a concurrent native Dolt open is temporarily projecting.
+// withNativeDoltOpenEnv mutates the keys in nativeDoltOpenEnvKeys (which include
+// BEADS_DOLT_SERVER_TLS) under this mutex, so a bare os.Getenv of one of those
+// keys can observe another scope's transient projection; this guarded read
+// cannot. It mirrors os.Getenv: an unset key returns "".
+func AmbientNativeDoltOpenEnv(key string) string {
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+	return os.Getenv(key)
 }
 
 func processEnvSnapshotExcludingNativeDoltOpen() []string {
@@ -198,6 +212,12 @@ type NativeDoltStore struct {
 	// window is hit. Zero (the default) leaves the pool's idle lifetime
 	// unbounded, matching prior behavior.
 	connMaxIdleTime time.Duration
+
+	// condWritesStamp carries the factory-stamped conditional-writes mode.
+	// NativeDoltStore implements no ConditionalWriter yet, so the stamp's
+	// effect today is require→typed refusal / auto→loud degrade at the
+	// seam, never a silent legacy write under require.
+	condWritesStamp
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -241,6 +261,7 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -1305,6 +1326,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		for _, issue := range issues {
 			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
 				return err
 			}
 			beads = append(beads, bead)
@@ -2020,7 +2044,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	}
 	metadata, err := metadataMapFromNative(issue.Metadata)
 	if err != nil {
-		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", issue.ID, err)
+		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
 		ID:          issue.ID,
@@ -2053,6 +2077,10 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		}
 	}
 	return b, nil
+}
+
+func isNativeIssueMetadataParseError(err error) bool {
+	return errors.Is(err, errNativeIssueMetadataParse)
 }
 
 func nativePriorityFromIssue(issue *beadslib.Issue) *int {

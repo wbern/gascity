@@ -11,23 +11,27 @@ import (
 
 // Tests for Fix A: alias-derived session_name.
 //
-// When CreateAliasedNamedWithTransport (or CreateAliasedBeadOnlyNamed) is
-// called with a non-empty alias and an empty explicitName, the resulting
-// session_name must be SanitizeQualifiedNameForSession(alias), not
-// "s-<beadID>". An empty alias still falls back to the s-<id> form.
-// A non-empty explicitName always wins over alias derivation.
+// When a session is created (started or bead-only) with a non-empty Alias and
+// an empty ExplicitName, the resulting session_name must be
+// SanitizeQualifiedNameForSession(alias), not "s-<beadID>". An empty alias
+// still falls back to the s-<id> form. A non-empty ExplicitName always wins
+// over alias derivation.
 
 func TestCreateAliasedNamed_DerivesSessionNameFromAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedNamedWithTransport(
-		context.Background(), "kenneth", "", "helper", "my chat",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:    "kenneth",
+		Template: "helper",
+		Title:    "my chat",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+		t.Fatalf("CreateSession: %v", err)
 	}
 	if info.SessionName != "kenneth" {
 		t.Errorf("SessionName = %q, want %q", info.SessionName, "kenneth")
@@ -47,14 +51,18 @@ func TestCreateAliasedNamed_DerivesSessionNameFromAlias(t *testing.T) {
 func TestCreateAliasedNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedNamedWithTransport(
-		context.Background(), "gas-city-infra/devops", "", "helper", "devops chat",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:    "gas-city-infra/devops",
+		Template: "helper",
+		Title:    "devops chat",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+		t.Fatalf("CreateSession: %v", err)
 	}
 	const want = "gas-city-infra--devops"
 	if info.SessionName != want {
@@ -68,14 +76,17 @@ func TestCreateAliasedNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 func TestCreateAliasedNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedNamedWithTransport(
-		context.Background(), "", "", "helper", "no alias",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper",
+		Title:    "no alias",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+		t.Fatalf("CreateSession: %v", err)
 	}
 	if !strings.HasPrefix(info.SessionName, "s-") {
 		t.Errorf("SessionName = %q, want prefix %q", info.SessionName, "s-")
@@ -85,14 +96,19 @@ func TestCreateAliasedNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 func TestCreateAliasedNamed_ExplicitNameTakesPrecedenceOverAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedNamedWithTransport(
-		context.Background(), "kenneth", "explicit-sky", "helper", "my chat",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{}, runtime.Config{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:        "kenneth",
+		ExplicitName: "explicit-sky",
+		Template:     "helper",
+		Title:        "my chat",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransport: %v", err)
+		t.Fatalf("CreateSession: %v", err)
 	}
 	if info.SessionName != "explicit-sky" {
 		t.Errorf("SessionName = %q, want %q", info.SessionName, "explicit-sky")
@@ -102,14 +118,19 @@ func TestCreateAliasedNamed_ExplicitNameTakesPrecedenceOverAlias(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_DerivesSessionNameFromAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedBeadOnlyNamed(
-		"kenneth", "", "helper", "my chat",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Alias:    "kenneth",
+		Template: "helper",
+		Title:    "my chat",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+		t.Fatalf("CreateSession(BeadOnly): %v", err)
 	}
 	b, err := store.Get(info.ID)
 	if err != nil {
@@ -126,14 +147,19 @@ func TestCreateAliasedBeadOnlyNamed_DerivesSessionNameFromAlias(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedBeadOnlyNamed(
-		"gas-city-infra/devops", "", "helper", "devops",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Alias:    "gas-city-infra/devops",
+		Template: "helper",
+		Title:    "devops",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+		t.Fatalf("CreateSession(BeadOnly): %v", err)
 	}
 	b, err := store.Get(info.ID)
 	if err != nil {
@@ -151,14 +177,18 @@ func TestCreateAliasedBeadOnlyNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
-	info, err := mgr.CreateAliasedBeadOnlyNamed(
-		"", "", "helper", "no alias",
-		"claude", "/tmp", "claude", "", nil, ProviderResume{},
-	)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Template: "helper",
+		Title:    "no alias",
+		Command:  "claude",
+		WorkDir:  "/tmp",
+		Provider: "claude",
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedBeadOnlyNamed: %v", err)
+		t.Fatalf("CreateSession(BeadOnly): %v", err)
 	}
 	b, err := store.Get(info.ID)
 	if err != nil {

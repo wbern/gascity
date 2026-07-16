@@ -10,6 +10,9 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https; requires --city-name) |
+| `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
 
@@ -32,6 +35,7 @@ gc [flags]
 | [gc cities](#gc-cities) | List registered cities |
 | [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
+| [gc context](#gc-context) | Manage named remote cities (~/.gc/contexts.toml) |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
 | [gc costs](#gc-costs) | Show per-run usage and estimated cost for this city |
@@ -50,9 +54,12 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
+| [gc login](#gc-login) | Log in to a hosted Gas City service |
+| [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
+| [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
@@ -78,6 +85,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
 | [gc worktree](#gc-worktree) | Manage worktree state |
 
 ## gc agent
@@ -697,6 +705,108 @@ gc config show -f overlay.toml
 | `--json` | bool |  | emit JSON |
 | `--provenance` | bool |  | show where each config element originated |
 | `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
+
+## gc context
+
+Manage the client-side registry of named remote cities.
+
+A context names a remote city the gc CLI can operate over the HTTP+SSE control
+plane: its URL, the remote city name, and an optional credential command. Select
+a context per-invocation with --context &lt;name&gt;, or set a sticky default with
+'gc context use &lt;name&gt;' (a discoverable local city always wins over the default).
+
+```
+gc context
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc context add](#gc-context-add) | Add a named remote city |
+| [gc context current](#gc-context-current) | Show which city the current flags/env/cwd would target |
+| [gc context list](#gc-context-list) | List named remote cities |
+| [gc context remove](#gc-context-remove) | Remove a named remote city |
+| [gc context show](#gc-context-show) | Show a named remote city |
+| [gc context use](#gc-context-use) | Set the sticky default context |
+
+## gc context add
+
+Add a named remote city to ~/.gc/contexts.toml.
+
+--url is required and must be https for a non-loopback host. --city sets the
+remote city name (defaults to &lt;name&gt;). At most one credential technique applies:
+--grant-command mints an X-GC-City-Write grant for a direct hardened self-host;
+--credential-command mints a transport bearer consumed by an edge/proxy.
+
+```
+gc context add <name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--ca-file` | string |  | PEM CA bundle to verify the server certificate |
+| `--city` | string |  | remote city name (default: &lt;name&gt;) |
+| `--credential-command` | string |  | command that mints a transport bearer (edge/proxy fronted) |
+| `--grant-command` | string |  | command that mints an X-GC-City-Write grant (direct hardened self-host) |
+| `--insecure-skip-verify` | bool |  | skip TLS verification (dev only) |
+| `--timeout` | string |  | REST request timeout, e.g. 120s (never applied to SSE streams) |
+| `--tls-server-name` | string |  | override the TLS SNI / certificate name |
+| `--url` | string |  | remote city base URL (https required for non-loopback) |
+
+## gc context current
+
+Dry-run the target resolver and report the winning tier.
+
+Applies the same precedence as every command — explicit flag &gt; explicit env &gt;
+local city discovery &gt; sticky default — and prints the target it would use,
+noting what was shadowed. Makes no network call.
+
+```
+gc context current
+```
+
+## gc context list
+
+List named remote cities
+
+```
+gc context list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit one JSONL record per context |
+
+## gc context remove
+
+Remove a named remote city
+
+```
+gc context remove <name>
+```
+
+## gc context show
+
+Show a named remote city
+
+```
+gc context show <name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit a JSONL record |
+
+## gc context use
+
+Set the sticky default remote city.
+
+The default is used only when no local city is discoverable from the current
+directory — a local city always wins (git-like). Clear it with 'gc context use'
+with no arguments is not supported; remove the default by removing the context.
+
+```
+gc context use <name>
+```
 
 ## gc converge
 
@@ -1754,6 +1864,7 @@ gc import
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
 | [gc import check](#gc-import-check) | Validate installed pack import state |
+| [gc import credential](#gc-import-credential) | Manage pack-source git credentials |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
@@ -1811,6 +1922,57 @@ Validate installed pack import state
 ```
 gc import check
 ```
+
+## gc import credential
+
+Manage pack-source git credentials
+
+```
+gc import credential
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import credential add](#gc-import-credential-add) | Register a pack-source credential |
+| [gc import credential list](#gc-import-credential-list) | List registered pack-source credentials |
+| [gc import credential remove](#gc-import-credential-remove) | Remove a registered pack-source credential |
+
+## gc import credential add
+
+Register a pack-source credential
+
+```
+gc import credential add <match> (--helper CMD | --token-file PATH | --token-env NAME | --ssh-key-file PATH) [--username NAME] [--global] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Write $GC_HOME/credentials.toml instead of the city file |
+| `--helper` | string |  | Command whose stdout is the token (executed per fetch) |
+| `--ssh-key-file` | string |  | Path to an SSH private key for git@/ssh:// sources |
+| `--token-env` | string |  | Name of an environment variable holding the token |
+| `--token-file` | string |  | Path to a file containing the token |
+| `--username` | string |  | Username sent to the remote (default x-access-token) |
+
+## gc import credential list
+
+List registered pack-source credentials
+
+```
+gc import credential list
+```
+
+## gc import credential remove
+
+Remove a registered pack-source credential
+
+```
+gc import credential remove <match> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Remove from $GC_HOME/credentials.toml instead of the city file |
 
 ## gc import install
 
@@ -1972,6 +2134,44 @@ gc lint <pack> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit structured JSON report |
+
+## gc login
+
+Log in to a hosted Gas City service and store a local API token.
+
+By default this targets https://gascity.com; pass --at &lt;url&gt; to log in to
+any server that implements the Gas City Service Protocol v0. It opens a browser
+to sign in; use --device for headless shells, or --token to store an existing
+token. The token is stored per service under ~/.gc/credentials.json.
+
+```
+gc login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string |  | label for the minted token; defaults to &lt;user&gt;@&lt;host&gt; |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | existing API token to store; defaults to GC_SERVICE_TOKEN |
+
+## gc logout
+
+Log out of a hosted Gas City service: revoke the session server-side, then
+remove the stored token. Because the session is the only long-lived credential,
+this is the kill switch for a leaked ~/.gc/credentials.json — the local token is
+always removed even if the server-side revoke fails or is not yet supported.
+
+```
+gc logout [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | log out of every stored service |
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 
 ## gc mail
 
@@ -2290,6 +2490,62 @@ gc mcp list [flags]
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
 
+## gc metrics
+
+Inspect or control Gas City command usage metrics
+
+```
+gc metrics
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc metrics example](#gc-metrics-example) | Print the fixed state-independent command-usage request example |
+| [gc metrics off](#gc-metrics-off) | Disable command usage metrics and delete local queued data |
+| [gc metrics on](#gc-metrics-on) | Read and accept the command-usage disclosure on a verified TTY |
+| [gc metrics status](#gc-metrics-status) | Show redacted local command-usage metrics status |
+
+## gc metrics example
+
+Print the fixed state-independent command-usage request example
+
+```
+gc metrics example [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write only the exact example JSON |
+
+## gc metrics off
+
+Disable command usage metrics and delete local queued data
+
+```
+gc metrics off
+```
+
+## gc metrics on
+
+Read and accept the command-usage disclosure on a verified TTY
+
+```
+gc metrics on
+```
+
+## gc metrics status
+
+Show redacted local command-usage metrics status
+
+```
+gc metrics status [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | write the redacted status as JSON |
+| `--show-installation-id` | bool |  | print the stable linkable installation pseudonym with a warning |
+
 ## gc nudge
 
 Inspect and deliver deferred nudges.
@@ -2398,6 +2654,9 @@ to the configured target (if any). Exec orders run their script directly
 write arbitrary stdout. Useful for testing orders or triggering them
 outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
+Use --var key=value (repeatable) to pass args to the order: formula orders
+receive them as formula vars, exec orders as environment variables. A param
+declared required in [order.params] must be supplied or the run fails.
 
 ```
 gc order run <name> [flags]
@@ -2407,6 +2666,7 @@ gc order run <name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+| `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |
 
 ## gc order show
 
@@ -3035,10 +3295,12 @@ gc rig add /path/to/existing --adopt
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
+| `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
-| `--name` | string |  | rig name (default: directory basename) |
+| `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
+| `--request-id` | string |  | idempotency key for a remote --git-url add; reuse it to resume/retry a provision |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
 
 ## gc rig list
@@ -4375,6 +4637,19 @@ gc wait ready <wait-id> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc whoami
+
+Show the authenticated hosted Gas City account
+
+```
+gc whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
+| `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
 
 ## gc worktree
 
