@@ -85,6 +85,69 @@ func (s *releaseRefreshFailOnceStore) ReleaseIfCurrent(id, expectedAssignee stri
 	return released, err
 }
 
+// claimReadLagStore persists a claim on its backing but replays the pre-claim
+// row once on the next Get, simulating a read-lagging remote backing (the
+// remote-Dolt read-visibility lag that masked a committed claim live).
+type claimReadLagStore struct {
+	Store
+	staleAfterClaim *Bead
+}
+
+func (s *claimReadLagStore) Get(id string) (Bead, error) {
+	if s.staleAfterClaim != nil && s.staleAfterClaim.ID == id {
+		stale := *s.staleAfterClaim
+		s.staleAfterClaim = nil
+		return stale, nil
+	}
+	return s.Store.Get(id)
+}
+
+func (s *claimReadLagStore) ClaimAs(id, actor string) (Bead, bool, error) {
+	claimer, ok := s.Store.(ActorClaimer)
+	if !ok {
+		return Bead{}, false, ErrActorClaimUnsupported
+	}
+	pre, _ := s.Store.Get(id)
+	bead, won, err := claimer.ClaimAs(id, actor)
+	if won && err == nil {
+		preCopy := pre
+		s.staleAfterClaim = &preCopy
+	}
+	return bead, won, err
+}
+
+func TestCachingStoreClaimAsSurvivesReadLaggingBacking(t *testing.T) {
+	t.Parallel()
+
+	backing := &claimReadLagStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "review task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	claimed, won, err := cache.ClaimAs(bead.ID, "reviewer-1")
+	if err != nil || !won {
+		t.Fatalf("ClaimAs won=%v err=%v, want true/nil", won, err)
+	}
+	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+		t.Fatalf("returned claimed = %+v, want in_progress and reviewer-1", claimed)
+	}
+	// Even though the backing served a read-lagged pre-claim row on the
+	// post-claim refresh, the cache must report the committed claim — not the
+	// stale open/unassigned row (the live gcw-7ejp coherence bug).
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
+		t.Fatalf("cached bead after read-lagged refresh = %+v, want in_progress and reviewer-1", got)
+	}
+}
+
 func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
 	s.updateCalls++
 	if err := s.Store.Update(id, opts); err != nil {

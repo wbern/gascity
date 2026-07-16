@@ -202,6 +202,14 @@ func (c *CachingStore) ClaimAs(id, actor string) (Bead, bool, error) {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	if refreshed {
+		// The claim is proven committed, but a read-lagging backing (remote
+		// Dolt) can still serve the pre-claim row on this refresh — which would
+		// make Get report a bead this actor just claimed as still open and
+		// unassigned. Force the claimed identity onto the refreshed row, exactly
+		// as Close forces status=closed against the same read-lag hazard. The
+		// refresh is still adopted for its post-claim revision.
+		fresh.Status = "in_progress"
+		fresh.Assignee = actor
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 			depsMode:   depsFromFields,
 			seqMode:    seqKeep,
