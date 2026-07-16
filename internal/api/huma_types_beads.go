@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Per-domain Huma input/output types for the beads handler
@@ -140,6 +142,26 @@ type BeadAssignInput struct {
 	Body struct {
 		Assignee string `json:"assignee,omitempty" doc:"Assignee name."`
 	}
+}
+
+// BeadClaimInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/claim.
+// The actor travels in the body because the controller claims on behalf of the
+// calling agent, not as its own identity (the actor-conveyance the warm-claim
+// route needs — see engdocs/contributors/claim-route-warm-controller.md).
+type BeadClaimInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Bead ID."`
+	Body struct {
+		Actor string `json:"actor" doc:"Actor to claim the bead for (the calling agent's identity)."`
+	}
+}
+
+// BeadClaimResult is the response body for a claim attempt. A lost race is not
+// an error: it returns claimed=false with the current (winning) bead state,
+// mirroring the store's ClaimAs (bead, ok=false, nil).
+type BeadClaimResult struct {
+	Claimed bool       `json:"claimed" doc:"True when the actor now holds the bead; false when another actor won the race."`
+	Bead    beads.Bead `json:"bead" doc:"The bead's current state: the claim on success, or the winning holder on a lost race."`
 }
 
 // BeadDeleteInput is the Huma input for DELETE /v0/city/{cityName}/bead/{id}.

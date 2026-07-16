@@ -127,6 +127,130 @@ func TestMemStoreReleaseIfCurrentSkipsMissingAndWrongStatus(t *testing.T) {
 	}
 }
 
+func TestMemStoreClaimAs(t *testing.T) {
+	t.Run("claims an open unassigned bead for the actor", func(t *testing.T) {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimed, ok, err := s.ClaimAs(b.ID, "reviewer-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatal("ClaimAs did not claim an open unassigned bead")
+		}
+		if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+			t.Fatalf("claimed bead = %+v, want in_progress and assignee reviewer-1", claimed)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
+			t.Fatalf("persisted bead = %+v, want in_progress and assignee reviewer-1", got)
+		}
+	})
+
+	t.Run("re-claiming an own in-progress bead is an idempotent success", func(t *testing.T) {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.ClaimAs(b.ID, "reviewer-1"); err != nil {
+			t.Fatal(err)
+		}
+		claimed, ok, err := s.ClaimAs(b.ID, "reviewer-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatal("re-claiming own bead should succeed idempotently")
+		}
+		if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+			t.Fatalf("idempotent re-claim = %+v, want in_progress and reviewer-1", claimed)
+		}
+	})
+
+	t.Run("loses the race when another actor already holds the bead", func(t *testing.T) {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.ClaimAs(b.ID, "reviewer-1"); err != nil {
+			t.Fatal(err)
+		}
+		current, ok, err := s.ClaimAs(b.ID, "reviewer-2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Fatal("ClaimAs stole a bead already held by another actor")
+		}
+		if current.Assignee != "reviewer-1" {
+			t.Fatalf("conflict bead = %+v, want current holder reviewer-1", current)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != "reviewer-1" || got.Status != "in_progress" {
+			t.Fatalf("lost-race mutated bead: %+v", got)
+		}
+	})
+
+	t.Run("refuses a bead assigned to another actor even while still open", func(t *testing.T) {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work", Assignee: "reviewer-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, ok, err := s.ClaimAs(b.ID, "reviewer-2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Fatal("ClaimAs stole an open bead assigned to another actor")
+		}
+	})
+
+	t.Run("refuses a closed bead", func(t *testing.T) {
+		s := beads.NewMemStore()
+		b, err := s.Create(beads.Bead{Title: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, ok, err := s.ClaimAs(b.ID, "reviewer-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Fatal("ClaimAs claimed a closed bead")
+		}
+	})
+
+	t.Run("returns ErrNotFound for a missing bead", func(t *testing.T) {
+		s := beads.NewMemStore()
+		_, ok, err := s.ClaimAs("missing", "reviewer-1")
+		if !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("ClaimAs(missing) err = %v, want ErrNotFound", err)
+		}
+		if ok {
+			t.Fatal("ClaimAs(missing) reported ok")
+		}
+	})
+}
+
+func TestMemStoreIsActorClaimer(t *testing.T) {
+	var _ beads.ActorClaimer = beads.NewMemStore()
+}
+
 func TestMemStoreReleaseIfCurrentDoesNotClobberConcurrentClaim(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		s := beads.NewMemStore()

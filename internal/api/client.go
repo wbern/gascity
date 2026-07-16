@@ -1479,6 +1479,12 @@ func setStrPtr(dst **string, v string) {
 
 var errClientUninitialized = errors.New("api client not initialized")
 
+// ErrClaimRouteUnsupported reports that the controller's backing store cannot
+// claim on behalf of an explicit actor (HTTP 501). Callers that route a claim
+// through the controller (the bd shim) fall back to a direct claim path on this
+// error rather than failing the claim.
+var ErrClaimRouteUnsupported = errors.New("claim route unsupported by controller backend")
+
 // checkMutation handles the (resp, err) tuple from a generated mutation
 // call and returns the (nil | connError | readOnlyError | generic error)
 // shape that ShouldFallback understands. resp may be nil when transportErr
@@ -2000,6 +2006,37 @@ func (c *Client) UpdateBead(id string, opts beads.UpdateOpts) error {
 	}
 	resp, err := c.cw.PostV0CityByCityNameBeadByIdUpdateWithResponse(context.Background(), c.cityName, id, nil, body)
 	return checkMutation(resp, err)
+}
+
+// ClaimBead atomically claims a bead for actor via
+// POST /v0/city/{cityName}/bead/{id}/claim. It returns (bead, claimed, nil):
+// claimed=true when the actor now holds the bead, claimed=false when another
+// actor won the race (the returned bead is the current holder). A 501 (backing
+// store cannot claim on behalf of an actor) surfaces as ErrClaimRouteUnsupported
+// so the shim can fall back to a direct claim. This is the warm-controller
+// claim path: the actor travels in the body, not the controller's identity.
+func (c *Client) ClaimBead(id, actor string) (beads.Bead, bool, error) {
+	if err := c.requireCityScope(); err != nil {
+		return beads.Bead{}, false, err
+	}
+	body := genclient.PostV0CityByCityNameBeadByIdClaimJSONRequestBody{Actor: actor}
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdClaimWithResponse(context.Background(), c.cityName, id, nil, body)
+	if err != nil {
+		return beads.Bead{}, false, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return beads.Bead{}, false, &connError{err: fmt.Errorf("nil response")}
+	}
+	if resp.StatusCode() == http.StatusNotImplemented {
+		return beads.Bead{}, false, ErrClaimRouteUnsupported
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return beads.Bead{}, false, err
+	}
+	if resp.JSON200 == nil {
+		return beads.Bead{}, false, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return beadFromGen(resp.JSON200.Bead), resp.JSON200.Claimed, nil
 }
 
 func (c *Client) CreateBead(b beads.Bead) (beads.Bead, error) {

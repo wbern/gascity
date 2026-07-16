@@ -169,6 +169,55 @@ func TestNativeDoltStoreReleaseIfCurrent(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreClaimAs(t *testing.T) {
+	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	created, err := store.Create(Bead{Title: "native claim"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Claim an open unassigned bead.
+	claimed, won, err := store.ClaimAs(created.ID, "reviewer-1")
+	if err != nil {
+		t.Fatalf("ClaimAs: %v", err)
+	}
+	if !won {
+		t.Fatal("ClaimAs did not claim an open unassigned bead")
+	}
+	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+		t.Fatalf("claimed bead = %+v, want in_progress and reviewer-1", claimed)
+	}
+
+	// Idempotent self re-claim succeeds.
+	if _, won, err := store.ClaimAs(created.ID, "reviewer-1"); err != nil || !won {
+		t.Fatalf("self re-claim won=%v err=%v, want true/nil", won, err)
+	}
+
+	// A different actor loses the race and does not mutate the bead.
+	current, won, err := store.ClaimAs(created.ID, "reviewer-2")
+	if err != nil {
+		t.Fatalf("ClaimAs conflict: %v", err)
+	}
+	if won {
+		t.Fatal("ClaimAs stole a bead held by another actor")
+	}
+	if current.Assignee != "reviewer-1" {
+		t.Fatalf("conflict bead = %+v, want current holder reviewer-1", current)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
+		t.Fatalf("lost-race mutated bead: %+v", got)
+	}
+
+	// Missing bead surfaces ErrNotFound.
+	if _, won, err := store.ClaimAs("gc-missing", "reviewer-1"); !errors.Is(err, ErrNotFound) || won {
+		t.Fatalf("ClaimAs(missing) = won %v err %v, want false/ErrNotFound", won, err)
+	}
+}
+
 func TestNativeDoltStoreCreatePropagatesUpstreamError(t *testing.T) {
 	wantErr := errors.New("create failed")
 	storage := &nativeDoltStorageSpy{

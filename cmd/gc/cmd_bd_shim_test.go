@@ -105,7 +105,14 @@ func TestClassifyBdShimVerb(t *testing.T) {
 		// passthrough — byte-identical in the identity phase.
 		{"update", []string{"x", "--set-metadata", "gc.outcome=pass", "--status", "closed"}, true, bdRoute},
 		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, bdPassthrough},
-		{"update", []string{"x", "--claim"}, true, bdPassthrough},
+		// claim: the pure-claim shape (optionally --json) now routes to the warm
+		// controller (POST /bead/{id}/claim); runBdShim gates on BEADS_ACTOR and
+		// falls back to real bd when the actor is unset or the backend can't claim.
+		{"update", []string{"x", "--claim"}, true, bdRoute},
+		{"update", []string{"x", "--claim", "--json"}, true, bdRoute},
+		// claim combined with another mutation has no atomic claim-route translation:
+		// passthrough to real bd (byte-identical in the identity phase).
+		{"update", []string{"x", "--claim", "--status", "closed"}, true, bdPassthrough},
 		{"reopen", []string{"x"}, true, bdRoute},
 		{"delete", []string{"x", "--force"}, true, bdRoute},
 	}

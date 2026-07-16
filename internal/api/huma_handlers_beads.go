@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -661,6 +662,48 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		return &IndexOutput[map[string]string]{
 			Index: s.latestIndex(),
 			Body:  map[string]string{"status": "assigned", "assignee": assignee},
+		}, nil
+	}
+	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")
+}
+
+// humaHandleBeadClaim is the Huma-typed handler for POST /v0/bead/{id}/claim.
+// It atomically claims the bead for input.Body.Actor on the controller's warm
+// store (the actor is conveyed in the request, not the controller's identity),
+// so worker agents can claim through the controller instead of dialing remote
+// Dolt directly. A lost race is a 200 with claimed=false carrying the current
+// holder; a backend that cannot claim on behalf of an actor is a 501 the shim
+// falls back on.
+func (s *Server) humaHandleBeadClaim(_ context.Context, input *BeadClaimInput) (*IndexOutput[BeadClaimResult], error) {
+	id := input.ID
+	actor := strings.TrimSpace(input.Body.Actor)
+	if actor == "" {
+		return nil, apierr.InvalidRequest.Msg("claim requires a non-empty actor")
+	}
+	for _, store := range s.beadStoresForID(id) {
+		if _, err := store.Get(id); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+		claimer, ok := store.(beads.ActorClaimer)
+		if !ok {
+			return nil, apierr.NotImplemented.Msg("bead store cannot claim on behalf of an actor")
+		}
+		claimed, won, err := claimer.ClaimAs(id, actor)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			if errors.Is(err, beads.ErrActorClaimUnsupported) {
+				return nil, apierr.NotImplemented.Msg("bead store cannot claim on behalf of an actor")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+		return &IndexOutput[BeadClaimResult]{
+			Index: s.latestIndex(),
+			Body:  BeadClaimResult{Claimed: won, Bead: claimed},
 		}, nil
 	}
 	return nil, apierr.BeadNotFound.Msg("bead " + id + " not found")

@@ -30,6 +30,7 @@ type MemStore struct {
 }
 
 var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
+var _ ActorClaimer = (*MemStore)(nil)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {
@@ -214,6 +215,34 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// ClaimAs atomically claims id for actor. See beads.ActorClaimer.
+func (m *MemStore) ClaimAs(id, actor string) (Bead, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID != id {
+			continue
+		}
+		if m.beads[i].Status == "closed" {
+			return cloneBead(m.beads[i]), false, nil
+		}
+		if held := m.beads[i].Assignee; held != "" && held != actor {
+			return cloneBead(m.beads[i]), false, nil
+		}
+		// Claimable (open/unassigned, or an idempotent self-claim). Only bump
+		// the revision when something actually changes, so a repeated self-claim
+		// is a true no-op.
+		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != actor {
+			m.beads[i].Status = "in_progress"
+			m.beads[i].Assignee = actor
+			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].Revision++
+		}
+		return cloneBead(m.beads[i]), true, nil
+	}
+	return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
 }
 
 // Close sets a bead's status to "closed". Returns a wrapped ErrNotFound if

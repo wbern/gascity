@@ -257,6 +257,7 @@ func WithConnMaxIdleTime(d time.Duration) NativeDoltStoreOption {
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ ActorClaimer                  = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
@@ -1246,6 +1247,67 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, err
 	}
 	return released, nil
+}
+
+// ClaimAs atomically claims a bead for actor on the native store's warm
+// connection. See beads.ActorClaimer. It is wrapped in withOpRetry so a
+// transient managed-Dolt rebind retries the whole claim; the idempotent
+// self-claim (already held by actor) makes that replay safe. The check-and-set
+// runs inside a single RunInTransaction, mirroring ReleaseIfCurrent's
+// conditional-release in the acquire direction.
+func (s *NativeDoltStore) ClaimAs(id, actor string) (Bead, bool, error) {
+	var claimed Bead
+	var won bool
+	err := s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
+		claimed, won = Bead{}, false
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: claim bead %s for %s", id, actor), func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
+			}
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			// Not claimable: closed, or already held by another actor. Surface
+			// the current bead so the caller can report the winning holder.
+			if issue.Status == beadslib.StatusClosed || (issue.Assignee != "" && issue.Assignee != actor) {
+				b, err := beadFromNativeIssue(issue)
+				if err != nil {
+					return err
+				}
+				claimed, won = b, false
+				return nil
+			}
+			// Claimable (open/unassigned, or an idempotent self-claim). Only
+			// write when something actually changes, so a repeated self-claim is
+			// a true no-op that still returns ok=true.
+			if issue.Status != beadslib.StatusInProgress || issue.Assignee != actor {
+				if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
+					"status":   "in_progress",
+					"assignee": actor,
+				}, s.actor); err != nil {
+					return nativeStoreError(id, err)
+				}
+				issue, err = tx.GetIssue(ctx, id)
+				if err != nil {
+					return nativeStoreError(id, err)
+				}
+				if issue == nil {
+					return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+				}
+			}
+			b, err := beadFromNativeIssue(issue)
+			if err != nil {
+				return err
+			}
+			claimed, won = b, true
+			return nil
+		})
+	})
+	if err != nil {
+		return Bead{}, false, err
+	}
+	return claimed, won, nil
 }
 
 // Close sets a bead's status to closed through the upstream beads storage layer.

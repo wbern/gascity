@@ -1,9 +1,31 @@
 package beads
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 )
+
+// TestParseBDMutationBeadParsesMarshaledBead proves the bd-shim claim route's
+// output — a JSON array of marshaled beads.Bead, exactly what writeReadyJSON
+// emits — round-trips through parseBDMutationBead, the parser gc hook's
+// BdStore.Claim uses to consume `bd update --claim --json`. This is the fidelity
+// guarantee that a warm-routed claim is not misread as a claim failure.
+func TestParseBDMutationBeadParsesMarshaledBead(t *testing.T) {
+	want := Bead{ID: "gcg-2", Title: "review", Status: "in_progress", Type: "task", Assignee: "reviewer-1"}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode([]Bead{want}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := parseBDMutationBead("bd claim", buf.Bytes())
+	if err != nil {
+		t.Fatalf("parseBDMutationBead: %v", err)
+	}
+	if got.ID != want.ID || got.Status != want.Status || got.Assignee != want.Assignee || got.Type != want.Type {
+		t.Fatalf("parsed bead = %+v, want %+v", got, want)
+	}
+}
 
 // TestIsBdTransientWriteError pins the write-retry classifier's needle set.
 // A bd backed by sqlite (modernc.org/sqlite) surfaces

@@ -182,6 +182,54 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return true, nil
 }
 
+// ClaimAs atomically claims a bead for actor through the backing store and
+// refreshes the cache only when the claim succeeds. It is the write-through
+// counterpart of ReleaseIfCurrent for the claim (acquire) direction, so a claim
+// routed through the controller keeps the warm cache and its observers
+// coherent and fires bead.updated exactly like a direct Update would.
+func (c *CachingStore) ClaimAs(id, actor string) (Bead, bool, error) {
+	claimer, ok := c.backing.(ActorClaimer)
+	if !ok {
+		return Bead{}, false, ErrActorClaimUnsupported
+	}
+	claimed, won, err := claimer.ClaimAs(id, actor)
+	if err != nil || !won {
+		return claimed, won, err
+	}
+
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after claim-as")
+	var updated Bead
+	c.mu.Lock()
+	c.noteLocalMutationLocked(id)
+	if refreshed {
+		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			depsMode:   depsFromFields,
+			seqMode:    seqKeep,
+			clearDirty: true,
+		})
+		updated = cloneBead(fresh)
+	} else {
+		// Refresh read failed: adopt the authoritative bead the store returned
+		// from the claim itself rather than serving a stale cached row.
+		c.absorbFreshLocked(id, claimed, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: false,
+		})
+		c.markDirtyLocked(id)
+		updated = cloneBead(claimed)
+	}
+	// A claim flips status open->in_progress, which can change dependents'
+	// readiness projection, so clear it as Update/ReleaseIfCurrent do.
+	c.clearDependentReadyProjectionsLocked(id)
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
+	c.mu.Unlock()
+
+	c.notifyChange("bead.updated", updated)
+	return updated, true, nil
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	// Idempotence: if the cached bead status is already "closed" AND the

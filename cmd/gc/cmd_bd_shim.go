@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -151,6 +152,33 @@ var bdUpdateFlagNeedsValue = map[string]bool{
 	"--parent":       true,
 }
 
+// bdUpdateClaimShape reports whether a `bd update` arg list is the pure-claim
+// shape the shim routes to the controller's atomic claim endpoint: it carries
+// --claim and no other flag except --json (the id positional is allowed).
+// A claim combined with any other mutation flag has no atomic claim-route
+// translation and is left to bdUpdateRoutable / passthrough.
+func bdUpdateClaimShape(args []string) bool {
+	sawClaim := false
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // the id positional
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		switch name {
+		case "--claim":
+			sawClaim = true
+		case "--json":
+			// allowed alongside --claim
+		default:
+			return false
+		}
+	}
+	return sawClaim
+}
+
 // bdUpdateRoutable reports whether a `bd update` arg list uses only flags that
 // map onto beads.UpdateOpts, so the shim can serve it in-process.
 func bdUpdateRoutable(args []string) bool {
@@ -284,6 +312,12 @@ func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDispo
 				return bdPassthrough
 			}
 		case "update":
+			// The pure-claim shape routes to the atomic claim endpoint; the
+			// actor gate and fallback live in runBdShim (env-dependent, kept
+			// out of this pure classifier).
+			if bdUpdateClaimShape(args) {
+				return bdRoute
+			}
 			if !bdUpdateRoutable(args) {
 				return bdPassthrough
 			}
@@ -1008,8 +1042,36 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	verb, verbArgs := splitBdGlobalFlags(bdArgs)
+	passthrough := func() int {
+		return passthroughRealBd(cfg, cityPath, rigName, cityName, bdArgs, stdin, stdout, stderr)
+	}
 	switch classifyBdShimVerb(verb, verbArgs, graphStoreSQLiteEnabled(cfg)) {
 	case bdRoute:
+		// The pure-claim shape is routed to the atomic claim endpoint, but it
+		// carries its own fallbacks: it needs an actor to convey, and a claim
+		// must still work when the controller is down or its backend cannot
+		// claim on behalf of an actor. In those cases fall back to the real bd
+		// (correctness preserved; just not warm) rather than hard-failing.
+		if verb == "update" && bdUpdateClaimShape(verbArgs) {
+			actor := bdShimClaimActor()
+			if actor == "" {
+				return passthrough()
+			}
+			id, ok := firstBdPositional(verbArgs)
+			if !ok {
+				fmt.Fprintln(stderr, "gc bd-shim: usage: update <id> --claim") //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			client := bdShimAPIClient(cityPath)
+			if client == nil {
+				return passthrough()
+			}
+			if code, handled := dispatchBdShimClaim(client, id, actor, stdout, stderr); handled {
+				return code
+			}
+			// Backend cannot claim on behalf of an actor (501): fall back.
+			return passthrough()
+		}
 		// Pure-HTTP: route the verb through the controller's HTTP API — the
 		// controller owns the store (Router + graph SQLite) and every worker is a
 		// thin client. There is no in-process Router fallback; a routed verb errors
@@ -1026,23 +1088,62 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd-shim: %q reads or mutates graph-class beads but is not yet routed through the graph store; refusing to pass it to the work-only bd while graph_store=sqlite is active (would silently miss graph beads — see graph-store-rollout-plan.md §X2)\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	default: // bdPassthrough
-		// Resolve the store scope only for passthrough: routed verbs reach the bead
-		// through the controller's city-scoped API (which federates across stores),
-		// so they never need the local scope target. Scope resolution can cost a
-		// remote-Dolt owner lookup for id-bearing verbs, so paying it only when the
-		// verb actually execs the real bd keeps routed reads/writes off that tax.
-		target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
-		if err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		env, err := bdCommandEnv(cityPath, cfg, target)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return execRealBd(bdArgs, target.ScopeRoot, workQueryEnvForDir(env, target.ScopeRoot), stdin, stdout, stderr)
+		return passthrough()
 	}
+}
+
+// passthroughRealBd resolves the local store scope and execs the real bd binary
+// for a passthrough op. Scope resolution is paid only here — routed verbs reach
+// the bead through the controller's city-scoped API (which federates across
+// stores) and never need the local scope target, and scope resolution can cost
+// a remote-Dolt owner lookup for id-bearing verbs.
+func passthroughRealBd(cfg *config.City, cityPath, rigName, cityName string, bdArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return execRealBd(bdArgs, target.ScopeRoot, workQueryEnvForDir(env, target.ScopeRoot), stdin, stdout, stderr)
+}
+
+// bdShimClaimActor resolves the actor a routed claim is made on behalf of, from
+// the BEADS_ACTOR env the caller (the agent, or gc hook's claim BdStore) sets.
+// An empty actor means the shim cannot faithfully route the claim and must fall
+// back to the real bd.
+func bdShimClaimActor() string {
+	return strings.TrimSpace(os.Getenv("BEADS_ACTOR"))
+}
+
+// dispatchBdShimClaim routes an atomic claim to the controller and reproduces
+// the `bd update <id> --claim --json` output contract its caller (BdStore.Claim)
+// parses: on success it prints the claimed bead JSON (exit 0); on a lost race it
+// prints an "already claimed by <holder>" message (exit 1) that
+// isBdClaimConflictMessage matches; on not-found it prints a "not found" message
+// (exit 1) that isBdNotFound matches. handled=false signals the caller to fall
+// back to the real bd (the backend cannot claim on behalf of an actor).
+func dispatchBdShimClaim(client *api.Client, id, actor string, stdout, stderr io.Writer) (code int, handled bool) {
+	bead, claimed, err := client.ClaimBead(id, actor)
+	if err != nil {
+		if errors.Is(err, api.ErrClaimRouteUnsupported) {
+			return 0, false
+		}
+		fmt.Fprintf(stderr, "gc bd-shim: claiming %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	if !claimed {
+		holder := strings.TrimSpace(bead.Assignee)
+		if holder == "" {
+			holder = "another agent"
+		}
+		fmt.Fprintf(stderr, "gc bd-shim: bead %s already claimed by %s\n", id, holder) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	return writeReadyJSON([]beads.Bead{bead}, stdout, stderr), true
 }
 
 // isBdShimInvocation reports whether this gc binary was invoked through the bd

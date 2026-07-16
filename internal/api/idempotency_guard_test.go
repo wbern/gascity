@@ -56,6 +56,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-agent-by-base-by-action":        true,
 	"post-v0-city-by-city-name-agent-by-dir-by-base-by-action": true,
 	"post-v0-city-by-city-name-bead-by-id-assign":              true,
+	"post-v0-city-by-city-name-bead-by-id-claim":               true,
 	"post-v0-city-by-city-name-bead-by-id-close":               true,
 	"post-v0-city-by-city-name-bead-by-id-reopen":              true,
 	"post-v0-city-by-city-name-bead-by-id-update":              true,

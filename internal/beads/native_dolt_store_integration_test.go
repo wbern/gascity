@@ -224,3 +224,73 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestNativeDoltStoreClaimAsRealBackend exercises ClaimAs against a real Dolt
+// backend, proving the atomic check-and-set and the in-transaction re-read
+// (read-your-writes within RunInTransaction) that the fake-storage unit test
+// cannot guarantee. This is the warm-controller claim path the reviewer pool
+// relies on.
+func TestNativeDoltStoreClaimAsRealBackend(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-integration", "gc")
+
+	bead, err := store.Create(Bead{Title: "review work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Claim an open bead: the returned bead must reflect the in-tx write.
+	claimed, won, err := store.ClaimAs(bead.ID, "reviewer-1")
+	if err != nil {
+		t.Fatalf("ClaimAs: %v", err)
+	}
+	if !won {
+		t.Fatal("ClaimAs did not win an open bead")
+	}
+	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+		t.Fatalf("claimed bead = %+v, want in_progress and reviewer-1 (in-tx re-read)", claimed)
+	}
+
+	// Persisted state matches.
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after claim: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
+		t.Fatalf("persisted bead = %+v, want in_progress and reviewer-1", got)
+	}
+
+	// Idempotent self re-claim.
+	if _, won, err := store.ClaimAs(bead.ID, "reviewer-1"); err != nil || !won {
+		t.Fatalf("self re-claim won=%v err=%v, want true/nil", won, err)
+	}
+
+	// A second actor loses the race and leaves the bead untouched.
+	current, won, err := store.ClaimAs(bead.ID, "reviewer-2")
+	if err != nil {
+		t.Fatalf("ClaimAs conflict: %v", err)
+	}
+	if won {
+		t.Fatal("ClaimAs stole a bead held by another actor")
+	}
+	if current.Assignee != "reviewer-1" {
+		t.Fatalf("conflict bead = %+v, want current holder reviewer-1", current)
+	}
+
+	// Missing bead surfaces ErrNotFound.
+	if _, won, err := store.ClaimAs("gc-missing", "reviewer-1"); !errors.Is(err, ErrNotFound) || won {
+		t.Fatalf("ClaimAs(missing) = won %v err %v, want false/ErrNotFound", won, err)
+	}
+}

@@ -141,6 +141,28 @@ type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
+// ActorClaimer is implemented by stores that can atomically claim a bead ON
+// BEHALF OF an explicit actor, rather than the store's own construction-time
+// identity. It is the conveyance the controller needs to claim for a calling
+// agent when the claim is routed through the HTTP API (the agent's actor
+// travels in the request, not in the controller's env). Discovered like
+// ConditionalAssignmentReleaser: type-assert on the resolved store, never on a
+// wrapper.
+type ActorClaimer interface {
+	// ClaimAs atomically claims id for actor. When the bead is claimable —
+	// open/unassigned, or already held by actor (an idempotent self-claim) —
+	// it sets assignee=actor and status=in_progress and returns
+	// (claimed, true, nil). When another actor already holds it, or it is
+	// closed, it makes no change and returns (current, false, nil). When id
+	// does not exist it returns (Bead{}, false, ErrNotFound).
+	ClaimAs(id, actor string) (Bead, bool, error)
+}
+
+// ErrActorClaimUnsupported reports that a store cannot claim on behalf of an
+// explicit actor (it is not an ActorClaimer). Callers routing a claim through
+// such a store must fall back to a direct claim path.
+var ErrActorClaimUnsupported = errors.New("actor claim unsupported")
+
 // ConditionalWriter is implemented by stores that can apply a write only when
 // the caller's snapshot of the bead is still current. It is an optional store
 // capability, discovered like ConditionalAssignmentReleaser: type-assert on the
