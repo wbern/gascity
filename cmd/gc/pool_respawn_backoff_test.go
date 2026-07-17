@@ -16,6 +16,13 @@ func testRespawnBackoffConfig() poolRespawnBackoffConfig {
 	return poolRespawnBackoffConfig{base: 5 * time.Second, max: 60 * time.Second}
 }
 
+// armed reports whether a template is currently backed off (window unelapsed).
+// The tracker exposes windowRemaining (magnitude) and activeTemplates (the
+// production query); this is a readable boolean shorthand for the tests.
+func armed(tr *poolRespawnBackoffTracker, template string, now time.Time) bool {
+	return tr.windowRemaining(template, now) > 0
+}
+
 func TestPoolRespawnBackoff_DisabledWhenBaseZero(t *testing.T) {
 	tr := newPoolRespawnBackoffTracker(poolRespawnBackoffConfig{base: 0, max: time.Minute})
 	now := time.Unix(1_000_000, 0)
@@ -23,7 +30,7 @@ func TestPoolRespawnBackoff_DisabledWhenBaseZero(t *testing.T) {
 	tr.observeNoClaimDrain("crm/reviewer", "s-1", now)
 	tr.observeNoClaimDrain("crm/reviewer", "s-2", now)
 
-	if tr.backedOff("crm/reviewer", now) {
+	if armed(tr,"crm/reviewer", now) {
 		t.Fatalf("base==0 must fully disable backoff, but template reported backed off")
 	}
 	if got := tr.activeTemplates(now); len(got) != 0 {
@@ -38,19 +45,19 @@ func TestPoolRespawnBackoff_FirstDrainArmsBaseWindow(t *testing.T) {
 	tr.observeNoClaimDrain("crm/reviewer", "s-1", now)
 
 	// Backed off immediately after the first no-claim drain.
-	if !tr.backedOff("crm/reviewer", now) {
+	if !armed(tr,"crm/reviewer", now) {
 		t.Fatalf("first no-claim drain must arm the backoff window")
 	}
 	// A different template is unaffected — de-correlation, not global.
-	if tr.backedOff("crm/other", now) {
+	if armed(tr,"crm/other", now) {
 		t.Fatalf("untouched template must not be backed off")
 	}
 	// The window is at least the base and released once it elapses.
-	if !tr.backedOff("crm/reviewer", now.Add(4*time.Second)) {
+	if !armed(tr,"crm/reviewer", now.Add(4*time.Second)) {
 		t.Fatalf("window must still be active within the base duration")
 	}
 	// Well past the max cap the window has certainly elapsed.
-	if tr.backedOff("crm/reviewer", now.Add(10*time.Minute)) {
+	if armed(tr,"crm/reviewer", now.Add(10*time.Minute)) {
 		t.Fatalf("window must release after it elapses")
 	}
 }
@@ -156,6 +163,27 @@ func TestPoolRespawnBackoff_ThrottledStormDoesNotDecay(t *testing.T) {
 	}
 	if last < cfg.max {
 		t.Fatalf("throttled storm must stay pinned near the cap, got %s (cap %s)", last, cfg.max)
+	}
+}
+
+func TestPoolRespawnBackoff_ConfigurableResetQuiet(t *testing.T) {
+	// An explicit resetQuiet overrides the 2*max default. With a LONG resetQuiet,
+	// a gap that would decay under the default must NOT decay; the exponent holds.
+	cfg := testRespawnBackoffConfig() // base 5s, max 60s -> default resetQuiet 120s
+	cfg.resetQuiet = 30 * time.Minute
+	tr := newPoolRespawnBackoffTracker(cfg)
+	now := time.Unix(1_000_000, 0)
+
+	tr.observeNoClaimDrain("crm/reviewer", "s-1", now)
+	tr.observeNoClaimDrain("crm/reviewer", "s-2", now.Add(70*time.Second))
+	ramped := tr.windowRemaining("crm/reviewer", now.Add(70*time.Second))
+
+	// A 10-minute gap would decay under the 2*max=120s default, but is well under
+	// the configured 30m resetQuiet, so the exponent must keep climbing.
+	tr.observeNoClaimDrain("crm/reviewer", "s-3", now.Add(70*time.Second).Add(10*time.Minute))
+	after := tr.windowRemaining("crm/reviewer", now.Add(70*time.Second).Add(10*time.Minute))
+	if after < ramped {
+		t.Fatalf("configured long resetQuiet must prevent decay: ramped=%s after=%s", ramped, after)
 	}
 }
 

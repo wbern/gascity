@@ -3952,7 +3952,7 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 		stdout:        io.Discard,
 		stderr:        io.Discard,
 	}
-	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard, events.Discard)
 	cs := &controllerState{
 		cfg:           cfg,
 		sp:            firstRuntime,

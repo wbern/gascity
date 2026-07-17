@@ -39,6 +39,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
 	stderr io.Writer,
+	rec events.Recorder,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	// The respawn-backoff tracker is cross-tick state: constructed once here and
 	// captured by the closure so no-claim-drain history survives between ticks
@@ -53,7 +54,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		backedOff := applyPoolRespawnBackoffObservation(respawnBackoff, c, sessionBeads, time.Now())
+		backedOff := applyPoolRespawnBackoffObservation(respawnBackoff, c, sessionBeads, time.Now(), rec)
 		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr, backedOff)
 	}
 }
@@ -837,7 +838,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
@@ -846,6 +846,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		recorder = fr
 		eventProv = fr
 	}
+
+	// Built after the recorder so the respawn-backoff observation can emit its
+	// PoolRespawnBackoffArmed event through it.
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr, recorder)
 
 	// Pre-check container images once (fail fast before N serial starts).
 	if err := checkAgentImages(sp, cfg.Agents, stderr); err != nil {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -52,11 +53,27 @@ func TestPoolRespawnBackoff_ObserveSnapshotArmsGateWithMatchingKey(t *testing.T)
 
 	tr := newPoolRespawnBackoffTracker(poolRespawnBackoffConfig{})
 	now := time.Unix(1_000_000, 0)
-	backedOff := applyPoolRespawnBackoffObservation(tr, cfg, newSessionBeadSnapshot([]beads.Bead{drained}), now)
+	rec := &events.Fake{}
+	backedOff := applyPoolRespawnBackoffObservation(tr, cfg, newSessionBeadSnapshot([]beads.Bead{drained}), now, rec)
 
 	if !backedOff[template] {
 		t.Fatalf("observeSnapshot did not arm the gate for %q; got %v. The observe-side key "+
 			"(normalizedSessionTemplateInfo) must equal the gate-side key (QualifiedName).", template, backedOff)
+	}
+
+	// The arm must emit an observability event for correlation with breaker trips.
+	var armed *events.Event
+	for i := range rec.Events {
+		if rec.Events[i].Type == events.PoolRespawnBackoffArmed {
+			armed = &rec.Events[i]
+			break
+		}
+	}
+	if armed == nil {
+		t.Fatalf("no PoolRespawnBackoffArmed event emitted; got %d events", len(rec.Events))
+	}
+	if armed.Subject != template {
+		t.Fatalf("PoolRespawnBackoffArmed subject = %q, want template %q", armed.Subject, template)
 	}
 
 	// And the produced key must actually block a create when fed to the gate.

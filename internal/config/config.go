@@ -1595,6 +1595,15 @@ type SessionConfig struct {
 	// lets the decay fire mid-storm and the ramp sawtooths instead of holding at
 	// the cap (the storm stays bounded either way).
 	PoolRespawnBackoffMax string `toml:"pool_respawn_backoff_max,omitempty"`
+	// PoolRespawnBackoffResetQuiet is the no-new-drain gap after which a
+	// template's backoff exponent decays back to the base window (the storm is
+	// treated as over). Ignored when the base is unset. Defaults to 2*max. Tune
+	// it ABOVE a throttled storm's respawn interval — roughly (max + worktree
+	// checkout time) — so an ongoing storm never decays; only genuine recovery
+	// does. Exposed because the right value couples to your checkout time, which
+	// the default (2*max) only covers when max already exceeds checkout time.
+	// Duration string (e.g. "10m").
+	PoolRespawnBackoffResetQuiet string `toml:"pool_respawn_backoff_reset_quiet,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1745,6 +1754,26 @@ func (s *SessionConfig) PoolRespawnBackoffMaxDuration() time.Duration {
 		return base
 	}
 	return max
+}
+
+// PoolRespawnBackoffResetQuietDuration returns the decay quiet-gap after which
+// the backoff exponent resets to base. Only meaningful when the base is set;
+// defaults to 2*max, is never allowed below max (a decay faster than the cap
+// window would fire mid-storm), and is clamped to twice the ceiling so the
+// tracker's comparison math cannot overflow.
+func (s *SessionConfig) PoolRespawnBackoffResetQuietDuration() time.Duration {
+	max := s.PoolRespawnBackoffMaxDuration()
+	if max <= 0 {
+		return 0
+	}
+	q := durationOr(s.PoolRespawnBackoffResetQuiet, 2*max)
+	if q < max {
+		return max
+	}
+	if q > 2*PoolRespawnBackoffCeiling {
+		return 2 * PoolRespawnBackoffCeiling
+	}
+	return q
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.

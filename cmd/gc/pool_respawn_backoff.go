@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -16,13 +18,23 @@ import (
 // trigger work (upstream #3279 respawn storm). A base of zero disables the
 // mechanism entirely, so the feature lands dormant and is enabled by config.
 type poolRespawnBackoffConfig struct {
-	base time.Duration // first backoff window; 0 disables the mechanism
-	max  time.Duration // cap on the (pre-jitter) window
+	base       time.Duration // first backoff window; 0 disables the mechanism
+	max        time.Duration // cap on the (pre-jitter) window
+	resetQuiet time.Duration // no-new-drain gap after which the exponent decays; 0 => 2*max
 }
 
 // enabled reports whether the backoff mechanism is active.
 func (c poolRespawnBackoffConfig) enabled() bool {
 	return c.base > 0
+}
+
+// poolRespawnBackoffArm records that a no-claim drain armed or deepened a
+// template's backoff. observeSnapshot returns one per newly-counted drain so the
+// caller can emit a PoolRespawnBackoffArmed observability event.
+type poolRespawnBackoffArm struct {
+	template    string
+	consecutive int
+	window      time.Duration
 }
 
 // poolRespawnBackoffEntry is the per-template backoff state.
@@ -109,6 +121,9 @@ func (t *poolRespawnBackoffTracker) enabled() bool {
 // longer persists. This is why PoolRespawnBackoffMaxDuration documents that the
 // cap should exceed checkout time.
 func (t *poolRespawnBackoffTracker) resetQuiet() time.Duration {
+	if t.cfg.resetQuiet > 0 {
+		return t.cfg.resetQuiet
+	}
 	if t.cfg.max > 0 {
 		return 2 * t.cfg.max
 	}
@@ -129,17 +144,20 @@ func (t *poolRespawnBackoffTracker) resetQuiet() time.Duration {
 // pool reuses the same bead ID across wake/re-drain cycles, so repeated no-wake
 // drains on it count once and the exponent will not climb; that is harmless
 // because singletons reuse rather than fresh-create, so they do not storm.
-func (t *poolRespawnBackoffTracker) observeNoClaimDrain(template, sessionBeadID string, now time.Time) {
+// It returns the arm record when this drain armed or deepened the backoff (a
+// newly-counted bead), or nil when disabled, deduped, or invalid — so the caller
+// emits an observability event exactly once per real storm iteration.
+func (t *poolRespawnBackoffTracker) observeNoClaimDrain(template, sessionBeadID string, now time.Time) *poolRespawnBackoffArm {
 	if t == nil || template == "" || sessionBeadID == "" {
-		return
+		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.cfg.enabled() {
-		return
+		return nil
 	}
 	if t.seen[sessionBeadID] {
-		return
+		return nil
 	}
 	t.seen[sessionBeadID] = true
 	entry := t.entries[template]
@@ -151,8 +169,10 @@ func (t *poolRespawnBackoffTracker) observeNoClaimDrain(template, sessionBeadID 
 		entry.consecutive = 0
 	}
 	entry.consecutive++
-	entry.until = now.Add(t.window(template, entry.consecutive))
+	window := t.window(template, entry.consecutive)
+	entry.until = now.Add(window)
 	entry.lastDrainAt = now
+	return &poolRespawnBackoffArm{template: template, consecutive: entry.consecutive, window: window}
 }
 
 // forgetAbsentDrains prunes the seen-set down to session bead IDs still present
@@ -177,10 +197,11 @@ func (t *poolRespawnBackoffTracker) forgetAbsentDrains(liveIDs map[string]bool) 
 // seen-set down to the still-open session beads. Callers invoke it once per
 // desired-state build, before consulting activeTemplates, so a drain observed
 // this build immediately gates a respawn in the same build.
-func (t *poolRespawnBackoffTracker) observeSnapshot(cfg *config.City, sessionBeads *sessionBeadSnapshot, now time.Time) {
+func (t *poolRespawnBackoffTracker) observeSnapshot(cfg *config.City, sessionBeads *sessionBeadSnapshot, now time.Time) []poolRespawnBackoffArm {
 	if t == nil || sessionBeads == nil || !t.enabled() {
-		return
+		return nil
 	}
+	var arms []poolRespawnBackoffArm
 	live := make(map[string]bool)
 	for _, info := range sessionBeads.OpenInfos() {
 		if info.ID == "" || info.Closed {
@@ -202,24 +223,12 @@ func (t *poolRespawnBackoffTracker) observeSnapshot(cfg *config.City, sessionBea
 		if template == "" {
 			continue
 		}
-		t.observeNoClaimDrain(template, info.ID, now)
+		if arm := t.observeNoClaimDrain(template, info.ID, now); arm != nil {
+			arms = append(arms, *arm)
+		}
 	}
 	t.forgetAbsentDrains(live)
-}
-
-// backedOff reports whether fresh pool creates for template must be deferred at
-// the given instant.
-func (t *poolRespawnBackoffTracker) backedOff(template string, now time.Time) bool {
-	if t == nil {
-		return false
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.cfg.enabled() {
-		return false
-	}
-	entry := t.entries[template]
-	return entry != nil && now.Before(entry.until)
+	return arms
 }
 
 // windowRemaining returns how long template stays deferred from now, or 0 when
@@ -271,24 +280,51 @@ func poolRespawnBackoffConfigFromCity(cfg *config.City) poolRespawnBackoffConfig
 		return poolRespawnBackoffConfig{}
 	}
 	return poolRespawnBackoffConfig{
-		base: cfg.Session.PoolRespawnBackoffBaseDuration(),
-		max:  cfg.Session.PoolRespawnBackoffMaxDuration(),
+		base:       cfg.Session.PoolRespawnBackoffBaseDuration(),
+		max:        cfg.Session.PoolRespawnBackoffMaxDuration(),
+		resetQuiet: cfg.Session.PoolRespawnBackoffResetQuietDuration(),
 	}
 }
 
 // applyPoolRespawnBackoffObservation refreshes the tracker's config from the live
 // city config, feeds it the current session-bead snapshot (recording no-claim
-// drains), and returns the set of templates currently under backoff for the
-// desired-state build's fresh-create gate. Returns nil (gate disabled) when the
-// tracker is nil or the mechanism is not configured. now is the observation
-// instant; callers pass the wall clock in production.
-func applyPoolRespawnBackoffObservation(tr *poolRespawnBackoffTracker, cfg *config.City, sessionBeads *sessionBeadSnapshot, now time.Time) map[string]bool {
+// drains), emits a PoolRespawnBackoffArmed event for each drain that armed or
+// deepened the backoff, and returns the set of templates currently under backoff
+// for the desired-state build's fresh-create gate. Returns nil (gate disabled)
+// when the tracker is nil or the mechanism is not configured. now is the
+// observation instant; callers pass the wall clock in production. rec may be nil.
+func applyPoolRespawnBackoffObservation(tr *poolRespawnBackoffTracker, cfg *config.City, sessionBeads *sessionBeadSnapshot, now time.Time, rec events.Recorder) map[string]bool {
 	if tr == nil {
 		return nil
 	}
 	tr.setConfig(poolRespawnBackoffConfigFromCity(cfg))
-	tr.observeSnapshot(cfg, sessionBeads, now)
+	for _, arm := range tr.observeSnapshot(cfg, sessionBeads, now) {
+		emitPoolRespawnBackoffArmed(rec, arm)
+	}
 	return tr.activeTemplates(now)
+}
+
+// emitPoolRespawnBackoffArmed records a PoolRespawnBackoffArmed observability
+// event for a single arm/deepen. No-op when rec is nil. The event is delivered
+// via the custom-event envelope (the type is intentionally omitted from
+// events.KnownEventTypes; the typed SSE projection is a follow-up).
+func emitPoolRespawnBackoffArmed(rec events.Recorder, arm poolRespawnBackoffArm) {
+	if rec == nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{ //nolint:errcheck // best-effort observability
+		"template":    arm.template,
+		"consecutive": arm.consecutive,
+		"window_ms":   arm.window.Milliseconds(),
+	})
+	rec.Record(events.Event{
+		Type:    events.PoolRespawnBackoffArmed,
+		Ts:      time.Now().UTC(),
+		Actor:   "gc",
+		Subject: arm.template,
+		Message: fmt.Sprintf("pool respawn backoff armed: template=%s consecutive=%d window=%s", arm.template, arm.consecutive, arm.window),
+		Payload: payload,
+	})
 }
 
 // window computes the backoff duration for the nth consecutive no-claim drain:

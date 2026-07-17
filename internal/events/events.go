@@ -237,6 +237,24 @@ const (
 	// follow-up.
 	SessionStartStalled = "session.start_stalled"
 
+	// PoolRespawnBackoffArmed fires when a pool template's respawn backoff arms
+	// or deepens — i.e. a freshly-spawned generic session drained
+	// "no-wake-reason" (it could not claim its routed work, e.g. the bead store's
+	// circuit breaker is tripped) and the reconciler deferred its next respawn.
+	// Carries the template, the consecutive no-claim-drain count (storm depth),
+	// and the backoff window. Low-volume: once per storm iteration, not per tick.
+	// It makes the otherwise-stderr-only backoff observable so an operator can see
+	// the storm and correlate it with store-breaker trips (the correlating
+	// store-side event is gcw-aknw). Per-template; the envelope Subject carries
+	// the template. (#3279-shaped store-claim respawn storm, gcw-3gif)
+	//
+	// Like ProviderHealthGateAlert and SessionStartStalled, this is intentionally
+	// omitted from KnownEventTypes for now: its typed SSE payload is not yet
+	// registered in internal/api, so subscribers receive it via the custom-event
+	// envelope. Adding the typed projection (and KnownEventTypes membership) is a
+	// follow-up, tracked alongside the store-side breaker event (gcw-aknw).
+	PoolRespawnBackoffArmed = "pool.respawn_backoff_armed"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -297,11 +315,12 @@ var KnownEventTypes = []string{
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
-	// follow-up that adds the full SSE projection). Until then, subscribers
-	// receive it via the custom-event envelope.
+	// ProviderHealthGateAlert, SessionStartStalled, and PoolRespawnBackoffArmed
+	// are intentionally omitted from KnownEventTypes. They are emitted by the
+	// reconciler but their typed SSE payloads are not yet registered in
+	// internal/api (the payload registration lives in a follow-up that adds the
+	// full SSE projection). Until then, subscribers receive them via the
+	// custom-event envelope.
 }
 
 // Event is a single recorded occurrence in the system.
