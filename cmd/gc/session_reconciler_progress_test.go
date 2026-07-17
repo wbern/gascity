@@ -522,10 +522,13 @@ func TestReconcileSessionBeads_ClaimHolderStallFailsSafeOnClaimCheckError(t *tes
 // The claim-less table runs with only ProgressStallTimeout set, so every safety
 // case there exercises the path with the claim-holder recycler switched OFF —
 // leaving the exact guarantees the new predicate re-opens untested. Each case
-// here seeds a real in-progress claim (so holdsClaim would be true and the
-// claim-holder recycler would fire absent the protection), enables only the
-// claim-holder recycler, applies one protective condition, and asserts the holder
-// is left running.
+// here seeds a real in-progress claim, enables only the claim-holder recycler,
+// applies one protective condition, and asserts the holder is left running. For
+// the non-exempt cases (provider-red, recent/unknown activity, sub-floor
+// threshold) the seeded claim resolves holdsClaim=true, so the recycler would
+// fire absent the protection; for the exempt cases (attached, startup lease,
+// observation-error) the claim check is short-circuited and the guarantee is the
+// exemption itself.
 func TestReconcileSessionBeads_ClaimHolderStallDoesNotRecycleProtectedHolder(t *testing.T) {
 	tests := []struct {
 		name      string

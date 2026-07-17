@@ -2363,7 +2363,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// holders) but inverts the claim-holder recycler, whose trigger IS
 				// holdsClaim — a store-scoped error would then recycle every stale
 				// holder in the tick, discarding exactly the in-progress work the
-				// failed check could not rule out (#4012 review). claimUnknown
+				// failed check could not rule out (#4137 review). claimUnknown
 				// suppresses BOTH recyclers instead: the claim-less call treats
 				// unknown as held (holdsClaim || claimUnknown, its prior
 				// conservative behavior), and the claim-holder call requires a
