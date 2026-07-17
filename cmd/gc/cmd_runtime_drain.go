@@ -683,16 +683,57 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sn, command st
 // Tests that swap it MUST NOT call t.Parallel().
 var drainAckPokeController = pokeController
 
+// drainAckMutationTimeout bounds the drain-ack metadata write so a stalled
+// remote store cannot wedge `gc runtime drain-ack` (and the `gc hook
+// --drain-ack` no-work path that calls it) indefinitely. Its siblings on the
+// hook hot path are already bounded (work query 60s, claim 10s); drain-ack was
+// the one unbounded store write, so a slow store could hang the whole hook
+// until an external timeout killed it. On timeout the ack is left unset and the
+// controller re-drives the drain on its next tick (NDI), rather than blocking.
+var drainAckMutationTimeout = 10 * time.Second
+
+// errDrainAckTimeout marks a drain-ack write abandoned after
+// drainAckMutationTimeout, distinguishing a slow store from a real failure.
+var errDrainAckTimeout = errors.New("drain-ack write timed out")
+
+// setDrainAckBounded runs dops.setDrainAck under drainAckMutationTimeout. A
+// stalled store write is abandoned — its goroutine drains into the buffered
+// channel and exits when the write finally returns — so the caller is never
+// blocked past the budget.
+func setDrainAckBounded(dops drainOps, sn string) error {
+	done := make(chan error, 1)
+	go func() { done <- dops.setDrainAck(sn) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(drainAckMutationTimeout):
+		return errDrainAckTimeout
+	}
+}
+
 // doRuntimeDrainAck sets the drain-ack flag on the session, then pokes the
 // controller so the reconciler observes the drained state immediately instead
 // of waiting for its next patrol tick.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if err := dops.setDrainAck(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	timedOut := false
+	if err := setDrainAckBounded(dops, sn); err != nil {
+		if errors.Is(err, errDrainAckTimeout) {
+			// Best-effort: a stalled store must not wedge the hook. Leave the ack
+			// unset, warn, and fall through to poke — the controller re-drives the
+			// drain on its next tick since GC_DRAIN_ACK was not written (NDI).
+			timedOut = true
+			fmt.Fprintf(stderr, "gc runtime drain-ack: timed out after %s writing drain-ack for %s; controller will re-drive on its next tick\n", drainAckMutationTimeout, sn) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if err := drainAckPokeController(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	status := "acknowledged"
+	if timedOut {
+		status = "deferred"
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
@@ -702,13 +743,17 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutpu
 			Action:        "drain-ack",
 			Session:       sn,
 			Target:        targetName,
-			Status:        "acknowledged",
+			Status:        status,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return 0
 	}
-	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
+	if timedOut {
+		fmt.Fprintln(stdout, "Drain-ack deferred (store slow); controller poked to re-drive.") //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }

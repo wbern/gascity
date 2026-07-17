@@ -1681,3 +1681,50 @@ func TestFindAgentByNameNoMatch(t *testing.T) {
 		t.Error("expected no match for nonexistent agent")
 	}
 }
+
+// blockingDrainOps embeds fakeDrainOps but blocks setDrainAck until release is
+// closed, simulating a stalled remote-store metadata write (gcw-gbfn).
+type blockingDrainOps struct {
+	*fakeDrainOps
+	release chan struct{}
+}
+
+func (b *blockingDrainOps) setDrainAck(sessionName string) error {
+	<-b.release
+	return b.fakeDrainOps.setDrainAck(sessionName)
+}
+
+// TestDoRuntimeDrainAckTimesOutInsteadOfWedging pins gcw-gbfn: a stalled
+// drain-ack store write must not hang the hook. doRuntimeDrainAck must return
+// within drainAckMutationTimeout (best-effort, code 0) instead of blocking
+// indefinitely on the store — otherwise `gc hook --claim --drain-ack` wedges on
+// its no-work path and the pool session respawn-churns without progressing.
+func TestDoRuntimeDrainAckTimesOutInsteadOfWedging(t *testing.T) {
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = oldPoke })
+
+	oldTO := drainAckMutationTimeout
+	drainAckMutationTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { drainAckMutationTimeout = oldTO })
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	dops := &blockingDrainOps{fakeDrainOps: newFakeDrainOps(), release: release}
+
+	done := make(chan int, 1)
+	var stdout, stderr bytes.Buffer
+	go func() { done <- doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr) }()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 (a timed-out drain-ack is best-effort, not a hard failure); stderr: %s", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeDrainAck did not return within 2s: a stalled setDrainAck wedged the hook (drain-ack has no timeout)")
+	}
+	unblock()
+}
