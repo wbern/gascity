@@ -465,6 +465,187 @@ func TestReconcileSessionBeads_ClaimHolderStallRespectsLargerThresholdWithBothSe
 	}
 }
 
+// seedInProgressClaim creates an in-progress bead assigned to sessionName, so
+// the reconciler's assigned-work check resolves holdsClaim=true. It lets a
+// claim-holder-recycler test prove that a protective condition wins over a real
+// held claim (rather than over an incidentally claim-less session).
+func seedInProgressClaim(t *testing.T, env *restartRequestTestEnv, sessionName string) {
+	t.Helper()
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+}
+
+// TestReconcileSessionBeads_ClaimHolderStallFailsSafeOnClaimCheckError is the
+// regression guard for the #4137 review blocker: when the assigned-work query
+// errors, the reconciler cannot tell whether the session holds a claim, so it
+// must recycle via NEITHER recycler. Before the fix the error was encoded as
+// holdsClaim=true — inert for the claim-less recycler (which skips holders) but
+// the TRIGGER for the claim-holder recycler. The error is store-scoped, so one
+// Dolt blip handed the same error to every session in the tick and mass-recycled
+// every stale holder in the city, discarding exactly the in-flight work the
+// failed check could not rule out. The claim state is unknown, so the holder
+// must be left running.
+func TestReconcileSessionBeads_ClaimHolderStallFailsSafeOnClaimCheckError(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""       // claim-less recycler OFF
+	env.cfg.Session.ClaimHolderStallTimeout = "20m" // claim-holder recycler ON
+	env.store = &assignedWorkListErrorStore{Store: env.store, err: errors.New("assigned work query failed")}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled; an unreadable claim check must not recycle a possible holder", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+	}
+	if strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want no claim-holder-stalled diagnostic", env.stderr.String())
+	}
+	if !strings.Contains(env.stderr.String(), "checking assigned work before progress-stall recycle") {
+		t.Fatalf("stderr = %q, want claim-check-error diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_ClaimHolderStallDoesNotRecycleProtectedHolder is the
+// claim-holder-enabled mirror of ProgressStallDoesNotRecycleExemptOrSafeSessions.
+// The claim-less table runs with only ProgressStallTimeout set, so every safety
+// case there exercises the path with the claim-holder recycler switched OFF —
+// leaving the exact guarantees the new predicate re-opens untested. Each case
+// here seeds a real in-progress claim (so holdsClaim would be true and the
+// claim-holder recycler would fire absent the protection), enables only the
+// claim-holder recycler, applies one protective condition, and asserts the holder
+// is left running.
+func TestReconcileSessionBeads_ClaimHolderStallDoesNotRecycleProtectedHolder(t *testing.T) {
+	tests := []struct {
+		name      string
+		cityPath  func(t *testing.T) string
+		configure func(t *testing.T, env *restartRequestTestEnv, session *beads.Bead, sessionName string)
+		provider  func(env *restartRequestTestEnv) runtime.Provider
+		wantLog   string
+	}{
+		{
+			name: "attached session",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, sessionName string) {
+				env.sp.SetAttached(sessionName, true)
+			},
+		},
+		{
+			name: "claim check error fails safe",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, _ string) {
+				env.store = &assignedWorkListErrorStore{Store: env.store, err: errors.New("assigned work query failed")}
+			},
+			wantLog: "checking assigned work before progress-stall recycle",
+		},
+		{
+			name: "attachment check error fails safe",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, session *beads.Bead, _ string) {
+				env.store = &sessionObservationGetErrorStore{
+					Store:     env.store,
+					id:        session.ID,
+					remaining: 1,
+					err:       errors.New("attachment observation failed"),
+				}
+			},
+			wantLog: "checking attachment before progress-stall recycle",
+		},
+		{
+			name: "provider health red",
+			cityPath: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeHealthCache(t, dir, "zai", "unhealthy", nowSecs())
+				return dir
+			},
+		},
+		{
+			name: "recent provider activity",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, sessionName string) {
+				env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Minute))
+			},
+		},
+		{
+			name: "unknown provider activity fails safe",
+			provider: func(env *restartRequestTestEnv) runtime.Provider {
+				return capabilityOverrideProvider{
+					Provider: env.sp,
+					caps: runtime.ProviderCapabilities{
+						CanReportAttachment: true,
+						CanReportActivity:   false,
+					},
+					sleepCap: runtime.SessionSleepCapabilityTimedOnly,
+				}
+			},
+		},
+		{
+			name: "startup in-flight lease",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, session *beads.Bead, _ string) {
+				env.setSessionMetadata(session, map[string]string{
+					"pending_create_claim": "true",
+					"state":                string(sessionpkg.StateCreating),
+					"last_woke_at":         env.clk.Now().UTC().Format(time.RFC3339),
+				})
+			},
+		},
+		{
+			name: "timeout below enforced minimum",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, sessionName string) {
+				env.cfg.Session.ClaimHolderStallTimeout = "30s"
+				env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Minute))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName := newProgressStallTestEnv(t)
+			env.cfg.Session.ProgressStallTimeout = ""       // isolate the claim-holder recycler
+			env.cfg.Session.ClaimHolderStallTimeout = "20m" // claim-holder recycler ON
+			seedInProgressClaim(t, env, sessionName)
+
+			cityPath := t.TempDir()
+			if tc.cityPath != nil {
+				cityPath = tc.cityPath(t)
+			}
+			if tc.configure != nil {
+				tc.configure(t, env, &session, sessionName)
+			}
+			sp := runtime.Provider(env.sp)
+			if tc.provider != nil {
+				sp = tc.provider(env)
+			}
+
+			env.reconcileAtPathWithProvider(cityPath, sp, []beads.Bead{session})
+
+			if !env.sp.IsRunning(sessionName) {
+				t.Fatalf("session %q was recycled; a protected claim-holder must be left running", sessionName)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", session.ID, err)
+			}
+			if got.Metadata["continuation_reset_pending"] != "" {
+				t.Fatalf("continuation_reset_pending = %q, want empty", got.Metadata["continuation_reset_pending"])
+			}
+			if strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+				t.Fatalf("stderr = %q, want no claim-holder-stalled diagnostic", env.stderr.String())
+			}
+			if tc.wantLog != "" && !strings.Contains(env.stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want %q", env.stderr.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
 // TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker drives the
 // reconciler's pool-counting branch (not just the extracted predicate): a stale,
 // claimless, healthy session whose pool is at its configured floor

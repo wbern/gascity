@@ -2357,7 +2357,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 				}
-				holdsClaim := false
+				// holdsClaim and claimUnknown are kept distinct: an unreadable
+				// claim check is "unknown", not "held". Encoding an error as
+				// holdsClaim=true is safe for the claim-less recycler (which skips
+				// holders) but inverts the claim-holder recycler, whose trigger IS
+				// holdsClaim — a store-scoped error would then recycle every stale
+				// holder in the tick, discarding exactly the in-progress work the
+				// failed check could not rule out (#4012 review). claimUnknown
+				// suppresses BOTH recyclers instead: the claim-less call treats
+				// unknown as held (holdsClaim || claimUnknown, its prior
+				// conservative behavior), and the claim-holder call requires a
+				// confirmed claim (holdsClaim && !claimUnknown).
+				holdsClaim, claimUnknown := false, false
 				if !exempt {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, infoByID[id], cfg)
 					if err != nil {
@@ -2366,7 +2377,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// guards elsewhere (they skip the destructive action on a
 						// claim-check error rather than assume the session is idle).
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before progress-stall recycle for %s: %v\n", name, err) //nolint:errcheck
-						holdsClaim = true
+						claimUnknown = true
 					} else {
 						holdsClaim = has
 					}
@@ -2382,7 +2393,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if sessionProgressStalled(claimlessThreshold, holdsClaim || claimUnknown, providerHealthy, exempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -2403,7 +2414,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// is poke-discounted, so gc's own nudges do not mask the stall. The
 				// diagnostic logs the aged activity so the next wedge is captured with a
 				// real timeline.
-				if sessionClaimHolderStalled(claimHolderThreshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+				if sessionClaimHolderStalled(claimHolderThreshold, holdsClaim && !claimUnknown, providerHealthy, exempt, lastActivity, clk.Now()) {
 					tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 					fmt.Fprintf(stderr, "session reconciler: %s claim-holder-stalled (holds a claim but no progress for >%s, provider healthy, last activity %s); requesting fresh restart\n", name, claimHolderThreshold, lastActivity.UTC().Format(time.RFC3339)) //nolint:errcheck
 				}
