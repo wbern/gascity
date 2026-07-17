@@ -1726,5 +1726,55 @@ func TestDoRuntimeDrainAckTimesOutInsteadOfWedging(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("doRuntimeDrainAck did not return within 2s: a stalled setDrainAck wedged the hook (drain-ack has no timeout)")
 	}
+	// The ack must NOT have persisted (the store write is still blocked): the
+	// reconciler keys on GC_DRAIN_ACK, so it must be left unset for the drain to
+	// be re-driven next tick (NDI) rather than reported as a drain never received.
+	if acked, _ := dops.isDrainAcked("worker"); acked {
+		t.Error("GC_DRAIN_ACK was set on a timed-out drain-ack; it must be left unset so the controller re-drives")
+	}
+	// Operator-facing output must say "deferred", not "acknowledged".
+	if out := stdout.String(); !strings.Contains(out, "deferred") {
+		t.Errorf("stdout = %q, want a 'deferred' notice on timeout", out)
+	}
+	unblock()
+}
+
+// TestDoRuntimeDrainAckDeferredStatusOnTimeout pins that the JSON result reports
+// status "deferred" (not "acknowledged") when the drain-ack write times out, so
+// a timed-out drain is never misreported to machine consumers as completed.
+func TestDoRuntimeDrainAckDeferredStatusOnTimeout(t *testing.T) {
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = oldPoke })
+
+	oldTO := drainAckMutationTimeout
+	drainAckMutationTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { drainAckMutationTimeout = oldTO })
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	dops := &blockingDrainOps{fakeDrainOps: newFakeDrainOps(), release: release}
+
+	done := make(chan int, 1)
+	var stdout, stderr bytes.Buffer
+	go func() { done <- doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr) }()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeDrainAck did not return within 2s on the JSON timeout path")
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Status != "deferred" {
+		t.Errorf("Status = %q, want %q on a timed-out drain-ack", result.Status, "deferred")
+	}
 	unblock()
 }
