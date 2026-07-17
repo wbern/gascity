@@ -37,6 +37,8 @@ type beadPolicyGraphStore struct {
 
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ActorClaimer                     = (*beadPolicyStore)(nil)
+	_ beads.ActorClaimer                     = (*beadPolicyGraphStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
 )
 
@@ -227,6 +229,20 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// ClaimAs forwards the optional ActorClaimer capability to the wrapped store.
+// The policy layer shapes creation and reads but does not intercept the atomic
+// claim, so interface embedding would otherwise hide a native/caching store's
+// ClaimAs behind the plain beads.Store surface — making the controller's claim
+// endpoint report the store as unable to claim on behalf of an actor. Mirrors
+// ReleaseIfCurrent; beadPolicyGraphStore inherits this via *beadPolicyStore.
+func (s *beadPolicyStore) ClaimAs(id, actor string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(beads.ActorClaimer)
+	if !ok {
+		return beads.Bead{}, false, beads.ErrActorClaimUnsupported
+	}
+	return claimer.ClaimAs(id, actor)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

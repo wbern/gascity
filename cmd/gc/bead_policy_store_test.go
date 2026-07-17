@@ -43,6 +43,54 @@ func underlyingPolicyStoreForTest(store beads.Store) beads.Store {
 	return base
 }
 
+func TestBeadPolicyStorePreservesActorClaimer(t *testing.T) {
+	backing := beads.NewMemStore()
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	claimer, ok := wrapped.(beads.ActorClaimer)
+	if !ok {
+		t.Fatalf("wrapped store implements ActorClaimer = false (policy wrapper hides the native/caching claim capability)")
+	}
+	bead, err := wrapped.Create(beads.Bead{Title: "review work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	claimed, won, err := claimer.ClaimAs(bead.ID, "reviewer-1")
+	if err != nil {
+		t.Fatalf("ClaimAs: %v", err)
+	}
+	if !won {
+		t.Fatal("ClaimAs won = false, want true")
+	}
+	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
+		t.Fatalf("claimed = %+v, want in_progress and reviewer-1", claimed)
+	}
+	got, err := wrapped.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
+		t.Fatalf("persisted = %+v, want in_progress and reviewer-1", got)
+	}
+}
+
+func TestBeadPolicyStoreClaimAsUnsupportedBacking(t *testing.T) {
+	// A backing that is not an ActorClaimer (interface-hidden) surfaces the
+	// typed unsupported error, not a panic or a silent wrong answer.
+	backing := storeWithoutActorClaim{beads.NewMemStore()}
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	claimer, ok := wrapped.(beads.ActorClaimer)
+	if !ok {
+		t.Fatal("wrapped store should still expose the ActorClaimer method set")
+	}
+	if _, _, err := claimer.ClaimAs("gc-x", "reviewer-1"); !errors.Is(err, beads.ErrActorClaimUnsupported) {
+		t.Fatalf("ClaimAs err = %v, want ErrActorClaimUnsupported", err)
+	}
+}
+
+// storeWithoutActorClaim wraps a Store as the bare interface so MemStore's
+// ClaimAs is not promoted — the backing is deliberately not an ActorClaimer.
+type storeWithoutActorClaim struct{ beads.Store }
+
 func TestBeadPolicyStorePreservesConditionalAssignmentReleaser(t *testing.T) {
 	backing := beads.NewMemStore()
 	wrapped := wrapStoreWithBeadPolicies(backing, nil)
