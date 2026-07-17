@@ -51,6 +51,12 @@ type DesiredStateResult struct {
 	ScaleCheckPartialTemplates      map[string]bool
 	PoolScaleCheckPartialTemplates  map[string]bool
 	NamedScaleCheckPartialTemplates map[string]bool
+	// PoolRespawnBackoffTemplates is the set of templates under respawn backoff
+	// this build (#3279). Carried on the result so the post-build overlay refresh
+	// (refreshDesiredStateWithSessionBeads) can re-apply it to its own
+	// agentBuildParams, keeping the fresh-create gate an invariant across BOTH the
+	// demand create path and the dependency-floor create path.
+	PoolRespawnBackoffTemplates map[string]bool
 	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet                         map[string]bool
 	AssignedWorkBeads               []beads.Bead // actionable assigned work, plus stranded pool work that needs release
@@ -1064,6 +1070,7 @@ func buildDesiredStateWithSessionBeads(
 		ScaleCheckPartialTemplates:      scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:  poolScaleCheckPartialTemplates,
 		NamedScaleCheckPartialTemplates: namedScaleCheckPartialTemplates,
+		PoolRespawnBackoffTemplates:     bp.poolRespawnBackoffTemplates,
 		AssignedWorkBeads:               assignedWorkBeads,
 		AssignedWorkStores:              assignedWorkStores,
 		AssignedWorkStoreRefs:           assignedWorkStoreRefs,
@@ -1243,6 +1250,9 @@ func refreshDesiredStateWithSessionBeads(
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
+	// Re-apply the respawn-backoff set so the dependency-floor create path this
+	// overlay drives is gated by the same invariant as the demand path (#3279).
+	bp.poolRespawnBackoffTemplates = result.PoolRespawnBackoffTemplates
 	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), result.PoolScaleCheckPartialTemplates, result.NamedScaleCheckPartialTemplates, stderr)
 	return refreshed
 }
@@ -3799,21 +3809,14 @@ func selectOrPlanPoolSessionBead(
 	}
 
 	// Respawn-backoff gate (#3279): refuse a fresh create while this template is
-	// inside its jittered exponential backoff window after a no-claim drain. Reuse
-	// paths above are unaffected (they return before reaching this point), so a
-	// session that is genuinely alive is never disturbed — only the storm's
-	// lockstep recreate is deferred. Symmetric with the partial and provider-red
-	// gates immediately around it.
-	//
-	// SCOPE: this gate covers the scale_check / routed-demand create path (the
-	// storm shape). It does NOT cover the dependency-floor create path
-	// (ensureDependencyOnlyTemplate -> selectOrCreateDependencyPoolSessionBead),
-	// which builds its own agentBuildParams without the backoff set; a template
-	// that both drains no-wake AND is a depends_on target of a live agent could
-	// still be recreated there. The primary demand-driven storm is additionally
-	// protected by the drained-pool skip in discoverSessionBeadsWithRoots.
-	// Threading the set into the dependency path is deferred (would require the
-	// tracker on CityRuntime); documented rather than silently unhandled.
+	// inside its jittered exponential backoff window after a no-claim drain. This
+	// is an early-exit on the demand path — it releases the just-claimed slot and
+	// avoids building a create plan. The load-bearing INVARIANT lives one level
+	// down at the shared choke point createPoolSessionBeadWithGuardedAlias, which
+	// every fresh create (demand AND dependency-floor) funnels through; this
+	// check just short-circuits before the plan/slot work. Reuse paths above are
+	// unaffected (they return before reaching this point), so a genuinely alive
+	// session is never disturbed.
 	//
 	// BLAST RADIUS: the gate is per-template, not per-trigger-bead. While a
 	// template is backed off, ALL its fresh creates wait, including healthy work
@@ -3934,6 +3937,17 @@ func createPoolSessionBeadWithGuardedAlias(
 ) (session.Info, error) {
 	if bp == nil {
 		return session.Info{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
+	}
+	// Respawn-backoff invariant (#3279): this is the single choke point every
+	// fresh pool-session create funnels through — the demand path
+	// (selectOrPlanPoolSessionBead) and the dependency-floor path
+	// (selectOrCreateDependencyPoolSessionBead), plus any future create path.
+	// Refusing here while the template is inside its backoff window makes the gate
+	// hold everywhere by construction, not just on the demand path. Reuse never
+	// reaches this function (callers return earlier for reusable sessions), so a
+	// genuinely alive session is never disturbed.
+	if bp.poolRespawnBackoffTemplates[template] {
+		return session.Info{}, errPoolSessionCreateRespawnBackoff
 	}
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedInstance); err != nil {
 		return session.Info{}, err

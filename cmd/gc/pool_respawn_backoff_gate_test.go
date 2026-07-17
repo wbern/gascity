@@ -92,6 +92,131 @@ func TestPoolRespawnBackoff_ObserveSnapshotArmsGateWithMatchingKey(t *testing.T)
 	}
 }
 
+// TestBuildDesiredState_RespawnBackoffGatesDependencyFloorCreate proves the
+// backoff gate is an INVARIANT at the shared create choke point, not just on the
+// demand path. Here "db" has zero scale_check demand and is created ONLY because
+// a live "helper" root depends on it — the dependency-floor create path
+// (selectOrCreateDependencyPoolSessionBead), which bypasses the demand-path gate.
+// With "db" under backoff, the floor create must be refused. Without the
+// choke-point gate this is the RED case (db floor created despite backoff).
+func TestBuildDesiredState_RespawnBackoffGatesDependencyFloorCreate(t *testing.T) {
+	newCfg := func() *config.City {
+		return &config.City{
+			Agents: []config.Agent{
+				{Name: "db", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0"},
+				{Name: "helper", Suspended: true, MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}, StartCommand: "echo"},
+			},
+		}
+	}
+	// A live "helper" root (state=creating) makes db a realized dependency floor.
+	helperBead := beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"template":     "helper",
+			"session_name": "s-gc-100",
+			"state":        "creating",
+		},
+	}
+	dbSlots := func(res DesiredStateResult) int {
+		n := 0
+		for _, tp := range res.State {
+			if tp.TemplateName == "db" {
+				n++
+			}
+		}
+		return n
+	}
+	build := func(t *testing.T, backedOff map[string]bool) DesiredStateResult {
+		cityPath := t.TempDir()
+		store := beads.NewMemStore()
+		if _, err := store.Create(helperBead); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := loadSessionBeadSnapshot(store)
+		if err != nil {
+			t.Fatalf("load snapshot: %v", err)
+		}
+		return buildDesiredStateWithSessionBeads(
+			"test-city", cityPath, time.Now().UTC(), newCfg(), runtime.NewFake(),
+			store, nil, snap, nil, io.Discard, backedOff,
+		)
+	}
+
+	t.Run("control creates the dependency floor", func(t *testing.T) {
+		if got := dbSlots(build(t, nil)); got != 1 {
+			t.Fatalf("control: db dependency-floor slots = %d, want 1", got)
+		}
+	})
+	t.Run("backoff blocks the dependency floor", func(t *testing.T) {
+		if got := dbSlots(build(t, map[string]bool{"db": true})); got != 0 {
+			t.Fatalf("backoff: db dependency-floor slots = %d, want 0 (choke-point gate must block the floor create)", got)
+		}
+	})
+}
+
+// TestRefreshDesiredState_RespawnBackoffGatesDependencyFloor covers the exact
+// path the second review flagged: the post-build overlay refresh
+// (refreshDesiredStateWithSessionBeads) builds its OWN agentBuildParams. The
+// backoff set must ride through on DesiredStateResult and be re-applied there, or
+// the dependency-floor create in the refresh escapes the gate. Control creates
+// the floor via refresh; backed-off blocks it.
+func TestRefreshDesiredState_RespawnBackoffGatesDependencyFloor(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "db", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0"},
+			{Name: "helper", Suspended: true, MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}, StartCommand: "echo"},
+		},
+	}
+	dbSlots := func(res DesiredStateResult) int {
+		n := 0
+		for _, tp := range res.State {
+			if tp.TemplateName == "db" {
+				n++
+			}
+		}
+		return n
+	}
+	refresh := func(t *testing.T, backedOff map[string]bool) DesiredStateResult {
+		cityPath := t.TempDir()
+		store := beads.NewMemStore()
+		if _, err := store.Create(beads.Bead{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "template:helper"},
+			Metadata: map[string]string{
+				"template":     "helper",
+				"session_name": "s-gc-100",
+				"state":        "creating",
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := loadSessionBeadSnapshot(store)
+		if err != nil {
+			t.Fatalf("load snapshot: %v", err)
+		}
+		result := DesiredStateResult{
+			BaseState:                   map[string]TemplateParams{},
+			BeaconTime:                  time.Now().UTC(),
+			PoolRespawnBackoffTemplates: backedOff,
+		}
+		return refreshDesiredStateWithSessionBeads(result, "test-city", cityPath, cfg, runtime.NewFake(), store, snap, io.Discard)
+	}
+
+	t.Run("control creates the floor via refresh", func(t *testing.T) {
+		if got := dbSlots(refresh(t, nil)); got != 1 {
+			t.Fatalf("control: db floor slots via refresh = %d, want 1", got)
+		}
+	})
+	t.Run("backoff blocks the floor via refresh", func(t *testing.T) {
+		if got := dbSlots(refresh(t, map[string]bool{"db": true})); got != 0 {
+			t.Fatalf("backoff: db floor slots via refresh = %d, want 0 (backoff set must ride the result into the refresh bp)", got)
+		}
+	})
+}
+
 // TestBuildDesiredState_RespawnBackoffBlocksFreshPoolCreate is the end-to-end
 // storm repro (upstream gastownhall/gascity#3279). A pool template with live
 // scale_check demand normally gets a fresh session created on every build — the
