@@ -22,24 +22,38 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+		// Memoized per (cityPath, scope, backend target): the bd context identity
+		// is process-stable, so the `bd context --json` spawn runs once per scope
+		// instead of on every store-open. Errors are not cached (retry next open).
+		v, err := preflightBDContextMemo.getOrCompute(preflightScopeKey(cityPath, scope), func() (preflightBDContextValue, error) {
+			out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+			if err != nil {
+				return preflightBDContextValue{}, err
+			}
+			var raw struct {
+				Backend       string `json:"backend"`
+				DoltMode      string `json:"dolt_mode"`
+				BDVersion     string `json:"bd_version"`
+				SchemaVersion int    `json:"schema_version"`
+			}
+			if err := json.Unmarshal(out, &raw); err != nil {
+				return preflightBDContextValue{}, fmt.Errorf("parse bd context --json: %w", err)
+			}
+			return preflightBDContextValue{
+				Backend:       raw.Backend,
+				DoltMode:      raw.DoltMode,
+				BDVersion:     raw.BDVersion,
+				SchemaVersion: raw.SchemaVersion,
+			}, nil
+		})
 		if err != nil {
 			return contract.PreflightBDContext{}, err
 		}
-		var raw struct {
-			Backend       string `json:"backend"`
-			DoltMode      string `json:"dolt_mode"`
-			BDVersion     string `json:"bd_version"`
-			SchemaVersion int    `json:"schema_version"`
-		}
-		if err := json.Unmarshal(out, &raw); err != nil {
-			return contract.PreflightBDContext{}, fmt.Errorf("parse bd context --json: %w", err)
-		}
 		return contract.PreflightBDContext{
-			Backend:       raw.Backend,
-			DoltMode:      raw.DoltMode,
-			BDVersion:     raw.BDVersion,
-			SchemaVersion: raw.SchemaVersion,
+			Backend:       v.Backend,
+			DoltMode:      v.DoltMode,
+			BDVersion:     v.BDVersion,
+			SchemaVersion: v.SchemaVersion,
 		}, nil
 	}
 }
@@ -62,21 +76,38 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 
 func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {
 	return func(scope string) (string, bool, error) {
-		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
-		if err != nil || !ok {
-			return "", false, err
-		}
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		// Memoized per (cityPath, scope, backend target): the project id (and the
+		// unconfirmed/confirmed outcome) is stable for a fixed backend, so the Dolt
+		// open+ping runs once per scope instead of on every store-open. A probe
+		// error is not cached, so a transient Dolt blip retries on the next open
+		// rather than sticking the scope in a degraded state until a bounce.
+		v, err := preflightProjectIDMemo.getOrCompute(preflightScopeKey(cityPath, scope), func() (preflightProjectIDValue, error) {
+			target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+			if err != nil || !ok {
+				// err may be nil here (scope not authoritative): that is a stable
+				// "unconfirmed" outcome and is cached as ("", false).
+				return preflightProjectIDValue{}, err
+			}
+			db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+			if err != nil {
+				return preflightProjectIDValue{}, err
+			}
+			defer db.Close() //nolint:errcheck // read-only best-effort close
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := db.PingContext(ctx); err != nil {
+				return preflightProjectIDValue{}, err
+			}
+			id, confirmed, err := readDatabaseProjectID(ctx, db)
+			if err != nil {
+				return preflightProjectIDValue{}, err
+			}
+			return preflightProjectIDValue{id: id, ok: confirmed}, nil
+		})
 		if err != nil {
 			return "", false, err
 		}
-		defer db.Close() //nolint:errcheck // read-only best-effort close
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := db.PingContext(ctx); err != nil {
-			return "", false, err
-		}
-		return readDatabaseProjectID(ctx, db)
+		return v.id, v.ok, nil
 	}
 }
