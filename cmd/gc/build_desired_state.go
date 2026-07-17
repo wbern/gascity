@@ -126,6 +126,7 @@ var (
 	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
 	errPoolSessionCreatePartial         = errors.New("pool session create skipped: demand read partial")
 	errPoolSessionCreateProviderRed     = errors.New("pool session create skipped: provider red")
+	errPoolSessionCreateRespawnBackoff  = errors.New("pool session create skipped: respawn backoff")
 )
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
@@ -494,6 +495,11 @@ func buildDesiredStateWithSessionBeads(
 	sessionBeads *sessionBeadSnapshot,
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
+	// poolRespawnBackoffTemplates is an optional, at-most-one trailing set of pool
+	// templates under respawn backoff (#3279). Only the reconcile-tick closures
+	// pass it; every other caller (one-shot builds, tests) omits it and the gate
+	// stays inert. Variadic so those callers need no nil argument.
+	poolRespawnBackoffTemplates ...map[string]bool,
 ) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
@@ -866,6 +872,9 @@ func buildDesiredStateWithSessionBeads(
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
+		if len(poolRespawnBackoffTemplates) > 0 {
+			bp.poolRespawnBackoffTemplates = poolRespawnBackoffTemplates[0]
+		}
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
@@ -2792,6 +2801,9 @@ func realizePoolDesiredSessions(
 				case errors.Is(err, errPoolSessionCreateProviderRed):
 					// debug-level: fires every tick during a red episode; not operator noise
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreateRespawnBackoff):
+					// debug-level: fires each tick during a backoff window; not operator noise
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (respawn backoff, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -3784,6 +3796,33 @@ func selectOrPlanPoolSessionBead(
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
+	}
+
+	// Respawn-backoff gate (#3279): refuse a fresh create while this template is
+	// inside its jittered exponential backoff window after a no-claim drain. Reuse
+	// paths above are unaffected (they return before reaching this point), so a
+	// session that is genuinely alive is never disturbed — only the storm's
+	// lockstep recreate is deferred. Symmetric with the partial and provider-red
+	// gates immediately around it.
+	//
+	// SCOPE: this gate covers the scale_check / routed-demand create path (the
+	// storm shape). It does NOT cover the dependency-floor create path
+	// (ensureDependencyOnlyTemplate -> selectOrCreateDependencyPoolSessionBead),
+	// which builds its own agentBuildParams without the backoff set; a template
+	// that both drains no-wake AND is a depends_on target of a live agent could
+	// still be recreated there. The primary demand-driven storm is additionally
+	// protected by the drained-pool skip in discoverSessionBeadsWithRoots.
+	// Threading the set into the dependency path is deferred (would require the
+	// tracker on CityRuntime); documented rather than silently unhandled.
+	//
+	// BLAST RADIUS: the gate is per-template, not per-trigger-bead. While a
+	// template is backed off, ALL its fresh creates wait, including healthy work
+	// routed to it under mixed load. Existing sessions are unaffected; new
+	// capacity for healthy triggers is deferred up to the window. Deliberate: a
+	// template whose store claims are failing cannot make progress on any trigger.
+	if bp.poolRespawnBackoffTemplates[template] {
+		delete(usedSlots, slot)
+		return session.Info{}, 0, nil, errPoolSessionCreateRespawnBackoff
 	}
 
 	// Provider-health gate: refuse new creates when the registry reports this

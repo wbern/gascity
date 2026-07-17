@@ -57,6 +57,8 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
 	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
+	check("[session]", "pool_respawn_backoff_base", cfg.Session.PoolRespawnBackoffBase)
+	check("[session]", "pool_respawn_backoff_max", cfg.Session.PoolRespawnBackoffMax)
 
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)

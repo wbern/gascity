@@ -40,6 +40,11 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	beaconTime time.Time,
 	stderr io.Writer,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	// The respawn-backoff tracker is cross-tick state: constructed once here and
+	// captured by the closure so no-claim-drain history survives between ticks
+	// (upstream gastownhall/gascity#3279). Disabled until the city sets
+	// session.pool_respawn_backoff_base.
+	respawnBackoff := newPoolRespawnBackoffTracker(poolRespawnBackoffConfig{})
 	return func(
 		c *config.City,
 		currentSP runtime.Provider,
@@ -48,7 +53,8 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+		backedOff := applyPoolRespawnBackoffObservation(respawnBackoff, c, sessionBeads, time.Now())
+		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr, backedOff)
 	}
 }
 

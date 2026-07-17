@@ -62,6 +62,16 @@ type agentBuildParams struct {
 	// evaluatePendingPoolsMap runs; newAgentBuildParams does not set it.
 	poolScaleCheckPartialTemplates map[string]bool
 
+	// poolRespawnBackoffTemplates holds pool templates currently under respawn
+	// backoff (upstream gastownhall/gascity#3279): a freshly-spawned generic
+	// session drained with reason "no-wake-reason" and the jittered exponential
+	// window has not yet elapsed. selectOrPlanPoolSessionBead refuses new creates
+	// for these templates; existing-session reuse is unaffected, exactly like
+	// poolScaleCheckPartialTemplates. Supplied by the caller (the reconciler's
+	// clock-aware tracker); newAgentBuildParams does not set it. Nil disables the
+	// gate (the default when a city has not opted in).
+	poolRespawnBackoffTemplates map[string]bool
+
 	// providerHealthSnapshot is the per-build provider-health registry view.
 	// Loaded once at the start of buildDesiredState via loadProviderHealthSnapshot,
 	// which always returns a non-nil snapshot. When the registry file is absent,

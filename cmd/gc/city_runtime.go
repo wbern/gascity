@@ -2943,6 +2943,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	cr.ensureManagedDoltPublishedForTick()
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
+	// No respawn-backoff set is threaded here on purpose: this workflow-finalize
+	// build runs over controlDispatcherOnlyConfig — the control-dispatcher
+	// singleton, which reuses its canonical identity rather than fresh-creating
+	// suffixed pool sessions, so it is not the per-tick suffix-storm shape the
+	// backoff guards (#3279). The main reconcile tick owns the backoff.
 	wfcResult := buildDesiredStateWithSessionBeads(
 		cr.cityName,
 		cr.cityPath,

@@ -1574,6 +1574,27 @@ type SessionConfig struct {
 	// Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero
 	// disables it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
+	// PoolRespawnBackoffBase, when set, enables jittered exponential backoff on
+	// pool respawns (upstream gastownhall/gascity#3279). When a freshly-spawned
+	// generic pool session drains with reason "no-wake-reason" — it started but
+	// could not claim its routed trigger work (e.g. the bead store's circuit
+	// breaker is tripped) — the reconciler otherwise recreates it immediately on
+	// the next tick, each respawn paying a full worktree checkout. Under a store
+	// blip that self-amplifies into a respawn storm. This is the FIRST backoff
+	// window applied after one no-claim drain; it doubles per consecutive drain
+	// up to PoolRespawnBackoffMax, with deterministic per-template jitter to
+	// de-correlate pools. Duration string (e.g. "5s"). Unset/zero disables it
+	// (the default), so the mechanism lands dormant until a city opts in.
+	PoolRespawnBackoffBase string `toml:"pool_respawn_backoff_base,omitempty"`
+	// PoolRespawnBackoffMax caps the exponential window from
+	// PoolRespawnBackoffBase. Ignored when the base is unset. Duration string
+	// (e.g. "5m"). Defaults to 5m when the base is set but the max is not.
+	// Set this ABOVE the pool's worktree-checkout time: the exponent only decays
+	// back to base after 2*max of quiet, and a throttled storm's respawns are
+	// spaced by roughly (window + checkout time), so a max below checkout time
+	// lets the decay fire mid-storm and the ramp sawtooths instead of holding at
+	// the cap (the storm stays bounded either way).
+	PoolRespawnBackoffMax string `toml:"pool_respawn_backoff_max,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1680,6 +1701,50 @@ func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
 		return ProgressStallTimeoutMinimum
 	}
 	return d
+}
+
+// DefaultPoolRespawnBackoffMax is the exponential-window cap applied when
+// PoolRespawnBackoffBase is set but PoolRespawnBackoffMax is not.
+const DefaultPoolRespawnBackoffMax = 5 * time.Minute
+
+// PoolRespawnBackoffCeiling is a sanity ceiling on both the base and max
+// respawn-backoff windows. It keeps the exponential doubling and the 2*max
+// quiet-decay math well clear of int64 nanosecond overflow even under absurd
+// config, so the accessors are total. A day is far above any sensible respawn
+// throttle.
+const PoolRespawnBackoffCeiling = 24 * time.Hour
+
+// PoolRespawnBackoffBaseDuration returns the base respawn-backoff window, or 0
+// when unset, zero, negative, or unparseable. Zero disables the mechanism (the
+// default): only a city that explicitly opts in gets respawn throttling. Clamped
+// to PoolRespawnBackoffCeiling.
+func (s *SessionConfig) PoolRespawnBackoffBaseDuration() time.Duration {
+	d := durationOr(s.PoolRespawnBackoffBase, 0)
+	if d <= 0 {
+		return 0
+	}
+	if d > PoolRespawnBackoffCeiling {
+		return PoolRespawnBackoffCeiling
+	}
+	return d
+}
+
+// PoolRespawnBackoffMaxDuration returns the exponential-window cap. It is only
+// meaningful when the base is set; it defaults to DefaultPoolRespawnBackoffMax,
+// is never allowed below the base, and is clamped to PoolRespawnBackoffCeiling.
+func (s *SessionConfig) PoolRespawnBackoffMaxDuration() time.Duration {
+	base := s.PoolRespawnBackoffBaseDuration()
+	if base <= 0 {
+		return 0
+	}
+	max := durationOr(s.PoolRespawnBackoffMax, DefaultPoolRespawnBackoffMax)
+	if max > PoolRespawnBackoffCeiling {
+		max = PoolRespawnBackoffCeiling
+	}
+	if max < base {
+		return base
+	}
+	return max
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
