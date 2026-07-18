@@ -165,6 +165,39 @@ dead Sleep sockets), not query complexity. Ranked hottest generators on live
 
 ---
 
+## Live validation (2026-07-18, DevOps gcw-gy67)
+
+Both config levers applied live + mirrored to city-template. Deltas are
+**directionally positive but confounded** (applying lever 1 required a fresh
+dolt process, which alone lowers CPU; the city was also quiet):
+
+- **Lever 1 — `auto_gc_enabled=false`:** dolt `%CPU` ~39% avg → ~19% avg.
+- **Lever 2 — `patrol_interval` 30s→45s:** supervisor `%CPU` ~10% median
+  (+266% transient) → ~idle (0–6%).
+
+**Key confirmation — the churn is untouched.** connID rate stayed ~**445/min**
+on the fresh server, `i/o-timeout` ~4/min → ~2/min (within noise). The levers
+reduce *background-GC + reconcile* CPU; they do **not** touch
+subprocess-per-op connection churn. **That churn is exactly what bd-shim v2
+(gcw-j8oq) removes** — so the assessment's ranking holds: config levers = cheap
+partial relief; bd-shim v2 = the durable fix.
+
+**Operational lessons (DevOps):**
+- `[dolt]` config changes only take effect via `gc dolt restart` (config
+  regenerates on dolt start), **not** a supervisor bounce (bounce adopts the
+  running dolt). A first attempt bounced-then-restarted, wedging the old server
+  into a lock-holding zombie → ~6-min store blip (13:06–13:12), rode out via bd
+  retry + circuit breaker, recovered by SIGKILL + keeper respawn. The
+  resilience layer this doc rates as "cold insurance" earned its keep here.
+- **Install-surface fragility CONFIRMED (the cluster-3 prediction):**
+  `GC_BD_REAL` was missing from the supervisor plist env, so order-exec'd
+  commands (gate-sweep, dolt-remotes-patrol, pileup-watchdog) hit the bd shim
+  with no real-bd fallback → **182 order failures**. Patched live
+  (`GC_BD_REAL=/Users/willi/go/bin/bd` in the plist). **Durable fix belongs in
+  gc-core: order-exec must inject `GC_BD_REAL` the way session-exec does** —
+  folded into the bd-shim v2 scope (gcw-j8oq) as a robustness prerequisite, and
+  it validates the "add routed-vs-passthrough telemetry" recommendation.
+
 ## Latent bugs surfaced (not CPU-critical, worth a trace)
 - `dolt.log`: `syntax error at position 9 near '$'` — an unexpanded `$` var
   leaking into a query (likely shell interpolation in a `bd --sandbox` call).
