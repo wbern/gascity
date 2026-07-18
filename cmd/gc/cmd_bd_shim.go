@@ -81,6 +81,7 @@ var bdShimRoutedVerbs = map[string]bool{
 	"reopen": true,
 	"delete": true,
 	"create": true,
+	"list":   true,
 }
 
 // bdCreateRoutableFlags are the `bd create` flags that map cleanly onto the
@@ -239,6 +240,100 @@ func bdReadyRoutable(args []string) bool {
 	return true
 }
 
+// bdListRoutableFlags are the `bd list` flags the shim can serve from the warm
+// controller's List (status/assignee/type/label/limit/all) — the cache-servable
+// subset that dominates agent traffic (the GUPP-hook AssignedInProgressQuery).
+// A list carrying any OTHER flag (--metadata-field, --exclude-type, --offset,
+// --sort, --no-assignee, …) passes through to the real bd rather than silently
+// mis-answering, because api.ListBeadsOpts cannot express it.
+var bdListRoutableFlags = map[string]bool{
+	"--status":   true,
+	"-s":         true,
+	"--assignee": true,
+	"-a":         true,
+	"--type":     true,
+	"-t":         true,
+	"--label":    true,
+	"-l":         true,
+	"--limit":    true,
+	"-n":         true,
+	"--all":      true,
+	"--json":     true,
+}
+
+// bdListRoutable reports whether a `bd list` arg list is routable: every flag is
+// in the allowlist AND --json is present. --json is REQUIRED because raw
+// `bd list` defaults to a human tree; only --json emits the flat array the shim
+// renders, so routing a non-json list would change the output shape.
+func bdListRoutable(args []string) bool {
+	hasJSON := false
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // a bare value (e.g. a space-separated flag arg) — not a gate
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if name == "--json" {
+			hasJSON = true
+		}
+		if !bdListRoutableFlags[name] {
+			return false
+		}
+	}
+	return hasJSON
+}
+
+// parseBdListOpts maps a routable `bd list` arg list onto api.ListBeadsOpts. The
+// default limit mirrors bd's default page size (50). Known v1 caveat: an
+// explicit `--limit 0` (bd's "unlimited") maps to the server's default page size
+// rather than true-unlimited; no hot-path traffic uses that shape.
+func parseBdListOpts(args []string) (api.ListBeadsOpts, error) {
+	opts := api.ListBeadsOpts{Limit: 50}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case (a == "--status" || a == "-s") && i+1 < len(args):
+			opts.Status = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--status="):
+			opts.Status = strings.TrimPrefix(a, "--status=")
+		case (a == "--assignee" || a == "-a") && i+1 < len(args):
+			opts.Assignee = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--assignee="):
+			opts.Assignee = strings.TrimPrefix(a, "--assignee=")
+		case (a == "--type" || a == "-t") && i+1 < len(args):
+			opts.Type = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--type="):
+			opts.Type = strings.TrimPrefix(a, "--type=")
+		case (a == "--label" || a == "-l") && i+1 < len(args):
+			opts.Label = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--label="):
+			opts.Label = strings.TrimPrefix(a, "--label=")
+		case (a == "--limit" || a == "-n") && i+1 < len(args):
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return opts, fmt.Errorf("parse %s %q: %w", a, args[i+1], err)
+			}
+			opts.Limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return opts, fmt.Errorf("parse %q: %w", a, err)
+			}
+			opts.Limit = n
+		case a == "--all":
+			opts.All = true
+		}
+	}
+	return opts, nil
+}
+
 // splitBdGlobalFlags finds the bd subcommand past any leading global flags. bd
 // accepts global flags before the subcommand (e.g. `bd --readonly --sandbox
 // ready ...`, the controller's discovery form), so the verb is not always
@@ -323,6 +418,10 @@ func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDispo
 			}
 		case "create":
 			if !bdCreateRoutable(args) {
+				return bdPassthrough
+			}
+		case "list":
+			if !bdListRoutable(args) {
 				return bdPassthrough
 			}
 		}
@@ -494,6 +593,18 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
 		return writeReadyJSON(applyBdReadyParams(read.Body, p), stdout, stderr)
+	case "list":
+		opts, err := parseBdListOpts(args)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		read, err := client.ListBeads(opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return writeReadyJSON(read.Body, stdout, stderr)
 	case "mol":
 		sub, id, jsonOut, ok := bdMolRoutable(args)
 		if !ok {

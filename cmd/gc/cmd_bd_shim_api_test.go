@@ -358,3 +358,30 @@ func TestDispatchBdShimVerbViaAPIRoutesVerbs(t *testing.T) {
 		t.Fatalf("ready -> %s %s, want GET /v0/city/alpha/beads/ready", gotMethod, gotPath)
 	}
 }
+
+// TestDispatchBdShimVerbViaAPIList proves `bd list` routes to GET /v0/beads with
+// the parsed status/assignee/limit filters — the GUPP-hook AssignedInProgressQuery.
+func TestDispatchBdShimVerbViaAPIList(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}}) //nolint:errcheck
+	}))
+	defer ts.Close()
+	client := api.NewCityScopedClient(ts.URL, "alpha")
+
+	var out, errb bytes.Buffer
+	if code := dispatchBdShimVerbViaAPI(client, "list",
+		[]string{"--status", "in_progress", "--assignee=worker", "--json", "--limit", "25"}, &out, &errb); code != 0 {
+		t.Fatalf("list via API: code=%d err=%s", code, errb.String())
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v0/city/alpha/beads" {
+		t.Fatalf("list -> %s %s, want GET /v0/city/alpha/beads", gotMethod, gotPath)
+	}
+	for _, want := range []string{"status=in_progress", "assignee=worker", "limit=25"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Fatalf("list query %q missing %q", gotQuery, want)
+		}
+	}
+}
