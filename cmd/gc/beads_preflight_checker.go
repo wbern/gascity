@@ -22,10 +22,12 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 
 func preflightBDContextReader(cityPath string) func(scope string) (contract.PreflightBDContext, error) {
 	return func(scope string) (contract.PreflightBDContext, error) {
-		// Memoized per (cityPath, scope, backend target): the bd context identity
-		// is process-stable, so the `bd context --json` spawn runs once per scope
-		// instead of on every store-open. Errors are not cached (retry next open).
-		v, err := preflightBDContextMemo.getOrCompute(preflightScopeKey(cityPath, scope), func() (preflightBDContextValue, error) {
+		// Cached per (cityPath, scope, backend target): the bd context identity is
+		// process-stable, so the `bd context --json` spawn runs at most once per
+		// scope. Resolution order is L1 in-process memo -> L2 on-disk TTL cache ->
+		// cold `bd context` spawn; a cold spawn populates both tiers. Errors are
+		// not cached (retry next open).
+		v, err := preflightBDContextCached(cityPath, preflightScopeKey(cityPath, scope), func() (preflightBDContextValue, error) {
 			out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
 			if err != nil {
 				return preflightBDContextValue{}, err
