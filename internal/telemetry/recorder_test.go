@@ -228,6 +228,47 @@ func TestRecordBDCallSanitizesArgs(t *testing.T) {
 	}
 }
 
+func TestRecordBDShimDisposition(t *testing.T) {
+	for _, disposition := range []string{"route", "passthrough", "refuse"} {
+		t.Run(disposition, func(t *testing.T) {
+			resetInstruments(t)
+			exp := installRecordingLogExporter(t)
+
+			RecordBDShimDisposition(context.Background(), "list", disposition)
+
+			rec := exp.recordByBody("bd.shim.call")
+			if rec == nil {
+				t.Fatal("RecordBDShimDisposition did not emit bd.shim.call")
+			}
+			attrs := recordAttrs(*rec)
+			if got := attrs["verb"].AsString(); got != "list" {
+				t.Fatalf("bd.shim.call verb = %q, want list", got)
+			}
+			if got := attrs["disposition"].AsString(); got != disposition {
+				t.Fatalf("bd.shim.call disposition = %q, want %q", got, disposition)
+			}
+		})
+	}
+}
+
+// TestRecordBDShimDispositionNormalizesEmptyVerb pins the fallback label so a
+// missing verb still produces a groupable attribute rather than an empty string.
+func TestRecordBDShimDispositionNormalizesEmptyVerb(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordBDShimDisposition(context.Background(), "", "passthrough")
+
+	rec := exp.recordByBody("bd.shim.call")
+	if rec == nil {
+		t.Fatal("RecordBDShimDisposition did not emit bd.shim.call")
+	}
+	attrs := recordAttrs(*rec)
+	if got := attrs["verb"].AsString(); got != "(none)" {
+		t.Fatalf("bd.shim.call verb = %q, want (none)", got)
+	}
+}
+
 func TestRecordBDSlowEmitsSanitizedWarnEvent(t *testing.T) {
 	resetInstruments(t)
 	exp := installRecordingLogExporter(t)

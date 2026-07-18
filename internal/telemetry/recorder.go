@@ -54,6 +54,7 @@ type recorderInstruments struct {
 	controllerTotal      metric.Int64Counter
 	supervisorTotal      metric.Int64Counter
 	bdTotal              metric.Int64Counter
+	bdShimTotal          metric.Int64Counter
 	slingTotal           metric.Int64Counter
 
 	// Counters — Phase 2 (4)
@@ -135,6 +136,9 @@ func initInstruments() {
 		)
 		inst.bdTotal, _ = m.Int64Counter("gc.bd.calls.total",
 			metric.WithDescription("Total bd CLI command invocations"),
+		)
+		inst.bdShimTotal, _ = m.Int64Counter("gc.bd.shim.calls.total",
+			metric.WithDescription("Total bd-shim invocations by verb and disposition (route/passthrough/refuse)"),
 		)
 		inst.slingTotal, _ = m.Int64Counter("gc.sling.dispatches.total",
 			metric.WithDescription("Total sling work dispatches"),
@@ -520,6 +524,30 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 		)
 	}
 	emit(ctx, "bd.call", severity(err), kvs...)
+}
+
+// RecordBDShimDisposition records how the bd shim handled one invocation:
+// "route" (served via the warm controller's HTTP API — no direct Dolt dial),
+// "passthrough" (execed the real bd, a direct dial that drives connection
+// churn), or "refuse" (declined to serve or pass through). It emits both a
+// counter (gc.bd.shim.calls.total, attributed by verb+disposition) and a
+// "bd.shim.call" log event, giving a live routed-vs-passthrough ratio so each
+// bd-shim routing slice's connection cut is measurable and a silent
+// shim-install regression is never invisible. verb is normalized to "(none)"
+// when empty so the attribute is always groupable.
+func RecordBDShimDisposition(ctx context.Context, verb, disposition string) {
+	initInstruments()
+	if verb == "" {
+		verb = "(none)"
+	}
+	inst.bdShimTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("verb", verb),
+		attribute.String("disposition", disposition),
+	))
+	emit(ctx, "bd.shim.call", otellog.SeverityInfo,
+		otellog.String("verb", verb),
+		otellog.String("disposition", disposition),
+	)
 }
 
 // RecordBDSlow records a bd CLI invocation that is still running after the

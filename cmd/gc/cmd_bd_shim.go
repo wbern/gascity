@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -513,6 +515,10 @@ func bdShimAPIClient(cityPath string) *api.Client {
 // is a thin client). It is the API counterpart of dispatchBdShimVerb — reads
 // render the same JSON, mutations map onto the bead write-path client methods.
 func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, stdout, stderr io.Writer) int {
+	// Every call here is a controller dispatch (the classifier already decided
+	// bdRoute) — a warm-pool hit with no direct worker->Dolt dial, whether the
+	// dispatch ultimately succeeds or the API returns an error.
+	telemetry.RecordBDShimDisposition(context.Background(), verb, bdRoute.String())
 	switch verb {
 	case "close":
 		id, ok := firstBdPositional(args)
@@ -1167,6 +1173,11 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	verb, verbArgs := splitBdGlobalFlags(bdArgs)
 	passthrough := func() int {
+		// Every real-bd exec — the default passthrough and every documented
+		// routing fallback (claim with no actor / no controller / backend can't
+		// claim) — flows through here, so recording the disposition in the
+		// closure captures a passthrough exactly when a direct Dolt dial happens.
+		telemetry.RecordBDShimDisposition(context.Background(), verb, bdPassthrough.String())
 		return passthroughRealBd(cfg, cityPath, rigName, cityName, bdArgs, stdin, stdout, stderr)
 	}
 	switch classifyBdShimVerb(verb, verbArgs, graphStoreSQLiteEnabled(cfg)) {
@@ -1191,6 +1202,7 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				return passthrough()
 			}
 			if code, handled := dispatchBdShimClaim(client, id, actor, stdout, stderr); handled {
+				telemetry.RecordBDShimDisposition(context.Background(), verb, bdRoute.String())
 				return code
 			}
 			// Backend cannot claim on behalf of an actor (501): fall back.
@@ -1204,11 +1216,15 @@ func runBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// agents, so the shim's consumers always find the API up.
 		client := bdShimAPIClient(cityPath)
 		if client == nil {
+			// Wanted to route but no controller is reachable: the shim neither
+			// dialed Dolt directly nor served the verb — record it as a refusal.
+			telemetry.RecordBDShimDisposition(context.Background(), verb, bdRefuse.String())
 			fmt.Fprintf(stderr, "gc bd-shim: no controller API reachable for %q; the shim routes bead ops through the controller (ga-2gap48 pure-HTTP)\n", verb) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return dispatchBdShimVerbViaAPI(client, verb, verbArgs, stdout, stderr)
 	case bdRefuse:
+		telemetry.RecordBDShimDisposition(context.Background(), verb, bdRefuse.String())
 		fmt.Fprintf(stderr, "gc bd-shim: %q reads or mutates graph-class beads but is not yet routed through the graph store; refusing to pass it to the work-only bd while graph_store=sqlite is active (would silently miss graph beads — see graph-store-rollout-plan.md §X2)\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	default: // bdPassthrough
