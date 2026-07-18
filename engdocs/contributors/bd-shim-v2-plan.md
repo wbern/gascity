@@ -216,3 +216,39 @@ preflight identity. The per-process memoization (`87bb30d87`) can't help because
 each short-lived `gc`/`bd` invocation is a fresh process. Tracked separately
 (see companion bead) — options: route context through the warm controller, an
 on-disk short-TTL identity cache, or reducing the caller frequency.
+
+---
+
+## Refinement outcomes (2026-07-18, post-build)
+
+Each slice was refined to 100% confidence *before* building. Two of the
+planned slices were corrected or rejected when live `bd-bypass.log` telemetry
+contradicted the plan's assumptions — the refinement gate did its job.
+
+- **Slice 0/1/2 — shipped** (`dbb6ea8c9`, `8d32a78a9`, `fdcf9a17d`, on
+  `develop`).
+- **Cross-cutting telemetry — shipped** (`e4bec069a`, bead `gcw-j8oq.1`).
+  *Plan correction:* the plan pointed telemetry at `internal/beads/bdstore.go`
+  `RecordBDCall`, but that instruments gc-core's **own** internal bd exec, not
+  the shim passthrough (the shim execs real bd via `execRealBd`). Disposition
+  telemetry therefore lives at the **shim boundary** (`runBdShim`): a new
+  `telemetry.RecordBDShimDisposition` records `route`/`passthrough`/`refuse`
+  reflecting the actual path taken (claim fallbacks → passthrough).
+- **`bd context` cache — shipped** (`75c78d403`, bead `gcw-40jw`, verified
+  on the live preflight path).
+- **Slice 1b — blocked, not built** (bead `gcw-j8oq.2`). Source pinned: the
+  3315 calls are `find_bead()` in `pr-{merge,review}-patrol.sh`, a **per-PR**
+  `list --metadata-field pr_number=$N --exclude-type=epic` lookup by the
+  crm-pr-* orders. Option A (route it, gc-core) vs Option B (batch the per-PR
+  fan-out into one `--has-metadata-key pr_number` list/tick, in the CRM pack
+  lane) — B is likely the better lever but cross-lane. Gated on the post-deploy
+  telemetry window. **Do not build blind.**
+- **Slice 3 — rejected as specced** (bead `gcw-j8oq.3` closed). Live telemetry:
+  **751/878** dep-list calls are `--direction=up --type=blocks --json`; **zero**
+  are `--down`. The plan's `--down` routing target has no live traffic, and the
+  dominant `--up` shape is exactly what the plan excludes (always hits Dolt).
+  The plan's `[]beads.Dep` **edge** output contract was also wrong — real
+  `bd dep list --json` emits full dep-**issue** objects, so an edge-returning
+  endpoint would silently mis-answer consumers. The real opportunity
+  (gc-invoked `--up` blocker-check churn, an **invocation-layer** fix like
+  `bd context`, not shim routing) is re-filed as `gcw-j8oq.4`, measurement-gated.
