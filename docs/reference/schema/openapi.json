@@ -23487,6 +23487,200 @@
         "summary": "Create a bead"
       }
     },
+    "/v0/city/{cityName}/beads/ephemeral": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-beads-ephemeral",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of results to return. 0 = server default.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "Maximum number of results to return. 0 = server default.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter by bead status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter by bead status.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by bead type.",
+            "explode": false,
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "description": "Filter by bead type.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by label.",
+            "explode": false,
+            "in": "query",
+            "name": "label",
+            "schema": {
+              "description": "Filter by label.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Filter by assignee.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by parent bead ID.",
+            "explode": false,
+            "in": "query",
+            "name": "parent",
+            "schema": {
+              "description": "Filter by parent bead ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include closed beads.",
+            "explode": false,
+            "in": "query",
+            "name": "all",
+            "schema": {
+              "description": "Include closed beads.",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBodyBead"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name beads ephemeral"
+      }
+    },
     "/v0/city/{cityName}/beads/graph/{rootID}": {
       "get": {
         "operationId": "get-v0-city-by-city-name-beads-graph-by-root-id",

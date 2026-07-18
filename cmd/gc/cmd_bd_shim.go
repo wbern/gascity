@@ -366,12 +366,13 @@ var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
 // the city is in the split phase (graph_store=sqlite active, so a distinct
 // graph backend exists). See the bdShimDisposition docs above.
 // bdQueryRoutingEnabled gates routing of `bd query` (ephemeral discovery) to the
-// controller. It is false in v1 because the GET /beads/ephemeral endpoint is not
-// yet ported to this fork: routing a query would hit an absent endpoint and
-// hard-error (pure-HTTP, no local fallback), so `bd query` must pass through to
-// the real bd until the endpoint lands. Flip to true once /beads/ephemeral (and
-// the EphemeralBeads client method) are present.
-const bdQueryRoutingEnabled = false
+// controller. It is true now that GET /beads/ephemeral and the EphemeralBeads
+// client method are present on this fork: the mappable ephemeral shape
+// (`--json 'ephemeral=true AND <bare clauses>'`) routes to the warm controller,
+// reaching wisps resident in the SQLite graph backend through the Router. An
+// unmappable query still refuses under the split phase rather than silently
+// missing SQLite-resident wisps.
+const bdQueryRoutingEnabled = true
 
 func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
 	// `bd query` (ephemeral discovery) routes when it is the mappable ephemeral
@@ -602,6 +603,18 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 		read, err := client.ListBeads(opts)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return writeReadyJSON(read.Body, stdout, stderr)
+	case "query":
+		opts, ok := parseBdQueryEphemeral(args)
+		if !ok {
+			fmt.Fprintln(stderr, "gc bd-shim: query: routable only as `ephemeral=true ...` --json") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		read, err := client.EphemeralBeads(opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd-shim: query via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		return writeReadyJSON(read.Body, stdout, stderr)

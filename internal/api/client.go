@@ -1863,6 +1863,51 @@ type EphemeralBeadsOpts struct {
 // /v0/city/{cityName}/beads/ephemeral — the routed form of
 // `bd query 'ephemeral=true AND ...'`. Under graph_store=sqlite this reaches
 // wisps resident in the SQLite graph backend through the controller's Router.
+// The CachedRead.AgeSeconds field carries the supervisor CachingStore age from
+// the X-GC-Cache-Age-S response header, mirroring ListBeads.
+func (c *Client) EphemeralBeads(opts EphemeralBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsEphemeralParams{}
+	if opts.Status != "" {
+		params.Status = &opts.Status
+	}
+	if opts.Type != "" {
+		params.Type = &opts.Type
+	}
+	if opts.Label != "" {
+		params.Label = &opts.Label
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Parent != "" {
+		params.Parent = &opts.Parent
+	}
+	if opts.Limit > 0 {
+		lim := int64(opts.Limit)
+		params.Limit = &lim
+	}
+	if opts.All {
+		t := true
+		params.All = &t
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsEphemeralWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
 
 type BeadGraphDep struct {
 	From string

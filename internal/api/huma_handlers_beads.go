@@ -355,6 +355,71 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 	return q
 }
 
+// humaHandleBeadEphemeral is the Huma-typed handler for
+// GET /v0/city/{cityName}/beads/ephemeral — the routed form of
+// `bd query 'ephemeral=true AND ...'`. It federates the ephemeral/wisp tier
+// (TierWisps) across the city and rig stores and returns a flat, limit-bounded
+// list. Unlike humaHandleBeadList it does no cursor pagination or bounded-total
+// accounting: the ephemeral tier is small and discovery-oriented, so a single
+// federated read with an overall limit is sufficient.
+func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeralInput) (*ListOutput[beads.Bead], error) {
+	cityStore := s.state.CityBeadStore()
+	if err := cacheLiveOr503(cityStore); err != nil {
+		return nil, err
+	}
+
+	limit := defaultPaginationLimit
+	if input.Limit > 0 {
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
+		}
+	}
+
+	stores := s.state.BeadStores()
+	var all []beads.Bead
+	for _, rigName := range sortedRigNames(stores) {
+		store := stores[rigName]
+		if store == nil {
+			continue
+		}
+		query := beads.ListQuery{
+			TierMode:      beads.TierWisps,
+			Status:        input.Status,
+			Type:          input.Type,
+			Label:         input.Label,
+			Assignee:      input.Assignee,
+			ParentID:      input.Parent,
+			IncludeClosed: input.All,
+			Limit:         limit,
+			Sort:          beads.SortCreatedDesc,
+		}
+		if !query.HasFilter() {
+			query.AllowScan = true
+		}
+		list, err := store.List(query)
+		if err != nil {
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+		all = append(all, list...)
+	}
+	if all == nil {
+		all = []beads.Bead{}
+	}
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	return &ListOutput[beads.Bead]{
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(cityStore),
+		Body: ListBody[beads.Bead]{
+			Items: all,
+			Total: len(all),
+		},
+	}, nil
+}
+
 // humaHandleBeadReady is the Huma-typed handler for GET /v0/beads/ready.
 func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()

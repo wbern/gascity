@@ -28,6 +28,21 @@ type BeadListInput struct {
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
 }
 
+// BeadEphemeralInput is the Huma input for GET /v0/city/{cityName}/beads/ephemeral.
+// It is the routed form of `bd query 'ephemeral=true AND ...'`: value-typed query
+// filters selecting the ephemeral/wisp tier. Modeled on BeadListInput but without
+// the blocking mixin (ephemeral discovery is a plain federated read).
+type BeadEphemeralInput struct {
+	CityScope
+	PaginationParam
+	Status   string `query:"status" required:"false" doc:"Filter by bead status."`
+	Type     string `query:"type" required:"false" doc:"Filter by bead type."`
+	Label    string `query:"label" required:"false" doc:"Filter by label."`
+	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
+	Parent   string `query:"parent" required:"false" doc:"Filter by parent bead ID."`
+	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
+}
+
 // BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.
 type BeadReadyInput struct {
 	CityScope
