@@ -37,6 +37,7 @@ func IsReservedExecEnvKey(key string) bool {
 		"BEADS_POSTGRES_USER",
 		"BD_DOLT_SYNC_CLI_REMOTES",
 		"BD_ROUTING_MODE",
+		"GC_BD_REAL",
 		"GC_BEADS",
 		"GC_BEADS_PREFIX",
 		"GC_BEADS_SCOPE_ROOT",

@@ -23,6 +23,16 @@ func TestValidateExecEnvOverridesRejectsBdAutoBackup(t *testing.T) {
 	}
 }
 
+// TestReservedExecEnvKeysIncludeBdReal guards the gc-as-bd shim passthrough
+// target: the controller projects GC_BD_REAL into the order exec env so a
+// shimmed `bd` passes through instead of refusing. An order's [order.env] must
+// not be able to redirect it to an arbitrary binary.
+func TestReservedExecEnvKeysIncludeBdReal(t *testing.T) {
+	if !IsReservedExecEnvKey("GC_BD_REAL") {
+		t.Errorf("IsReservedExecEnvKey(%q) = false, want true", "GC_BD_REAL")
+	}
+}
+
 // TestReservedExecEnvKeysIncludeBdContributorRouting guards the
 // contributor-routing opt-out: gc forces bd's fork/contributor auto-routing
 // off via BD_ROUTING_MODE, so an order's [order.env] must not be able to

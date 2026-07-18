@@ -226,6 +226,18 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	// `gh` calls authenticate. Projected before the [order.env] loop below so an
 	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
 	projectGitHubTokenExecEnv(env)
+	// Order/gate condition and body commands run `bd` under a PATH that may
+	// front the gc-as-bd shim bin dir; without GC_BD_REAL the shim refuses and
+	// the order fails (the 182-failure class DevOps band-aided in the supervisor
+	// plist). Resolve the real bd (excluding the city's shim dir) so a shimmed
+	// `bd` passes through, matching session exec. GC_BD_REAL is controller-owned
+	// (reserved; orders cannot override it — see IsReservedExecEnvKey); the guard
+	// is defensive and it is omitted when no real bd is on PATH.
+	if _, ok := env[citylayout.RealBdEnvVar]; !ok {
+		if realBD, err := citylayout.ResolveRealBd(cityPath); err == nil {
+			env[citylayout.RealBdEnvVar] = realBD
+		}
+	}
 	// Order-supplied [order.env] entries take effect last so they can tune
 	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
 	// noisy city) without editing the order's shell scripts or the parent

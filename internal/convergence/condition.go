@@ -129,6 +129,17 @@ func (ce ConditionEnv) Environ() []string {
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
 	}
+	// Gate condition scripts run `bd` under a PATH that may front the gc-as-bd
+	// shim bin dir; without GC_BD_REAL the shim refuses and the check fails.
+	// Resolve the real bd (excluding the city's shim dir) so a shimmed `bd`
+	// passes through, matching session exec. Best-effort: when no real bd is on
+	// PATH the var is omitted (the check either doesn't use bd, or fails as it
+	// would today).
+	if ce.CityPath != "" {
+		if realBD, err := citylayout.ResolveRealBd(ce.CityPath); err == nil {
+			env = append(env, citylayout.RealBdEnvVar+"="+realBD)
+		}
+	}
 	for _, key := range []string{
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_SERVER_HOST",
