@@ -68,61 +68,6 @@ func TestExecRealBdUsesGCBDRealAndPropagatesExit(t *testing.T) {
 	}
 }
 
-// TestClassifyBdShimVerb pins the three-way disposition policy: routed verbs
-// always route; provably-graph-free verbs always passthrough; graph-touching
-// unrouted verbs passthrough in the identity phase (byte-identical, safe) but
-// are refused in the split phase rather than silently bypassing the graph store.
-func TestClassifyBdShimVerb(t *testing.T) {
-	cases := []struct {
-		verb  string
-		args  []string
-		split bool
-		want  bdShimDisposition
-	}{
-		{"close", []string{"x"}, false, bdRoute},
-		{"close", []string{"x"}, true, bdRoute},
-		{"show", []string{"x", "--json"}, true, bdRoute},
-		{"version", nil, false, bdPassthrough},
-		{"version", nil, true, bdPassthrough},
-		{"mol", []string{"current", "m"}, false, bdRoute},  // current|progress + id routes (graph-aware) in both phases
-		{"mol", []string{"current", "m"}, true, bdRoute},   // split phase: routes to GET /beads/graph/{root}
-		{"mol", []string{"pour", "proto"}, true, bdRefuse}, // non-read mol subcommand: refuse under split
-		{"mol", []string{"current"}, true, bdRefuse},       // id-omitted (bd infers it): not routable, refuse under split
-		{"gate", []string{"check"}, true, bdRefuse},
-		{"query", []string{"ephemeral=true"}, true, bdRefuse}, // no --json: not routable, refuse under split
-		// ready: the simple assigned form routes (graph-aware), but predicate
-		// flags the Router cannot yet replicate (pool-demand; C3/ga-2gap48.11)
-		// passthrough to the work-only bd — byte-identical in the identity phase.
-		{"ready", []string{"--assignee=w", "--json", "--limit", "1"}, true, bdRoute},
-		// Discovery predicates now route (C3): the shim federates store.Ready() and
-		// post-filters, so a graph control bead in SQLite is discoverable.
-		{"ready", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}, true, bdRoute},
-		{"ready", []string{"--exclude-type=epic", "--json"}, false, bdRoute},
-		// A ready flag the shim does not model still passes through (byte-identical).
-		{"ready", []string{"--label", "pool:worker", "--json"}, true, bdPassthrough},
-		// update: the cleanly-mappable flag set routes (the canonical graph-worker
-		// close), but flags with no UpdateOpts mapping (--notes/--claim/...)
-		// passthrough — byte-identical in the identity phase.
-		{"update", []string{"x", "--set-metadata", "gc.outcome=pass", "--status", "closed"}, true, bdRoute},
-		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, bdPassthrough},
-		// claim: the pure-claim shape (optionally --json) now routes to the warm
-		// controller (POST /bead/{id}/claim); runBdShim gates on BEADS_ACTOR and
-		// falls back to real bd when the actor is unset or the backend can't claim.
-		{"update", []string{"x", "--claim"}, true, bdRoute},
-		{"update", []string{"x", "--claim", "--json"}, true, bdRoute},
-		// claim combined with another mutation has no atomic claim-route translation:
-		// passthrough to real bd (byte-identical in the identity phase).
-		{"update", []string{"x", "--claim", "--status", "closed"}, true, bdPassthrough},
-		{"reopen", []string{"x"}, true, bdRoute},
-		{"delete", []string{"x", "--force"}, true, bdRoute},
-	}
-	for _, tc := range cases {
-		if got := classifyBdShimVerb(tc.verb, tc.args, tc.split); got != tc.want {
-			t.Errorf("classifyBdShimVerb(%q, %v, split=%v) = %v, want %v", tc.verb, tc.args, tc.split, got, tc.want)
-		}
-	}
-}
-
 // TestIsBdShimInvocation pins which argv[0] basenames trigger shim mode: only an
 // executable named exactly `bd` (the PATH install symlinks bd -> gc). gc invoked
 // normally, or a differently-named helper, must not enter the shim.
@@ -191,39 +136,6 @@ func TestDispatchBdShimArgv0RefusesWithoutGCBDReal(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "GC_BD_REAL") {
 		t.Fatalf("stderr = %q, want it to mention GC_BD_REAL", stderr.String())
-	}
-}
-
-// TestSplitBdGlobalFlags proves the shim finds the bd subcommand past leading
-// global flags — the controller discovers work via `bd --readonly --sandbox
-// ready ...`, where the verb is not args[0].
-func TestSplitBdGlobalFlags(t *testing.T) {
-	cases := []struct {
-		args []string
-		verb string
-		rest []string
-	}{
-		{[]string{"--readonly", "--sandbox", "ready", "--json"}, "ready", []string{"--json"}},
-		{[]string{"ready", "--assignee=x"}, "ready", []string{"--assignee=x"}},
-		{[]string{"close", "id"}, "close", []string{"id"}},
-		{[]string{"--readonly"}, "", nil},
-		{nil, "", nil},
-	}
-	for _, tc := range cases {
-		verb, rest := splitBdGlobalFlags(tc.args)
-		if verb != tc.verb {
-			t.Errorf("splitBdGlobalFlags(%v) verb = %q, want %q", tc.args, verb, tc.verb)
-		}
-		if len(rest) != len(tc.rest) {
-			t.Errorf("splitBdGlobalFlags(%v) rest = %v, want %v", tc.args, rest, tc.rest)
-			continue
-		}
-		for i := range rest {
-			if rest[i] != tc.rest[i] {
-				t.Errorf("splitBdGlobalFlags(%v) rest = %v, want %v", tc.args, rest, tc.rest)
-				break
-			}
-		}
 	}
 }
 

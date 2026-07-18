@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -49,242 +50,52 @@ import (
 // captured at install time as an absolute path.
 const realBdEnvVar = "GC_BD_REAL"
 
-// bdShimDisposition is how the shim handles one bd subcommand.
-type bdShimDisposition int
+// The bd-shim verb classifier (pure route-vs-passthrough decision logic) now
+// lives in internal/bdshim so a standalone bd binary can import it. The aliases
+// and thin wrappers below keep cmd/gc's existing call sites unchanged while the
+// decision logic lives in one dependency-light place.
+
+// bdShimDisposition aliases bdshim.Disposition (route/passthrough/refuse).
+type bdShimDisposition = bdshim.Disposition
 
 const (
-	// bdPassthrough execs the real bd binary unchanged.
-	bdPassthrough bdShimDisposition = iota
-	// bdRoute serves the verb via the controller's HTTP bead API.
-	bdRoute
-	// bdRefuse rejects the verb rather than silently bypassing the graph store.
-	bdRefuse
+	bdPassthrough = bdshim.Passthrough
+	bdRoute       = bdshim.Route
+	bdRefuse      = bdshim.Refuse
 )
 
-func (d bdShimDisposition) String() string {
-	switch d {
-	case bdRoute:
-		return "route"
-	case bdRefuse:
-		return "refuse"
-	default:
-		return "passthrough"
-	}
+// bdQueryRoutingEnabled mirrors bdshim.QueryRoutingEnabled: whether `bd query`
+// (ephemeral discovery) routing is compiled in.
+const bdQueryRoutingEnabled = bdshim.QueryRoutingEnabled
+
+// bdUpdateFlagNeedsValue mirrors bdshim.UpdateFlagNeedsValue — the routable
+// update flags that consume the following token as their value — for
+// parseBdUpdateOpts.
+var bdUpdateFlagNeedsValue = bdshim.UpdateFlagNeedsValue
+
+// classifyBdShimVerb decides how the shim handles a bd subcommand; see
+// bdshim.ClassifyVerb.
+func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
+	return bdshim.ClassifyVerb(verb, args, splitPhase)
 }
 
-// bdShimRoutedVerbs are bd subcommands the shim translates to in-process Router
-// store ops so graph beads in the embedded SQLite store are seen and mutated,
-// not just Dolt work beads. Grown incrementally.
-var bdShimRoutedVerbs = map[string]bool{
-	"close":  true,
-	"show":   true,
-	"ready":  true,
-	"update": true,
-	"reopen": true,
-	"delete": true,
-	"create": true,
-	"list":   true,
-}
-
-// bdCreateRoutableFlags are the `bd create` flags that map cleanly onto the
-// create API body. A create carrying any OTHER flag (--ephemeral, --no-history,
-// --from, ...) passes through to the real bd rather than silently dropping the
-// unmapped effect.
-var bdCreateRoutableFlags = map[string]bool{
-	"--type":         true,
-	"--priority":     true,
-	"--assignee":     true,
-	"--label":        true,
-	"--description":  true,
-	"--parent":       true,
-	"--set-metadata": true,
-	"--metadata":     true,
-	"--defer-until":  true,
-	"--json":         true,
-}
-
-// bdCreateRoutable reports whether a `bd create` arg list uses only flags that
-// map onto the create API body, so the shim can serve it in-process.
-func bdCreateRoutable(args []string) bool {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			continue // the title positional or a space-separated flag value
-		}
-		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
-		}
-		if !bdCreateRoutableFlags[name] {
-			return false
-		}
-	}
-	return true
-}
-
-// bdUpdateRoutableFlags are the `bd update` flags that map cleanly onto
-// beads.UpdateOpts. A bd update carrying any OTHER flag (--claim, --notes,
-// --note, --persistent, --unset-metadata, ...) has no faithful in-process
-// translation yet, so it passes through to the real bd (byte-identical in the
-// identity phase) rather than silently losing the unmapped effect.
-var bdUpdateRoutableFlags = map[string]bool{
-	"--status":       true,
-	"--set-metadata": true,
-	"--assignee":     true,
-	"--label":        true,
-	"--remove-label": true,
-	"--title":        true,
-	"--type":         true,
-	"--priority":     true,
-	"--description":  true,
-	"--parent":       true,
-	"--json":         true,
-}
-
-// bdUpdateFlagNeedsValue is the subset of routable update flags that consume the
-// following token as their value when written space-separated (--flag value).
-var bdUpdateFlagNeedsValue = map[string]bool{
-	"--status":       true,
-	"--set-metadata": true,
-	"--assignee":     true,
-	"--label":        true,
-	"--remove-label": true,
-	"--title":        true,
-	"--type":         true,
-	"--priority":     true,
-	"--description":  true,
-	"--parent":       true,
+// splitBdGlobalFlags finds the bd subcommand past leading global flags; see
+// bdshim.SplitGlobalFlags.
+func splitBdGlobalFlags(args []string) (string, []string) {
+	return bdshim.SplitGlobalFlags(args)
 }
 
 // bdUpdateClaimShape reports whether a `bd update` arg list is the pure-claim
-// shape the shim routes to the controller's atomic claim endpoint: it carries
-// --claim and no other flag except --json (the id positional is allowed).
-// A claim combined with any other mutation flag has no atomic claim-route
-// translation and is left to bdUpdateRoutable / passthrough.
+// shape routed to the controller's atomic claim endpoint; see
+// bdshim.UpdateClaimShape.
 func bdUpdateClaimShape(args []string) bool {
-	sawClaim := false
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			continue // the id positional
-		}
-		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
-		}
-		switch name {
-		case "--claim":
-			sawClaim = true
-		case "--json":
-			// allowed alongside --claim
-		default:
-			return false
-		}
-	}
-	return sawClaim
+	return bdshim.UpdateClaimShape(args)
 }
 
-// bdUpdateRoutable reports whether a `bd update` arg list uses only flags that
-// map onto beads.UpdateOpts, so the shim can serve it in-process.
-func bdUpdateRoutable(args []string) bool {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			continue // the id positional or a space-separated flag value
-		}
-		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
-		}
-		if !bdUpdateRoutableFlags[name] {
-			return false
-		}
-	}
-	return true
-}
-
-// bdReadyRoutableFlags are the `bd ready` flags Router.Ready replicates exactly
-// (Assignee/Limit, plus output/tier flags that are no-ops here). A ready
-// invocation carrying any OTHER flag — the pool-demand predicates
-// (--metadata-field, --unassigned, --exclude-type, --sort, --label, ...) — is
-// not yet federated (predicate parity is C3/ga-2gap48.11), so it passes through
-// to the real bd (byte-identical in the identity phase) rather than silently
-// dropping the filter.
-var bdReadyRoutableFlags = map[string]bool{
-	"--assignee":          true,
-	"--limit":             true,
-	"-n":                  true,
-	"--json":              true,
-	"--include-ephemeral": true,
-	// Discovery predicates the controller's serve loop and the pool-demand probe
-	// use. The Router's ReadyQuery cannot express these, so the shim federates
-	// store.Ready() and applies them as a Go-side post-filter (parseBdReadyParams
-	// / applyBdReadyParams). This is what lets a graph control bead in SQLite be
-	// discovered through `bd ready` (the deployed graph_store=sqlite crux).
-	"--metadata-field": true,
-	"--unassigned":     true,
-	"--exclude-type":   true,
-	"--sort":           true,
-}
-
-// bdReadyRoutable reports whether a `bd ready` arg list uses only flags the shim
-// can replicate (directly via ReadyQuery or via the discovery post-filter).
-func bdReadyRoutable(args []string) bool {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			continue // a bare value (e.g. a space-separated flag arg) — not a gate
-		}
-		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
-		}
-		if !bdReadyRoutableFlags[name] {
-			return false
-		}
-	}
-	return true
-}
-
-// bdListRoutableFlags are the `bd list` flags the shim can serve from the warm
-// controller's List (status/assignee/type/label/limit/all) — the cache-servable
-// subset that dominates agent traffic (the GUPP-hook AssignedInProgressQuery).
-// A list carrying any OTHER flag (--metadata-field, --exclude-type, --offset,
-// --sort, --no-assignee, …) passes through to the real bd rather than silently
-// mis-answering, because api.ListBeadsOpts cannot express it.
-var bdListRoutableFlags = map[string]bool{
-	"--status":   true,
-	"-s":         true,
-	"--assignee": true,
-	"-a":         true,
-	"--type":     true,
-	"-t":         true,
-	"--label":    true,
-	"-l":         true,
-	"--limit":    true,
-	"-n":         true,
-	"--all":      true,
-	"--json":     true,
-}
-
-// bdListRoutable reports whether a `bd list` arg list is routable: every flag is
-// in the allowlist AND --json is present. --json is REQUIRED because raw
-// `bd list` defaults to a human tree; only --json emits the flat array the shim
-// renders, so routing a non-json list would change the output shape.
-func bdListRoutable(args []string) bool {
-	hasJSON := false
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			continue // a bare value (e.g. a space-separated flag arg) — not a gate
-		}
-		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
-		}
-		if name == "--json" {
-			hasJSON = true
-		}
-		if !bdListRoutableFlags[name] {
-			return false
-		}
-	}
-	return hasJSON
+// bdMolRoutable reports whether a `bd mol` arg list is a routable read and
+// returns the parsed subcommand/id/json; see bdshim.MolRoutable.
+func bdMolRoutable(args []string) (sub, id string, jsonOut, ok bool) {
+	return bdshim.MolRoutable(args)
 }
 
 // parseBdListOpts maps a routable `bd list` arg list onto api.ListBeadsOpts. The
@@ -334,106 +145,6 @@ func parseBdListOpts(args []string) (api.ListBeadsOpts, error) {
 		}
 	}
 	return opts, nil
-}
-
-// splitBdGlobalFlags finds the bd subcommand past any leading global flags. bd
-// accepts global flags before the subcommand (e.g. `bd --readonly --sandbox
-// ready ...`, the controller's discovery form), so the verb is not always
-// args[0]. It returns the verb and the args that follow it; leading global flags
-// are dropped (they govern bd's execution mode, irrelevant to in-process Router
-// reads). Returns ("", nil) when there is no subcommand.
-func splitBdGlobalFlags(args []string) (string, []string) {
-	for i, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return a, args[i+1:]
-		}
-	}
-	return "", nil
-}
-
-// bdShimGraphTouchingUnroutedVerbs are bd subcommands that read or mutate
-// graph/wisp data but are not yet translated to Router ops. Passing them to the
-// real (work-only) bd is byte-identical and safe while graph storage is off
-// (the identity phase), but would SILENTLY miss graph beads once
-// graph_store=sqlite is on — so in the split phase the shim refuses them loudly
-// rather than dropping graph data (graph-store-rollout-plan.md §X2).
-var bdShimGraphTouchingUnroutedVerbs = map[string]bool{
-	"gate": true, // bd gate check --escalate — a mutation on gate beads
-	// "query" and "mol" are now handled in classifyBdShimVerb: the ephemeral
-	// discovery shape maps to GET /beads/ephemeral and mol current|progress to
-	// GET /beads/graph/{root}, both reaching the SQLite graph store via the Router.
-}
-
-// classifyBdShimVerb decides how the shim handles a bd subcommand given whether
-// the city is in the split phase (graph_store=sqlite active, so a distinct
-// graph backend exists). See the bdShimDisposition docs above.
-// bdQueryRoutingEnabled gates routing of `bd query` (ephemeral discovery) to the
-// controller. It is true now that GET /beads/ephemeral and the EphemeralBeads
-// client method are present on this fork: the mappable ephemeral shape
-// (`--json 'ephemeral=true AND <bare clauses>'`) routes to the warm controller,
-// reaching wisps resident in the SQLite graph backend through the Router. An
-// unmappable query still refuses under the split phase rather than silently
-// missing SQLite-resident wisps.
-const bdQueryRoutingEnabled = true
-
-func classifyBdShimVerb(verb string, args []string, splitPhase bool) bdShimDisposition {
-	// `bd query` (ephemeral discovery) routes when it is the mappable ephemeral
-	// shape (`--json 'ephemeral=true AND <bare clauses>'`). An unmappable query
-	// under the split phase must REFUSE rather than passthrough: passing it to the
-	// work-only bd would silently miss SQLite-resident wisps (the §X2 hazard).
-	if verb == "query" {
-		if bdQueryRoutingEnabled && bdQueryRoutable(args) {
-			return bdRoute
-		}
-		if splitPhase {
-			return bdRefuse
-		}
-		return bdPassthrough
-	}
-	// `bd mol current|progress <id>` routes to the graph endpoint; other mol
-	// subcommands (pour/wisp/bond/...) and id-omitted/flag-heavy forms are not
-	// faithfully routable and must refuse under the split phase (they would miss
-	// SQLite-resident molecule topology), passthrough otherwise.
-	if verb == "mol" {
-		if bdMolRoutableArgs(args) {
-			return bdRoute
-		}
-		if splitPhase {
-			return bdRefuse
-		}
-		return bdPassthrough
-	}
-	if bdShimRoutedVerbs[verb] {
-		switch verb {
-		case "ready":
-			if !bdReadyRoutable(args) {
-				return bdPassthrough
-			}
-		case "update":
-			// The pure-claim shape routes to the atomic claim endpoint; the
-			// actor gate and fallback live in runBdShim (env-dependent, kept
-			// out of this pure classifier).
-			if bdUpdateClaimShape(args) {
-				return bdRoute
-			}
-			if !bdUpdateRoutable(args) {
-				return bdPassthrough
-			}
-		case "create":
-			if !bdCreateRoutable(args) {
-				return bdPassthrough
-			}
-		case "list":
-			if !bdListRoutable(args) {
-				return bdPassthrough
-			}
-		}
-		return bdRoute
-	}
-	if splitPhase && bdShimGraphTouchingUnroutedVerbs[verb] {
-		return bdRefuse
-	}
-	return bdPassthrough
 }
 
 // resolveRealBdPath returns the absolute path of the real bd binary the shim
@@ -664,16 +375,6 @@ func dispatchBdShimVerbViaAPI(client *api.Client, verb string, args []string, st
 	}
 }
 
-// bdQueryRoutable reports whether a `bd query` arg list is the ephemeral
-// discovery shape the shim can faithfully route: a --json query whose predicate
-// is `ephemeral=true` optionally AND-joined with bare status/label/type/
-// assignee/parent clauses. Anything else (non-ephemeral predicate, non-bare
-// value, unknown flag, missing --json) is not routable.
-func bdQueryRoutable(args []string) bool {
-	_, ok := parseBdQueryEphemeral(args)
-	return ok
-}
-
 // parseBdQueryEphemeral maps the two in-repo `bd query` ephemeral shapes —
 // listEphemeral's multi-clause argv (bdstore.go) and the work_query literal
 // `bd query --json 'ephemeral=true AND status=<s>' --limit=N` (config.go) — onto
@@ -781,44 +482,6 @@ func isBareBdQueryValue(v string) bool {
 		}
 	}
 	return true
-}
-
-// bdMolRoutable reports whether a `bd mol` arg list is a routable read —
-// `current` or `progress` with an explicit molecule id and at most --json — and
-// returns the parsed subcommand/id/json. Other subcommands (pour/wisp/bond/...),
-// an omitted id (bd infers it from in_progress issues, which the rooted graph
-// endpoint cannot express), or view flags (--for/--limit/--range) are not
-// faithfully routable.
-func bdMolRoutable(args []string) (sub, id string, jsonOut, ok bool) {
-	if len(args) < 2 {
-		return "", "", false, false
-	}
-	sub = args[0]
-	if sub != "current" && sub != "progress" {
-		return "", "", false, false
-	}
-	for _, a := range args[1:] {
-		switch {
-		case a == "--json":
-			jsonOut = true
-		case strings.HasPrefix(a, "-"):
-			return "", "", false, false // --for/--limit/--range: not routable
-		default:
-			if id != "" {
-				return "", "", false, false
-			}
-			id = a
-		}
-	}
-	if id == "" {
-		return "", "", false, false
-	}
-	return sub, id, jsonOut, true
-}
-
-func bdMolRoutableArgs(args []string) bool {
-	_, _, _, ok := bdMolRoutable(args)
-	return ok
 }
 
 // renderBdMol renders `bd mol current|progress` from a fetched bead graph. Step

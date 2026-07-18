@@ -6,34 +6,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
-// TestClassifyBdListRouting pins the `bd list` routing gate: the cache-servable
-// shapes route, everything else passes through byte-identically.
-func TestClassifyBdListRouting(t *testing.T) {
-	cases := []struct {
-		args []string
-		want bdShimDisposition
-	}{
-		// The GUPP-hook AssignedInProgressQuery — the dominant live shape.
-		{[]string{"--status", "in_progress", "--assignee=gc2-x", "--json", "--limit", "50"}, bdRoute},
-		{[]string{"--status", "in_progress", "--json"}, bdRoute},
-		{[]string{"-s", "open", "-a", "y", "-n", "10", "--json"}, bdRoute},
-		{[]string{"--all", "--json"}, bdRoute},
-		// --json is REQUIRED: raw `bd list` defaults to a human tree, so a
-		// non-json list must passthrough to preserve the output shape.
-		{[]string{"--status", "in_progress"}, bdPassthrough},
-		// Flags api.ListBeadsOpts cannot express passthrough (the refinery
-		// --metadata-field/--exclude-type shape, --offset, --sort, --no-assignee).
-		{[]string{"--metadata-field", "pr_number=5", "--exclude-type=epic", "--json"}, bdPassthrough},
-		{[]string{"--json", "--offset", "10"}, bdPassthrough},
-		{[]string{"--json", "--no-assignee"}, bdPassthrough},
-	}
-	for _, tc := range cases {
-		if got := classifyBdShimVerb("list", tc.args, false); got != tc.want {
-			t.Errorf("classifyBdShimVerb(list, %v) = %v, want %v", tc.args, got, tc.want)
-		}
-	}
-}
-
 // TestParseBdListOpts pins the arg->ListBeadsOpts mapping, including bd's
 // default page size of 50 when --limit is absent.
 func TestParseBdListOpts(t *testing.T) {

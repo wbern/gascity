@@ -189,28 +189,6 @@ func TestDispatchBdShimVerbViaAPIMol(t *testing.T) {
 	})
 }
 
-// TestBdMolRoutable covers the routable read shapes and the forms that must not
-// route (other subcommands, omitted id, view flags).
-func TestBdMolRoutable(t *testing.T) {
-	cases := []struct {
-		args []string
-		ok   bool
-	}{
-		{[]string{"current", "gcg-1"}, true},
-		{[]string{"progress", "gcg-1"}, true},
-		{[]string{"current", "gcg-1", "--json"}, true},
-		{[]string{"current"}, false},                            // id omitted (bd infers it)
-		{[]string{"pour", "proto"}, false},                      // not a read subcommand
-		{[]string{"current", "--for", "agent", "gcg-1"}, false}, // view flag: not routable
-		{nil, false},
-	}
-	for _, tc := range cases {
-		if got := bdMolRoutableArgs(tc.args); got != tc.ok {
-			t.Errorf("bdMolRoutableArgs(%v) = %v, want %v", tc.args, got, tc.ok)
-		}
-	}
-}
-
 // TestDispatchBdShimVerbViaAPIQueryEphemeral proves `bd query --json
 // 'ephemeral=true AND ...'` routes to GET /beads/ephemeral with the parsed
 // filters and renders the wisp rows as a JSON array (like raw `bd query`).
@@ -272,40 +250,6 @@ func TestParseBdQueryEphemeral(t *testing.T) {
 				t.Fatalf("parseBdQueryEphemeral(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestClassifyBdShimVerbQueryRoutes: a mappable ephemeral query routes in both
-// phases; an unmappable one refuses under split (would miss SQLite wisps) and
-// passes through in the identity phase.
-func TestClassifyBdShimVerbQueryRoutes(t *testing.T) {
-	routable := []string{"--json", "ephemeral=true AND status=open"}
-	unmappable := []string{"--json", "type=bug"}
-	if bdQueryRoutingEnabled {
-		// v2: a mappable ephemeral query routes in both phases.
-		if got := classifyBdShimVerb("query", routable, true); got != bdRoute {
-			t.Fatalf("routable query (split) = %v, want bdRoute", got)
-		}
-		if got := classifyBdShimVerb("query", routable, false); got != bdRoute {
-			t.Fatalf("routable query (identity) = %v, want bdRoute", got)
-		}
-	} else {
-		// v1: query never routes (GET /beads/ephemeral is not ported); it passes
-		// through in the identity phase and refuses under split, so a
-		// SQLite-resident wisp is never silently missed.
-		if got := classifyBdShimVerb("query", routable, false); got != bdPassthrough {
-			t.Fatalf("routable query (identity, v1) = %v, want bdPassthrough", got)
-		}
-		if got := classifyBdShimVerb("query", routable, true); got != bdRefuse {
-			t.Fatalf("routable query (split, v1) = %v, want bdRefuse", got)
-		}
-	}
-	// The unmappable-query contract is identical regardless of routing.
-	if got := classifyBdShimVerb("query", unmappable, true); got != bdRefuse {
-		t.Fatalf("unmappable query (split) = %v, want bdRefuse", got)
-	}
-	if got := classifyBdShimVerb("query", unmappable, false); got != bdPassthrough {
-		t.Fatalf("unmappable query (identity) = %v, want bdPassthrough", got)
 	}
 }
 
