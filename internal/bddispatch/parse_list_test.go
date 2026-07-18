@@ -1,4 +1,4 @@
-package main
+package bddispatch
 
 import (
 	"testing"
@@ -6,9 +6,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
-// TestParseBdListOpts pins the arg->ListBeadsOpts mapping, including bd's
+// TestParseListOpts pins the arg->ListBeadsOpts mapping, including bd's
 // default page size of 50 when --limit is absent.
-func TestParseBdListOpts(t *testing.T) {
+func TestParseListOpts(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -37,19 +37,19 @@ func TestParseBdListOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseBdListOpts(tc.args)
+			got, err := ParseListOpts(tc.args)
 			if err != nil {
-				t.Fatalf("parseBdListOpts: %v", err)
+				t.Fatalf("ParseListOpts: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("parseBdListOpts(%v) = %+v, want %+v", tc.args, got, tc.want)
+				t.Fatalf("ParseListOpts(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestParseBdListOptsBadLimit(t *testing.T) {
-	if _, err := parseBdListOpts([]string{"--limit", "notanint", "--json"}); err == nil {
+func TestParseListOptsBadLimit(t *testing.T) {
+	if _, err := ParseListOpts([]string{"--limit", "notanint", "--json"}); err == nil {
 		t.Fatal("expected error for non-integer --limit")
 	}
 }

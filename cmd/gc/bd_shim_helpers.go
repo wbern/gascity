@@ -1,10 +1,9 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"io"
 
+	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -22,17 +21,8 @@ func graphStoreSQLiteEnabled(cfg *config.City) bool {
 	return false
 }
 
-// writeReadyJSON encodes the ready beads as a JSON array — never null, so a
-// work_query consumer that unmarshals into []beads.Bead always sees valid JSON.
-// (v1 extract of the upstream cmd_ready.go helper; the full `gc ready` command
-// rides the graph-store Router and is intentionally not ported in v1.)
+// writeReadyJSON encodes the ready beads as a JSON array; see
+// bddispatch.WriteReadyJSON.
 func writeReadyJSON(out []beads.Bead, stdout, stderr io.Writer) int {
-	if out == nil {
-		out = []beads.Bead{}
-	}
-	if err := json.NewEncoder(stdout).Encode(out); err != nil {
-		fmt.Fprintf(stderr, "gc bd-shim: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
+	return bddispatch.WriteReadyJSON(out, stdout, stderr)
 }
