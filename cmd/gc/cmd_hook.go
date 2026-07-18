@@ -594,16 +594,22 @@ type WorkQueryRunner func(command, dir string) (string, error)
 
 // hookWorkQueryTimeout caps the work-query subprocess that `gc hook` and the
 // workflow serve loop run via shellWorkQueryWithEnv. The default work-probe
-// issues ~6 sequential bd/store round-trips before the pool-demand tier that
-// finds routed work; on a multi-rig dolt city under concurrent load the probe
-// intermittently exceeded the prior 30s cap, so shellWorkQueryWithEnv killed it
-// and pool operators were starved of routed work. Raised to 60s to cover the
-// realistic loaded cost. This is independent of defaultHookRunTimeout, which
-// bounds the `gc hook run` managed-hook wrapper (around nudge drain / mail
-// check) and does not enclose this work query. The package-level var lets us
-// lower it again once the probe's round-trip count is reduced and the slow
-// per-rig `bd ready`/`gc ready` paths are optimized.
-var hookWorkQueryTimeout = 60 * time.Second
+// (config.Agent.EffectiveWorkQuery) fans out ~15 sequential unpooled bd/store
+// round-trips in the no-work case — three session identifiers across the
+// in-progress and ready assigned tiers (each: bd list/ready + an ephemeral bd
+// query = 12) plus the pool-demand tier (~3) — not the ~6 an earlier estimate
+// assumed. On a remote-dolt city every call is a fresh Tailscale MySQL
+// connection (raw SQL ~0.5s, but ~2-5s of connection setup, measured), so the
+// full scan intermittently exceeded the prior 60s cap under un-park concurrent
+// load: shellWorkQueryWithEnv killed the probe mid-scan and the pool worker
+// BLOCKED without claiming (and leaked un-reaped — gcw-t9d8). Sized at
+// ~10s/round-trip across the real ~15-call count. This is independent of
+// defaultHookRunTimeout, which bounds the `gc hook run` managed-hook wrapper
+// (around nudge drain / mail check) and does not enclose this work query. The
+// package-level var lets us lower it again once these reads are routed through
+// the warm pooled store (each call ms, not seconds — gcw-t9d8); a local-dolt
+// city already pays ~0s/call and does not need the headroom.
+var hookWorkQueryTimeout = 150 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
