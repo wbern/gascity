@@ -255,6 +255,14 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	result, err := dispatch.ProcessControl(store, bead, opts)
 	if err != nil {
+		if errors.Is(err, dispatch.ErrNotControlBead) {
+			// A plain work bead reached control dispatch via a mis-scoped
+			// selection. Skip it — leave it open and assignable so normal
+			// dispatch can pick it up — never quarantine it as a control
+			// failure (gcw-zaey).
+			_, _ = fmt.Fprintf(stderr, "control dispatch: skipped non-control bead=%s (left open/assignable)\n", beadID) //nolint:errcheck // best-effort stderr
+			return nil
+		}
 		if errors.Is(err, dispatch.ErrControlPending) {
 			return err
 		}

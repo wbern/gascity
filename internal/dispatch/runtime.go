@@ -135,6 +135,15 @@ var ErrControlPending = errors.New("workflow control pending")
 // that cannot become valid by waiting.
 var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
 
+// ErrNotControlBead reports that a bead handed to ProcessControl carries no
+// control kind — it is a plain work bead, not workflow infrastructure, that
+// reached the control dispatcher via a mis-scoped selection. Callers must treat
+// it as a skip (leave the bead open and assignable), never as a control-dispatch
+// failure to quarantine. See gcw-zaey: a mis-scoped selection hard-quarantined
+// 60 plain work beads because ProcessControl's default arm rejected their empty
+// kind as an unsupported control kind.
+var ErrNotControlBead = errors.New("bead is not a control bead")
+
 // ProcessControl executes a graph.v2 control bead.
 //
 // The current graph.v2 runtime assumes a single controller processes a given
@@ -144,6 +153,16 @@ var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
 func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if store == nil {
 		return ControlResult{}, fmt.Errorf("store is nil")
+	}
+	// A bead with no control kind is not a control bead at all — it reached the
+	// control dispatcher via a mis-scoped selection, not because it is workflow
+	// infrastructure. Report ErrNotControlBead so the caller SKIPS it (leaving it
+	// open and assignable) instead of hard-quarantining a plain work bead as a
+	// control-dispatch failure. A non-empty but unrecognized kind is a genuine
+	// control-bead misconfiguration and still hard-errors in the switch below
+	// (gcw-zaey: distinguish "not a control bead" from "unknown control kind").
+	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == "" {
+		return ControlResult{}, ErrNotControlBead
 	}
 	// Resolve the attempt-route config once per invocation. opts is copied by
 	// value into every sub-step, so a shared pointer cache collapses the former
