@@ -194,12 +194,24 @@ func ensureCityBdShimbin(cityPath, mode string, stderr io.Writer) error {
 	bdTarget := realBd
 	if bp := bdproxyBesideGC(); bp != "" {
 		bdTarget = bp
+	} else if mode == config.BdShimModeOn {
+		// Operator forced bd_shim=on but the thin client is not installed beside
+		// gc: the redirect falls back to passthrough (real bd), so there is no
+		// routing benefit. Warn loudly rather than silently degrade to auto.
+		fmt.Fprintf(stderr, "gc supervisor: bd_shim=on but no bdproxy beside gc; bd redirect falls back to real bd (build/install bdproxy to route)\n") //nolint:errcheck
 	}
 	if err := atomicSymlinkShimbin(bdTarget, filepath.Join(dir, "bd")); err != nil {
 		return fmt.Errorf("linking bd shim: %w", err)
 	}
-	// With the bd redirect active, install the gc-managed ZDOTDIR so a worker's
-	// zsh fronts the shim bin dir even when the user rc re-prepends a real-bd dir.
+	// Cross-platform note: the load-bearing PATH-front is prependGCBinDirToPATH
+	// (agent_env_path.go), which prepends the shim bin dir to the agent's PROCESS
+	// PATH using os.PathListSeparator — shell- and OS-agnostic, so a worker's
+	// `bd` routes on Linux/bash as well as macOS/zsh, and every non-interactive
+	// `sh -c` command inherits it. The ZDOTDIR below is an ADDITIONAL, zsh-only
+	// hardening for the narrow case where a user's interactive zsh rc re-prepends
+	// a competing real-bd dir; it is inert (harmless) under bash/sh. A bash/sh
+	// equivalent (BASH_ENV/$ENV) for the interactive-rc-reprepend case is tracked
+	// in gcw-b8yk and is not required for the process-PATH base to work.
 	if err := ensureCityBdShimZdotdir(cityPath); err != nil {
 		return fmt.Errorf("installing shim zdotdir: %w", err)
 	}

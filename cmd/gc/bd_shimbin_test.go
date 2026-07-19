@@ -62,6 +62,27 @@ func TestEnsureCityBdShimbinOffRemovesStaleRedirect(t *testing.T) {
 	}
 }
 
+// TestEnsureCityBdShimbinOnWarnsWhenBdproxyMissing pins bd_shim=on with no
+// bdproxy beside gc: it still installs the redirect (passthrough to real bd) but
+// warns loudly rather than silently degrading to auto.
+func TestEnsureCityBdShimbinOnWarnsWhenBdproxyMissing(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+
+	var stderr strings.Builder
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeOn, &stderr); err != nil {
+		t.Fatalf("ensureCityBdShimbin(on): %v", err)
+	}
+	if !strings.Contains(stderr.String(), "bd_shim=on but no bdproxy") {
+		t.Fatalf("want on-missing warning, got stderr: %q", stderr.String())
+	}
+	if !isSymlink(filepath.Join(cityBdShimbinDir(cityPath), "bd")) {
+		t.Fatalf("bd symlink should still be installed under on (passthrough fallback)")
+	}
+}
+
 func mustExe(t *testing.T) string {
 	t.Helper()
 	exe, err := os.Executable()
