@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// routeLogLine is one structured bdproxy dispatch record, appended as JSONL for
+// routeLogLine is one structured bdshim dispatch record, appended as JSONL for
 // post-hoc routing/latency insight (which verbs route vs passthrough, and how
 // long the in-proxy work took — excludes this binary's own OS spawn cost).
 type routeLogLine struct {
@@ -46,14 +46,14 @@ func logDisposition(verb, disposition string, exit int, start time.Time) {
 	_, _ = f.Write(append(enc, '\n'))
 }
 
-// routeLogPath resolves the JSONL log path: the GC_BDPROXY_LOG override, else
-// $GC_CITY_PATH/.gc/bdproxy.log when a city is in scope, else empty (logging off).
+// routeLogPath resolves the JSONL log path: the GC_BDSHIM_LOG override, else
+// $GC_CITY_PATH/.gc/bdshim.log when a city is in scope, else empty (logging off).
 func routeLogPath() string {
-	if v := strings.TrimSpace(os.Getenv("GC_BDPROXY_LOG")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("GC_BDSHIM_LOG")); v != "" {
 		return v
 	}
 	if city := strings.TrimSpace(os.Getenv("GC_CITY_PATH")); city != "" {
-		return filepath.Join(city, ".gc", "bdproxy.log")
+		return filepath.Join(city, ".gc", "bdshim.log")
 	}
 	return ""
 }

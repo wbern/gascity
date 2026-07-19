@@ -1,4 +1,4 @@
-// Command bdproxy is the tiny bd-compatible thin client. Installed as `bd` first
+// Command bdshim is the tiny bd-compatible thin client. Installed as `bd` first
 // on an agent's PATH, it makes a worker's bead calls fast by routing the
 // cache-servable verbs through the already-warm controller HTTP API and execing
 // the real bd (GC_BD_REAL) for everything else — WITHOUT paying the ~200ms
@@ -46,11 +46,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Expand the gc-only `heartbeat <id>` verb into the bd write that performs it.
 	bdArgs, err := rewriteHeartbeatArgs(bdArgs)
 	if err != nil {
-		fmt.Fprintf(stderr, "bdproxy: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if len(bdArgs) == 0 {
-		fmt.Fprintln(stderr, "bdproxy: missing bd subcommand") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "bdshim: missing bd subcommand") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -105,7 +105,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			id, ok := bddispatch.FirstBdPositional(verbArgs)
 			if !ok {
-				fmt.Fprintln(stderr, "bdproxy: usage: update <id> --claim") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "bdshim: usage: update <id> --claim") //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			if !controllerReachable(base) {

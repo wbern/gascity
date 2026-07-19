@@ -2783,7 +2783,7 @@
             "on",
             "off"
           ],
-          "description": "BdShim selects how a managed worker's `bd` is routed. \"auto\" (default):\nroute through the bd-shim thin client (bdproxy) when it is installed beside\ngc, else use the real bd directly — the current behavior, and an\nupstream-safe no-op when no thin client is present. \"on\": always install\nthe redirect (doctor warns if the thin client binary is missing). \"off\":\nnever install the redirect — workers use the real bd directly, the clean\nbaseline for benchmarking or opting out. The GC_BDSHIM environment variable\noverrides this at the shim-install site. See gcw-b8yk.",
+          "description": "BdShim selects how a managed worker's `bd` is routed. \"auto\" (default):\nroute through the bd-shim thin client (bdshim) when it is installed beside\ngc, else use the real bd directly — the current behavior, and an\nupstream-safe no-op when no thin client is present. \"on\": always install\nthe redirect (doctor warns if the thin client binary is missing). \"off\":\nnever install the redirect — workers use the real bd directly, the clean\nbaseline for benchmarking or opting out. The GC_BDSHIM environment variable\noverrides this at the shim-install site. See gcw-b8yk.",
           "default": "auto"
         },
         "pool_respawn_backoff_base": {

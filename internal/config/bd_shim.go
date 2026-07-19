@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// bd-shim routing modes for [session] bd_shim. The bd-shim (bdproxy) is a tiny
+// bd-shim routing modes for [session] bd_shim. The bd-shim (bdshim) is a tiny
 // thin client installed beside gc that routes a worker's hot `bd` calls to the
 // warm controller instead of paying gc's cold-start per call.
 const (

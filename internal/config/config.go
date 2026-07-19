@@ -1575,7 +1575,7 @@ type SessionConfig struct {
 	// disables it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// BdShim selects how a managed worker's `bd` is routed. "auto" (default):
-	// route through the bd-shim thin client (bdproxy) when it is installed beside
+	// route through the bd-shim thin client (bdshim) when it is installed beside
 	// gc, else use the real bd directly — the current behavior, and an
 	// upstream-safe no-op when no thin client is present. "on": always install
 	// the redirect (doctor warns if the thin client binary is missing). "off":

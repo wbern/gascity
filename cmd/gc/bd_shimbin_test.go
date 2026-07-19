@@ -62,10 +62,10 @@ func TestEnsureCityBdShimbinOffRemovesStaleRedirect(t *testing.T) {
 	}
 }
 
-// TestEnsureCityBdShimbinOnWarnsWhenBdproxyMissing pins bd_shim=on with no
-// bdproxy beside gc: it still installs the redirect (passthrough to real bd) but
+// TestEnsureCityBdShimbinOnWarnsWhenBdshimMissing pins bd_shim=on with no
+// bdshim beside gc: it still installs the redirect (passthrough to real bd) but
 // warns loudly rather than silently degrading to auto.
-func TestEnsureCityBdShimbinOnWarnsWhenBdproxyMissing(t *testing.T) {
+func TestEnsureCityBdShimbinOnWarnsWhenBdshimMissing(t *testing.T) {
 	cityPath := t.TempDir()
 	realBdDir := t.TempDir()
 	writeFakeBd(t, realBdDir)
@@ -75,7 +75,7 @@ func TestEnsureCityBdShimbinOnWarnsWhenBdproxyMissing(t *testing.T) {
 	if err := ensureCityBdShimbin(cityPath, config.BdShimModeOn, &stderr); err != nil {
 		t.Fatalf("ensureCityBdShimbin(on): %v", err)
 	}
-	if !strings.Contains(stderr.String(), "bd_shim=on but no bdproxy") {
+	if !strings.Contains(stderr.String(), "bd_shim=on but no bdshim") {
 		t.Fatalf("want on-missing warning, got stderr: %q", stderr.String())
 	}
 	if !isSymlink(filepath.Join(cityBdShimbinDir(cityPath), "bd")) {
@@ -130,7 +130,7 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	if got, _ := os.Readlink(gcLink); got != exe {
 		t.Fatalf("gc symlink -> %q, want %q", got, exe)
 	}
-	// bd -> the real bd directly (gc is no longer a bd shim; no bdproxy in this test).
+	// bd -> the real bd directly (gc is no longer a bd shim; no bdshim in this test).
 	wantBd, err := resolveRealBdExcludingDir(cityBdShimbinDir(cityPath))
 	if err != nil {
 		t.Fatalf("resolve real bd: %v", err)
@@ -149,42 +149,42 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	}
 }
 
-func TestBdproxyBesideExe(t *testing.T) {
+func TestBdshimBesideExe(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "gc")
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// No bdproxy beside exe yet.
-	if got := bdproxyBesideExe(exe); got != "" {
-		t.Fatalf("no bdproxy: got %q, want empty", got)
+	// No bdshim beside exe yet.
+	if got := bdshimBesideExe(exe); got != "" {
+		t.Fatalf("no bdshim: got %q, want empty", got)
 	}
-	// An executable bdproxy beside exe is found.
-	bp := filepath.Join(dir, "bdproxy")
+	// An executable bdshim beside exe is found.
+	bp := filepath.Join(dir, "bdshim")
 	if err := os.WriteFile(bp, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := bdproxyBesideExe(exe); got != bp {
-		t.Fatalf("bdproxy beside exe: got %q, want %q", got, bp)
+	if got := bdshimBesideExe(exe); got != bp {
+		t.Fatalf("bdshim beside exe: got %q, want %q", got, bp)
 	}
-	// A non-executable bdproxy is ignored (not a valid shim target).
+	// A non-executable bdshim is ignored (not a valid shim target).
 	if err := os.Chmod(bp, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := bdproxyBesideExe(exe); got != "" {
-		t.Fatalf("non-exec bdproxy: got %q, want empty", got)
+	if got := bdshimBesideExe(exe); got != "" {
+		t.Fatalf("non-exec bdshim: got %q, want empty", got)
 	}
 }
 
-// TestBdproxyBesideExeFollowsSymlink verifies a gc started via a symlink still
-// finds a bdproxy installed beside the symlink's real target.
-func TestBdproxyBesideExeFollowsSymlink(t *testing.T) {
+// TestBdshimBesideExeFollowsSymlink verifies a gc started via a symlink still
+// finds a bdshim installed beside the symlink's real target.
+func TestBdshimBesideExeFollowsSymlink(t *testing.T) {
 	realDir := t.TempDir()
 	realExe := filepath.Join(realDir, "gc")
 	if err := os.WriteFile(realExe, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bp := filepath.Join(realDir, "bdproxy")
+	bp := filepath.Join(realDir, "bdshim")
 	if err := os.WriteFile(bp, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -193,15 +193,15 @@ func TestBdproxyBesideExeFollowsSymlink(t *testing.T) {
 	if err := os.Symlink(realExe, linkExe); err != nil {
 		t.Fatal(err)
 	}
-	// bdproxy is beside the symlink target, not beside the symlink itself.
+	// bdshim is beside the symlink target, not beside the symlink itself.
 	// Normalize via EvalSymlinks: on macOS the tmp root (/var) is itself a symlink
 	// to /private/var, which the resolver follows.
 	wantBP, err := filepath.EvalSymlinks(bp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bdproxyBesideExe(linkExe); got != wantBP {
-		t.Fatalf("symlink-resolved bdproxy: got %q, want %q", got, wantBP)
+	if got := bdshimBesideExe(linkExe); got != wantBP {
+		t.Fatalf("symlink-resolved bdshim: got %q, want %q", got, wantBP)
 	}
 }
 

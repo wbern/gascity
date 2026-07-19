@@ -145,7 +145,7 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	out := filepath.Join(dir, "calls.txt")
 	bd := fakeBd(t, dir, out, 7)
 	t.Setenv("GC_BD_REAL", bd)
-	t.Setenv("GC_BDPROXY_LOG", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
 	// "log" is not in RoutedVerbs -> passthrough.
@@ -170,7 +170,7 @@ func TestRunRoutedReadFailsLoudWhenControllerDown(t *testing.T) {
 	t.Setenv("GC_BD_REAL", bd)
 	t.Setenv("GC_API_URL", "http://127.0.0.1:1") // nothing listens on port 1
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
-	t.Setenv("GC_BDPROXY_LOG", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
@@ -192,7 +192,7 @@ func TestRunRoutedCityUnresolvablePassesThrough(t *testing.T) {
 	t.Setenv("GC_BD_REAL", bd)
 	t.Setenv("GC_CITY_PATH", "")
 	t.Setenv("GC_CITY", "")
-	t.Setenv("GC_BDPROXY_LOG", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
@@ -214,7 +214,7 @@ func TestRunClaimFallsBackWhenControllerDown(t *testing.T) {
 	t.Setenv("GC_API_URL", "http://127.0.0.1:1") // nothing listens on port 1
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 	t.Setenv("BEADS_ACTOR", "gas-city-wbern/architect")
-	t.Setenv("GC_BDPROXY_LOG", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"update", "gcw-1", "--claim"}, strings.NewReader(""), &stdout, &stderr)

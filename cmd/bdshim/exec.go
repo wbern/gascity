@@ -45,7 +45,7 @@ func resolveRealBdPath() (string, error) {
 func execRealBd(args []string, dir string, env []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	bdPath, err := resolveRealBdPath()
 	if err != nil {
-		fmt.Fprintf(stderr, "bdproxy: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cmd := exec.Command(bdPath, args...)
@@ -64,7 +64,7 @@ func execRealBd(args []string, dir string, env []string, stdin io.Reader, stdout
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "bdproxy: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0

@@ -23,7 +23,7 @@ func dispatchClaim(client *api.Client, id, actor string, stdout, stderr io.Write
 		if errors.Is(err, api.ErrClaimRouteUnsupported) {
 			return 0, false
 		}
-		fmt.Fprintf(stderr, "bdproxy: claiming %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "bdshim: claiming %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
 	if !claimed {
@@ -31,7 +31,7 @@ func dispatchClaim(client *api.Client, id, actor string, stdout, stderr io.Write
 		if holder == "" {
 			holder = "another agent"
 		}
-		fmt.Fprintf(stderr, "bdproxy: bead %s already claimed by %s\n", id, holder) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "bdshim: bead %s already claimed by %s\n", id, holder) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
 	return bddispatch.WriteReadyJSON([]beads.Bead{bead}, stdout, stderr), true
