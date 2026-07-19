@@ -102,8 +102,8 @@ only ~1.9 MB on top. We're at the practical floor.
 
 ## Questions for maintainers
 
-1. Is there appetite for this upstream? The cold-start tax hits any multi-agent
-   deployment, and the mechanism is opt-in and composable.
+1. Is there appetite for this upstream? Every multi-agent deployment pays the
+   same per-call CLI cost, and the mechanism is opt-in and composable.
 2. Preferred shape: a separate `cmd/bdshim` binary (as we have it), or a `gc`
    subcommand built as a size-constrained artifact?
 3. We'd like to start with the **telemetry OTLP-exporter split** as a small
