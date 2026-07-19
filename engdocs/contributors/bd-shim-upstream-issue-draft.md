@@ -6,7 +6,7 @@
 
 ---
 
-**Title:** Proposal: a tiny `bd` thin-client shim to kill per-call CLI cold-start (measured 8–19× on hot verbs)
+**Title:** Proposal: route hot `bd` verbs to the warm controller via a tiny thin client (8× faster point lookups)
 
 ## Context
 
@@ -18,27 +18,11 @@ scripts shell out to it too. A healthy consequence is that `bd`'s per-invocation
 cost is a first-class performance concern by design — every agent action and
 gate evaluation pays it.
 
-In our fork, `bd` resolves (via PATH) to the `gc` binary, so each of those calls
-cold-starts gc. Across many agents and gates that per-command startup adds up,
-and it surfaces as general sluggishness.
-
-## The finding that shaped the fix: binary size is *not* the boot cost
-
-Boot floor + end-to-end, warm cache, live gc2 (the genesis measurement that
-started this work):
-
-| `bd` front end            | binary size | boot floor | show   | list   | ready  |
-| ------------------------- | ----------- | ---------- | ------ | ------ | ------ |
-| gc-as-bd (fat shim)       | 122 MB      | 228 ms     | 230 ms | 265 ms | 650 ms |
-| raw `bd.real`             | 187 MB      | 99 ms      | 99 ms  | 119 ms | 110 ms |
-| **bdshim (this proposal)**| **7.7 MB**  | **~10 ms** | **12 ms** | 40 ms | 367 ms |
-
-Key point: `bd.real` is *larger* (187 MB) than `gc` (122 MB) yet boots ~2.3×
-faster. **The driver is package-level `init()` breadth, not binary size** — `gc`
-wires the whole orchestration graph at startup; `bd` only wires the ledger.
-(Building `gc` with `CGO_ENABLED=0` halved its *size* and did nothing to the boot
-floor.) So the fix is a program with a *tiny init surface*, not merely a smaller
-binary.
+Each `bd` invocation is a fresh, standalone process. For the cache-servable read
+verbs it does that work from cold — even though a warm `gc` controller is already
+running and holds the answer in memory. Plain `bd` simply doesn't use it. That is
+the opportunity: route the hot verbs to the already-warm controller instead of
+recomputing them per call.
 
 ## What we built
 
@@ -55,15 +39,28 @@ binary.
   optimization, never a correctness requirement. Controller-down → routed reads
   fail loud (rc=1) rather than silently returning a wrong/empty local answer.
 
-## Measured wins (post-slim, live gc2, n=25/verb)
+## Measured wins (live gc2, warm controller, n=25/verb)
 
-- **`bd show <id>` — the dominant point-lookup verb — is 8.1× faster: 14.5 ms vs
-  117 ms, and ~14× less CPU.**
-- Boot floor 228 ms → ~10 ms.
-- Binary: **122 MB → 7.7 MB** for the thing on every agent's PATH.
-- Honest caveats: `ready` is *slower* via the shim (federated controller
-  round-trip loses to a local scan on a loaded controller — a separate lever);
-  `list` is passthrough (neutral).
+`bdshim` vs the real `bd`:
+
+| verb              | wall (bdshim / bd) | CPU (bdshim / bd) | result                                          |
+| ----------------- | ------------------ | ----------------- | ----------------------------------------------- |
+| `show <id>`       | **14.5 / 117 ms**  | **7.2 / 102 ms**  | **8.1× faster wall, ~14× less CPU**             |
+| `list --status …` | 126 / 120 ms       | 117 / 109 ms      | passthrough (neutral)                           |
+| `ready`           | 463 / 123 ms       | 9.4 / 108 ms      | slower — federated round-trip (a separate lever) |
+
+`show <id>` is the point-lookup verb agents run most, so the 8.1× is the win that
+matters in practice. Binary footprint: bdshim **7.7 MB** vs the real `bd` **187
+MB**.
+
+## The lever is routing, not binary size
+
+The speedup comes from *avoiding the work* — answering from the warm controller —
+not from a smaller binary. Binary size does not drive startup: the real `bd` is
+187 MB yet boots in ~99 ms; Go's startup cost is dominated by package `init()`
+breadth, not size. So bdshim being small is a footprint/hygiene benefit (disk,
+per-process RSS across many concurrent workers, faster cold first-load), not the
+source of the latency win — chase the warm-path routing, not the megabytes.
 
 ## How the binary got small (independently useful to upstream)
 
@@ -84,9 +81,11 @@ only ~1.9 MB on top. We're at the practical floor.
 
 ## What we tried and moved away from (concise)
 
-- **gc-as-bd fat shim** — an earlier attempt kept warm-cache routing but paid
-  gc's ~228 ms cold-start per call, making it 2–6× *slower* than plain `bd` on
-  real reads. Removed; bdshim keeps the routing, drops the boot.
+- **Symlinking `bd` → `gc`** — an earlier attempt to give the CLI controller
+  access by making `bd` *be* gc. It cold-started the 122 MB gc on every call —
+  2–6× *slower* than plain `bd` on reads — so any routing benefit was swamped by
+  the boot. Removed; the thin client gets the controller routing without the gc
+  boot.
 - **Fat thin-client (18 MB)** — the first thin client still transitively imported
   the server and the OTLP/grpc exporter. Slimmed via the two steps above.
 - **Remote (WAN) Dolt store** → cut over to a single local gc-managed `dolt
