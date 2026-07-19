@@ -238,6 +238,15 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 			env[citylayout.RealBdEnvVar] = realBD
 		}
 	}
+	// Front the bd-shim bin dir on PATH (when installed) so an exec order's `bd`
+	// resolves to the shim and routes hot reads through the warm controller,
+	// symmetric with managed sessions (sessionGCBinForCity/prependGCBinDirToPATH).
+	// GC_BD_REAL (set above) lets the shim pass non-routable verbs through. The
+	// shim is absent when bd_shim=off (the supervisor removed it), so the symlink
+	// check naturally no-ops for the opt-out.
+	if gcLink := cityBdShimbinGCPath(cityPath); isSymlink(gcLink) {
+		prependGCBinDirToPATH(env, gcLink)
+	}
 	// Order-supplied [order.env] entries take effect last so they can tune
 	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
 	// noisy city) without editing the order's shell scripts or the parent
