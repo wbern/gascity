@@ -43,6 +43,54 @@ func TestBuildT3BridgeStartupEnvelope_UsesTemplateForGroupingAgent(t *testing.T)
 	}
 }
 
+func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughController(t *testing.T) {
+	// Regression (gcw-b8yk / codex no_work spawn-loop): codex/t3bridge sessions
+	// must receive the bd-shim env block (GC_BD_REAL, ZDOTDIR, GC_BIN, GC_BEADS)
+	// so their tool shells resolve the gc-as-bd shim, not the real bd. Without
+	// ZDOTDIR the codex zsh tool shell sources the user's ~/.zshrc (which
+	// re-prepends ~/go/bin), resolves the real bd, reads a store view that misses
+	// controller-fresh/federated routed work, and `gc hook --claim` returns
+	// no_work -> pool spawn-loop. Claude sessions (tmux) already receive these.
+	tp := TemplateParams{
+		TemplateName:             "gas-city-infra/codex-polecat",
+		InstanceName:             "gas-city-infra/codex-polecat-1",
+		SessionName:              "codex-polecat-gc2-nhr6q",
+		EffectiveSessionProvider: "t3bridge",
+		WorkDir:                  "/tmp/wt",
+		Command:                  "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/tmp/city",
+			"GC_PROVIDER":     "codex",
+			"GC_AGENT":        "gas-city-infra/codex-polecat-1",
+			"GC_TEMPLATE":     "gas-city-infra/codex-polecat",
+			"GC_SESSION_NAME": "codex-polecat-gc2-nhr6q",
+			"GC_BD_REAL":      "/home/u/go/bin/bd",
+			"ZDOTDIR":         "/tmp/city/.gc/shimzdotdir",
+			"GC_BIN":          "/tmp/city/.gc/shimbin/gc",
+			"GC_BEADS":        "bd",
+		},
+	}
+
+	raw := buildT3BridgeStartupEnvelope(tp, "prime")
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	ctx, ok := envelope["context"].(map[string]any)
+	if !ok {
+		t.Fatalf("context section missing: %#v", envelope["context"])
+	}
+	gcEnv, ok := ctx["gcEnv"].(map[string]any)
+	if !ok {
+		t.Fatalf("context.gcEnv missing: %#v", ctx["gcEnv"])
+	}
+	for _, k := range []string{"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS"} {
+		if got, _ := gcEnv[k].(string); got != tp.Env[k] {
+			t.Fatalf("gcEnv[%q] = %#v, want %q (codex must receive the bd-shim env or its tool shell resolves the real bd -> no_work)", k, gcEnv[k], tp.Env[k])
+		}
+	}
+}
+
 func TestBuildT3BridgeStartupEnvelope_NamedSessionPublishesTemplatePatchIdentity(t *testing.T) {
 	tp := TemplateParams{
 		TemplateName:             "crew",

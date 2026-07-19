@@ -72,6 +72,19 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 				"GC_CITY_PATH":    tp.Env["GC_CITY_PATH"],
 				"GC_RIG":          tp.Env["GC_RIG"],
 				"GC_SESSION_NAME": tp.Env["GC_SESSION_NAME"],
+				// bd-shim env block: without these a codex/t3bridge tool shell
+				// resolves the real bd (its zsh sources the user rc which
+				// re-prepends ~/go/bin) instead of the gc-as-bd shim, reads a
+				// store view that misses controller-fresh/federated routed work,
+				// and `gc hook --claim` returns no_work -> pool spawn-loop
+				// (gcw-b8yk). ZDOTDIR points the tool zsh at the gc-managed shim
+				// guard; GC_BD_REAL is the shim's passthrough target; GC_BIN and
+				// GC_BEADS keep bead ops on the shimmed gc. Claude (tmux) already
+				// receives these via sessionGCBinForCity.
+				"GC_BD_REAL": tp.Env["GC_BD_REAL"],
+				"ZDOTDIR":    tp.Env["ZDOTDIR"],
+				"GC_BIN":     tp.Env["GC_BIN"],
+				"GC_BEADS":   tp.Env["GC_BEADS"],
 			},
 		},
 		"resume": map[string]any{
