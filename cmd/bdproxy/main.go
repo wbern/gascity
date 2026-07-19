@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/bdshim"
 )
@@ -66,9 +67,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// always byte-identical to raw bd.
 	switch bdshim.ClassifyVerb(verb, verbArgs, false) {
 	case bdshim.Route:
+		city := resolveCityName(cityOverride)
+		if city == "" {
+			// No city resolvable (non-agent context): can't route, passthrough is
+			// best-effort and byte-identical in the identity phase.
+			return passthrough()
+		}
+		base := controllerBaseURL()
 		// The pure-claim shape routes to the atomic claim endpoint and carries its
 		// own fallbacks (needs an actor; must still work when the controller is
-		// down or its backend cannot claim on behalf of an actor).
+		// down — bd.real's atomic claim is a correct fallback — or its backend
+		// cannot claim on behalf of an actor).
 		if verb == "update" && bdshim.UpdateClaimShape(verbArgs) {
 			actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR"))
 			if actor == "" {
@@ -79,10 +88,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "bdproxy: usage: update <id> --claim") //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			client := controllerClient(cityOverride)
-			if client == nil {
+			if !controllerReachable(base) {
 				return passthrough()
 			}
+			client := api.NewCityScopedClient(base, city)
 			if code, handled := dispatchClaim(client, id, actor, stdout, stderr); handled {
 				logDisposition(verb, "route", code, start)
 				return code
@@ -90,14 +99,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			// Backend cannot claim on behalf of an actor (501): fall back.
 			return passthrough()
 		}
-		client := controllerClient(cityOverride)
-		if client == nil {
-			// Wanted to route but no controller reachable. In identity phase
-			// passthrough is byte-identical and strictly safer than failing, so
-			// fall back rather than refuse (the fat shim's pure-HTTP refusal exists
-			// for the split phase, which is off here).
-			return passthrough()
-		}
+		// Routed read/write: dispatch through the controller. When the controller
+		// is unreachable this fails loudly (rc=1) rather than silently passing
+		// through to the work-only bd, whose cwd scope cannot answer a city-wide
+		// read — matching the fat shim's pure-HTTP contract. No liveness probe on
+		// this hot path (a probe can spuriously trip under load and mis-route).
+		client := api.NewCityScopedClient(base, city)
 		code := bddispatch.DispatchViaAPI(client, verb, verbArgs, stdout, stderr)
 		logDisposition(verb, "route", code, start)
 		return code

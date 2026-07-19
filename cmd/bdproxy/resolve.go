@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/api"
 )
 
 // defaultControllerBaseURL is the supervisor API default (bind 127.0.0.1, port
@@ -90,25 +89,13 @@ func resolveCityName(override string) string {
 	return ""
 }
 
-// controllerClient returns a city-scoped API client when a controller is
-// reachable, or nil (so the caller falls back to passthrough). The controller
-// ignores Authorization on localhost, so no token is attached. A fast liveness
-// probe avoids a slow per-call timeout when the controller is down.
-func controllerClient(cityOverride string) *api.Client {
-	city := resolveCityName(cityOverride)
-	if city == "" {
-		return nil
-	}
-	base := controllerBaseURL()
-	if !controllerAlive(base) {
-		return nil
-	}
-	return api.NewCityScopedClient(base, city)
-}
-
-// controllerAlive reports whether the controller answers an HTTP request at base
-// within a short timeout. Any HTTP status (even 404) proves the listener is up.
-func controllerAlive(base string) bool {
+// controllerReachable reports whether the controller answers an HTTP request at
+// base within a short timeout. Any HTTP status (even 404) proves the listener is
+// up. Used ONLY by the infrequent claim path to decide whether to fall back to
+// the real bd's atomic claim — where a spurious miss is harmless because the
+// fallback claim is correct. The hot read/write path deliberately does not probe
+// (a probe can spuriously trip under load and mis-route a read to bd.real).
+func controllerReachable(base string) bool {
 	client := &http.Client{Timeout: 400 * time.Millisecond}
 	resp, err := client.Get(base + "/")
 	if err != nil {

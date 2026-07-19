@@ -159,10 +159,11 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
-// TestRunRoutedFallsBackWhenControllerDown verifies that a routable verb falls
-// back to passthrough (execs real bd) when no controller is reachable — the
-// identity-phase robustness path.
-func TestRunRoutedFallsBackWhenControllerDown(t *testing.T) {
+// TestRunRoutedReadFailsLoudWhenControllerDown verifies a routable READ dispatches
+// (and fails loudly rc!=0) rather than silently passing through to the work-only
+// bd when the controller is down — bd.real's cwd scope cannot answer a city-wide
+// read, so a silent passthrough would return wrong/empty output.
+func TestRunRoutedReadFailsLoudWhenControllerDown(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "calls.txt")
 	bd := fakeBd(t, dir, out, 0)
@@ -172,13 +173,55 @@ func TestRunRoutedFallsBackWhenControllerDown(t *testing.T) {
 	t.Setenv("GC_BDPROXY_LOG", "")
 
 	var stdout, stderr bytes.Buffer
-	// "list --json" is routable, but the controller is unreachable -> passthrough.
+	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("routed read with controller down: exit code = 0; want non-zero (loud fail)")
+	}
+	if got, _ := os.ReadFile(out); strings.Contains(string(got), "list") {
+		t.Fatalf("routed read must NOT silently passthrough to bd; calls=%q", string(got))
+	}
+}
+
+// TestRunRoutedCityUnresolvablePassesThrough verifies that a routable verb passes
+// through when no city is resolvable (non-agent context), since routing requires a
+// city and passthrough is byte-identical in the identity phase.
+func TestRunRoutedCityUnresolvablePassesThrough(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "calls.txt")
+	bd := fakeBd(t, dir, out, 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_BDPROXY_LOG", "")
+
+	var stdout, stderr bytes.Buffer
 	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit code = %d; want 0", code)
+		t.Fatalf("exit code = %d; want 0 (passthrough to fake bd)", code)
 	}
-	got, _ := os.ReadFile(out)
-	if !strings.Contains(string(got), "list --json") {
+	if got, _ := os.ReadFile(out); !strings.Contains(string(got), "list --json") {
 		t.Fatalf("expected passthrough to fake bd; calls=%q", string(got))
+	}
+}
+
+// TestRunClaimFallsBackWhenControllerDown verifies the claim shape falls back to
+// the real bd's atomic claim when the controller is unreachable.
+func TestRunClaimFallsBackWhenControllerDown(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "calls.txt")
+	bd := fakeBd(t, dir, out, 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_API_URL", "http://127.0.0.1:1") // nothing listens on port 1
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("BEADS_ACTOR", "gas-city-wbern/architect")
+	t.Setenv("GC_BDPROXY_LOG", "")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"update", "gcw-1", "--claim"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; want 0 (passthrough claim to fake bd)", code)
+	}
+	if got, _ := os.ReadFile(out); !strings.Contains(string(got), "update gcw-1 --claim") {
+		t.Fatalf("expected claim passthrough to fake bd; calls=%q", string(got))
 	}
 }
