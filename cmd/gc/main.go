@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/telemetry/otlpexport"
 	"github.com/spf13/cobra"
 )
 
@@ -135,6 +136,10 @@ type cliTelemetryShutdowner interface {
 }
 
 var initializeCLITelemetry = func(ctx context.Context, serviceName, serviceVersion string) (cliTelemetryShutdowner, error) {
+	// Register the OTLP/HTTP exporters (the only grpc-linking dependency) before
+	// Init. gc exports telemetry; record-only binaries like the bd shim omit
+	// this import and stay grpc-free.
+	otlpexport.Register()
 	provider, err := telemetry.Init(ctx, serviceName, serviceVersion)
 	if provider == nil {
 		return nil, err

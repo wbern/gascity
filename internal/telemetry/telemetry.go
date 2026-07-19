@@ -44,8 +44,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -91,6 +89,32 @@ var (
 	initDone       bool
 	globalProvider *Provider
 )
+
+// MetricExporterFactory constructs the OTLP metric exporter for the given
+// endpoint URL. LogExporterFactory does the same for logs. They are injected by
+// the internal/telemetry/otlpexport sub-package (imported only by binaries that
+// actually export telemetry, e.g. gc) so that record-only binaries — the bd
+// shim above all — never link the grpc-heavy OTLP/HTTP exporters. The record
+// API in this package stays lightweight and grpc-free.
+type MetricExporterFactory func(ctx context.Context, endpointURL string) (sdkmetric.Exporter, error)
+
+// LogExporterFactory constructs the OTLP log exporter for the given endpoint URL.
+type LogExporterFactory func(ctx context.Context, endpointURL string) (sdklog.Exporter, error)
+
+var (
+	metricExporterFactory MetricExporterFactory
+	logExporterFactory    LogExporterFactory
+)
+
+// SetExporterFactories registers the OTLP exporter constructors. It is called by
+// internal/telemetry/otlpexport (the only place that imports the grpc-heavy
+// OTLP/HTTP exporter packages). Until it is called, Init treats an otherwise
+// enabled telemetry configuration as a hard error, so a misconfigured binary
+// fails loudly rather than silently dropping metrics.
+func SetExporterFactories(metric MetricExporterFactory, log LogExporterFactory) {
+	metricExporterFactory = metric
+	logExporterFactory = log
+}
 
 // Provider wraps OTel SDK providers and their shutdown functions.
 type Provider struct {
@@ -246,6 +270,14 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 		return nil, nil
 	}
 
+	// Enabled but no exporter registered → the binary imported the record API
+	// without internal/telemetry/otlpexport. Fail loudly rather than silently
+	// dropping telemetry. Record-only binaries never reach here (they don't
+	// call Init).
+	if metricExporterFactory == nil || logExporterFactory == nil {
+		return nil, fmt.Errorf("telemetry enabled but no OTLP exporter registered; import internal/telemetry/otlpexport")
+	}
+
 	res, err := newResource(ctx, serviceName, serviceVersion)
 	if err != nil {
 		return nil, err
@@ -254,9 +286,7 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 	p := &Provider{resource: res}
 
 	// Metrics → VictoriaMetrics
-	metricExp, err := otlpmetrichttp.New(ctx,
-		otlpmetrichttp.WithEndpointURL(metricsURL),
-	)
+	metricExp, err := metricExporterFactory(ctx, metricsURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating OTLP metric exporter: %w", err)
 	}
@@ -273,9 +303,7 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 	initInstruments()
 
 	// Logs → VictoriaLogs
-	logExp, err := otlploghttp.New(ctx,
-		otlploghttp.WithEndpointURL(logsURL),
-	)
+	logExp, err := logExporterFactory(ctx, logsURL)
 	if err != nil {
 		// Shut down the already-registered metric provider to avoid leaking
 		// its periodic reader goroutine.
