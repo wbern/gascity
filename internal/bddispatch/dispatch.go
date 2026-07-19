@@ -586,6 +586,133 @@ func applyReadyParams(in []beads.Bead, p ReadyParams) []beads.Bead {
 	return out
 }
 
+// listMetadataFetchLimit mirrors the API's maxPaginationLimit.
+// DispatchListMetadataGuarded fetches up to this many candidate beads and treats
+// a full page as possibly truncated (defer to real bd), so a client-side
+// metadata filter can never miss a match beyond the cap.
+const listMetadataFetchLimit = 1000
+
+// listMetadataFilter holds the client-side predicates for a routed metadata list
+// (the list API has no server-side metadata filter).
+type listMetadataFilter struct {
+	equals       map[string]string // --metadata-field k=v (all must match)
+	hasKeys      []string          // --has-metadata-key K (all must be present)
+	excludeTypes map[string]bool   // --exclude-type=T
+	limit        int               // user --limit (0/unset = unlimited), applied last
+}
+
+// parseListMetadataFilter extracts the client-side predicates from a `bd list`
+// arg list; the server-filterable flags (status/type/assignee/label/all) are
+// handled separately by ParseListOpts.
+func parseListMetadataFilter(args []string) (listMetadataFilter, error) {
+	f := listMetadataFilter{equals: map[string]string{}, excludeTypes: map[string]bool{}}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--metadata-field" && i+1 < len(args):
+			if err := addMetadataEquals(f.equals, args[i+1]); err != nil {
+				return f, err
+			}
+			i++
+		case strings.HasPrefix(a, "--metadata-field="):
+			if err := addMetadataEquals(f.equals, strings.TrimPrefix(a, "--metadata-field=")); err != nil {
+				return f, err
+			}
+		case a == "--has-metadata-key" && i+1 < len(args):
+			f.hasKeys = append(f.hasKeys, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--has-metadata-key="):
+			f.hasKeys = append(f.hasKeys, strings.TrimPrefix(a, "--has-metadata-key="))
+		case a == "--exclude-type" && i+1 < len(args):
+			f.excludeTypes[args[i+1]] = true
+			i++
+		case strings.HasPrefix(a, "--exclude-type="):
+			f.excludeTypes[strings.TrimPrefix(a, "--exclude-type=")] = true
+		case (a == "--limit" || a == "-n") && i+1 < len(args):
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return f, fmt.Errorf("parse %s %q: %w", a, args[i+1], err)
+			}
+			f.limit = n
+			i++
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err != nil {
+				return f, fmt.Errorf("parse %q: %w", a, err)
+			}
+			f.limit = n
+		}
+	}
+	return f, nil
+}
+
+// applyListMetadataFilter keeps beads matching every predicate, then applies the
+// user's --limit last (0/unset = unlimited), mirroring bd's post-predicate limit.
+func applyListMetadataFilter(in []beads.Bead, f listMetadataFilter) []beads.Bead {
+	out := make([]beads.Bead, 0, len(in))
+	for _, b := range in {
+		if f.excludeTypes[b.Type] {
+			continue
+		}
+		match := true
+		for k, v := range f.equals {
+			if b.Metadata[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			for _, k := range f.hasKeys {
+				if _, present := b.Metadata[k]; !present {
+					match = false
+					break
+				}
+			}
+		}
+		if !match {
+			continue
+		}
+		out = append(out, b)
+	}
+	if f.limit > 0 && len(out) > f.limit {
+		out = out[:f.limit]
+	}
+	return out
+}
+
+// DispatchListMetadataGuarded routes a `bd list` carrying --metadata-field /
+// --has-metadata-key by fetching the server-filterable candidate set and
+// applying the metadata predicates client-side. It returns handled=false —
+// signalling the caller to pass through to the real bd — when the candidate set
+// may be truncated at the pagination cap, so a match beyond the cap is never
+// missed. The user's --limit is applied after filtering (not pushed to the
+// server), so --limit bounds the matching set exactly like real bd.
+func DispatchListMetadataGuarded(client *api.Client, args []string, stdout, stderr io.Writer) (int, bool) {
+	opts, err := ParseListOpts(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	// Fetch the full candidate page; the user's --limit is applied post-filter.
+	opts.Limit = listMetadataFetchLimit
+	read, err := client.ListBeads(opts)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	// Truncation guard: at/above the cap we cannot prove completeness, so defer
+	// to real bd (which filters server-side) rather than risk missing a match.
+	if len(read.Body) >= listMetadataFetchLimit {
+		return 0, false
+	}
+	f, err := parseListMetadataFilter(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	return WriteReadyJSON(applyListMetadataFilter(read.Body, f), stdout, stderr), true
+}
+
 // ParseUpdateOpts maps the routable `bd update` flags onto a beads.UpdateOpts.
 // It ignores the leading id positional; only routable update flags reach here
 // (the classifier passes the rest through), so an unknown flag is silently

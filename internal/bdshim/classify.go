@@ -255,6 +255,24 @@ func ListRoutable(args []string) bool {
 	return hasJSON
 }
 
+// ListHasMetadataPredicate reports whether a `bd list` arg list carries a
+// metadata predicate (--metadata-field / --has-metadata-key). Such a list is
+// not statically routable (the API has no server-side metadata filter), but the
+// caller can route it opportunistically with a client-side filter under a
+// truncation guard — see bddispatch.DispatchListMetadataGuarded.
+func ListHasMetadataPredicate(args []string) bool {
+	for _, a := range args {
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if name == "--metadata-field" || name == "--has-metadata-key" {
+			return true
+		}
+	}
+	return false
+}
+
 // SplitGlobalFlags finds the bd subcommand past any leading global flags. bd
 // accepts global flags before the subcommand (e.g. `bd --readonly --sandbox
 // ready ...`, the controller's discovery form), so the verb is not always

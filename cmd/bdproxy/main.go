@@ -62,6 +62,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	// A `bd list` with a metadata predicate is not statically routable (the list
+	// API has no server-side metadata filter), so route it opportunistically with
+	// a client-side filter under a truncation guard: DispatchListMetadataGuarded
+	// returns handled=false when the candidate set may be truncated at the page
+	// cap, and we pass through to the real bd so a match beyond the cap is never
+	// missed. Unreachable controller / no city also fall through to real bd.
+	if verb == "list" && bdshim.ListHasMetadataPredicate(verbArgs) {
+		if city := resolveCityName(cityOverride); city != "" {
+			base := controllerBaseURL()
+			if controllerReachable(base) {
+				client := api.NewCityScopedClient(base, city)
+				if code, handled := bddispatch.DispatchListMetadataGuarded(client, verbArgs, stdout, stderr); handled {
+					logDisposition(verb, "route", code, start)
+					return code
+				}
+			}
+		}
+		return passthrough()
+	}
+
 	// splitPhase is pinned false to match gc's graphStoreSQLiteEnabled (identity
 	// phase). Route is therefore always a pure latency choice; passthrough is
 	// always byte-identical to raw bd.
