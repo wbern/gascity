@@ -59,13 +59,13 @@ bonus, but that is a side effect, not the proposal.
 **Why we route only some verbs.** The shim routes only what the controller can
 serve quickly from its warm in-memory store — point lookups like `show`. Other
 endpoints are *intentionally* live and uncached upstream, for freshness:
-`GET /beads/ready` federates across every store (#3817, Julian Knutsen) and is
-deliberately not response-cached — open reads stay live and blocking callers
-bypass "so the body reflects the event they waited for" (#3208 / #3217, Stephanie
-Jarmak; same lever as /status in #3186). There is no warm-cache shortcut to exploit
-there, so routing `ready` only adds a round-trip (the 🟡 row above). Verbs like
-that are best left as passthrough — this is a deliberate upstream design we
-respect, not a gap to close.
+`GET /beads/ready` federates across every store (#3817, Julian Knutsen), and the
+open/live work it returns is deliberately served fresh rather than from the
+response cache — the same freshness lever used for `/status` (#3186, Jay German) —
+so blocking callers see the event they waited for. There is no warm-cache
+shortcut to exploit there, so routing `ready` only adds a round-trip (the 🟡 row
+above). Verbs like that are best left as passthrough — a deliberate upstream
+design we respect, not a gap to close.
 
 ## What we tried and moved away from (concise)
 
