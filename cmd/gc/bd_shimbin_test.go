@@ -8,7 +8,68 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// TestEnsureCityBdShimbinOffSkipsRedirect pins bd_shim=off: no redirect is
+// installed, so a worker's `bd`/`gc` resolve to the real binaries on PATH (the
+// clean baseline for benchmarking / opt-out).
+func TestEnsureCityBdShimbinOffSkipsRedirect(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeOff, io.Discard); err != nil {
+		t.Fatalf("ensureCityBdShimbin(off): %v", err)
+	}
+	if isSymlink(cityBdShimbinGCPath(cityPath)) {
+		t.Fatalf("gc symlink must NOT be installed under bd_shim=off")
+	}
+	if isSymlink(filepath.Join(cityBdShimbinDir(cityPath), "bd")) {
+		t.Fatalf("bd symlink must NOT be installed under bd_shim=off")
+	}
+	// sessionGCBinForCity falls back to the real gc, setting no redirect env.
+	env := map[string]string{}
+	if gcBin := sessionGCBinForCity(cityPath, env); gcBin != mustExe(t) {
+		t.Fatalf("GC_BIN = %q, want os.Executable fallback under off", gcBin)
+	}
+	if _, set := env[citylayout.RealBdEnvVar]; set {
+		t.Fatalf("GC_BD_REAL must not be set under bd_shim=off")
+	}
+}
+
+// TestEnsureCityBdShimbinOffRemovesStaleRedirect pins that switching to off
+// tears down a prior auto/on install (idempotent opt-out), so a bounce into off
+// leaves no dangling shimbin/bd that would keep routing.
+func TestEnsureCityBdShimbinOffRemovesStaleRedirect(t *testing.T) {
+	cityPath := t.TempDir()
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
+		t.Fatalf("install (auto): %v", err)
+	}
+	if !isSymlink(filepath.Join(cityBdShimbinDir(cityPath), "bd")) {
+		t.Fatalf("precondition: bd symlink should exist after auto install")
+	}
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeOff, io.Discard); err != nil {
+		t.Fatalf("switch to off: %v", err)
+	}
+	if _, err := os.Lstat(cityBdShimbinDir(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("shim bin dir should be removed under off (lstat err=%v)", err)
+	}
+}
+
+func mustExe(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	return exe
+}
 
 // writeFakeBd writes an executable `bd` stub into dir and returns its path.
 func writeFakeBd(t *testing.T, dir string) string {
@@ -29,7 +90,7 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("ensureCityBdShimbin: %v", err)
 	}
 
@@ -129,7 +190,7 @@ func TestEnsureCityBdShimbinIdempotentAndAtomic(t *testing.T) {
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
 	gcLink := cityBdShimbinGCPath(cityPath)
@@ -138,7 +199,7 @@ func TestEnsureCityBdShimbinIdempotentAndAtomic(t *testing.T) {
 		t.Fatalf("lstat gc link: %v", err)
 	}
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 
@@ -168,7 +229,7 @@ func TestEnsureCityBdShimbinNoBdOnPATHSkipsBdSymlink(t *testing.T) {
 	emptyDir := t.TempDir() // a PATH entry with no bd
 	t.Setenv("PATH", emptyDir)
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("ensureCityBdShimbin: %v", err)
 	}
 
@@ -186,7 +247,7 @@ func TestSessionGCBinPointsIntoShimbinWhenInstalled(t *testing.T) {
 	realBdDir := t.TempDir()
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -222,7 +283,7 @@ func TestGCBINDerivationFromCityPathNotOsExecutable(t *testing.T) {
 	realBdDir := t.TempDir()
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -243,7 +304,7 @@ func TestSessionEnvSetsGCBDRealToRealBdNotShim(t *testing.T) {
 	realBdDir := t.TempDir()
 	realBd := writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -289,7 +350,7 @@ func TestEnsureCityBdShimbinInstallsZdotdir(t *testing.T) {
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("ensureCityBdShimbin: %v", err)
 	}
 
@@ -336,7 +397,7 @@ func TestSessionGCBinSetsZdotdirWhenInstalled(t *testing.T) {
 	writeFakeBd(t, realBdDir)
 	t.Setenv("PATH", realBdDir)
 
-	if err := ensureCityBdShimbin(cityPath, io.Discard); err != nil {
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
 		t.Fatalf("ensureCityBdShimbin: %v", err)
 	}
 	env := map[string]string{}

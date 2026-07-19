@@ -2526,7 +2526,7 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// Install the gc-as-bd shim bin dir so managed worker sessions route bead
 	// ops through the controller (keeps the controller cache authoritative in
 	// every city). Non-fatal: on failure sessions stay on the real gc and bd.
-	if err := ensureCityBdShimbin(cityPath, stderr); err != nil {
+	if err := ensureCityBdShimbin(cityPath, resolveBdShimMode(cfg), stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bd shim install: %v\n", cityName, err) //nolint:errcheck
 	}
 

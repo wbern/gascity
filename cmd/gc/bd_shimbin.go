@@ -7,9 +7,38 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// resolveBdShimMode returns the effective bd-shim routing mode for a city: the
+// GC_BDSHIM env override when set (for ephemeral benchmarking without editing
+// config), else the [session] bd_shim value, else auto.
+func resolveBdShimMode(cfg *config.City) string {
+	if v := strings.TrimSpace(os.Getenv(config.BdShimEnvOverride)); v != "" {
+		return config.NormalizeBdShimMode(v)
+	}
+	if cfg != nil {
+		return cfg.Session.BdShimMode()
+	}
+	return config.BdShimModeAuto
+}
+
+// removeCityBdShim tears down the shim bin dir and gc-managed ZDOTDIR for
+// cityPath so a worker's `bd`/`gc` resolve to the real binaries on PATH. Used by
+// the bd_shim=off opt-out (the clean benchmark baseline). Idempotent: absent
+// paths are not an error.
+func removeCityBdShim(cityPath string) error {
+	if err := os.RemoveAll(cityBdShimbinDir(cityPath)); err != nil {
+		return fmt.Errorf("removing shim bin dir: %w", err)
+	}
+	if err := os.RemoveAll(cityBdShimZdotdir(cityPath)); err != nil {
+		return fmt.Errorf("removing shim zdotdir: %w", err)
+	}
+	return nil
+}
 
 // bdShimbinDirName is the per-city directory, under the runtime root, that holds
 // the gc-as-bd shim symlinks placed on every managed worker session's PATH.
@@ -136,7 +165,12 @@ func ensureCityBdShimZdotdir(cityPath string) error {
 // `bd` unshimmed preserves the no-bd-installed behavior. Errors creating the
 // dir or the gc symlink are returned for the caller to log non-fatally; on
 // error sessions stay on the real gc (no shim), matching pre-install behavior.
-func ensureCityBdShimbin(cityPath string, stderr io.Writer) error {
+func ensureCityBdShimbin(cityPath, mode string, stderr io.Writer) error {
+	if mode == config.BdShimModeOff {
+		// Opt-out: remove any prior redirect so workers use the real bd directly
+		// (the clean baseline for benchmarking or opting out). Idempotent.
+		return removeCityBdShim(cityPath)
+	}
 	gcExe, err := os.Executable()
 	if err != nil || gcExe == "" {
 		return fmt.Errorf("resolving gc binary: %w", err)
