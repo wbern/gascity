@@ -68,6 +68,15 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 			"ZDOTDIR":         "/tmp/city/.gc/shimzdotdir",
 			"GC_BIN":          "/tmp/city/.gc/shimbin/gc",
 			"GC_BEADS":        "bd",
+			// store-connection env: the load-bearing gap — without these the
+			// codex session's bd cannot reach the managed Dolt server -> no_work.
+			"GC_DOLT_PORT":           "49813",
+			"GC_DOLT_USER":           "root",
+			"BEADS_DOLT_SERVER_PORT": "49813",
+			"GC_BEADS_SCOPE_ROOT":    "/tmp/city",
+			"BEADS_DIR":              "/tmp/city/rigs/crm/.beads",
+			"BEADS_ACTOR":            "gas-city-infra/codex-polecat-1",
+			"GC_SESSION_ID":          "gc2-nhr6q",
 		},
 	}
 
@@ -84,9 +93,15 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 	if !ok {
 		t.Fatalf("context.gcEnv missing: %#v", ctx["gcEnv"])
 	}
-	for _, k := range []string{"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS"} {
+	// shim vars + the store-connection vars must all reach codex, or its bd
+	// resolves the wrong binary AND/OR cannot reach the managed Dolt store.
+	for _, k := range []string{
+		"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS",
+		"GC_DOLT_PORT", "GC_DOLT_USER", "BEADS_DOLT_SERVER_PORT",
+		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR", "GC_SESSION_ID",
+	} {
 		if got, _ := gcEnv[k].(string); got != tp.Env[k] {
-			t.Fatalf("gcEnv[%q] = %#v, want %q (codex must receive the bd-shim env or its tool shell resolves the real bd -> no_work)", k, gcEnv[k], tp.Env[k])
+			t.Fatalf("gcEnv[%q] = %#v, want %q (codex must receive the store/shim env or gc hook --claim -> no_work)", k, gcEnv[k], tp.Env[k])
 		}
 	}
 }

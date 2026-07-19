@@ -39,6 +39,43 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 	if provider == "" {
 		provider = tp.Env["GC_PROVIDER"]
 	}
+	// gcEnv is the env the t3bridge runtime projects onto the codex process.
+	// It MUST carry the same store-connection env the tmux/claude path gives its
+	// sessions (template_resolve.go Step 8), or a codex session's bd cannot reach
+	// the managed Dolt server the controller/claude use: bd falls back to a
+	// different/empty store, `bd ready ...routed_to...` returns nothing, and
+	// `gc hook --claim` = no_work -> pool spawn-loop (gci-x8zo). Identity + shim
+	// vars alone are necessary-but-insufficient (the shim still needs GC_DOLT_PORT
+	// + backend creds to connect). Forward the canonical Dolt/backend keys plus
+	// the scope/actor/session keys instead of a hand-maintained allowlist that
+	// keeps losing vars. GC_DOLT_PORT is rebuilt per managed-server restart
+	// (bd_env.go), so reading tp.Env at envelope-build time picks up the live port.
+	gcEnv := map[string]any{
+		"GC_AGENT":        tp.Env["GC_AGENT"],
+		"GC_PROVIDER":     provider,
+		"GC_TEMPLATE":     tp.Env["GC_TEMPLATE"],
+		"GC_CITY_PATH":    tp.Env["GC_CITY_PATH"],
+		"GC_RIG":          tp.Env["GC_RIG"],
+		"GC_SESSION_NAME": tp.Env["GC_SESSION_NAME"],
+		// bd-shim resolution vars: without ZDOTDIR/GC_BD_REAL the codex tool shell
+		// resolves the wrong bd; GC_BIN/GC_BEADS keep bead ops on the shimmed gc.
+		"GC_BD_REAL": tp.Env["GC_BD_REAL"],
+		"ZDOTDIR":    tp.Env["ZDOTDIR"],
+		"GC_BIN":     tp.Env["GC_BIN"],
+		"GC_BEADS":   tp.Env["GC_BEADS"],
+	}
+	// Store-connection env (the load-bearing gap for gci-x8zo): the managed Dolt
+	// server coordinates + the bead scope/actor/session identity.
+	storeEnvKeys := append([]string{}, projectedDoltEnvKeys...)
+	storeEnvKeys = append(storeEnvKeys,
+		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR",
+		"GC_SESSION_ID", "GC_BEADS_BACKEND", "BEADS_BACKEND", "GC_CITY",
+	)
+	for _, k := range storeEnvKeys {
+		if v := strings.TrimSpace(tp.Env[k]); v != "" {
+			gcEnv[k] = v
+		}
+	}
 	envelope := map[string]any{
 		"version": 1,
 		"gc": map[string]any{
@@ -65,27 +102,7 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 			"initialNudge":   tp.Hints.Nudge,
 		},
 		"context": map[string]any{
-			"gcEnv": map[string]any{
-				"GC_AGENT":        tp.Env["GC_AGENT"],
-				"GC_PROVIDER":     provider,
-				"GC_TEMPLATE":     tp.Env["GC_TEMPLATE"],
-				"GC_CITY_PATH":    tp.Env["GC_CITY_PATH"],
-				"GC_RIG":          tp.Env["GC_RIG"],
-				"GC_SESSION_NAME": tp.Env["GC_SESSION_NAME"],
-				// bd-shim env block: without these a codex/t3bridge tool shell
-				// resolves the real bd (its zsh sources the user rc which
-				// re-prepends ~/go/bin) instead of the gc-as-bd shim, reads a
-				// store view that misses controller-fresh/federated routed work,
-				// and `gc hook --claim` returns no_work -> pool spawn-loop
-				// (gcw-b8yk). ZDOTDIR points the tool zsh at the gc-managed shim
-				// guard; GC_BD_REAL is the shim's passthrough target; GC_BIN and
-				// GC_BEADS keep bead ops on the shimmed gc. Claude (tmux) already
-				// receives these via sessionGCBinForCity.
-				"GC_BD_REAL": tp.Env["GC_BD_REAL"],
-				"ZDOTDIR":    tp.Env["ZDOTDIR"],
-				"GC_BIN":     tp.Env["GC_BIN"],
-				"GC_BEADS":   tp.Env["GC_BEADS"],
-			},
+			"gcEnv": gcEnv,
 		},
 		"resume": map[string]any{
 			"policy":                 "match-or-recreate",
