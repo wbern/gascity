@@ -61,6 +61,71 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	}
 }
 
+func TestBdproxyBesideExe(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "gc")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No bdproxy beside exe yet.
+	if got := bdproxyBesideExe(exe); got != "" {
+		t.Fatalf("no bdproxy: got %q, want empty", got)
+	}
+	// An executable bdproxy beside exe is found.
+	bp := filepath.Join(dir, "bdproxy")
+	if err := os.WriteFile(bp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := bdproxyBesideExe(exe); got != bp {
+		t.Fatalf("bdproxy beside exe: got %q, want %q", got, bp)
+	}
+	// A non-executable bdproxy is ignored (not a valid shim target).
+	if err := os.Chmod(bp, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := bdproxyBesideExe(exe); got != "" {
+		t.Fatalf("non-exec bdproxy: got %q, want empty", got)
+	}
+}
+
+// TestBdproxyBesideExeFollowsSymlink verifies a gc started via a symlink still
+// finds a bdproxy installed beside the symlink's real target.
+func TestBdproxyBesideExeFollowsSymlink(t *testing.T) {
+	realDir := t.TempDir()
+	realExe := filepath.Join(realDir, "gc")
+	if err := os.WriteFile(realExe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bp := filepath.Join(realDir, "bdproxy")
+	if err := os.WriteFile(bp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := t.TempDir()
+	linkExe := filepath.Join(linkDir, "gc")
+	if err := os.Symlink(realExe, linkExe); err != nil {
+		t.Fatal(err)
+	}
+	// bdproxy is beside the symlink target, not beside the symlink itself.
+	// Normalize via EvalSymlinks: on macOS the tmp root (/var) is itself a symlink
+	// to /private/var, which the resolver follows.
+	wantBP, err := filepath.EvalSymlinks(bp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bdproxyBesideExe(linkExe); got != wantBP {
+		t.Fatalf("symlink-resolved bdproxy: got %q, want %q", got, wantBP)
+	}
+}
+
+func TestBdShimTargetFallsBackToGCWhenNoBdproxy(t *testing.T) {
+	cityPath := t.TempDir()
+	// No bdproxy beside the test binary -> the shim target is the in-dir gc link,
+	// preserving pre-bdproxy behavior.
+	if got := bdShimTarget(cityPath); got != cityBdShimbinGCPath(cityPath) {
+		t.Fatalf("fallback target: got %q, want %q", got, cityBdShimbinGCPath(cityPath))
+	}
+}
+
 func TestEnsureCityBdShimbinIdempotentAndAtomic(t *testing.T) {
 	cityPath := t.TempDir()
 	realBdDir := t.TempDir()

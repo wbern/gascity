@@ -9,6 +9,7 @@ BIN_DIR := $(shell go env GOPATH)/bin
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 
 BINARY     := gc
+BDPROXY    := bdproxy
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -115,8 +116,13 @@ endif
 ## server-mode/DoltLite thin client; override CGO_ENABLED=1 for a native build)
 build: check-beads-bd-version
 	CGO_ENABLED=$(CGO_ENABLED) go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	@# bdproxy: the tiny (~18MB) pure-Go bd thin client installed beside gc. It is
+	@# always CGO-free (no Dolt/ICU) and stripped; when present beside gc the
+	@# supervisor points the per-city `bd` shim at it, skipping gc's ~200ms boot.
+	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BUILD_DIR)/$(BDPROXY) ./cmd/bdproxy
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
+	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BDPROXY)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -167,7 +173,22 @@ install: check-self-contained
 			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
 		fi; \
 	fi
+	@# Install bdproxy beside gc (same dir) so bdproxyBesideGC finds it and the
+	@# per-city `bd` shim targets it. Mirror the .local/bin symlink so it is beside
+	@# gc under either os.Executable() resolution (INSTALL_DIR or ~/.local/bin).
+	@set -e; \
+		tmp="$(INSTALL_DIR)/.$(BDPROXY).tmp.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+		cp -f "$(BUILD_DIR)/$(BDPROXY)" "$$tmp"; \
+		chmod 0755 "$$tmp"; \
+		mv -f "$$tmp" "$(INSTALL_DIR)/$(BDPROXY)"; \
+		trap - EXIT INT TERM HUP
+	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ] && [ -d "$(HOME)/.local/bin" ]; then \
+		ln -sf "$(INSTALL_DIR)/$(BDPROXY)" "$(HOME)/.local/bin/$(BDPROXY)"; \
+		echo "Symlinked $(HOME)/.local/bin/$(BDPROXY) -> $(INSTALL_DIR)/$(BDPROXY)"; \
+	fi
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installed $(BDPROXY) to $(INSTALL_DIR)/$(BDPROXY)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -180,7 +201,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(BDPROXY)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
 check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test

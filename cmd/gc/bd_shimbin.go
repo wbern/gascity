@@ -21,6 +21,54 @@ func cityBdShimbinDir(cityPath string) string {
 	return filepath.Join(cityPath, citylayout.RuntimeRoot, bdShimbinDirName)
 }
 
+// bdproxyBinName is the file name of the tiny bd thin client installed beside the
+// gc binary. When present, the `bd` shim symlink targets it so a worker's bd call
+// skips gc's ~200ms cold-start; when absent, the shim falls back to gc-as-bd.
+const bdproxyBinName = "bdproxy"
+
+// bdShimTarget returns the binary the city's `bd` shim symlink should point at:
+// the tiny bdproxy thin client installed beside the gc binary when present, else
+// the in-dir gc symlink (gc-invoked-as-bd), preserving the pre-bdproxy behavior.
+func bdShimTarget(cityPath string) string {
+	if bp := bdproxyBesideGC(); bp != "" {
+		return bp
+	}
+	return cityBdShimbinGCPath(cityPath)
+}
+
+// bdproxyBesideGC returns the absolute path of the bdproxy binary installed in the
+// same directory as the running gc binary (following the gc symlink), or "" when
+// no executable bdproxy is found there. Both the invoked path and its symlink-
+// resolved path are checked so a gc started via a symlink (e.g. .local/bin/gc ->
+// go/bin/gc) still finds a bdproxy installed beside either.
+func bdproxyBesideGC() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return ""
+	}
+	return bdproxyBesideExe(exe)
+}
+
+// bdproxyBesideExe returns the absolute path of an executable bdproxy in the same
+// directory as exe (or as exe's symlink-resolved target), or "" when none is
+// found. Split from bdproxyBesideGC so the resolution is testable without mocking
+// os.Executable.
+func bdproxyBesideExe(exe string) string {
+	candidates := []string{filepath.Join(filepath.Dir(exe), bdproxyBinName)}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != exe {
+		candidates = append(candidates, filepath.Join(filepath.Dir(resolved), bdproxyBinName))
+	}
+	for _, cand := range candidates {
+		if !isExecutableFile(cand) {
+			continue
+		}
+		if abs, err := filepath.Abs(cand); err == nil {
+			return abs
+		}
+	}
+	return ""
+}
+
 // cityBdShimbinGCPath returns the path of the `gc` symlink inside the city's
 // shim bin dir. This is the GC_BIN value handed to managed sessions: its
 // directory (the shim bin dir) is fronted on PATH by prependGCBinDirToPATH, so a
@@ -113,14 +161,17 @@ func ensureCityBdShimbin(cityPath string, stderr io.Writer) error {
 	if err := atomicSymlinkShimbin(gcExe, cityBdShimbinGCPath(cityPath)); err != nil {
 		return fmt.Errorf("linking gc shim: %w", err)
 	}
-	// The `bd` symlink targets the in-dir gc symlink (not the real bd): a worker
-	// invoking `bd` execs gc, whose "bd" argv0 basename activates the shim. Only
-	// create it when a real bd exists to pass through to.
+	// The `bd` symlink targets the tiny bdproxy thin client when it is installed
+	// beside the gc binary (the fast path — no 117MB gc cold-start per bd call),
+	// else the in-dir gc symlink (a worker invoking `bd` execs gc, whose "bd"
+	// argv0 basename activates the shim). Both route bead ops through the same
+	// controller; bdproxy just skips gc's ~200ms boot. Only create the symlink
+	// when a real bd exists to pass through to.
 	if _, err := resolveRealBdExcludingDir(dir); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: bd shim install: no real bd on PATH; worker bd redirect disabled (%v)\n", err) //nolint:errcheck
 		return nil
 	}
-	if err := atomicSymlinkShimbin(cityBdShimbinGCPath(cityPath), filepath.Join(dir, "bd")); err != nil {
+	if err := atomicSymlinkShimbin(bdShimTarget(cityPath), filepath.Join(dir, "bd")); err != nil {
 		return fmt.Errorf("linking bd shim: %w", err)
 	}
 	// With the bd redirect active, install the gc-managed ZDOTDIR so a worker's
