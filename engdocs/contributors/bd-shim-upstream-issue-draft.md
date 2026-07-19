@@ -43,11 +43,11 @@ recomputing them per call.
 
 `bdshim` vs the real `bd`:
 
-| verb              | wall (bdshim / bd) | CPU (bdshim / bd) | result                                          |
-| ----------------- | ------------------ | ----------------- | ----------------------------------------------- |
-| `show <id>`       | **14.5 / 117 ms**  | **7.2 / 102 ms**  | **8.1× faster wall, ~14× less CPU**             |
-| `list --status …` | 126 / 120 ms       | 117 / 109 ms      | passthrough (neutral)                           |
-| `ready`           | 463 / 123 ms       | 9.4 / 108 ms      | slower — federated round-trip (a separate lever) |
+| verb              | wall (bdshim / bd) | CPU (bdshim / bd) | result                                              |
+| ----------------- | ------------------ | ----------------- | --------------------------------------------------- |
+| `show <id>`       | **14.5 / 117 ms**  | **7.2 / 102 ms**  | 🟢 **routed — 8.1× faster wall, ~14× less CPU**     |
+| `list --status …` | 126 / 120 ms       | 117 / 109 ms      | ⚪ passthrough — identical to real `bd`             |
+| `ready`           | 463 / 123 ms       | 9.4 / 108 ms      | 🟡 routed but slower — federated round-trip (separate lever) |
 
 `show <id>` is the point-lookup verb agents run most, so the 8.1× is the win that
 matters in practice. Binary footprint: bdshim **7.7 MB** vs the real `bd` **187
