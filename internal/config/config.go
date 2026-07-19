@@ -1574,6 +1574,15 @@ type SessionConfig struct {
 	// Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero
 	// disables it.
 	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
+	// BdShim selects how a managed worker's `bd` is routed. "auto" (default):
+	// route through the bd-shim thin client (bdproxy) when it is installed beside
+	// gc, else use the real bd directly — the current behavior, and an
+	// upstream-safe no-op when no thin client is present. "on": always install
+	// the redirect (doctor warns if the thin client binary is missing). "off":
+	// never install the redirect — workers use the real bd directly, the clean
+	// baseline for benchmarking or opting out. The GC_BDSHIM environment variable
+	// overrides this at the shim-install site. See gcw-b8yk.
+	BdShim string `toml:"bd_shim,omitempty" jsonschema:"default=auto,enum=auto,enum=on,enum=off"`
 	// PoolRespawnBackoffBase, when set, enables jittered exponential backoff on
 	// pool respawns (upstream gastownhall/gascity#3279). When a freshly-spawned
 	// generic pool session drains with reason "no-wake-reason" — it started but

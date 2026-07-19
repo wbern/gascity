@@ -2776,6 +2776,16 @@
           "type": "string",
           "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that HOLDS an in-progress claim but has stopped\nprogressing — the case ProgressStallTimeout deliberately exempts. Such a\nsession has wedged mid-work on a provider condition it will not self-clear\n(e.g. a codex \"Selected model is at capacity\" banner) and is invisible to\nevery other liveness surface (#4012). Because recycling a claim-holder\ndiscards in-progress work, set this above the longest legitimate quiet\nperiod a working claim-holder can exhibit — well above ProgressStallTimeout.\nValues below 5m are clamped to 5m. Duration string (e.g. \"20m\"). Unset/zero\ndisables it."
         },
+        "bd_shim": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "description": "BdShim selects how a managed worker's `bd` is routed. \"auto\" (default):\nroute through the bd-shim thin client (bdproxy) when it is installed beside\ngc, else use the real bd directly — the current behavior, and an\nupstream-safe no-op when no thin client is present. \"on\": always install\nthe redirect (doctor warns if the thin client binary is missing). \"off\":\nnever install the redirect — workers use the real bd directly, the clean\nbaseline for benchmarking or opting out. The GC_BDSHIM environment variable\noverrides this at the shim-install site. See gcw-b8yk.",
+          "default": "auto"
+        },
         "pool_respawn_backoff_base": {
           "type": "string",
           "description": "PoolRespawnBackoffBase, when set, enables jittered exponential backoff on\npool respawns (upstream gastownhall/gascity#3279). When a freshly-spawned\ngeneric pool session drains with reason \"no-wake-reason\" — it started but\ncould not claim its routed trigger work (e.g. the bead store's circuit\nbreaker is tripped) — the reconciler otherwise recreates it immediately on\nthe next tick, each respawn paying a full worktree checkout. Under a store\nblip that self-amplifies into a respawn storm. This is the FIRST backoff\nwindow applied after one no-claim drain; it doubles per consecutive drain\nup to PoolRespawnBackoffMax, with deterministic per-template jitter to\nde-correlate pools. Duration string (e.g. \"5s\"). Unset/zero disables it\n(the default), so the mechanism lands dormant until a city opts in."
