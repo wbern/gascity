@@ -82,10 +82,11 @@ only ~1.9 MB on top. We're at the practical floor.
 ## What we tried and moved away from (concise)
 
 - **Symlinking `bd` → `gc`** — an earlier attempt to give the CLI controller
-  access by making `bd` *be* gc. It cold-started the 122 MB gc on every call —
-  2–6× *slower* than plain `bd` on reads — so any routing benefit was swamped by
-  the boot. Removed; the thin client gets the controller routing without the gc
-  boot.
+  access by making `bd` *be* gc. But every call then paid gc's own startup: gc
+  wires the whole orchestration graph at `init` (the same init-breadth effect as
+  above — not its size), so it boots slowly (~230 ms) — 2–6× *slower* than plain
+  `bd` on reads. The routing benefit was swamped by the boot. Removed; the thin
+  client reaches the controller over HTTP without booting gc at all.
 - **Fat thin-client (18 MB)** — the first thin client still transitively imported
   the server and the OTLP/grpc exporter. Slimmed via the two steps above.
 - **Remote (WAN) Dolt store** → cut over to a single local gc-managed `dolt
@@ -111,8 +112,10 @@ only ~1.9 MB on top. We're at the practical floor.
 
 ## Code & references
 
-- Fork: `github.com/wbern/gascity`, branch `develop`.
-- Origin: `542270c9d` (tiny bd thin-client). Fat-shim removal: `87ba2cd42`.
-  Client leaf: `00da26053`. Telemetry exporter split: `cc9960577`. Build flags:
-  `05f6f5820`.
-- Design doc: `engdocs/contributors/bd-shim-thin-client.md`.
+- Fork: [`wbern/gascity` @ `develop`](https://github.com/wbern/gascity/tree/develop)
+- Origin — tiny bd thin client: [`542270c9d`](https://github.com/wbern/gascity/commit/542270c9d)
+- `bd`→`gc` removal: [`87ba2cd42`](https://github.com/wbern/gascity/commit/87ba2cd42)
+- Client leaf (drops the server): [`00da26053`](https://github.com/wbern/gascity/commit/00da26053)
+- Telemetry OTLP-exporter split (drops grpc): [`cc9960577`](https://github.com/wbern/gascity/commit/cc9960577)
+- Build flags: [`05f6f5820`](https://github.com/wbern/gascity/commit/05f6f5820)
+- Design doc: [`bd-shim-thin-client.md`](https://github.com/wbern/gascity/blob/develop/engdocs/contributors/bd-shim-thin-client.md)
