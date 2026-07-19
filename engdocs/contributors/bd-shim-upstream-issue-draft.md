@@ -1,7 +1,8 @@
-# Upstream discussion issue — DRAFT
+# Upstream discussion issue
 
-> Target: `gastownhall/gascity` GitHub issue (Discussion/Proposal). This is a
-> draft for review before posting. Numbers are from live gc2, 2026-07-19.
+> Posted: **gastownhall/gascity#4441**
+> (https://github.com/gastownhall/gascity/issues/4441). Numbers are from live
+> gc2, 2026-07-19. Source text below.
 
 ---
 
