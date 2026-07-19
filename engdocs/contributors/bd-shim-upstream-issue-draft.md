@@ -8,13 +8,19 @@
 
 **Title:** Proposal: a tiny `bd` thin-client shim to kill per-call CLI cold-start (measured 8–19× on hot verbs)
 
-## Problem
+## Context
 
-In multi-agent operation the beads CLI (`bd`) is invoked *constantly* — one
-process per call from every agent, plus every order/gate condition script. In
-our fork `bd` resolves (via PATH) to the `gc` binary, so **each call cold-starts
-gc**. At fleet scale this is a per-command fork storm that reads as general
-sluggishness.
+Gas City deliberately has agents reach subsystems through their CLIs rather than
+registered tools or MCP — per the project's own principle, *"No MCP/tool
+registration — if a tool has a CLI, the agent uses it."* The beads work ledger
+follows that model: agents drive work by calling `bd`, and order/gate condition
+scripts shell out to it too. A healthy consequence is that `bd`'s per-invocation
+cost is a first-class performance concern by design — every agent action and
+gate evaluation pays it.
+
+In our fork, `bd` resolves (via PATH) to the `gc` binary, so each of those calls
+cold-starts gc. Across many agents and gates that per-command startup adds up,
+and it surfaces as general sluggishness.
 
 ## The finding that shaped the fix: binary size is *not* the boot cost
 
