@@ -8,6 +8,54 @@ Exhaustive classification of every fork-unique commit on `origin/develop` that i
 origin/develop` reported **59 fork-unique (`+`)** commits and 35 already-equivalent
 (`-`); this inventory covers all 59.
 
+---
+
+## Validation pass — 2026-07-19 (`develop` @ `87ba2cd42`) · Bead: gcw-2t3d
+
+The 2026-07-14 body below is **stale**: `develop` has since advanced
+`f3ad19579 → 87ba2cd42` through **two upstream merge-downs** (`0db553a51`,
+`eab1a1c35`) plus the bdproxy cutover. This pass re-audited **all 130 fork-unique
+commits** above the new merge-base (`d5cb9125`) one at a time, grounding every
+verdict in **tree-state** (`git diff upstream/main..HEAD -- <file>`: is the fork
+change still *live*, or already *absorbed* to byte-identical-with-upstream?).
+
+**Conclusion: zero obsolete/dead code to remove.** No commit is `OBSOLETE-LIVE`.
+The divergence is live fork behavior (DoltLite / t3bridge / bdproxy / reconciler
+fixes / features) plus ~30 `ABSORBED-HISTORY` commits that are byte-identical to
+upstream in the tree and **self-dedupe on the next merge-down**. Removing the
+absorbed set would require rewriting 130-commit history on `develop` — churn we
+explicitly avoid (trunk-based). Let the merge-down dedupe.
+
+**The 2026-07-14 "8 to drop before merge-down" list is now moot** — the two
+merge-downs already resolved every one:
+
+- `aacd07fb0` / `22c75f175` (native-store dup) — preflight files now byte-identical
+  to upstream (#3940 landed). Nothing live.
+- reconnect trio `b612bdc39` / `53dda79b2` / `b30b7a83c` — one converged copy in
+  the tree; the rest is redundant history only.
+- fat gc-as-bd shim — **removed** by `87ba2cd42`; verified clean (zero live callers
+  of the deleted symbols).
+- fix+revert pair `d793c61a1` / `ba967e3a2` — nets to zero, no residue.
+- preflight cache `87bb30d8` / `75c78d403` — **not** dead; live L1/L2 tiers.
+- `a14cca88b` (CGO shard), `b24a8685d`+`a6ace4cf0` (rig-store fanout),
+  `19f8f52a5`, `4f66d7242`, `c715e832a`, `f1285efb3` — all either fork-permanent
+  build/DoltLite infra or absorbed; none removable.
+
+**What the audit *did* surface — churn regressions, not bloat** (the real cost of
+past branch-hopping):
+
+| Finding | Status |
+| --- | --- |
+| `cf3a2fcfd` refinement lost: `develop` dropped upstream's `shouldReopenForReassign` `!IsFormula` guard; `sling --reassign` on a formula reopened the formula-name bead | **FIXED** on develop (`c0c91faea`, bead gcw-m7pf) |
+| `5b55d6ea7` `default_sling_targets`: upstream shipped a divergent inline pick; fork routes through `selectDefaultSlingTarget` (load-bearing for `round_robin`) | Reconcile (union) at next merge-down — do **not** delete fork code |
+| `e4bec069` bd-shim disposition telemetry half-wired after fat-shim removal (only `route` emitted) | Follow-up bead — not a removal |
+
+Method: 7 read-only classifier agents (~19 commits each), each verifying
+tree-state and upstream PR-merge-state per commit, then synthesized. The dated
+body below is retained as the last full 59-commit table for reference.
+
+---
+
 ## Purpose
 
 Serve the integration mission — *keep `upstream/main` easy to merge, shrink
