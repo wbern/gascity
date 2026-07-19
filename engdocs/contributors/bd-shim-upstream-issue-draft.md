@@ -49,35 +49,23 @@ recomputing them per call.
 | `list --status …` | 126 / 120 ms       | 117 / 109 ms      | ⚪ passthrough — identical to real `bd`             |
 | `ready`           | 463 / 123 ms       | 9.4 / 108 ms      | 🟡 routed but slower — federated round-trip (separate lever) |
 
-`show <id>` is the point-lookup verb agents run most, so the 8.1× is the win that
-matters in practice. Binary footprint: bdshim **7.7 MB** vs the real `bd` **187
-MB**.
+`show <id>` is the point-lookup verb agents run most, so the 8.1× is the win
+that matters in practice. To be clear, the lever is *routing* — answering from
+the already-warm controller — not a smaller binary: Go startup is dominated by
+package `init` breadth, not binary size (the real `bd` is far larger than gc yet
+boots faster). bdshim is also small and dependency-light, a modest footprint
+bonus, but that is a side effect, not the proposal.
 
-## The lever is routing, not binary size
-
-The speedup comes from *avoiding the work* — answering from the warm controller —
-not from a smaller binary. Binary size does not drive startup: the real `bd` is
-187 MB yet boots in ~99 ms; Go's startup cost is dominated by package `init()`
-breadth, not size. So bdshim being small is a footprint/hygiene benefit (disk,
-per-process RSS across many concurrent workers, faster cold first-load), not the
-source of the latency win — chase the warm-path routing, not the megabytes.
-
-## How the binary got small (independently useful to upstream)
-
-Two steps took the thin client from 18 MB → 7.7 MB, both of which are clean and
-arguably valuable on their own:
-
-1. **A bead-scoped client leaf** so the thin client stops importing the huma
-   *server* package (a client importing the server is a layering inversion).
-2. **Splitting the OTLP exporter out of `internal/telemetry`** into a sub-package
-   that only telemetry-*exporting* binaries import. The OTLP/HTTP exporters pull
-   ~160 `google.golang.org/grpc` packages (~10 MB linked); the `Record*` API
-   itself is grpc-free. After the split, any record-only binary drops grpc. **This
-   one is a self-contained refactor we'd be happy to send as a standalone PR.**
-
-Floor check: a trivial Go program doing one `https.Get` is already ~5.5 MB
-(runtime + `crypto/tls` + FIPS module + `net/http`); bdshim's entire client adds
-only ~1.9 MB on top. We're at the practical floor.
+**Why we route only some verbs.** The shim routes only what the controller can
+serve quickly from its warm in-memory store — point lookups like `show`. Other
+endpoints are *intentionally* live and uncached upstream, for freshness:
+`GET /beads/ready` federates across every store (#3817, Julian Knutsen) and is
+deliberately not response-cached — open reads stay live and blocking callers
+bypass "so the body reflects the event they waited for" (#3208 / #3217, Stephanie
+Jarmak; same lever as /status in #3186). There is no warm-cache shortcut to exploit
+there, so routing `ready` only adds a round-trip (the 🟡 row above). Verbs like
+that are best left as passthrough — this is a deliberate upstream design we
+respect, not a gap to close.
 
 ## What we tried and moved away from (concise)
 
@@ -87,8 +75,6 @@ only ~1.9 MB on top. We're at the practical floor.
   above — not its size), so it boots slowly (~230 ms) — 2–6× *slower* than plain
   `bd` on reads. The routing benefit was swamped by the boot. Removed; the thin
   client reaches the controller over HTTP without booting gc at all.
-- **Fat thin-client (18 MB)** — the first thin client still transitively imported
-  the server and the OTLP/grpc exporter. Slimmed via the two steps above.
 - **Remote (WAN) Dolt store** → cut over to a single local gc-managed `dolt
   sql-server`. The remote machinery was built for a churny remote endpoint and
   became cold overhead once local; the connection benefit is *concentration*, not
@@ -96,26 +82,17 @@ only ~1.9 MB on top. We're at the practical floor.
 - **Rejected routing scope** — telemetry showed some verbs get zero benefit from
   routing (e.g. 751/878 live `dep-list` calls are `--direction=up` with no
   win), so we route only the verbs the data justified.
-- **Size levers we rejected:** *TinyGo* (its size win is WASM/baremetal-specific;
-  reflection-heavy JSON / generated clients panic at runtime); *UPX* (decompresses
-  the whole image on every `exec` and defeats page-cache sharing — a startup +
-  RSS regression, exactly wrong for a per-call binary).
 
 ## Questions for maintainers
 
 1. Is there appetite for this upstream? Every multi-agent deployment pays the
    same per-call CLI cost, and the mechanism is opt-in and composable.
 2. Preferred shape: a separate `cmd/bdshim` binary (as we have it), or a `gc`
-   subcommand built as a size-constrained artifact?
-3. We'd like to start with the **telemetry OTLP-exporter split** as a small
-   standalone PR regardless — any objection to that separation of concerns?
+   subcommand?
 
 ## Code & references
 
 - Fork: [`wbern/gascity` @ `develop`](https://github.com/wbern/gascity/tree/develop)
 - Origin — tiny bd thin client: [`542270c9d`](https://github.com/wbern/gascity/commit/542270c9d)
 - `bd`→`gc` removal: [`87ba2cd42`](https://github.com/wbern/gascity/commit/87ba2cd42)
-- Client leaf (drops the server): [`00da26053`](https://github.com/wbern/gascity/commit/00da26053)
-- Telemetry OTLP-exporter split (drops grpc): [`cc9960577`](https://github.com/wbern/gascity/commit/cc9960577)
-- Build flags: [`05f6f5820`](https://github.com/wbern/gascity/commit/05f6f5820)
 - Design doc: [`bd-shim-thin-client.md`](https://github.com/wbern/gascity/blob/develop/engdocs/contributors/bd-shim-thin-client.md)
