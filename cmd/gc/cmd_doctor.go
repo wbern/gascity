@@ -356,6 +356,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
 	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
+	// bd-shim routing observability: reports the effective [session] bd_shim
+	// mode and warns when bd_shim=on but the bdshim thin client is missing
+	// beside gc (bd silently falls back to the real bd). See gcw-b8yk.
+	register(doctor.NewBdShimCheck(cfg))
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
