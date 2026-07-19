@@ -3,12 +3,69 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// readyFederationConcurrencyEnv opts GET /beads/ready into CONCURRENT per-store
+// reads and sets the cap. It is OPT-IN: unset or <2 means SEQUENTIAL federation —
+// byte-identical to the pre-parallel behavior and the default — so the concurrent
+// path only runs when an operator deliberately enables it (per deployment) and can
+// revert it by clearing the variable. Values are clamped to
+// [1, readyFederationMaxConcurrency].
+const readyFederationConcurrencyEnv = "GC_READY_FEDERATION_CONCURRENCY"
+
+// readyFederationMaxConcurrency is the hard ceiling on concurrent per-store bd
+// reads regardless of the configured value — a backstop so a misconfiguration
+// cannot stampede the host with heavy bd process spawns.
+const readyFederationMaxConcurrency = 8
+
+// readyFederationParallelism is the resolved federation concurrency, read once at
+// startup from readyFederationConcurrencyEnv. 1 (the default) = sequential
+// (opt-in off); >=2 enables the concurrent path. Package tests override this (and
+// readyFederationSem) directly.
+var readyFederationParallelism = resolveReadyFederationParallelism()
+
+// readyFederationSem bounds concurrent per-store bd reads across ALL in-flight
+// /beads/ready federations to readyFederationParallelism — a process-wide cap, so
+// many concurrent callers cannot stampede the host with heavy bd processes.
+var readyFederationSem = make(chan struct{}, readyFederationParallelism)
+
+// resolveReadyFederationParallelism reads and clamps the configured federation
+// concurrency, defaulting to 1 (sequential/opt-in-off) when unset or invalid.
+func resolveReadyFederationParallelism() int {
+	raw := strings.TrimSpace(os.Getenv(readyFederationConcurrencyEnv))
+	if raw == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 1
+	}
+	if n > readyFederationMaxConcurrency {
+		return readyFederationMaxConcurrency
+	}
+	return n
+}
+
+// readySource pairs a federation store with its stable partial-error label.
+type readySource struct {
+	label string
+	store beads.Store
+}
+
+// readyResult carries one store's Ready() outcome back from its goroutine.
+type readyResult struct {
+	ready []beads.Bead
+	err   error
+}
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -429,27 +486,81 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
+
+	// Build the federation source list in the SAME deterministic order the former
+	// sequential loop used: the city store first, then each rig (skipping the
+	// city's duplicate key). City-scope ready work (graph.v2 molecules in a
+	// single-HQ city, control beads) lives in the city store, so it must be
+	// federated explicitly or HTTP `bd ready` would never surface it (#3817). In
+	// production BeadStores() also returns the city store keyed by CityName(), so
+	// the rig loop skips that duplicate key to avoid querying it twice.
+	cityName := s.state.CityName()
+	sources := make([]readySource, 0, len(rigNames)+1)
+	sources = append(sources, readySource{label: "city", store: s.state.CityBeadStore()})
+	for _, rigName := range rigNames {
+		if rigName == cityName {
+			continue
+		}
+		sources = append(sources, readySource{label: "rig " + rigName, store: stores[rigName]})
+	}
+
+	// Read each store's authoritative Live.Ready(). Sequential by default; when
+	// readyFederationParallelism>=2 the reads fan out concurrently, bounded by the
+	// process-global readyFederationSem. Either way these are the identical .Live
+	// (backing) reads — only their scheduling changes — so the out-of-band-write
+	// authoritativeness contract (TestBeadReadyUsesLiveLookup, the deliberate
+	// ReadyLive design) is preserved exactly.
+	started := time.Now()
+	results := make([]readyResult, len(sources))
+	if readyFederationParallelism <= 1 {
+		for i, src := range sources {
+			if src.store == nil {
+				continue
+			}
+			ready, err := beads.HandlesFor(src.store).Live.Ready()
+			results[i] = readyResult{ready: ready, err: err}
+		}
+	} else {
+		var wg sync.WaitGroup
+		for i, src := range sources {
+			if src.store == nil {
+				continue
+			}
+			wg.Add(1)
+			go func(i int, store beads.Store) {
+				defer wg.Done()
+				readyFederationSem <- struct{}{}
+				defer func() { <-readyFederationSem }()
+				ready, err := beads.HandlesFor(store).Live.Ready()
+				results[i] = readyResult{ready: ready, err: err}
+			}(i, src.store)
+		}
+		wg.Wait()
+	}
+
+	// Merge single-threaded in source order, preserving the exact partial-
+	// aggregation and city-first dedup semantics of the former sequential loop.
 	var all []beads.Bead
 	var pa partialAggregator
 	seen := make(map[string]bool)
-	federate := func(label string, store beads.Store) {
-		if store == nil {
-			return
+	for i, src := range sources {
+		if src.store == nil {
+			continue
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
-		if err != nil {
-			if beads.IsPartialResult(err) && len(ready) > 0 {
-				pa.record(label, err)
+		r := results[i]
+		if r.err != nil {
+			if beads.IsPartialResult(r.err) && len(r.ready) > 0 {
+				pa.record(src.label, r.err)
 				pa.success()
 			} else {
-				pa.record(label, err)
-				return
+				pa.record(src.label, r.err)
+				continue
 			}
 		} else {
 			pa.success()
 		}
-		for _, b := range ready {
+		for _, b := range r.ready {
 			if seen[b.ID] {
 				continue // legacy file mode can alias the city and rig stores
 			}
@@ -457,20 +568,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			all = append(all, b)
 		}
 	}
-	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
-	// beads) lives in the city store, so federate it explicitly first or HTTP
-	// `bd ready` would never surface it. In production BeadStores() also returns
-	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
-	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
-	cityName := s.state.CityName()
-	for _, rigName := range rigNames {
-		if rigName == cityName {
-			continue // city store already federated explicitly above; production
-			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
-		}
-		federate("rig "+rigName, stores[rigName])
-	}
+
+	// Verification logging: federation store count + wall time + concurrency cap,
+	// so the before/after improvement is observable in the controller log.
+	log.Printf("api: beads/ready federated %d stores in %v (parallelism=%d, %d ready)",
+		len(sources), time.Since(started).Round(time.Millisecond), readyFederationParallelism, len(all))
+
 	if pa.totalOutage() {
 		return nil, pa.outageError()
 	}
