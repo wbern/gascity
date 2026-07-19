@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bdshim"
+	"github.com/gastownhall/gascity/internal/beadclient"
 )
 
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
@@ -27,7 +27,7 @@ func TestDispatchViaAPICreate(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "gcg-9", "title": title}) //nolint:errcheck
 	}))
 	defer ts.Close()
-	client := api.NewCityScopedClient(ts.URL, "alpha")
+	client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 
 	var out, errb bytes.Buffer
 	if code := DispatchViaAPI(client, "create", []string{"my task", "--type", "task", "--label", "x"}, &out, &errb); code != 0 {
@@ -72,7 +72,7 @@ func TestDispatchViaAPIMol(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(graphJSON) //nolint:errcheck
 		}))
 		defer ts.Close()
-		client := api.NewCityScopedClient(ts.URL, "alpha")
+		client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 		var out, errb bytes.Buffer
 		if code := DispatchViaAPI(client, "mol", []string{"current", "gcg-1"}, &out, &errb); code != 0 {
 			t.Fatalf("mol current: code=%d err=%s", code, errb.String())
@@ -92,7 +92,7 @@ func TestDispatchViaAPIMol(t *testing.T) {
 	t.Run("progress", func(t *testing.T) {
 		ts := newServer()
 		defer ts.Close()
-		client := api.NewCityScopedClient(ts.URL, "alpha")
+		client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 		var out, errb bytes.Buffer
 		if code := DispatchViaAPI(client, "mol", []string{"progress", "gcg-1"}, &out, &errb); code != 0 {
 			t.Fatalf("mol progress: code=%d err=%s", code, errb.String())
@@ -120,7 +120,7 @@ func TestDispatchViaAPIQueryEphemeral(t *testing.T) {
 		})
 	}))
 	defer ts.Close()
-	client := api.NewCityScopedClient(ts.URL, "alpha")
+	client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 
 	var out, errb bytes.Buffer
 	if code := DispatchViaAPI(client, "query", []string{"--json", "ephemeral=true AND status=open", "--limit", "0"}, &out, &errb); code != 0 {
@@ -144,15 +144,15 @@ func TestParseQueryEphemeral(t *testing.T) {
 		name string
 		args []string
 		ok   bool
-		want api.EphemeralBeadsOpts
+		want beadclient.EphemeralBeadsOpts
 	}{
-		{"listEphemeral shape", []string{"query", "--json", "ephemeral=true AND status=open AND label=wisp_type:ping", "--limit", "0"}, true, api.EphemeralBeadsOpts{Status: "open", Label: "wisp_type:ping"}},
-		{"work_query literal", []string{"query", "--json", "ephemeral=true AND status=in_progress", "--limit=0"}, true, api.EphemeralBeadsOpts{Status: "in_progress"}},
-		{"with --all", []string{"query", "--json", "ephemeral=true", "--all"}, true, api.EphemeralBeadsOpts{All: true}},
-		{"missing --json", []string{"query", "ephemeral=true"}, false, api.EphemeralBeadsOpts{}},
-		{"non-ephemeral predicate", []string{"query", "--json", "type=bug"}, false, api.EphemeralBeadsOpts{}},
-		{"non-bare value", []string{"query", "--json", "ephemeral=true AND status=open OR x"}, false, api.EphemeralBeadsOpts{}},
-		{"unknown flag", []string{"query", "--json", "ephemeral=true", "--weird"}, false, api.EphemeralBeadsOpts{}},
+		{"listEphemeral shape", []string{"query", "--json", "ephemeral=true AND status=open AND label=wisp_type:ping", "--limit", "0"}, true, beadclient.EphemeralBeadsOpts{Status: "open", Label: "wisp_type:ping"}},
+		{"work_query literal", []string{"query", "--json", "ephemeral=true AND status=in_progress", "--limit=0"}, true, beadclient.EphemeralBeadsOpts{Status: "in_progress"}},
+		{"with --all", []string{"query", "--json", "ephemeral=true", "--all"}, true, beadclient.EphemeralBeadsOpts{All: true}},
+		{"missing --json", []string{"query", "ephemeral=true"}, false, beadclient.EphemeralBeadsOpts{}},
+		{"non-ephemeral predicate", []string{"query", "--json", "type=bug"}, false, beadclient.EphemeralBeadsOpts{}},
+		{"non-bare value", []string{"query", "--json", "ephemeral=true AND status=open OR x"}, false, beadclient.EphemeralBeadsOpts{}},
+		{"unknown flag", []string{"query", "--json", "ephemeral=true", "--weird"}, false, beadclient.EphemeralBeadsOpts{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -181,7 +181,7 @@ func TestDispatchViaAPIRoutesVerbs(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 	}))
 	defer ts.Close()
-	client := api.NewCityScopedClient(ts.URL, "alpha")
+	client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 
 	var out, errb bytes.Buffer
 
@@ -227,7 +227,7 @@ func TestDispatchViaAPIList(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}}) //nolint:errcheck
 	}))
 	defer ts.Close()
-	client := api.NewCityScopedClient(ts.URL, "alpha")
+	client := beadclient.NewCityScopedClient(ts.URL, "alpha")
 
 	var out, errb bytes.Buffer
 	if code := DispatchViaAPI(client, "list",

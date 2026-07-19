@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bdshim"
+	"github.com/gastownhall/gascity/internal/beadclient"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -25,7 +25,7 @@ import (
 // (the pure-HTTP redirect: the controller owns the store, every worker is a
 // thin client). Reads render the same JSON raw bd emits; mutations map onto the
 // bead write-path client methods.
-func DispatchViaAPI(client *api.Client, verb string, args []string, stdout, stderr io.Writer) int {
+func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdout, stderr io.Writer) int {
 	// Every call here is a controller dispatch (the classifier already decided
 	// bdshim.Route) — a warm-pool hit with no direct worker->Dolt dial, whether
 	// the dispatch ultimately succeeds or the API returns an error.
@@ -175,12 +175,12 @@ func DispatchViaAPI(client *api.Client, verb string, args []string, stdout, stde
 	}
 }
 
-// ParseListOpts maps a routable `bd list` arg list onto api.ListBeadsOpts. The
+// ParseListOpts maps a routable `bd list` arg list onto beadclient.ListBeadsOpts. The
 // default limit mirrors bd's default page size (50). Known v1 caveat: an
 // explicit `--limit 0` (bd's "unlimited") maps to the server's default page size
 // rather than true-unlimited; no hot-path traffic uses that shape.
-func ParseListOpts(args []string) (api.ListBeadsOpts, error) {
-	opts := api.ListBeadsOpts{Limit: 50}
+func ParseListOpts(args []string) (beadclient.ListBeadsOpts, error) {
+	opts := beadclient.ListBeadsOpts{Limit: 50}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -229,8 +229,8 @@ func ParseListOpts(args []string) (api.ListBeadsOpts, error) {
 // `bd query --json 'ephemeral=true AND status=<s>' --limit=N` (config.go) — onto
 // EphemeralBeadsOpts. It returns ok=false for any shape it cannot map cleanly,
 // so the caller refuses/passes through rather than silently dropping clauses.
-func ParseQueryEphemeral(args []string) (api.EphemeralBeadsOpts, bool) {
-	var opts api.EphemeralBeadsOpts
+func ParseQueryEphemeral(args []string) (beadclient.EphemeralBeadsOpts, bool) {
+	var opts beadclient.EphemeralBeadsOpts
 	var predicate string
 	var sawJSON, sawPredicate bool
 	for i := 0; i < len(args); i++ {
@@ -280,7 +280,7 @@ func ParseQueryEphemeral(args []string) (api.EphemeralBeadsOpts, bool) {
 // parseEphemeralPredicate parses an `ephemeral=true [AND key=value]...` predicate
 // into opts. The predicate MUST contain ephemeral=true; every other clause must
 // be a bare key=value with key in {status,label,type,assignee,parent}.
-func parseEphemeralPredicate(predicate string, opts *api.EphemeralBeadsOpts) bool {
+func parseEphemeralPredicate(predicate string, opts *beadclient.EphemeralBeadsOpts) bool {
 	sawEphemeral := false
 	for _, clause := range strings.Split(predicate, " AND ") {
 		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
@@ -340,7 +340,7 @@ func isBareBdQueryValue(v string) bool {
 // [ready]/[blocked] — exact ready/blocked discrimination is C2a's byte-identity
 // work. Routing here (X2) reaches SQLite-resident topology the work-only bd
 // cannot see; the text is LLM-facing situational awareness, not a parsed wire.
-func renderBdMol(sub string, g api.BeadGraph, jsonOut bool, stdout, stderr io.Writer) int {
+func renderBdMol(sub string, g beadclient.BeadGraph, jsonOut bool, stdout, stderr io.Writer) int {
 	steps := molSteps(g)
 	if jsonOut {
 		return WriteReadyJSON(steps, stdout, stderr)
@@ -369,7 +369,7 @@ func renderBdMol(sub string, g api.BeadGraph, jsonOut bool, stdout, stderr io.Wr
 
 // molSteps returns the molecule's step beads (every graph bead except the root),
 // preserving the endpoint's order.
-func molSteps(g api.BeadGraph) []beads.Bead {
+func molSteps(g beadclient.BeadGraph) []beads.Bead {
 	steps := make([]beads.Bead, 0, len(g.Beads))
 	for _, b := range g.Beads {
 		if b.ID == g.Root.ID {
@@ -687,7 +687,7 @@ func applyListMetadataFilter(in []beads.Bead, f listMetadataFilter) []beads.Bead
 // may be truncated at the pagination cap, so a match beyond the cap is never
 // missed. The user's --limit is applied after filtering (not pushed to the
 // server), so --limit bounds the matching set exactly like real bd.
-func DispatchListMetadataGuarded(client *api.Client, args []string, stdout, stderr io.Writer) (int, bool) {
+func DispatchListMetadataGuarded(client *beadclient.Client, args []string, stdout, stderr io.Writer) (int, bool) {
 	opts, err := ParseListOpts(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr

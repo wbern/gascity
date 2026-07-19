@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/bdshim"
+	"github.com/gastownhall/gascity/internal/beadclient"
 )
 
 func main() {
@@ -72,7 +72,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if city := resolveCityName(cityOverride); city != "" {
 			base := controllerBaseURL()
 			if controllerReachable(base) {
-				client := api.NewCityScopedClient(base, city)
+				client := beadclient.NewCityScopedClient(base, city)
 				if code, handled := bddispatch.DispatchListMetadataGuarded(client, verbArgs, stdout, stderr); handled {
 					logDisposition(verb, "route", code, start)
 					return code
@@ -111,7 +111,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if !controllerReachable(base) {
 				return passthrough()
 			}
-			client := api.NewCityScopedClient(base, city)
+			client := beadclient.NewCityScopedClient(base, city)
 			if code, handled := dispatchClaim(client, id, actor, stdout, stderr); handled {
 				logDisposition(verb, "route", code, start)
 				return code
@@ -124,7 +124,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// through to the work-only bd, whose cwd scope cannot answer a city-wide
 		// read — matching the fat shim's pure-HTTP contract. No liveness probe on
 		// this hot path (a probe can spuriously trip under load and mis-route).
-		client := api.NewCityScopedClient(base, city)
+		client := beadclient.NewCityScopedClient(base, city)
 		code := bddispatch.DispatchViaAPI(client, verb, verbArgs, stdout, stderr)
 		logDisposition(verb, "route", code, start)
 		return code

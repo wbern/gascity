@@ -3,7 +3,7 @@ package bddispatch
 import (
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadclient"
 )
 
 // TestParseListOpts pins the arg->ListBeadsOpts mapping, including bd's
@@ -12,27 +12,27 @@ func TestParseListOpts(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want api.ListBeadsOpts
+		want beadclient.ListBeadsOpts
 	}{
 		{
 			name: "hook shape space-separated",
 			args: []string{"--status", "in_progress", "--assignee=gc2-x", "--json", "--limit", "25"},
-			want: api.ListBeadsOpts{Status: "in_progress", Assignee: "gc2-x", Limit: 25},
+			want: beadclient.ListBeadsOpts{Status: "in_progress", Assignee: "gc2-x", Limit: 25},
 		},
 		{
 			name: "short flags",
 			args: []string{"-s", "open", "-a", "y", "-t", "task", "-l", "pool:w", "-n", "10", "--json"},
-			want: api.ListBeadsOpts{Status: "open", Assignee: "y", Type: "task", Label: "pool:w", Limit: 10},
+			want: beadclient.ListBeadsOpts{Status: "open", Assignee: "y", Type: "task", Label: "pool:w", Limit: 10},
 		},
 		{
 			name: "default limit is 50",
 			args: []string{"--status=open", "--json"},
-			want: api.ListBeadsOpts{Status: "open", Limit: 50},
+			want: beadclient.ListBeadsOpts{Status: "open", Limit: 50},
 		},
 		{
 			name: "all",
 			args: []string{"--all", "--json"},
-			want: api.ListBeadsOpts{All: true, Limit: 50},
+			want: beadclient.ListBeadsOpts{All: true, Limit: 50},
 		},
 	}
 	for _, tc := range cases {
