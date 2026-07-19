@@ -63,3 +63,43 @@ func TestConditionEnvOmitsGCBdRealWhenNoRealBd(t *testing.T) {
 		}
 	}
 }
+
+// condEnvPATH extracts the PATH entry from an Environ() slice.
+func condEnvPATH(env []string) string {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "PATH="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestConditionEnvFrontsShimWhenInstalled pins that a condition script's PATH is
+// fronted with the shim bin dir when the shim is installed (gc symlink present,
+// so its `bd` routes through the warm controller), and is NOT fronted when the
+// shim is absent (bd_shim=off / not installed) — no config threading needed.
+func TestConditionEnvFrontsShimWhenInstalled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	city := t.TempDir()
+	shim := citylayout.ShimbinDir(city)
+	sep := string(os.PathListSeparator)
+
+	// Not installed (no gc symlink) -> PATH is not fronted with the shim dir.
+	if got := condEnvPATH((ConditionEnv{CityPath: city}).Environ()); strings.HasPrefix(got, shim+sep) {
+		t.Fatalf("PATH fronted with shim dir before install: %q", got)
+	}
+
+	// Install the shim gc symlink -> ShimInstalled true -> PATH fronted.
+	if err := os.MkdirAll(shim, 0o755); err != nil {
+		t.Fatalf("mkdir shim: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(city, "gc-real"), citylayout.ShimbinGCPath(city)); err != nil {
+		t.Fatalf("symlink shim gc: %v", err)
+	}
+	got := condEnvPATH((ConditionEnv{CityPath: city}).Environ())
+	if !strings.HasPrefix(got, shim+sep) && got != shim {
+		t.Fatalf("PATH not fronted with shim dir after install: %q", got)
+	}
+}

@@ -24,6 +24,21 @@ func ShimbinDir(cityPath string) string {
 	return filepath.Join(cityPath, RuntimeRoot, bdShimbinDirName)
 }
 
+// ShimbinGCPath returns the gc shim symlink path whose presence signals the
+// bd-shim is installed for cityPath (<cityPath>/.gc/shimbin/gc).
+func ShimbinGCPath(cityPath string) string {
+	return filepath.Join(ShimbinDir(cityPath), "gc")
+}
+
+// ShimInstalled reports whether the bd-shim is installed for cityPath (the gc
+// shim symlink exists). It is naturally false under bd_shim=off, because the
+// supervisor removes the shim dir, so callers front the shim on PATH without
+// threading the bd_shim config: an absent shim just no-ops.
+func ShimInstalled(cityPath string) bool {
+	info, err := os.Lstat(ShimbinGCPath(cityPath))
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
 // ResolveRealBd resolves the real bd binary for cityPath by scanning PATH while
 // skipping the city's shim bin dir, so a gate/order condition script whose `bd`
 // resolves to the shim has a passthrough target. Returns an error when no real

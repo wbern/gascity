@@ -87,8 +87,22 @@ func (ce ConditionEnv) Environ() []string {
 	if storePath == "" {
 		storePath = ce.CityPath
 	}
+	// Front the bd-shim bin dir on PATH (when installed) so a gate/ralph/trigger
+	// condition script's `bd` resolves to the shim and routes hot reads through
+	// the warm controller — symmetric with managed sessions and exec orders.
+	// GC_BD_REAL (set below) passes non-routable verbs through. ShimInstalled is
+	// false under bd_shim=off (the supervisor removed the shim dir), so this
+	// no-ops for the opt-out without threading config here.
+	pathVal := conditionPATH()
+	if ce.CityPath != "" && citylayout.ShimInstalled(ce.CityPath) {
+		shim := citylayout.ShimbinDir(ce.CityPath)
+		sep := string(os.PathListSeparator)
+		if pathVal != shim && !strings.HasPrefix(pathVal, shim+sep) {
+			pathVal = shim + sep + pathVal
+		}
+	}
 	env := []string{
-		"PATH=" + conditionPATH(),
+		"PATH=" + pathVal,
 		"HOME=" + home,
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
