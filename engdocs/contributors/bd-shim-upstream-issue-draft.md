@@ -96,3 +96,35 @@ design we respect, not a gap to close.
 - Origin — tiny bd thin client: [`542270c9d`](https://github.com/wbern/gascity/commit/542270c9d)
 - `bd`→`gc` removal: [`87ba2cd42`](https://github.com/wbern/gascity/commit/87ba2cd42)
 - Design doc: [`bd-shim-thin-client.md`](https://github.com/wbern/gascity/blob/develop/engdocs/contributors/bd-shim-thin-client.md)
+
+---
+
+## Follow-up comment — posted 2026-07-19
+
+Posted at
+[gascity#4441 (comment-5016421700)](https://github.com/gastownhall/gascity/issues/4441#issuecomment-5016421700).
+Reframes the pitch after re-verifying the adjacent upstream work. Key moves:
+
+- **Lever = read-result recompute, not connection/process warmth.** Neither a
+  `bd serve` daemon nor a connection pool avoids recomputing the query; routing
+  a point-lookup to the warm controller skips the query *and* the process boot.
+- **The win survives the gc-layer conn-churn fixes.** Benchmarked on gc fork
+  `cc9960577` (upstream base `gastownhall/gascity@d5cb9125f`, 2026-07-16) with
+  bd v1.1.0 — i.e. *with* #1692/#1706/#1722/#2152/#2153 and bd's post-#3674
+  auto-commit fix already in. The 8.1× on `show` is the residual those don't
+  touch.
+- **vs beads#3760** (`bd serve`): withdrawn by its author after the connection
+  storm collapsed at the gc layer; we do **not** re-propose it and do **not**
+  pitch on idle Dolt CPU.
+- **vs beads#4303** (db-proxy pooling): complementary — it warms the
+  *connection*; we skip the *query recompute*. #4303's own `bd daemon`
+  rejection is about the write/transaction path, which is why we route only
+  read point-lookups.
+- Transport → **Unix domain socket**; contract → **identical `--json`** (not
+  byte-identical human output); `update --claim` flagged as the one
+  write-through boundary still being validated; version handshake noted.
+- Appended a **"related work / what this is *not*"** section (#3760, #4303,
+  gascity#1978, #3248/#3946, #2987/#3892) to rule out overlaps.
+
+Still an opt-in / default-off design-discussion RFC, not a PR ask (upstream is
+under a new-feature freeze).
