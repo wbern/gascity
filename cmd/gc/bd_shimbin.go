@@ -23,18 +23,9 @@ func cityBdShimbinDir(cityPath string) string {
 
 // bdproxyBinName is the file name of the tiny bd thin client installed beside the
 // gc binary. When present, the `bd` shim symlink targets it so a worker's bd call
-// skips gc's ~200ms cold-start; when absent, the shim falls back to gc-as-bd.
+// skips gc's ~200ms cold-start; when absent, the symlink targets the real bd
+// directly (the traditional, shim-free path). gc itself is never a bd shim.
 const bdproxyBinName = "bdproxy"
-
-// bdShimTarget returns the binary the city's `bd` shim symlink should point at:
-// the tiny bdproxy thin client installed beside the gc binary when present, else
-// the in-dir gc symlink (gc-invoked-as-bd), preserving the pre-bdproxy behavior.
-func bdShimTarget(cityPath string) string {
-	if bp := bdproxyBesideGC(); bp != "" {
-		return bp
-	}
-	return cityBdShimbinGCPath(cityPath)
-}
 
 // bdproxyBesideGC returns the absolute path of the bdproxy binary installed in the
 // same directory as the running gc binary (following the gc symlink), or "" when
@@ -130,13 +121,9 @@ func ensureCityBdShimZdotdir(cityPath string) error {
 
 // ensureCityBdShimbin installs the gc-as-bd shim for cityPath's managed worker
 // sessions. It (re)creates <cityPath>/.gc/shimbin/gc and .../bd as symlinks to
-// the running gc binary, so a worker whose PATH is fronted with the shim bin dir
-// resolves `bd` to gc-invoked-as-bd and routes bead ops through the controller.
-//
-// Installing it for every managed city is safe regardless of graph_store: the
-// shim adapts per-city at runtime (classifyBdShimVerb), routing by-id verbs in
-// all cities and only refusing graph verbs when graph_store=sqlite. By-id
-// mediation keeps the controller's cache authoritative even in Dolt-only cities.
+// the running gc binary. The sibling `bd` symlink points at the tiny bdproxy
+// thin client when it is installed beside gc (routing hot bead ops through the
+// warm controller), else at the real bd directly — gc itself is never a bd shim.
 //
 // Symlinks (not a copy of gc) suffice because session GC_BIN is computed from
 // cityPath, not re-derived from os.Executable() — see sessionGCBinForCity — so a
@@ -163,15 +150,18 @@ func ensureCityBdShimbin(cityPath string, stderr io.Writer) error {
 	}
 	// The `bd` symlink targets the tiny bdproxy thin client when it is installed
 	// beside the gc binary (the fast path — no 117MB gc cold-start per bd call),
-	// else the in-dir gc symlink (a worker invoking `bd` execs gc, whose "bd"
-	// argv0 basename activates the shim). Both route bead ops through the same
-	// controller; bdproxy just skips gc's ~200ms boot. Only create the symlink
-	// when a real bd exists to pass through to.
-	if _, err := resolveRealBdExcludingDir(dir); err != nil {
+	// else the real bd directly (the traditional, shim-free path). It never
+	// targets gc: gc is no longer a bd shim. Only create it when a real bd exists.
+	realBd, err := resolveRealBdExcludingDir(dir)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: bd shim install: no real bd on PATH; worker bd redirect disabled (%v)\n", err) //nolint:errcheck
 		return nil
 	}
-	if err := atomicSymlinkShimbin(bdShimTarget(cityPath), filepath.Join(dir, "bd")); err != nil {
+	bdTarget := realBd
+	if bp := bdproxyBesideGC(); bp != "" {
+		bdTarget = bp
+	}
+	if err := atomicSymlinkShimbin(bdTarget, filepath.Join(dir, "bd")); err != nil {
 		return fmt.Errorf("linking bd shim: %w", err)
 	}
 	// With the bd redirect active, install the gc-managed ZDOTDIR so a worker's
@@ -207,7 +197,7 @@ func sessionGCBinForCity(cityPath string, agentEnv map[string]string) string {
 	dir := cityBdShimbinDir(cityPath)
 	if isSymlink(filepath.Join(dir, "bd")) {
 		if realBd, err := resolveRealBdExcludingDir(dir); err == nil {
-			agentEnv[realBdEnvVar] = realBd
+			agentEnv[citylayout.RealBdEnvVar] = realBd
 		}
 		// Point the worker's zsh at the gc-managed ZDOTDIR so the shim bin dir
 		// wins on PATH even after the user rc re-prepends a real-bd dir. Only set

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 // writeFakeBd writes an executable `bd` stub into dir and returns its path.
@@ -46,9 +48,13 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	if got, _ := os.Readlink(gcLink); got != exe {
 		t.Fatalf("gc symlink -> %q, want %q", got, exe)
 	}
-	// bd -> the in-dir gc symlink (single source of truth; bd follows gc refresh).
-	if got, _ := os.Readlink(bdLink); got != gcLink {
-		t.Fatalf("bd symlink -> %q, want %q", got, gcLink)
+	// bd -> the real bd directly (gc is no longer a bd shim; no bdproxy in this test).
+	wantBd, err := resolveRealBdExcludingDir(cityBdShimbinDir(cityPath))
+	if err != nil {
+		t.Fatalf("resolve real bd: %v", err)
+	}
+	if got, _ := os.Readlink(bdLink); got != wantBd {
+		t.Fatalf("bd symlink -> %q, want real bd %q", got, wantBd)
 	}
 
 	// Clobber-safety: the real bd install dir is never written to.
@@ -114,15 +120,6 @@ func TestBdproxyBesideExeFollowsSymlink(t *testing.T) {
 	}
 	if got := bdproxyBesideExe(linkExe); got != wantBP {
 		t.Fatalf("symlink-resolved bdproxy: got %q, want %q", got, wantBP)
-	}
-}
-
-func TestBdShimTargetFallsBackToGCWhenNoBdproxy(t *testing.T) {
-	cityPath := t.TempDir()
-	// No bdproxy beside the test binary -> the shim target is the in-dir gc link,
-	// preserving pre-bdproxy behavior.
-	if got := bdShimTarget(cityPath); got != cityBdShimbinGCPath(cityPath) {
-		t.Fatalf("fallback target: got %q, want %q", got, cityBdShimbinGCPath(cityPath))
 	}
 }
 
@@ -212,7 +209,7 @@ func TestSessionGCBinFallsBackWhenNotInstalled(t *testing.T) {
 	if gcBin != exe {
 		t.Fatalf("GC_BIN = %q, want os.Executable fallback %q", gcBin, exe)
 	}
-	if _, set := env[realBdEnvVar]; set {
+	if _, set := env[citylayout.RealBdEnvVar]; set {
 		t.Fatalf("GC_BD_REAL must not be set when the shim is not installed")
 	}
 }
@@ -255,11 +252,11 @@ func TestSessionEnvSetsGCBDRealToRealBdNotShim(t *testing.T) {
 	env := map[string]string{}
 	_ = sessionGCBinForCity(cityPath, env)
 
-	if env[realBdEnvVar] != realBd {
-		t.Fatalf("GC_BD_REAL = %q, want real bd %q", env[realBdEnvVar], realBd)
+	if env[citylayout.RealBdEnvVar] != realBd {
+		t.Fatalf("GC_BD_REAL = %q, want real bd %q", env[citylayout.RealBdEnvVar], realBd)
 	}
-	if strings.HasPrefix(env[realBdEnvVar], cityBdShimbinDir(cityPath)) {
-		t.Fatalf("GC_BD_REAL %q points into the shim bin dir (recursion)", env[realBdEnvVar])
+	if strings.HasPrefix(env[citylayout.RealBdEnvVar], cityBdShimbinDir(cityPath)) {
+		t.Fatalf("GC_BD_REAL %q points into the shim bin dir (recursion)", env[citylayout.RealBdEnvVar])
 	}
 }
 

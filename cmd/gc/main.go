@@ -29,11 +29,6 @@ import (
 )
 
 func main() {
-	// When this gc binary is invoked as `bd` (the PATH-installed shim symlink),
-	// run the bd-compatible thin client instead of the gc command tree.
-	if code, handled := dispatchBdShimArgv0(os.Args[0], os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
-		os.Exit(code)
-	}
 	os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -374,7 +369,6 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
-		newBdShimCmd(stdout, stderr),
 		newBdStoreBridgeCmd(stdout, stderr),
 		newDoltCleanupCmd(stdout, stderr),
 		newDoltConfigCmd(stdout, stderr),
