@@ -93,9 +93,8 @@ var (
 // MetricExporterFactory constructs the OTLP metric exporter for the given
 // endpoint URL. LogExporterFactory does the same for logs. They are injected by
 // the internal/telemetry/otlpexport sub-package (imported only by binaries that
-// actually export telemetry, e.g. gc) so that record-only binaries — the bd
-// shim above all — never link the grpc-heavy OTLP/HTTP exporters. The record
-// API in this package stays lightweight and grpc-free.
+// export telemetry, e.g. gc) so that record-only binaries never link the
+// grpc-heavy OTLP/HTTP exporters. The record API in this package is grpc-free.
 type MetricExporterFactory func(ctx context.Context, endpointURL string) (sdkmetric.Exporter, error)
 
 // LogExporterFactory constructs the OTLP log exporter for the given endpoint URL.

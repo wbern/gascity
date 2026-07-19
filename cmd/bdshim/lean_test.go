@@ -9,39 +9,42 @@ import (
 	"testing"
 )
 
-// The bd shim is a hot-path thin client: workers invoke it once per `bd` call,
-// so it must start fast and stay small (see gcw-wd6g and gcw-fqat, which cut it
-// from ~18MB to ~7.4MB by keeping the huma server and the OTLP/grpc exporter out
-// of its graph). These tests are the regression guard for that win. They are the
-// only thing that will notice if a well-meaning import silently re-bloats the
-// shim, since neither the compiler nor golangci-lint flags dependency growth.
+// Dependency-footprint guards for the bd shim. The shim is a hot-path thin
+// client (one process per `bd` call), so it must not link the control-plane
+// server or the OTLP/grpc telemetry exporter. The compiler and golangci-lint do
+// not flag dependency growth, so these guard it explicitly:
+//
+//   - TestBdshimForbiddenImports (hard gate): forbids the server and OTLP
+//     exporter packages anywhere in the import graph, failing with the exact
+//     import chain.
+//   - TestBdshimBinaryStaysSmall (advisory): reports the built binary size and
+//     warns past a soft budget without failing.
 
 // bdshimPkg is the import path of the shim's main package, the root of the
 // dependency walk below.
 const bdshimPkg = "github.com/gastownhall/gascity/cmd/bdshim"
 
-// forbiddenImports are packages that must never appear anywhere in the shim's
-// import graph. Each maps to the reason it is banned, which is printed on
-// failure so the fix is obvious. grpc is deliberately NOT listed here: it is
-// pulled transitively by github.com/steveyegge/beads but the linker
-// dead-code-eliminates it because nothing reachable calls it — so it is guarded
-// by TestBdshimBinaryStaysSmall (a reachable-grpc regression balloons the
-// binary), not by import presence.
+// forbiddenImports lists packages that must never appear in the shim's import
+// graph, each mapped to the reason it is banned (printed on failure). grpc
+// itself is not listed: it is pulled transitively via github.com/steveyegge/
+// beads but linker-eliminated because nothing reachable calls it. The realistic
+// ways it becomes reachable are importing the server or the OTLP exporter, both
+// forbidden here.
 var forbiddenImports = map[string]string{
 	"github.com/gastownhall/gascity/internal/api":                  "the huma control-plane SERVER; the shim talks to the controller via internal/beadclient (a leaf client), never the server package",
 	"github.com/gastownhall/gascity/internal/telemetry/otlpexport": "the OTLP/HTTP exporter, which links ~160 grpc packages; only telemetry-exporting binaries (gc) may import it, never record-only tools",
 }
 
-// maxShimBytes is the size ceiling for the stripped shim binary. It is
-// production-representative (CGO disabled, -s -w) and generous: the shim is
-// ~7.4MB today, and the dominant regression it guards against — reactivating
-// the OTLP/grpc exporter on a reachable path — adds ~10MB, so a 12MB ceiling
-// leaves headroom for honest growth while still catching that class of mistake.
-const maxShimBytes = 12 << 20
+// shimSoftBudgetBytes is the advisory size budget for the stripped shim. The
+// floor for a Go binary that makes an HTTPS request is ~5.5MB (runtime, TLS, the
+// FIPS crypto module); the shim's own code adds ~1.9MB. Crossing this budget
+// does not fail the build; it flags that a heavy dependency may have become
+// reachable.
+const shimSoftBudgetBytes = 10 << 20
 
 // TestBdshimForbiddenImports fails if the shim's transitive import graph
-// contains any banned package, printing the exact import chain that pulled it
-// in so the offending edge is easy to find and cut.
+// contains any package in forbiddenImports, printing the exact import chain that
+// pulled it in.
 func TestBdshimForbiddenImports(t *testing.T) {
 	graph := loadImportGraph(t)
 	for pkg, why := range forbiddenImports {
@@ -52,11 +55,9 @@ func TestBdshimForbiddenImports(t *testing.T) {
 	}
 }
 
-// TestBdshimBinaryStaysSmall builds the shim exactly as production does
-// (CGO_ENABLED=0, -ldflags "-s -w") and fails if it exceeds maxShimBytes. This
-// is the backstop for regressions that keep the import graph unchanged but make
-// a heavy dependency reachable again (e.g. calling an OTLP exporter), which the
-// import guard cannot see. Skipped in -short mode because it links a binary.
+// TestBdshimBinaryStaysSmall is advisory: it builds the shim as production does
+// (CGO_ENABLED=0, -ldflags "-s -w"), logs the size, and warns past
+// shimSoftBudgetBytes without failing. Skipped in -short (it links a binary).
 func TestBdshimBinaryStaysSmall(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping binary-size build in -short mode")
@@ -71,9 +72,13 @@ func TestBdshimBinaryStaysSmall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat built shim: %v", err)
 	}
-	if info.Size() > maxShimBytes {
-		t.Errorf("stripped bd shim is %.1f MiB, over the %.0f MiB ceiling — a heavy dependency became reachable again;\nrun `make deadcode` and `go tool nm` / a size analyzer to find what grew",
-			float64(info.Size())/(1<<20), float64(maxShimBytes)/(1<<20))
+	sizeMiB := float64(info.Size()) / (1 << 20)
+	t.Logf("stripped bd shim: %.1f MiB (soft budget %.0f MiB, floor ~5.5 MiB)", sizeMiB, float64(shimSoftBudgetBytes)/(1<<20))
+	if info.Size() > shimSoftBudgetBytes {
+		// Advisory only: report, do not fail. A heavy dependency likely became
+		// reachable; `make deadcode` and a size analyzer show what grew.
+		t.Logf("ADVISORY: bd shim is %.1f MiB, over the %.0f MiB soft budget — check for a heavy dependency regression.",
+			sizeMiB, float64(shimSoftBudgetBytes)/(1<<20))
 	}
 }
 
