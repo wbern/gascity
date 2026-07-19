@@ -14,6 +14,24 @@
 
 ---
 
+> **Status corrections (2026-07-19, verified against primary sources):**
+> Two claims below were re-verified live and corrected.
+> 1. **beads#3760** ("bd serve" daemon) — the issue is still OPEN but was
+>    **WITHDRAWN by its own author**: re-measured against gc 1.1.1, the
+>    connection storm collapsed **41→0.6 conn/sec at the gc layer**, idle Dolt
+>    CPU 475%→313%, and the residual was reattributed to auto-commit no-op
+>    churn (**beads#3674**, merged 2026-06-17), not connection setup. Upstream
+>    is also under a **new-feature freeze**. Read every "#3760 is a live
+>    competing proposal" line below through this lens.
+> 2. **beads#4303** (db-proxy pooling) — **OPEN + Draft, `mergedAt=null`; NOT
+>    in beads `main` or any release.** Where the text says "already in main",
+>    read "unmerged". Our v1.1.0 baseline is therefore honest/current.
+>
+> **Net effect on the #4441 pitch:** do NOT lead with idle Dolt CPU (#3760's
+> author retracted that framing). Lead with **read-result recompute latency** —
+> the one lever neither #3760 nor #4303 touches (both only warm the
+> connection/process; they still recompute every query).
+
 ## Executive summary
 
 The proposal is sound in spirit and well-measured, but the research surfaces
@@ -206,9 +224,13 @@ reinventing the wire protocol over a socket; transactions still force
 per-invocation session pinning → no gain)."* **Important nuance for our pitch:**
 that rejection reasoning is about the **write/transaction path** (session
 pinning), which does **not** apply to routing *read* point-lookups like
-`show` — a defensible distinction for #4441. Proxy code is already in `main`
-(`cmd/bd/db_proxy_child.go`, `cmd/bd/proxied_server.go`,
-`internal/storage/dbproxy/`).
+`show` — a defensible distinction for #4441. **Status (verified 2026-07-19):
+#4303 is OPEN + Draft, `mergedAt=null` — NOT in any bd release.** We run bd
+v1.1.0 (latest release, 2026-07-04), which contains no connection-pooling
+proxy, so our measured baseline is honest against shipping `bd`; re-measure
+only *if/when* #4303 merges. (Some transparent-forwarder db-proxy scaffolding
+predates this PR in `cmd/bd/`; the session-pooling behavior that would shrink
+per-call connection cost is what #4303 adds and it is unmerged.)
 
 **Perf issues diagnosing cold-start** (frame the cost as connection setup, not
 Go init):
@@ -508,14 +530,24 @@ preferred over #1978's daemon).
 
 ## Things we may have missed
 
-1. **beads#3760 is a competing, prototyped, opt-in `bd serve` daemon proposal
-   with the *same fallback philosophy* as bdshim.** #4441 should cite and
-   position against it directly — we are arguing "gc layer" while #3760 argues
-   "bd layer," and #3760's own Ask #1 frames exactly that fork in the road.
-2. **The connection-pooling proxy (#4303) is already merged into beads `main`
-   as the accepted direction** — an agent's raw `bd` call may *already* be
-   getting connection reuse, which could shrink our measured baseline over
-   time. Re-measure against current beads `main`.
+1. **beads#3760 was WITHDRAWN by its own author (verified 2026-07-19; issue
+   still OPEN but the author retracted the proposal).** Re-measured against
+   gc 1.1.1, the connection storm collapsed **41→0.6 conn/sec at the gc layer**;
+   idle Dolt CPU 475%→313%; the residual was reattributed to auto-commit no-op
+   churn (beads#3674, now CLOSED/merged 2026-06-17), **not** connection setup.
+   A maintainer also noted upstream is under a **new-feature freeze**.
+   Consequence for #4441: do **not** lead with aggregate idle Dolt CPU (#3760's
+   author retracted exactly that framing). Position bdshim as *orthogonal* —
+   our lever is **read-result recompute latency**, which neither #3760 nor
+   #4303 addresses (both only warm the connection/process; they still recompute
+   every query). This *removes* the "re-proposing a rejected shape" risk but
+   *voids* the idle-CPU pitch.
+2. **The connection-pooling proxy (#4303) is OPEN + Draft, `mergedAt=null` —
+   NOT in beads `main`/any release** (the earlier "already merged" claim was
+   wrong; verified 2026-07-19). Our v1.1.0 baseline is therefore honest and
+   current; #4303 is **complementary** (it warms the *connection*; bdshim skips
+   the *query recompute + process* for routed reads). Re-measure only *if/when*
+   #4303 merges.
 3. **The cost framing gap.** Upstream diagnoses the tax as **per-connection
    Dolt setup** (view resolution), not gc `init()` breadth. Our proposal should
    acknowledge both, because the "route to warm controller" fix and the
