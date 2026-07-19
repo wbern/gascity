@@ -118,11 +118,11 @@ endif
 ## build: compile gc binary with version metadata (CGO_ENABLED=0 by default —
 ## server-mode/DoltLite thin client; override CGO_ENABLED=1 for a native build)
 build: check-beads-bd-version
-	CGO_ENABLED=$(CGO_ENABLED) go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
-	@# bdshim: the tiny (~18MB) pure-Go bd thin client installed beside gc. It is
+	CGO_ENABLED=$(CGO_ENABLED) go build -trimpath -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	@# bdshim: the tiny (~7MB) pure-Go bd thin client installed beside gc. It is
 	@# always CGO-free (no Dolt/ICU) and stripped; when present beside gc the
 	@# supervisor points the per-city `bd` shim at it, skipping gc's ~200ms boot.
-	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BUILD_DIR)/$(BDSHIM) ./cmd/bdshim
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BUILD_DIR)/$(BDSHIM) ./cmd/bdshim
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BDSHIM)
