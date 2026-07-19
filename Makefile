@@ -1,5 +1,8 @@
 GOLANGCI_LINT_VERSION := 2.9.0
 BUILDX_VERSION := 0.21.2
+# Pinned to the golang.org/x/tools version in go.mod so `make deadcode` is
+# reproducible. Bump both together.
+DEADCODE_VERSION := 0.44.0
 
 # Detect OS and arch for binary download.
 GOOS   := $(shell go env GOOS)
@@ -303,6 +306,16 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
+
+## deadcode: report unreachable functions reachable from the gc + bdshim entrypoints
+# golangci-lint's `unused` only sees within-package unexported code; this does a
+# whole-program reachability walk from main(), so it also catches dead EXPORTED
+# functions. Both entrypoints are analyzed together, so a function is only
+# reported when it is unreachable from BOTH — safe to delete. Advisory, not a
+# gate: some reported funcs are kept intentionally (future API, build-tagged).
+deadcode:
+	@echo "Analyzing dead (unreachable) code from the gc + bdshim entrypoints..."
+	CGO_ENABLED=0 go run golang.org/x/tools/cmd/deadcode@v$(DEADCODE_VERSION) ./cmd/gc ./cmd/bdshim
 
 ## lint: run full-repo golangci-lint
 lint: lint-full
