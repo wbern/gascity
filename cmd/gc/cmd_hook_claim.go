@@ -23,11 +23,22 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// TriggerBeadID, when set, scopes the claim to that exact bead — the
+	// target a demand/trigger spawn was created for (GC_TRIGGER_WORK_BEAD_ID).
+	// A triggered session claims its target by ID and never falls back to the
+	// generic work_query, so a federated bd store that surfaces unrelated
+	// global work cannot make the session claim the wrong bead or spawn-loop.
+	TriggerBeadID string
+	// TriggerStoreDir, when set, is the working dir whose bead store owns the
+	// trigger bead (resolved from GC_TRIGGER_WORK_STORE_REF). Empty falls back
+	// to the agent's own work dir.
+	TriggerStoreDir string
 }
 
 type hookClaimOps struct {
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
+	ResolveBead        hookResolveBeadFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
@@ -36,6 +47,7 @@ type hookClaimOps struct {
 
 type (
 	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookResolveBeadFunc        func(context.Context, string, []string, string) (beads.Bead, bool, error)
 	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
 	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc           func(io.Writer) error
@@ -69,6 +81,9 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
 	}
+	if ops.ResolveBead == nil {
+		ops.ResolveBead = hookResolveBeadWithBdStore
+	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
 	}
@@ -81,6 +96,16 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	now := time.Now
 	if ops.Now != nil {
 		now = ops.Now
+	}
+
+	// A demand/trigger spawn is created FOR one exact bead. Claim that bead
+	// by ID and never fall back to generic work_query selection: a federated
+	// bd store can surface unrelated global work from `bd ready`, and taking
+	// it would either claim the wrong bead or (when the route filter rejects
+	// it) drain-and-respawn forever. Resolving + claiming by ID is immune to
+	// which store `bd ready` reads.
+	if triggerID := strings.TrimSpace(opts.TriggerBeadID); triggerID != "" {
+		return doHookTriggerClaim(triggerID, dir, opts, ops, stdout, stderr)
 	}
 
 	output, err := ops.Runner(workQuery, dir)
@@ -146,6 +171,93 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	}
 
 	return writeHookClaimNoWork(opts, ops, stdout, stderr)
+}
+
+// doHookTriggerClaim resolves the exact trigger bead in its own store, runs the
+// same readiness/route/ownership checks the generic path applies, and claims it
+// through the existing atomic claim primitive. A triggered session NEVER falls
+// through to generic selection: if the trigger is gone, taken, misrouted, or
+// lost to a race, it drains rather than grabbing unrelated work.
+func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	triggerDir := strings.TrimSpace(opts.TriggerStoreDir)
+	if triggerDir == "" {
+		triggerDir = dir
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+
+	bead, found, err := ops.ResolveBead(ctx, triggerDir, opts.Env, triggerID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: resolving trigger bead %s: %v\n", triggerID, err) //nolint:errcheck
+		return 1
+	}
+	if !found {
+		// The trigger was completed or removed — nothing to do; drain.
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not found; draining\n", triggerID) //nolint:errcheck
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	}
+
+	// Already mine and in progress: report the existing assignment (resume).
+	if strings.EqualFold(strings.TrimSpace(bead.Status), "in_progress") &&
+		hookClaimHasIdentity(bead.Assignee, opts.IdentityCandidates) {
+		result := hookClaimJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       hookClaimCommandName,
+			Action:        "work",
+			Reason:        "existing_assignment",
+			BeadID:        bead.ID,
+			Assignee:      bead.Assignee,
+			Route:         hookClaimRoute(bead),
+		}
+		return writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)
+	}
+
+	// Taken by another session or no longer open: drain, do NOT grab other work.
+	if strings.TrimSpace(bead.Assignee) != "" || !strings.EqualFold(strings.TrimSpace(bead.Status), "open") {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not claimable (status=%q assignee=%q); draining\n", //nolint:errcheck
+			triggerID, strings.TrimSpace(bead.Status), strings.TrimSpace(bead.Assignee))
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	}
+
+	// Route must match this session's targets — a misroute is not ours to take.
+	if !hookClaimMatchesRoute(bead, opts.RouteTargets) {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s routed to %q not in this session's targets; draining\n", //nolint:errcheck
+			triggerID, hookClaimRoute(bead))
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	}
+
+	claimed, ok, err := ops.Claim(ctx, triggerDir, opts.Env, triggerID, opts.Assignee)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: claiming trigger %s: %v\n", triggerID, err) //nolint:errcheck
+		return 1
+	}
+	if !ok {
+		// Lost the race — another session claimed it first. Drain; never
+		// fall through to claim unrelated work.
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s claimed by another session; draining\n", triggerID) //nolint:errcheck
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
+	}
+	if claimed.Metadata == nil {
+		claimed.Metadata = bead.Metadata
+	}
+	result := hookClaimJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Command:       hookClaimCommandName,
+		Action:        "work",
+		Reason:        "claimed_trigger",
+		BeadID:        claimed.ID,
+		Assignee:      claimed.Assignee,
+		Route:         hookClaimRoute(claimed),
+	}
+	if result.BeadID == "" {
+		result.BeadID = triggerID
+	}
+	if result.Assignee == "" {
+		result.Assignee = opts.Assignee
+	}
+	return writeHookClaimWorkResultForBead(result, claimed, opts, ops, triggerDir, stdout, stderr)
 }
 
 func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
@@ -271,6 +383,22 @@ func hookClaimWithBdStore(_ context.Context, dir string, env []string, beadID, a
 		return beads.Bead{}, false, nil
 	}
 	return claimed, true, nil
+}
+
+// hookResolveBeadWithBdStore fetches one bead by ID from the store rooted at
+// dir. A missing bead is reported as (zero, false, nil) so a triggered claim
+// treats an already-completed trigger as "drain", not an error. Resolution is
+// by exact ID, so it is unaffected by which store a federated `bd ready` reads.
+func hookResolveBeadWithBdStore(_ context.Context, dir string, env []string, beadID string) (beads.Bead, bool, error) {
+	store := hookClaimBdStore(dir, env, "")
+	bead, err := store.Get(beadID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		return beads.Bead{}, false, err
+	}
+	return bead, true, nil
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

@@ -472,6 +472,184 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQueryResult is the codex
+// spawn-loop regression: a session spawned FOR a specific bead
+// (GC_TRIGGER_WORK_BEAD_ID) must claim that exact bead directly, bypassing the
+// generic work_query. Live, the federated bd-shim surfaces unrelated global
+// work (a route-mismatched HQ bead) from bd ready, which the route filter then
+// rejects -> no_work -> drain -> respawn. Trigger scoping resolves and claims
+// the target by ID, immune to which store bd ready reads.
+func TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQueryResult(t *testing.T) {
+	var claimed []string
+	runner := func(string, string) (string, error) {
+		// What the federated shim returns: an unrelated, route-mismatched
+		// global P1 (gc2-z7j83), NOT the trigger.
+		return `[{"id":"gc2-z7j83","status":"open","priority":1,"metadata":{}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			if id != "crm-1g4vjm.4" {
+				t.Fatalf("ResolveBead id = %q, want trigger crm-1g4vjm.4", id)
+			}
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = append(claimed, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimed, ","); got != "crm-1g4vjm.4" {
+		t.Fatalf("claimed = %q, want only the trigger bead crm-1g4vjm.4 (never gc2-z7j83)", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != "crm-1g4vjm.4" || result.Reason != "claimed_trigger" {
+		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+}
+
+// TestDoHookClaimTriggerTakenByAnotherDrainsWithoutGenericClaim proves the
+// safety invariant: a triggered session whose target is already taken (or
+// closed) drains rather than grabbing unrelated route-matched work. Taking
+// generic work is exactly the "claims the wrong bead" footgun trigger scoping
+// exists to prevent.
+func TestDoHookClaimTriggerTakenByAnotherDrainsWithoutGenericClaim(t *testing.T) {
+	drained := false
+	runner := func(string, string) (string, error) {
+		// Generic route-matched work exists — must NOT be claimed by a
+		// triggered session whose trigger is gone.
+		return `[{"id":"other-routed","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "crm/gastown.someone-else", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run when the trigger is taken")
+			return beads.Bead{}, false, nil
+		},
+		DrainAck: func(io.Writer) error { drained = true; return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger taken) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !drained {
+		t.Fatal("drain ack was not called for a taken trigger")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("unexpected result for taken trigger: %+v", result)
+	}
+}
+
+// TestDoHookClaimTriggerAlreadyOwnedReturnsExisting covers resume/adopt: a
+// triggered session that already owns its in-progress trigger reports the
+// existing assignment instead of re-claiming.
+func TestDoHookClaimTriggerAlreadyOwnedReturnsExisting(t *testing.T) {
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			t.Fatal("work_query must not run when the trigger is already owned")
+			return "", nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "crm/gastown.furiosa", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run for an already-owned trigger")
+			return beads.Bead{}, false, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger owned) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "crm-1g4vjm.4" {
+		t.Fatalf("unexpected result for owned trigger: %+v", result)
+	}
+}
+
+// TestDoHookClaimTriggerRouteMismatchDrains guards against claiming a trigger
+// misrouted to a different pool: validate route before claiming; a mismatch
+// drains rather than mis-claiming.
+func TestDoHookClaimTriggerRouteMismatchDrains(t *testing.T) {
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return "[]", nil },
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "crm/gastown.other-pool"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run for a misrouted trigger")
+			return beads.Bead{}, false, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger misrouted) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" {
+		t.Fatalf("unexpected result for misrouted trigger: %+v", result)
+	}
+}
+
 func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
@@ -1551,6 +1729,180 @@ dir = "myrig"
 	// Tiered query: first tier checks in_progress assigned to session name.
 	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
+	}
+}
+
+// TestCmdHookClaimTargetsTriggerBeadEndToEnd is the codex-polecat spawn-loop
+// regression, end to end through gc hook --claim with the exact live setup:
+//   - trigger: rig:crm / crm-1g4vjm.4 (open, unassigned, routed to the pool)
+//   - session alias: crm/gastown.nux, template/route target crm/gastown.polecat
+//   - the generic work_query returns an unrelated HQ bead (gc2-z7j83)
+//
+// The claim must target crm-1g4vjm.4 (assignee = this session), and gc2-z7j83
+// must be left untouched.
+func TestCmdHookClaimTargetsTriggerBeadEndToEnd(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "crm-repo")
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	unrelatedMarker := filepath.Join(t.TempDir(), "unrelated-claim")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "crm"
+path = %q
+
+[[agent]]
+name = "gastown.polecat"
+dir = "crm"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'actor=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$*" >> %q
+case "$*" in
+  *update*gc2-z7j83*) : > %q; printf '[]' ;;
+  *show*crm-1g4vjm.4*)
+    printf '[{"id":"crm-1g4vjm.4","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *update*crm-1g4vjm.4*--claim*)
+    printf '[{"id":"crm-1g4vjm.4","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' "${BEADS_ACTOR:-}" ;;
+  *ready*gc.routed_to=crm/gastown.polecat*)
+    printf '[{"id":"gc2-z7j83","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath, unrelatedMarker)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "crm/gastown.polecat")
+	t.Setenv("GC_ALIAS", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_NAME", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_ID", "gc2-4vdbu")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "crm-1g4vjm.4")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:crm")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "crm-1g4vjm.4" || result.Reason != "claimed_trigger" || result.Assignee != "crm/gastown.nux" {
+		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+	if _, err := os.Stat(unrelatedMarker); !os.IsNotExist(err) {
+		t.Fatalf("unrelated bead gc2-z7j83 was claimed/updated; marker stat err=%v", err)
+	}
+	logText := readFileString(t, logPath)
+	if !strings.Contains(logText, "actor=crm/gastown.nux args=update crm-1g4vjm.4 --claim") {
+		t.Fatalf("trigger bead was not claimed by this session; bd log:\n%s", logText)
+	}
+	if strings.Contains(logText, "gc2-z7j83") {
+		t.Fatalf("gc hook touched the unrelated HQ bead; bd log:\n%s", logText)
+	}
+}
+
+// TestCmdHookClaimTriggerLostRaceDrainsEndToEnd is the concurrent-claim variant
+// of the contract: when another session wins the trigger bead first, gc hook
+// --claim must report a lost race (drain) and MUST NOT fall through to claim
+// the unrelated bead surfaced by the generic query.
+func TestCmdHookClaimTriggerLostRaceDrainsEndToEnd(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "crm-repo")
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	unrelatedMarker := filepath.Join(t.TempDir(), "unrelated-claim")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "crm"
+path = %q
+
+[[agent]]
+name = "gastown.polecat"
+dir = "crm"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'actor=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$*" >> %q
+case "$*" in
+  *update*gc2-z7j83*) : > %q; printf '[]' ;;
+  *show*crm-1g4vjm.4*)
+    printf '[{"id":"crm-1g4vjm.4","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *update*crm-1g4vjm.4*--claim*)
+    printf 'already claimed by another session'; exit 1 ;;
+  *ready*gc.routed_to=crm/gastown.polecat*)
+    printf '[{"id":"gc2-z7j83","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath, unrelatedMarker)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "crm/gastown.polecat")
+	t.Setenv("GC_ALIAS", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_NAME", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_ID", "gc2-4vdbu")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "crm-1g4vjm.4")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:crm")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	// No --drain-ack: a no-work drain without runtime ack exits 1 but still
+	// emits the JSON protocol result. The point is it drained, not claimed.
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--claim, lost race) = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" {
+		t.Fatalf("lost-race result must drain, got: %+v", result)
+	}
+	if _, err := os.Stat(unrelatedMarker); !os.IsNotExist(err) {
+		t.Fatalf("lost race fell through to claim the unrelated bead gc2-z7j83; marker stat err=%v", err)
+	}
+	logText := readFileString(t, logPath)
+	if !strings.Contains(logText, "update crm-1g4vjm.4 --claim") {
+		t.Fatalf("expected a claim attempt on the trigger bead; bd log:\n%s", logText)
+	}
+	if strings.Contains(logText, "gc2-z7j83") {
+		t.Fatalf("lost race touched the unrelated HQ bead; bd log:\n%s", logText)
 	}
 }
 

@@ -233,6 +233,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
 		routeTarget := hookClaimPrimaryRouteTarget(&a)
+		// A demand/trigger spawn injects the exact bead it was created for.
+		// Claim that bead by ID rather than trusting generic work_query
+		// discovery, which a federated bd store can answer with unrelated
+		// global work (issue: codex polecat spawn-loop).
+		triggerBeadID := strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID"))
+		triggerStoreDir := ""
+		if triggerBeadID != "" {
+			triggerStoreDir = hookTriggerStoreDir(cityPath, cfg, &a, os.Getenv("GC_TRIGGER_WORK_STORE_REF"))
+		}
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			IdentityCandidates: hookClaimIdentityCandidates(
@@ -243,14 +252,39 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				agentForQuery,
 				resolvedAgentName,
 			),
-			RouteTargets: hookClaimRouteTargets(routeTarget, resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			Env:          queryEnv,
-			DrainAck:     opts.DrainAck,
-			JSON:         opts.JSON,
+			RouteTargets:    hookClaimRouteTargets(routeTarget, resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
+			Env:             queryEnv,
+			DrainAck:        opts.DrainAck,
+			JSON:            opts.JSON,
+			TriggerBeadID:   triggerBeadID,
+			TriggerStoreDir: triggerStoreDir,
 		}
 		return doHookClaim(workQuery, workDir, claimOpts, hookClaimOps{Runner: runner}, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+}
+
+// hookTriggerStoreDir resolves GC_TRIGGER_WORK_STORE_REF to the working dir of
+// the bead store that owns the trigger bead. It supports the "rig:<name>" form
+// the demand spawn injects; a non-rig ref or unknown rig yields "" so the
+// caller falls back to the agent's own work dir. Because the trigger claim
+// resolves and claims by exact bead ID, an unresolved store ref is not fatal —
+// it only forgoes the dir hint.
+func hookTriggerStoreDir(cityPath string, cfg *config.City, a *config.Agent, storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	rigName := strings.TrimPrefix(storeRef, "rig:")
+	if rigName == storeRef || strings.TrimSpace(rigName) == "" {
+		return ""
+	}
+	rigName = strings.TrimSpace(rigName)
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Name) == rigName {
+			view := *a
+			view.Dir = rigName
+			return agentCommandDir(cityPath, &view, cfg.Rigs)
+		}
+	}
+	return ""
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
