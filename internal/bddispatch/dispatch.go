@@ -562,6 +562,9 @@ func addMetadataEquals(into map[string]string, kv string) error {
 func applyReadyParams(in []beads.Bead, p ReadyParams) []beads.Bead {
 	out := make([]beads.Bead, 0, len(in))
 	for _, b := range in {
+		if p.query.Assignee != "" && strings.TrimSpace(b.Assignee) != p.query.Assignee {
+			continue
+		}
 		if p.unassigned && strings.TrimSpace(b.Assignee) != "" {
 			continue
 		}
@@ -683,7 +686,7 @@ func applyListMetadataFilter(in []beads.Bead, f listMetadataFilter) []beads.Bead
 // DispatchListMetadataGuarded routes a `bd list` carrying --metadata-field /
 // --has-metadata-key by fetching the server-filterable candidate set and
 // applying the metadata predicates client-side. It returns handled=false —
-// signalling the caller to pass through to the real bd — when the candidate set
+// signaling the caller to pass through to the real bd — when the candidate set
 // may be truncated at the pagination cap, so a match beyond the cap is never
 // missed. The user's --limit is applied after filtering (not pushed to the
 // server), so --limit bounds the matching set exactly like real bd.

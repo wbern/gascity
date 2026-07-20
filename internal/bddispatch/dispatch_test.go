@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
@@ -164,6 +165,21 @@ func TestParseQueryEphemeral(t *testing.T) {
 				t.Fatalf("ParseQueryEphemeral(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestApplyReadyParamsHonorsAssignee(t *testing.T) {
+	params, err := ParseReadyParams([]string{"--assignee=worker-a", "--json"})
+	if err != nil {
+		t.Fatalf("ParseReadyParams: %v", err)
+	}
+	got := applyReadyParams([]beads.Bead{
+		{ID: "global-p1", Assignee: "someone-else"},
+		{ID: "unassigned", Assignee: ""},
+		{ID: "mine", Assignee: "worker-a"},
+	}, params)
+	if len(got) != 1 || got[0].ID != "mine" {
+		t.Fatalf("applyReadyParams(--assignee) = %+v, want only mine", got)
 	}
 }
 
