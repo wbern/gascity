@@ -66,3 +66,19 @@ The reclamation reaper already exists in core and is deployed: `repairStrandedPo
 3. `hasAssignedWork` false because assignees were manually released — then the current loop is "codex not claiming UNASSIGNED work," a different proximate cause than stranded-repair.
 
 **Honest status:** cause 100% (repro green); reaper exists + works in isolation (test green); wrong fix (demand) ruled out. Pinning the live gate needs `gc trace` on a quiesced pool per reconciler-debugging.md — blocked by live churn.
+
+## CONFIRMED ROOT CAUSE (2026-07-20, corroborated by a live polecat's self-diagnosis)
+
+After ruling out every layer (query stable=8, codex-env store read returns work, all readiness filters pass the head bead crm-yeb98x, route matches GC_TEMPLATE=crm/gastown.polecat), the actual root — independently reached by a live crm codex polecat and matching gci-a8y — is a SPAWN/CLAIM invariant gap:
+
+- The pool worker is spawned FOR a specific bead: env carries GC_TRIGGER_WORK_BEAD_ID=crm-1g4vjm.4 (+ GC_TRIGGER_BEAD_ID, GC_TRIGGER_BEAD_STORE_REF=rig:crm). But spawn does NOT atomically claim/pin that bead — it stays open+unassigned.
+- The mandated startup `gc hook --claim --drain-ack` is UNSCOPED: it runs a global ready query that does NOT constrain to GC_TRIGGER_WORK_BEAD_ID. It returns no_work or surfaces the wrong item (a polecat's read-only `gc hook` selected gc2-z7j83 — a P1 non-CRM bead not routed to this pool — and correctly refused to steal it, then parked).
+
+Net: nothing makes a worker claim its OWN trigger bead; the generic claim is unscoped → no_work / wrong-task → trigger bead stays unassigned → pool re-spawns for the same demand → loop. This is gci-a8y, pinned.
+
+### The fix (gc-core, well-defined)
+1. On pool-worker spawn, when GC_TRIGGER_WORK_BEAD_ID is set: validate it is routed to this pool and ATOMICALLY CLAIM that exact bead onto the spawned session (pin it). No unscoped race.
+2. `gc hook --claim` must PRIORITIZE/REQUIRE the trigger bead when GC_TRIGGER_WORK_BEAD_ID is present; fall back to the generic unscoped query only for genuinely pool-idle sessions.
+3. Hygiene: `gc prime --hook` injects only a timestamp today — it should enforce/communicate the trigger-claim invariant. Separately, 768 stale is_blocked flags (bd recompute-blocked) can hide ready work but are not this cause.
+
+Separate/real: the ~60s codex cold-start crash (gc2-z7j83); nvf76 assigned-to-dead adoption gap (green repro, this repo); reaper works (green regression guard). Those are distinct from THIS loop, whose cause is the unclaimed-trigger + unscoped-hook gap above.
