@@ -53,3 +53,16 @@ risk that a fixed binary may not be the one that runs).
   is the calibration lesson: check the threshold, don't pattern-match the symptom.
 - Everything tagged CONFIRMED has a live read or code anchor behind it; treat STRONG/
   HYPOTHESIS rows as still-falsifiable.
+
+## Update — fix investigation (2026-07-20, later)
+
+The reclamation reaper already exists in core and is deployed: `repairStrandedPoolWorkerBead` (commit 7eb0c7045 / PR #4088), gated by `poolFreeable && hasAssignedWork && !storeQueryPartial && marker aged past strandedRepairConfirmGrace(2m)`. So nvf76 is **"the deployed reaper isn't firing,"** not "no reaper." Packs have zero lifecycle reaping (only mol-polecat-work + business monitors) — reaping is core's job per SDK self-sufficiency.
+
+**Hypothesis tested and REFUTED (deterministic reconcile test):** the demand-deadlock idea — that pending pool demand sets `shouldWake=true` → `poolFreeable=false` → repair skipped. Test `TestReconcileSessionBeads_StrandedRepairVsPoolDemand_gci310k` shows the reaper releases stranded work **with or without** `poolDesired` demand. So `shouldWake`/demand is NOT the gate. (Committed as a regression guard.)
+
+**Remaining gate candidates (need a live trace / quiesced pool to disambiguate):**
+1. `storeQueryPartial` true under the fork's Dolt latency (gci-8qm3) → repair skipped every tick. **Leading candidate** — would make nvf76 partly a *symptom* of the store-determinism issue; fix is store health (devops) or decoupling repair from the non-degraded-read gate.
+2. Confirmation marker never ages 2m — less likely, since each respawn mints a NEW session bead (the dead bead's marker should age undisturbed).
+3. `hasAssignedWork` false because assignees were manually released — then the current loop is "codex not claiming UNASSIGNED work," a different proximate cause than stranded-repair.
+
+**Honest status:** cause 100% (repro green); reaper exists + works in isolation (test green); wrong fix (demand) ruled out. Pinning the live gate needs `gc trace` on a quiesced pool per reconciler-debugging.md — blocked by live churn.
