@@ -807,6 +807,20 @@ func hookClaimStripDiagnostic(output string, now time.Time) []string {
 	return stripped
 }
 
+// hookCandidateCount returns the number of candidate rows in a work-query JSON
+// array payload, or 0 when it is empty or not a decodable array.
+func hookCandidateCount(output string) int {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return 0
+	}
+	var arr []any
+	if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
+		return 0
+	}
+	return len(arr)
+}
+
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
 	raw, ok := item["defer_until"].(string)
 	if !ok {

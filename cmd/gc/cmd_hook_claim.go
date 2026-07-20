@@ -137,7 +137,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	preFilter := normalizeWorkQueryOutput(strings.TrimSpace(output))
 	normalized := filterUnreadyHookCandidates(preFilter, now())
 	if stripped := hookClaimStripDiagnostic(preFilter, now()); len(stripped) > 0 {
-		fmt.Fprintf(stderr, "gc hook --claim: stripped %d unready routed candidate(s) that pool demand still counts: %s\n", len(stripped), strings.Join(stripped, ", ")) //nolint:errcheck
+		// Emit len(before) and len(after) so a recurrence self-classifies the
+		// mechanism (gci-x8zo): before>0,after=0 == count<->claim readiness
+		// asymmetry (the case evaluatePoolNewDemandFiltered fixes). A separate
+		// "reconciler counted demand but bd ready returned before=0" case is
+		// bd-ready non-determinism and needs store determinism, not this filter.
+		beforeN := hookCandidateCount(preFilter)
+		afterN := hookCandidateCount(normalized)
+		fmt.Fprintf(stderr, "gc hook --claim: bd ready returned %d routed candidate(s), %d claimable after readiness filter; stripped: %s\n", beforeN, afterN, strings.Join(stripped, ", ")) //nolint:errcheck
 	}
 	if !workQueryHasReadyWork(normalized) {
 		return hookClaimResult{}
