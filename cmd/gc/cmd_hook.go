@@ -424,6 +424,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
+		triggerBeadID := strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID"))
+		triggerStoreDir := ""
+		if triggerBeadID != "" {
+			triggerStoreDir = hookTriggerStoreDir(cityPath, cfg, &a, os.Getenv("GC_TRIGGER_WORK_STORE_REF"))
+		}
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
@@ -443,10 +448,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				alias,
 				agentForQuery,
 			),
-			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			Env:          queryEnv,
-			DrainAck:     opts.DrainAck,
-			JSON:         opts.JSON,
+			RouteTargets:    hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
+			Env:             queryEnv,
+			DrainAck:        opts.DrainAck,
+			JSON:            opts.JSON,
+			TriggerBeadID:   triggerBeadID,
+			TriggerStoreDir: triggerStoreDir,
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
@@ -476,6 +483,13 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	if strings.TrimSpace(claimOpts.TriggerBeadID) != "" {
+		claimOpts.Env = queryEnv
+		if env, ok := hookStoreEnvForDir(stores, claimOpts.TriggerStoreDir); ok {
+			claimOpts.Env = env
+		}
+		return doHookClaim(workQuery, workDir, claimOpts, ops, stdout, stderr)
+	}
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -536,6 +550,39 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, stdout, stderr)
+}
+
+func hookStoreEnvForDir(stores []hookStore, dir string) ([]string, bool) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nil, false
+	}
+	for _, store := range stores {
+		if strings.TrimSpace(store.dir) == dir {
+			return store.env, true
+		}
+	}
+	return nil, false
+}
+
+// hookTriggerStoreDir resolves GC_TRIGGER_WORK_STORE_REF to the working dir of
+// the store that owns the trigger bead. Demand spawns inject "rig:<name>" for
+// rig-scoped work; unknown refs fall back to the agent work dir at claim time.
+func hookTriggerStoreDir(cityPath string, cfg *config.City, a *config.Agent, storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	rigName := strings.TrimPrefix(storeRef, "rig:")
+	if rigName == storeRef || strings.TrimSpace(rigName) == "" {
+		return ""
+	}
+	rigName = strings.TrimSpace(rigName)
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Name) == rigName {
+			view := *a
+			view.Dir = rigName
+			return agentCommandDir(cityPath, &view, cfg.Rigs)
+		}
+	}
+	return ""
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {

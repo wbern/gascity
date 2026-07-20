@@ -934,6 +934,195 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	}
 }
 
+func TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQueryResult(t *testing.T) {
+	var claimed []string
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"global-p1","status":"open","priority":1,"metadata":{}}]`, nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			if id != "crm-1g4vjm.4" {
+				t.Fatalf("ResolveBead id = %q, want trigger crm-1g4vjm.4", id)
+			}
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = append(claimed, beadID)
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"},
+			}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimed, ","); got != "crm-1g4vjm.4" {
+		t.Fatalf("claimed = %q, want only trigger bead crm-1g4vjm.4", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != "crm-1g4vjm.4" || result.Reason != "claimed_trigger" {
+		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+}
+
+func TestDoHookClaimTriggerTakenByAnotherDrainsWithoutGenericClaim(t *testing.T) {
+	drained := false
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"other-routed","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]`, nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "crm/gastown.someone-else", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run when the trigger is taken")
+			return beads.Bead{}, false, nil
+		},
+		DrainAck: func(io.Writer) error { drained = true; return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger taken) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !drained {
+		t.Fatal("drain ack was not called for a taken trigger")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("unexpected result for taken trigger: %+v", result)
+	}
+}
+
+func TestDoHookClaimTriggerAlreadyOwnedReturnsExisting(t *testing.T) {
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			t.Fatal("work_query must not run when the trigger is already owned")
+			return "", nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "crm/gastown.furiosa", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run for an already-owned trigger")
+			return beads.Bead{}, false, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger owned) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "existing_assignment" || result.BeadID != "crm-1g4vjm.4" {
+		t.Fatalf("unexpected result for owned trigger: %+v", result)
+	}
+}
+
+func TestClaimHookWorkTargetsTriggerBeforeFederatedDiscovery(t *testing.T) {
+	var claimedID, claimDir string
+	var claimEnv []string
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "crm", env: []string{"GC_STORE=crm"}},
+	}
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, dir string, _ []string, id string) (beads.Bead, bool, error) {
+			if dir != "crm" {
+				t.Fatalf("ResolveBead dir = %q, want trigger store crm", dir)
+			}
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimDir = dir
+			claimEnv = env
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.nux",
+		IdentityCandidates: []string{"crm/gastown.nux"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		TriggerStoreDir:    "crm",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner(
+		"bd ready --json",
+		"city",
+		stores[0].env,
+		stores,
+		opts,
+		ops,
+		func(string, string, []string) (string, error) {
+			t.Fatal("federated discovery must not run for a trigger-scoped claim")
+			return "", nil
+		},
+		func(string, error) {},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner(trigger) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimedID != "crm-1g4vjm.4" || claimDir != "crm" {
+		t.Fatalf("claim = id %q dir %q, want trigger id in trigger store", claimedID, claimDir)
+	}
+	if len(claimEnv) != 1 || claimEnv[0] != "GC_STORE=crm" {
+		t.Fatalf("claim env = %v, want trigger store env [GC_STORE=crm]", claimEnv)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Reason != "claimed_trigger" || result.BeadID != "crm-1g4vjm.4" {
+		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+}
+
 func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
@@ -1373,6 +1562,91 @@ esac
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)
+	}
+}
+
+func TestCmdHookClaimTargetsTriggerBeadEndToEnd(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "crm-repo")
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	readyMarker := filepath.Join(t.TempDir(), "generic-ready")
+	unrelatedMarker := filepath.Join(t.TempDir(), "unrelated-claim")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "crm"
+path = %q
+
+[[agent]]
+name = "gastown.polecat"
+dir = "crm"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'actor=%%s pwd=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$(pwd)" "$*" >> %q
+case "$*" in
+  *"show --json crm-1g4vjm.4"*)
+    printf '[{"id":"crm-1g4vjm.4","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *"update crm-1g4vjm.4 --claim --json"*)
+    printf '[{"id":"crm-1g4vjm.4","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' "${BEADS_ACTOR:-}" ;;
+  *"update gc2-z7j83 --claim --json"*)
+    : > %q
+    printf '[]' ;;
+  *"ready "*)
+    : > %q
+    printf '[{"id":"gc2-z7j83","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+  *)
+    printf '[]' ;;
+esac
+`, logPath, unrelatedMarker, readyMarker)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "crm/gastown.polecat")
+	t.Setenv("GC_ALIAS", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_NAME", "crm/gastown.nux")
+	t.Setenv("GC_SESSION_ID", "gc2-4vdbu")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "crm-1g4vjm.4")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:crm")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "crm-1g4vjm.4" || result.Reason != "claimed_trigger" || result.Assignee != "crm/gastown.nux" {
+		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+	if _, err := os.Stat(readyMarker); !os.IsNotExist(err) {
+		t.Fatalf("trigger-scoped claim ran generic bd ready; marker stat err=%v", err)
+	}
+	if _, err := os.Stat(unrelatedMarker); !os.IsNotExist(err) {
+		t.Fatalf("trigger-scoped claim touched unrelated gc2-z7j83; marker stat err=%v", err)
+	}
+	logText := readFileString(t, logPath)
+	if !strings.Contains(logText, "actor=crm/gastown.nux") || !strings.Contains(logText, "args=update crm-1g4vjm.4 --claim --json") {
+		t.Fatalf("trigger bead was not claimed by this session; bd log:\n%s", logText)
 	}
 }
 

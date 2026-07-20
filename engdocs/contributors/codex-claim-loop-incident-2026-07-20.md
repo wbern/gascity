@@ -1,9 +1,16 @@
 ---
 title: "Codex crm polecat spawn-loop — incident findings + confidence audit (2026-07-20)"
 author: gas-city-wbern/architect
-status: cause CONFIRMED; fix not yet built
+status: CORRECTED — root cause was NOT nvf76; real cause = bd-shim federation + unscoped claim; gc-core + bdshim fixes built (gcw-49yi)
 scope: crm/gastown.polecat (codex-polecat, gpt-5.6-terra) on running binary fork-ce1476243
 ---
+
+> **CORRECTION (2026-07-20, later): see "## CORRECTED ROOT CAUSE" at the bottom.**
+> Finding #1 below (nvf76 identity-adoption as the blocker of the stuck beads) is
+> **RETRACTED**. Live reads show every stuck open bead is UNASSIGNED — the claim
+> code keys on the `assignee` field, so identity-adoption never applies to them.
+> The real cause is the federated bd-shim surfacing global work plus an unscoped
+> trigger claim.
 
 # What happened
 
@@ -54,31 +61,43 @@ risk that a fixed binary may not be the one that runs).
 - Everything tagged CONFIRMED has a live read or code anchor behind it; treat STRONG/
   HYPOTHESIS rows as still-falsifiable.
 
-## Update — fix investigation (2026-07-20, later)
+## CORRECTED ROOT CAUSE (2026-07-20, later — gcw-49yi)
 
-The reclamation reaper already exists in core and is deployed: `repairStrandedPoolWorkerBead` (commit 7eb0c7045 / PR #4088), gated by `poolFreeable && hasAssignedWork && !storeQueryPartial && marker aged past strandedRepairConfirmGrace(2m)`. So nvf76 is **"the deployed reaper isn't firing,"** not "no reaper." Packs have zero lifecycle reaping (only mol-polecat-work + business monitors) — reaping is core's job per SDK self-sufficiency.
+The "sole remaining blocker = nvf76" claim (finding #2, STRONG-not-proven) did
+not survive the isolated repro it owed. It is now **RETRACTED** for the stuck
+beads, replaced by a CONFIRMED, live-reproduced cause.
 
-**Hypothesis tested and REFUTED (deterministic reconcile test):** the demand-deadlock idea — that pending pool demand sets `shouldWake=true` → `poolFreeable=false` → repair skipped. Test `TestReconcileSessionBeads_StrandedRepairVsPoolDemand_gci310k` shows the reaper releases stranded work **with or without** `poolDesired` demand. So `shouldWake`/demand is NOT the gate. (Committed as a regression guard.)
+**CONFIRMED (direct live A/B reads):**
 
-**Remaining gate candidates (need a live trace / quiesced pool to disambiguate):**
-1. `storeQueryPartial` true under the fork's Dolt latency (gci-8qm3) → repair skipped every tick. **Leading candidate** — would make nvf76 partly a *symptom* of the store-determinism issue; fix is store health (devops) or decoupling repair from the non-degraded-read gate.
-2. Confirmation marker never ages 2m — less likely, since each respawn mints a NEW session bead (the dead bead's marker should age undisturbed).
-3. `hasAssignedWork` false because assignees were manually released — then the current loop is "codex not claiming UNASSIGNED work," a different proximate cause than stranded-repair.
+1. Every stuck *open* bead — `crm-1g4vjm.2/.3/.4/.6/.7` — is **unassigned**
+   (`assignee: null`), routed to `crm/gastown.polecat`, and present in
+   `bd ready`. The claim code (`cmd_hook_claim.go`) reads the `assignee` field,
+   not the stale `gc.session_name` metadata, so the nvf76 "can't adopt work
+   assigned to a dead id" path never applies. The fresh-claim route path should
+   claim them trivially.
+2. **bd vs bd-shim is the differentiator.** `.gc/shimbin/bd -> ~/.local/bin/bdshim`
+   is a *federated* beads client and reads the city-wide store; real `bd` reads
+   the local rig `.beads`. Same crm dir: real `bd ready --assignee=""` sees crm
+   beads; shim sees city P1 work such as `gc2-z7j83`.
+3. Through the shim the polecat work_query surfaces global P1 `gc2-z7j83`
+   (`routed=null`); `gc hook --claim`'s route filter rejects it -> `no_work` ->
+   `--drain-ack` -> session exits -> pool respawns.
+4. `GC_TRIGGER_WORK_BEAD_ID`/`GC_TRIGGER_WORK_STORE_REF=rig:crm` are injected by
+   the pack and resolvable, but gc-core `gc hook` consumed them nowhere before
+   this fix. The claim was unscoped.
 
-**Honest status:** cause 100% (repro green); reaper exists + works in isolation (test green); wrong fix (demand) ruled out. Pinning the live gate needs `gc trace` on a quiesced pool per reconciler-debugging.md — blocked by live churn.
+**FIX (gc-core lane — built in gcw-49yi):** `gc hook --claim` honors the injected
+trigger env. The trigger path resolves the exact bead by ID (`store.Get`), runs
+ownership/status/route checks, and claims via the existing atomic
+`store.Claim(id)`. A triggered session never falls through to generic selection:
+gone / taken / misrouted / lost-race => drain.
 
-## CONFIRMED ROOT CAUSE (2026-07-20, corroborated by a live polecat's self-diagnosis)
+**FIX (bdshim lane — built in gcw-49yi):** keep `bdshim` wide/federated, but make
+the routed `ready` path honor `--assignee`. The bug was a missing filter, not
+excess scope. The controller `/beads/ready` endpoint returns a broad ready set;
+the shim already applies client-side ready filters for metadata/unassigned/type
+and now also filters by assignee.
 
-After ruling out every layer (query stable=8, codex-env store read returns work, all readiness filters pass the head bead crm-yeb98x, route matches GC_TEMPLATE=crm/gastown.polecat), the actual root — independently reached by a live crm codex polecat and matching gci-a8y — is a SPAWN/CLAIM invariant gap:
-
-- The pool worker is spawned FOR a specific bead: env carries GC_TRIGGER_WORK_BEAD_ID=crm-1g4vjm.4 (+ GC_TRIGGER_BEAD_ID, GC_TRIGGER_BEAD_STORE_REF=rig:crm). But spawn does NOT atomically claim/pin that bead — it stays open+unassigned.
-- The mandated startup `gc hook --claim --drain-ack` is UNSCOPED: it runs a global ready query that does NOT constrain to GC_TRIGGER_WORK_BEAD_ID. It returns no_work or surfaces the wrong item (a polecat's read-only `gc hook` selected gc2-z7j83 — a P1 non-CRM bead not routed to this pool — and correctly refused to steal it, then parked).
-
-Net: nothing makes a worker claim its OWN trigger bead; the generic claim is unscoped → no_work / wrong-task → trigger bead stays unassigned → pool re-spawns for the same demand → loop. This is gci-a8y, pinned.
-
-### The fix (gc-core, well-defined)
-1. On pool-worker spawn, when GC_TRIGGER_WORK_BEAD_ID is set: validate it is routed to this pool and ATOMICALLY CLAIM that exact bead onto the spawned session (pin it). No unscoped race.
-2. `gc hook --claim` must PRIORITIZE/REQUIRE the trigger bead when GC_TRIGGER_WORK_BEAD_ID is present; fall back to the generic unscoped query only for genuinely pool-idle sessions.
-3. Hygiene: `gc prime --hook` injects only a timestamp today — it should enforce/communicate the trigger-claim invariant. Separately, 768 stale is_blocked flags (bd recompute-blocked) can hide ready work but are not this cause.
-
-Separate/real: the ~60s codex cold-start crash (gc2-z7j83); nvf76 assigned-to-dead adoption gap (green repro, this repo); reaper works (green regression guard). Those are distinct from THIS loop, whose cause is the unclaimed-trigger + unscoped-hook gap above.
+**Still owed:** live proof via rebuilt binary and a codex polecat spawned for a
+held crm trigger bead. The implementation is covered by TDD and local fake-`bd`
+e2e, but the fleet binary has not yet been rebuilt in this branch.
