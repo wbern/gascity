@@ -128,3 +128,75 @@ routing/demand/claim path, so it cannot create a count↔claim asymmetry.
   divergence. Test through the real path.
 - **Verify production reachability before claiming a fix.** A correct, tested,
   green change can still be dead code. The wiring is part of the fix.
+
+## Worth assessment & disposition (2026-07-20)
+
+Each identified item triaged by worth × reachability × safety. Implemented the
+clearly-worthwhile+safe ones (TDD + review); every deferral records its reason.
+
+### Implemented
+
+- **P1a defer gate — SHIPPED (`7bc4ebc18`).** `ComputePoolDesiredStates` woke a
+  session for an OPEN assigned bead hidden by a future `defer_until`
+  (characterization test confirmed it fired). Gated open beads on
+  `beads.IsDeferred`. Reachable at the function level, safe (in-progress work
+  never gated; self-heals on defer-clear), narrow. Reuses the existing helper.
+
+### Deferred (with reason)
+
+- **P1a `is_blocked` / dependency-blocked gating — DEFER.** The dep-aware
+  readiness signal is the store-scoped `readyAssigned` verdict keyed by
+  `(storeRef, beadID)`; `computePoolDesiredStates` receives `[]beads.Bead`
+  without store refs, so threading it cleanly means plumbing store-scoped keys
+  through a multi-caller public API. Reachability of the *loop* here is also
+  unproven: the open+assigned beads that reach this function are largely
+  orphan-release fodder assigned to *dead instance ids*, which the resume tier
+  already skips (`!isKnownPoolTemplate` at `pool_desired_state.go:209`).
+  `beads.IsReadyCandidate` deliberately excludes `is_blocked` ("dependency
+  checks are store-specific"), so it would not cover this case anyway. The
+  reliability of `is_blocked` is really the F0 / `gci-8qm3` concern below.
+
+- **F0 — align `store.Ready()`/`IsReadyCandidate` (#1) with worker
+  `filterUnreadyHookCandidates` (#3) — DEFER.** These diverge on `is_blocked`:
+  the store **recomputes** readiness from actual deps (ignores denormalized
+  `is_blocked`); the worker **trusts** the denormalized `is_blocked` in the
+  `bd ready` row. Under a lying/degraded store both directions have failure
+  modes — trusting strands ready work; not-trusting acts on truly-blocked work
+  (the exact bug `filterUnreadyHookCandidates` was added to prevent). So this is
+  a **store-determinism** problem, not cleanly resolvable by predicate
+  alignment. Primary fix = `gci-8qm3` (Dolt compaction / read determinism),
+  owned by devops. Predicate alignment would only trade one failure mode for
+  another; revisit only if `gci-8qm3` proves insufficient.
+
+- **P1b — convoy/scope completion status-only gates — DEFER.** Failure mode is
+  **starvation** (a workflow never completes because an open-but-unclaimable
+  member is counted outstanding), not a busy loop. It is loud (stuck workflow),
+  self-heals when the store heals, and lives in central convoy/dispatch
+  completion logic (high blast radius). Needs its own characterization test +
+  careful design before touching completion semantics. Tracked in `gcw-ehvg`;
+  not rushed.
+
+- **F1–F5 (tier-union, limit-window, control-dispatcher, perf, tautological
+  test) — DEFER.** All pertain to predicate #2 (`poolDemandCountShell` /
+  `evaluatePoolNewDemandFiltered`), which is **dormant in this fleet** (no
+  `scale_check` + store-backed ⇒ default pools use `store.Ready`, never this
+  path). Latent only; relevant if a custom `scale_check` or legacy `store==nil`
+  mode is ever adopted. Revisit then.
+
+- **P2 — `store.Ready` predicate copy drift — DEFER.** Hygiene; currently
+  mostly-aligned with the worker. Fold into F0 if store-determinism work touches
+  it.
+
+- **P3 — `computeWorkSet` (dormant; production `WorkSet` is empty, test-only) and
+  in-progress-tier mark-ready-without-check (in-progress work rarely dep-blocked
+  and resumes regardless by design) — DEFER.** Low worth.
+
+### Shipped-work disposition
+
+- **`28de22ead`** (pool-vs-instance refutation tests) — KEEP; `gc2-nvf76` closed.
+- **`8d4d75bb1`** (demand-count fix) — KEEP as latent defense for the
+  custom-`scale_check`/legacy path (F1–F5 live there), but it is **inert for
+  this fleet's default pools and is NOT the cure** for the incident. Do not cite
+  it as validated.
+- **`ce1476243`** (worker-path strip diagnostic) — KEEP (real path).
+- **`7bc4ebc18`** (P1a defer gate) — SHIPPED improvement.
