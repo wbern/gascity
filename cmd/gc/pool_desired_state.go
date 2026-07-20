@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -143,6 +144,11 @@ func computePoolDesiredStates(
 
 	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
 
+	// now anchors the defer_until readiness gate below. An OPEN assigned bead
+	// hidden from claim by a future defer_until is not actionable, so waking a
+	// session for it would only drain-and-re-wake every tick (gcw-ehvg P1a).
+	now := time.Now()
+
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
 
@@ -161,6 +167,13 @@ func computePoolDesiredStates(
 		for _, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
+				continue
+			}
+			// An OPEN bead deferred into the future is not claimable; waking a
+			// session for it just drains and re-wakes each tick (gcw-ehvg P1a).
+			// In-progress work resumes regardless (defer hides from claim, not
+			// from an already-running session).
+			if wb.Status == "open" && beads.IsDeferred(wb, now) {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)

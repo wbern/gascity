@@ -398,6 +398,45 @@ func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssigne
 	}
 }
 
+// TestComputePoolDesiredStates_SkipsDeferredOpenAssignedBead is the gcw-ehvg P1a
+// hardening: the resume/wake tiers must NOT wake a session for an OPEN assigned
+// bead hidden from claim by a future defer_until. The worker would find nothing
+// claimable, drain, and the tier would re-wake it every tick until the defer
+// clears — a phantom-demand loop of the same class as gci-x8zo. This honors the
+// ComputePoolDesiredStates contract ("open work already proven ready upstream").
+func TestComputePoolDesiredStates_SkipsDeferredOpenAssignedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(8), 0)},
+	}
+	deferred := workBead("def-1", "rig/claude", "rig/claude", "open", 5)
+	future := time.Now().Add(time.Hour)
+	deferred.DeferUntil = &future
+
+	result := ComputePoolDesiredStates(cfg, []beads.Bead{deferred}, nil, nil)
+
+	for _, st := range result {
+		if len(st.Requests) != 0 {
+			t.Fatalf("deferred open assigned bead produced requests %+v; want none (it is not claimable)", st.Requests)
+		}
+	}
+}
+
+// TestComputePoolDesiredStates_WakesReadyOpenAssignedBead pins the baseline the
+// P1a defer gate must not regress: a claimable (non-deferred) open bead assigned
+// to the pool template still wakes exactly one session.
+func TestComputePoolDesiredStates_WakesReadyOpenAssignedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(8), 0)},
+	}
+	ready := workBead("rdy-1", "rig/claude", "rig/claude", "open", 5) // no defer_until
+
+	result := ComputePoolDesiredStates(cfg, []beads.Bead{ready}, nil, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "wake-known-identity" {
+		t.Fatalf("ready open assigned bead: want one wake-known-identity request, got %+v", result)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
