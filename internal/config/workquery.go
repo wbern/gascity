@@ -145,12 +145,33 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 // The && chain ensures any non-zero bd exit short-circuits the whole expression
 // (TestEffectiveScaleCheckUsesReadyOnly).
 func poolDemandCountShell(target string, includeEphemeralReady bool) string {
+	return poolDemandUnionShell(target, includeEphemeralReady, `(add // []) | unique_by(.id) | length`)
+}
+
+// poolDemandRowsShell emits the deduped union of ready, unassigned, routed
+// candidate ROWS (not the count length) for target. It shares the exact union
+// and short-circuit semantics of poolDemandCountShell so the reconciler can
+// apply the SAME Go-side readiness filter the worker's claim path uses
+// (filterUnreadyHookCandidates) before counting. Without it the count trusts
+// bd ready verbatim while the worker strips denormalized-blocked rows, so a
+// stale/degraded projection yields phantom demand -> spawn -> no_work -> respawn
+// loop (gci-x8zo). See cmd/gc evaluatePoolNewDemandFiltered.
+func poolDemandRowsShell(target string, includeEphemeralReady bool) string {
+	return poolDemandUnionShell(target, includeEphemeralReady, `(add // []) | unique_by(.id)`)
+}
+
+// poolDemandUnionShell builds the shared pool-demand union script (ready +
+// migration + ephemeral candidates for target, deduped by id) terminated by the
+// supplied jq expression. The `|| exit $?` chain ensures any non-zero bd exit
+// surfaces as an error rather than masquerading as "no demand"
+// (TestEffectiveScaleCheckUsesReadyOnly).
+func poolDemandUnionShell(target string, includeEphemeralReady bool, terminalJQ string) string {
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", includeEphemeralReady) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, includeEphemeralReady, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "` + terminalJQ + `"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -502,6 +523,24 @@ func (a *Agent) EffectivePoolDemandQueryForBeads(beads BeadsConfig) string {
 func buildPoolDemandQuery(a *Agent, includeEphemeralReady bool) string {
 	target := a.poolDemandTarget()
 	return poolDemandCountShell(target, includeEphemeralReady)
+}
+
+// EffectivePoolDemandRowsQueryForBeads returns the ROWS-emitting default
+// pool-demand query used by the reconciler to detect new demand with the SAME
+// readiness gate the worker's claim path applies. It returns "" when a custom
+// scale_check overrides demand detection: a user scale_check is an opaque
+// integer count with no candidate-row form, so it keeps the legacy int path.
+func (a *Agent) EffectivePoolDemandRowsQueryForBeads(beads BeadsConfig) string {
+	if strings.TrimSpace(a.ScaleCheck) != "" {
+		return ""
+	}
+	target := a.poolDemandTarget()
+	if legacyWorkflowControlQualifiedName(target) != "" {
+		// Legacy workflow-control demand keeps the count-form path; its
+		// dual-target probe has no single rows union.
+		return ""
+	}
+	return poolDemandRowsShell(target, beads.UsesBD105ReadySemantics())
 }
 
 // EffectiveScaleCheck returns the scale check command for this agent.

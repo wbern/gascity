@@ -774,6 +774,39 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 	return string(reencoded)
 }
 
+// hookClaimStripDiagnostic returns "id (reason)" strings for candidates that
+// filterUnreadyHookCandidates removes from output. The reconciler's pool-demand
+// count and the worker's claim now share the same readiness filter
+// (evaluatePoolNewDemandFiltered), so a strip here should be rare; when it does
+// happen it is the smoking gun for a stale/degraded denormalized projection that
+// bd ready returned but that is not actually claimable (gci-x8zo). Best-effort;
+// returns nil when output is not a decodable JSON array.
+func hookClaimStripDiagnostic(output string, now time.Time) []string {
+	var before []map[string]any
+	if err := json.Unmarshal([]byte(output), &before); err != nil {
+		return nil
+	}
+	var stripped []string
+	for _, obj := range before {
+		reason := ""
+		switch {
+		case isClosedHookCandidate(obj):
+			reason = "closed"
+		case isFutureDeferredHookCandidate(obj, now):
+			reason = "future defer_until"
+		case isDepBlockedHookCandidate(obj):
+			reason = "dependency-blocked"
+		case isSelfBlockedHookCandidate(obj):
+			reason = "self-blocked (is_blocked/status)"
+		default:
+			continue
+		}
+		id, _ := obj["id"].(string)
+		stripped = append(stripped, fmt.Sprintf("%s (%s)", strings.TrimSpace(id), reason))
+	}
+	return stripped
+}
+
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
 	raw, ok := item["defer_until"].(string)
 	if !ok {

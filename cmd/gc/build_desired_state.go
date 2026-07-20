@@ -57,9 +57,9 @@ type DesiredStateResult struct {
 	// agentBuildParams, keeping the fresh-create gate an invariant across BOTH the
 	// demand create path and the dependency-floor create path.
 	PoolRespawnBackoffTemplates map[string]bool
-	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
-	WorkSet                         map[string]bool
-	AssignedWorkBeads               []beads.Bead // actionable assigned work, plus stranded pool work that needs release
+	PoolDesiredCounts           map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
+	WorkSet                     map[string]bool
+	AssignedWorkBeads           []beads.Bead // actionable assigned work, plus stranded pool work that needs release
 	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
 	// mutation paths update rig-owned work in the right store even when
 	// independent stores produce overlapping bead IDs.
@@ -361,6 +361,9 @@ func evaluatePendingPools(
 		sp := pw.sp
 		probeEnv := pw.env
 		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		if strings.TrimSpace(sp.NewDemandRowsCheck) != "" {
+			sp.NewDemandRowsCheck = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.NewDemandRowsCheck)
+		}
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -373,7 +376,7 @@ func evaluatePendingPools(
 			var d int
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePoolNewDemandFiltered(agentName, sp, dir, probeEnv, shellScaleCheck, started)
 			} else {
 				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
 			}

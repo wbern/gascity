@@ -134,8 +134,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 
-	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized = filterUnreadyHookCandidates(normalized, now())
+	preFilter := normalizeWorkQueryOutput(strings.TrimSpace(output))
+	normalized := filterUnreadyHookCandidates(preFilter, now())
+	if stripped := hookClaimStripDiagnostic(preFilter, now()); len(stripped) > 0 {
+		fmt.Fprintf(stderr, "gc hook --claim: stripped %d unready routed candidate(s) that pool demand still counts: %s\n", len(stripped), strings.Join(stripped, ", ")) //nolint:errcheck
+	}
 	if !workQueryHasReadyWork(normalized) {
 		return hookClaimResult{}
 	}
