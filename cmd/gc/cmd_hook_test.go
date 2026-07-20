@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -1022,6 +1023,37 @@ func TestDoHookClaimTriggerTakenByAnotherDrainsWithoutGenericClaim(t *testing.T)
 	}
 }
 
+func TestDoHookClaimTriggerLostRaceEmitsRejected(t *testing.T) {
+	var rejected []string
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "crm/gastown.peer"}, false, nil
+		},
+		EmitClaimRejected: func(beadID, existingClaimant, attemptedClaimant string) {
+			rejected = append(rejected, beadID+"="+existingClaimant+"<-"+attemptedClaimant)
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookClaim(trigger race) = %d, want 1 without drain-ack; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(rejected, ","); got != "crm-1g4vjm.4=crm/gastown.peer<-crm/gastown.furiosa" {
+		t.Fatalf("claim rejected events = %q, want trigger race event", got)
+	}
+}
+
 func TestDoHookClaimTriggerAlreadyOwnedReturnsExisting(t *testing.T) {
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) {
@@ -1120,6 +1152,36 @@ func TestClaimHookWorkTargetsTriggerBeforeFederatedDiscovery(t *testing.T) {
 	}
 	if result.Reason != "claimed_trigger" || result.BeadID != "crm-1g4vjm.4" {
 		t.Fatalf("unexpected trigger claim result: %+v", result)
+	}
+}
+
+func TestHookTriggerStoreDirResolvesProducedStoreRefs(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "crm")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "crm", Path: rigDir}},
+	}
+	agent := &config.Agent{Name: "worker", Dir: "crm"}
+
+	for _, storeRef := range []string{"city", "city:test-city"} {
+		got, err := hookTriggerStoreDir(cityDir, cfg, agent, storeRef)
+		if err != nil {
+			t.Fatalf("hookTriggerStoreDir(%q): %v", storeRef, err)
+		}
+		if got != cityDir {
+			t.Fatalf("hookTriggerStoreDir(%q) = %q, want city dir %q", storeRef, got, cityDir)
+		}
+	}
+	got, err := hookTriggerStoreDir(cityDir, cfg, agent, "rig:crm")
+	if err != nil {
+		t.Fatalf("hookTriggerStoreDir(rig:crm): %v", err)
+	}
+	if got != rigDir {
+		t.Fatalf("hookTriggerStoreDir(rig:crm) = %q, want rig dir %q", got, rigDir)
+	}
+	if _, err := hookTriggerStoreDir(cityDir, cfg, agent, "rig:missing"); err == nil {
+		t.Fatal("hookTriggerStoreDir(rig:missing) succeeded, want invalid store-ref error")
 	}
 }
 
@@ -1771,6 +1833,90 @@ esac
 		if strings.Contains(workQueryText, leaked) {
 			t.Fatalf("caller session env leaked into explicit hook target (%s):\n%s", leaked, workQueryText)
 		}
+	}
+}
+
+func TestCmdHookClaimExplicitTargetIgnoresCallerTrigger(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	triggerMarker := filepath.Join(t.TempDir(), "trigger-show")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "caller"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"show --json caller-trigger"*)
+    : > %q
+    printf '[{"id":"caller-trigger","status":"open","metadata":{"gc.routed_to":"caller"}}]' ;;
+  *"update caller-trigger --claim --json"*)
+    printf '[{"id":"caller-trigger","status":"in_progress","assignee":"caller-session","metadata":{"gc.routed_to":"caller"}}]' ;;
+  *"update worker-work --claim --json"*)
+    printf '[{"id":"worker-work","status":"in_progress","assignee":"worker","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *"--metadata-field gc.routed_to=worker"*)
+    printf '[{"id":"worker-work","status":"open","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *)
+    printf '[]' ;;
+esac
+`, triggerMarker)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "caller")
+	t.Setenv("GC_AGENT", "caller")
+	t.Setenv("GC_SESSION_ID", "caller-session-id")
+	t.Setenv("GC_SESSION_NAME", "caller-session")
+	t.Setenv("GC_TEMPLATE", "caller")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "caller-trigger")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "city:test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions([]string{"worker"}, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(explicit claim) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "worker-work" || result.Assignee != "worker" {
+		t.Fatalf("explicit target claim result = %+v, want worker-work owned by worker", result)
+	}
+	if _, err := os.Stat(triggerMarker); !os.IsNotExist(err) {
+		t.Fatalf("explicit target inherited caller trigger; marker stat err=%v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = cmdHookWithOptions([]string{"caller"}, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(explicit current runtime) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("current-runtime stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.BeadID != "caller-trigger" || result.Reason != "claimed_trigger" {
+		t.Fatalf("explicit current-runtime claim result = %+v, want caller trigger", result)
+	}
+	if _, err := os.Stat(triggerMarker); err != nil {
+		t.Fatalf("explicit current runtime did not resolve caller trigger: %v", err)
 	}
 }
 

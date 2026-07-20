@@ -342,6 +342,7 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 		return 1
 	}
 	if !ok {
+		reportHookClaimRejected(bead, claimed, opts, ops)
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s claimed by another session; draining\n", triggerID) //nolint:errcheck
 		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
 	}

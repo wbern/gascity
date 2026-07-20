@@ -261,6 +261,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	if len(args) > 0 {
 		agentName = args[0]
+		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
+			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
+		isRuntimeIdentity := agentName == strings.TrimSpace(os.Getenv("GC_ALIAS")) ||
+			agentName == strings.TrimSpace(os.Getenv("GC_AGENT")) ||
+			agentName == strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+		sessionTemplateContext = hasSessionContext && isRuntimeIdentity
 	}
 	if agentName == "" {
 		fmt.Fprintln(stderr, "gc hook: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck // best-effort stderr
@@ -424,10 +430,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
-		triggerBeadID := strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID"))
+		triggerBeadID := ""
 		triggerStoreDir := ""
+		if sessionTemplateContext {
+			triggerBeadID = strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID"))
+		}
 		if triggerBeadID != "" {
-			triggerStoreDir = hookTriggerStoreDir(cityPath, cfg, &a, os.Getenv("GC_TRIGGER_WORK_STORE_REF"))
+			triggerStoreDir, err = hookTriggerStoreDir(cityPath, cfg, &a, os.Getenv("GC_TRIGGER_WORK_STORE_REF"))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: resolving trigger store: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
@@ -566,23 +579,37 @@ func hookStoreEnvForDir(stores []hookStore, dir string) ([]string, bool) {
 }
 
 // hookTriggerStoreDir resolves GC_TRIGGER_WORK_STORE_REF to the working dir of
-// the store that owns the trigger bead. Demand spawns inject "rig:<name>" for
-// rig-scoped work; unknown refs fall back to the agent work dir at claim time.
-func hookTriggerStoreDir(cityPath string, cfg *config.City, a *config.Agent, storeRef string) string {
+// the store that owns the trigger bead. Demand spawns inject "city",
+// "city:<name>", or "rig:<name>"; invalid explicit refs fail closed, while a
+// missing ref preserves the legacy agent-work-dir fallback at claim time.
+func hookTriggerStoreDir(cityPath string, cfg *config.City, a *config.Agent, storeRef string) (string, error) {
 	storeRef = strings.TrimSpace(storeRef)
-	rigName := strings.TrimPrefix(storeRef, "rig:")
-	if rigName == storeRef || strings.TrimSpace(rigName) == "" {
-		return ""
+	if storeRef == "" {
+		return "", nil
+	}
+	if storeRef == "city" {
+		return cityPath, nil
+	}
+	if cityName, ok := strings.CutPrefix(storeRef, "city:"); ok {
+		cityName = strings.TrimSpace(cityName)
+		if cityName == "" || cityName != loadedCityName(cfg, cityPath) {
+			return "", fmt.Errorf("unknown city store ref %q", storeRef)
+		}
+		return cityPath, nil
+	}
+	rigName, ok := strings.CutPrefix(storeRef, "rig:")
+	if !ok || strings.TrimSpace(rigName) == "" {
+		return "", fmt.Errorf("unsupported trigger store ref %q", storeRef)
 	}
 	rigName = strings.TrimSpace(rigName)
 	for i := range cfg.Rigs {
 		if strings.TrimSpace(cfg.Rigs[i].Name) == rigName {
 			view := *a
 			view.Dir = rigName
-			return agentCommandDir(cityPath, &view, cfg.Rigs)
+			return agentCommandDir(cityPath, &view, cfg.Rigs), nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("unknown rig store ref %q", storeRef)
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
