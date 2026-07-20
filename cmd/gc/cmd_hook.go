@@ -444,12 +444,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 				agentForQuery,
 			),
 			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			// The bead this pool worker was spawned FOR, so the claim prioritizes
-			// it over the arbitrary head of the shared routed queue (gci-a8y).
-			TriggerBeadID: strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID")),
-			Env:           queryEnv,
-			DrainAck:      opts.DrainAck,
-			JSON:          opts.JSON,
+			Env:          queryEnv,
+			DrainAck:     opts.DrainAck,
+			JSON:         opts.JSON,
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
