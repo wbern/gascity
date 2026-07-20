@@ -1,0 +1,55 @@
+---
+title: "Codex crm polecat spawn-loop — incident findings + confidence audit (2026-07-20)"
+author: gas-city-wbern/architect
+status: cause CONFIRMED; fix not yet built
+scope: crm/gastown.polecat (codex-polecat, gpt-5.6-terra) on running binary fork-ce1476243
+---
+
+# What happened
+
+William switched the crm crew to an all-codex pool (Claude quota low). The codex
+polecats spawned and died ~1/min without claiming any of the RED PR-backlog beads
+("codex says there's no work before it dies"). Investigated jointly by
+gas-city-infra/devops and gas-city-wbern/architect. Multiple layered causes; one
+deep recurring root.
+
+# Confidence scale
+
+- **CONFIRMED** — directly verified: live read + code anchor and/or reproduced. High confidence.
+- **STRONG** — multiple corroborating signals; not isolated-repro-proven.
+- **HYPOTHESIS** — plausible, not verified.
+- **RETRACTED** — asserted then disproved (owned).
+
+# Findings + confidence
+
+| # | Claim | Confidence | Evidence / basis |
+|---|-------|-----------|------------------|
+| 1 | **Root cause = nvf76 claim-identity gap (gci-310k).** `gc hook --claim` matches ownership by exact identity string; a fresh pool member gets a new runtime id but work stays pinned to the dead instance's id → new id not in `IdentityCandidates` → can't adopt its pool's claimed bead, can't fresh-claim (already assigned) → `no_work` → respawn loop. | **CONFIRMED** | 3 axes: (a) code `cmd/gc/cmd_hook_claim.go:271` `hookClaimMatchesRoute` + `:279` `hookClaimHasIdentity(claimed.Assignee, opts.IdentityCandidates)`; (b) history — no identity-normalization commit exists (`git log --grep` empty) → not in fork-ce1476243; (c) live — `crm-1g4vjm.7` pinned `gc.session_name=…kb-gc2-zzw2o`, `crm-1g4vjm.1` `…gc2-pttkk`, while live instances are `gc2-o2iiz`/`gc2-ldpj9`. Also independently root-caused by devops (gci-310k, mail gc2-wisp-9jmga4, 12:47) with kb-pool repro. |
+| 2 | nvf76 is the **SOLE remaining** blocker after the compounding layers were fixed. | **STRONG (not isolated-repro-proven)** | All corroborating signals point here + config caveat names it, but I have NOT run a clean isolated scratch repro that rules out every other factor. This is the one thing left to prove during the fix. |
+| 3 | The deployed `481dd9b` "claim-first" pack change only **masks** the symptom; claim still yields `no_work`. | **STRONG** | Stated in the gci-310k archive/bead; consistent with live churn persisting. Not personally re-derived from the pack source. |
+| 4 | **`gc sling --no-formula` suppresses the pool default formula** (`mol-polecat-work`), producing a bare auto-convoy with no worker child → nothing claimable. Compounding cause devops introduced in the reject fix + manual re-slings. | **CONFIRMED** | `cmd/gc/cmd_sling.go:152` flag doc "suppress default formula (route raw bead)"; `:877` applies default unless `--no-formula`; `agents/polecat/agent.toml:35` `default_sling_formula="mol-polecat-work"`; `mol-steve-triage.toml:118` documents the correct pattern; devops observed formula=null/no-worker convoys. |
+| 5 | **Sling idempotency trap** — `gc sling` skips ("already routed … skipping") when `metadata.gc.routed_to` is set even if the prior molecule was orphaned; must clear `routed_to` first. | **CONFIRMED** | Live `--dry-run` on crm-1g4vjm.6/k3dtde printed "already routed … Without --force, sling would skip routing"; devops reproduced. |
+| 6 | **Removing native bd broke claiming.** `~/go/bin/bd` → `bd.disabled-devops-20260720`, but `GC_BD_REAL` still points at it → shim hard-fails → shelled `bd` reads "no work". Compounding, self-inflicted, now resolved. | **CONFIRMED** | `bd.disabled-devops-20260720` on disk; `.gc/shimbin/bd --version` → `stat …/go/bin/bd: no such file or directory`; devops admitted (mail gc2-wisp-f8r73t) + restored (bd 1.1.0). |
+| 7 | **"~60s cold-start timeout is the cause."** | **RETRACTED** | I pattern-matched off `session.cold_start_timeout` event names without checking the value. `[session].startup_timeout = "15m"` (city.toml:287; default 60s). Cold-start is NOT the ~1/min recycle. This was a guess dressed as a finding — the miss William caught the pattern of. |
+| 8 | Skill distribution (gci-aam5): **gas-city-basics IS mounted** (`[imports.basics]` in `/Users/willi/gc2/pack.toml`), and the real cause was **empty live skill dirs** (0 SKILL.md; template had 14). | **CONFIRMED** | Live pack.toml read; `find` (0 vs 14); reproduced on deployed binary (empty dir absent, populated shows `basics.<name>`); devops executed the sync → 14 `basics.*` live (mail gc2-wisp-2dtg6h). |
+| 9 | Skill edits no longer recycle the fleet (a22adca0b + 8dd704296), so a live skill populate needs a **manual wake** to reach running agents. | **CONFIRMED (mechanism) / HYPOTHESIS (live wake)** | Commits present in binary (`merge-base --is-ancestor`), drain-neutrality tests green; the "needs a wake" operational consequence ties to open upstream #3459 — not personally live-repro'd. |
+| 10 | Provider brittleness: switching claude→codex silently broke flows (resume-only handoffs + `--no-formula` + shim floor). Filed durable fix **gc2-z7j83 (P1)**. | **CONFIRMED (pattern)** | The three sub-bugs above are each CONFIRMED; the "provider-coupling" framing is my synthesis, not a separate measurement. |
+
+# The fix (gc-core, architect lane — NOT yet built)
+
+Per gci-310k: (1) normalize claim identity to canonical binding-id + pool-base so a
+fresh member recognizes its pool's work; (2) release assignee on instance death /
+own by pool-eligibility not dead-instance id; (3) dispatcher-executed
+drain/workflow-finalize. Do NOT rely on the deterministic claim-first mask.
+Prereq/adjacent: dedupe the duplicate gc + bd binaries on PATH (deployment-integrity
+risk that a fixed binary may not be the one that runs).
+
+# Honest self-assessment
+
+- The **root cause (nvf76) is CONFIRMED**, but the claim that it's the *sole* remaining
+  blocker is **STRONG, not proven** — the clean isolated repro is still owed and is
+  step 1 of the fix.
+- I got **cold-start wrong** (#7) by trusting an event name over the config value. That
+  is the calibration lesson: check the threshold, don't pattern-match the symptom.
+- Everything tagged CONFIRMED has a live read or code anchor behind it; treat STRONG/
+  HYPOTHESIS rows as still-falsifiable.
