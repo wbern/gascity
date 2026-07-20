@@ -775,11 +775,10 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 }
 
 // hookClaimStripDiagnostic returns "id (reason)" strings for candidates that
-// filterUnreadyHookCandidates removes from output. The reconciler's pool-demand
-// count and the worker's claim now share the same readiness filter
-// (evaluatePoolNewDemandFiltered), so a strip here should be rare; when it does
-// happen it is the smoking gun for a stale/degraded denormalized projection that
-// bd ready returned but that is not actually claimable (gci-x8zo). Best-effort;
+// filterUnreadyHookCandidates removes from output. A strip means bd ready
+// returned a routed row the worker cannot actually claim (closed / future
+// defer_until / dependency-blocked / self-blocked) — the smoking gun for a
+// stale/degraded denormalized projection (gci-x8zo / gci-8qm3). Best-effort;
 // returns nil when output is not a decodable JSON array.
 func hookClaimStripDiagnostic(output string, now time.Time) []string {
 	var before []map[string]any

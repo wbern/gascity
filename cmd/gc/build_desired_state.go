@@ -361,9 +361,6 @@ func evaluatePendingPools(
 		sp := pw.sp
 		probeEnv := pw.env
 		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
-		if strings.TrimSpace(sp.NewDemandRowsCheck) != "" {
-			sp.NewDemandRowsCheck = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.NewDemandRowsCheck)
-		}
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -376,7 +373,7 @@ func evaluatePendingPools(
 			var d int
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemandFiltered(agentName, sp, dir, probeEnv, shellScaleCheck, started)
+				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
 			} else {
 				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
 			}

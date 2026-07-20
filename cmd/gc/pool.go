@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -123,13 +122,6 @@ type scaleParams struct {
 	Min   int
 	Max   int    // -1 = unlimited
 	Check string // scale_check command
-	// NewDemandRowsCheck is the ROWS-emitting default pool-demand query. It is
-	// set only for default (non-custom-scale_check) bead-backed demand, and lets
-	// evaluatePoolNewDemandFiltered apply the SAME readiness filter the worker's
-	// claim path uses before counting demand. Empty for custom scale_check
-	// (opaque integer) and legacy workflow-control targets, which keep the int
-	// count path. See EffectivePoolDemandRowsQueryForBeads.
-	NewDemandRowsCheck string
 }
 
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
@@ -145,9 +137,8 @@ func scaleParamsFor(a *config.Agent) scaleParams {
 
 func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scaleParams {
 	sp := scaleParams{
-		Min:                a.EffectiveMinActiveSessions(),
-		Check:              a.EffectivePoolDemandQueryForBeads(beadsCfg),
-		NewDemandRowsCheck: a.EffectivePoolDemandRowsQueryForBeads(beadsCfg),
+		Min:   a.EffectiveMinActiveSessions(),
+		Check: a.EffectivePoolDemandQueryForBeads(beadsCfg),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -198,55 +189,6 @@ func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
 	return n, nil
-}
-
-// evaluatePoolNewDemandFiltered evaluates additive new pool demand for the
-// default bead-backed path, counting only routed candidates that survive the
-// SAME readiness filter the worker's claim path applies
-// (filterUnreadyHookCandidates). This keeps the reconciler's spawn decision and
-// the worker's claim decision symmetric: a bead the worker would strip
-// (closed / future-deferred / dependency-blocked / self-blocked, e.g. a
-// stale denormalized projection under a degraded store) no longer counts as
-// demand, so it cannot drive a spawn -> no_work -> respawn loop (gci-x8zo).
-//
-// When NewDemandRowsCheck is empty (custom scale_check or legacy
-// workflow-control target) it falls back to the opaque integer count path.
-func evaluatePoolNewDemandFiltered(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner, now time.Time) (int, error) {
-	if strings.TrimSpace(sp.NewDemandRowsCheck) == "" {
-		return evaluatePoolNewDemand(agentName, sp, dir, env, runner)
-	}
-	start := time.Now()
-	out, err := runner(sp.NewDemandRowsCheck, dir, env)
-	durationMs := float64(time.Since(start).Milliseconds())
-	if err != nil {
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
-		return 0, fmt.Errorf("agent %q: %w", agentName, err)
-	}
-	n, err := countClaimablePoolDemand(out, now)
-	if err != nil {
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
-		return 0, fmt.Errorf("agent %q: %w", agentName, err)
-	}
-	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
-	return n, nil
-}
-
-// countClaimablePoolDemand counts pool-demand candidate rows that survive the
-// worker's readiness filter (filterUnreadyHookCandidates), reusing the exact
-// same predicate so the count and the claim can never drift. A non-empty,
-// non-array payload is treated as an error rather than zero so a malformed
-// probe surfaces instead of masquerading as "no demand".
-func countClaimablePoolDemand(rowsJSON string, now time.Time) (int, error) {
-	trimmed := strings.TrimSpace(rowsJSON)
-	if trimmed == "" {
-		return 0, nil
-	}
-	filtered := filterUnreadyHookCandidates(trimmed, now)
-	var arr []any
-	if err := json.Unmarshal([]byte(filtered), &arr); err != nil {
-		return 0, fmt.Errorf("decoding pool-demand rows %q: %w", trimmed, err)
-	}
-	return len(arr), nil
 }
 
 func parseScaleCheckCount(agentName, check, out string) (int, error) {
