@@ -612,6 +612,46 @@ func TestDoHookClaimTriggerAlreadyOwnedReturnsExisting(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimTriggerOpenButPreassignedToMeAdopts covers the open+mine case
+// (e.g. continuation-group preassignment set the assignee while the bead is
+// still open): the trigger session adopts it as a ready assignment rather than
+// draining it as "taken", matching the generic path's ready_assignment case.
+func TestDoHookClaimTriggerOpenButPreassignedToMeAdopts(t *testing.T) {
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			t.Fatal("work_query must not run when the trigger is already mine")
+			return "", nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: id, Status: "open", Assignee: "crm/gastown.furiosa", Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run for a bead already assigned to me")
+			return beads.Bead{}, false, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-1g4vjm.4",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(trigger open+mine) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "ready_assignment" || result.BeadID != "crm-1g4vjm.4" {
+		t.Fatalf("unexpected result for open+mine trigger: %+v", result)
+	}
+}
+
 // TestDoHookClaimTriggerRouteMismatchDrains guards against claiming a trigger
 // misrouted to a different pool: validate route before claiming; a mismatch
 // drains rather than mis-claiming.

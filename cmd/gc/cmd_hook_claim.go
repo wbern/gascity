@@ -197,24 +197,39 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 		return writeHookClaimNoWork(opts, ops, stdout, stderr)
 	}
 
-	// Already mine and in progress: report the existing assignment (resume).
-	if strings.EqualFold(strings.TrimSpace(bead.Status), "in_progress") &&
-		hookClaimHasIdentity(bead.Assignee, opts.IdentityCandidates) {
-		result := hookClaimJSONResult{
-			SchemaVersion: "1",
-			OK:            true,
-			Command:       hookClaimCommandName,
-			Action:        "work",
-			Reason:        "existing_assignment",
-			BeadID:        bead.ID,
-			Assignee:      bead.Assignee,
-			Route:         hookClaimRoute(bead),
+	status := strings.ToLower(strings.TrimSpace(bead.Status))
+
+	// Already mine: adopt without re-claiming, mirroring the generic path's
+	// existing/ready-assignment handling. in_progress = actively mine; open =
+	// pre-assigned to me (e.g. continuation-group preassignment). A mine-but-
+	// closed trigger is already done — drain.
+	if hookClaimHasIdentity(bead.Assignee, opts.IdentityCandidates) {
+		reason := ""
+		switch status {
+		case "in_progress":
+			reason = "existing_assignment"
+		case "open":
+			reason = "ready_assignment"
 		}
-		return writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)
+		if reason != "" {
+			result := hookClaimJSONResult{
+				SchemaVersion: "1",
+				OK:            true,
+				Command:       hookClaimCommandName,
+				Action:        "work",
+				Reason:        reason,
+				BeadID:        bead.ID,
+				Assignee:      bead.Assignee,
+				Route:         hookClaimRoute(bead),
+			}
+			return writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but %s; draining\n", triggerID, status) //nolint:errcheck
+		return writeHookClaimNoWork(opts, ops, stdout, stderr)
 	}
 
 	// Taken by another session or no longer open: drain, do NOT grab other work.
-	if strings.TrimSpace(bead.Assignee) != "" || !strings.EqualFold(strings.TrimSpace(bead.Status), "open") {
+	if strings.TrimSpace(bead.Assignee) != "" || status != "open" {
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not claimable (status=%q assignee=%q); draining\n", //nolint:errcheck
 			triggerID, strings.TrimSpace(bead.Status), strings.TrimSpace(bead.Assignee))
 		return writeHookClaimNoWork(opts, ops, stdout, stderr)
