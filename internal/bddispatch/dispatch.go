@@ -488,6 +488,7 @@ func FirstBdPositional(args []string) (string, bool) {
 // after filtering — it bounds the post-filtered result, matching bd.
 type ReadyParams struct {
 	query          beads.ReadyQuery
+	assigneeSet    bool              // --assignee was present, including --assignee=""
 	metadataEquals map[string]string // --metadata-field k=v (all must match)
 	unassigned     bool              // --unassigned
 	excludeTypes   map[string]bool   // --exclude-type=T (repeatable)
@@ -507,9 +508,11 @@ func ParseReadyParams(args []string) (ReadyParams, error) {
 		switch {
 		case a == "--assignee" && i+1 < len(args):
 			p.query.Assignee = args[i+1]
+			p.assigneeSet = true
 			i++
 		case strings.HasPrefix(a, "--assignee="):
 			p.query.Assignee = strings.TrimPrefix(a, "--assignee=")
+			p.assigneeSet = true
 		case a == "--unassigned":
 			p.unassigned = true
 		case (a == "--metadata-field") && i+1 < len(args):
@@ -562,7 +565,7 @@ func addMetadataEquals(into map[string]string, kv string) error {
 func applyReadyParams(in []beads.Bead, p ReadyParams) []beads.Bead {
 	out := make([]beads.Bead, 0, len(in))
 	for _, b := range in {
-		if p.query.Assignee != "" && strings.TrimSpace(b.Assignee) != p.query.Assignee {
+		if p.assigneeSet && strings.TrimSpace(b.Assignee) != p.query.Assignee {
 			continue
 		}
 		if p.unassigned && strings.TrimSpace(b.Assignee) != "" {

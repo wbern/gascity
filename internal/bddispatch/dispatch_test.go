@@ -183,6 +183,20 @@ func TestApplyReadyParamsHonorsAssignee(t *testing.T) {
 	}
 }
 
+func TestApplyReadyParamsHonorsExplicitEmptyAssignee(t *testing.T) {
+	params, err := ParseReadyParams([]string{"--assignee=", "--json"})
+	if err != nil {
+		t.Fatalf("ParseReadyParams: %v", err)
+	}
+	got := applyReadyParams([]beads.Bead{
+		{ID: "assigned", Assignee: "worker-a"},
+		{ID: "unassigned", Assignee: ""},
+	}, params)
+	if len(got) != 1 || got[0].ID != "unassigned" {
+		t.Fatalf("applyReadyParams(--assignee=) = %+v, want only unassigned", got)
+	}
+}
+
 // TestDispatchViaAPIRoutesVerbs proves the shim's HTTP dispatch maps each routed
 // bd verb onto the right city-scoped endpoint, verb, and body — the path a
 // worker's bd op takes through the controller in the pure-HTTP redirect.
