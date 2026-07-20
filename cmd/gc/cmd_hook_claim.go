@@ -24,9 +24,14 @@ type hookClaimOptions struct {
 	Assignee           string
 	IdentityCandidates []string
 	RouteTargets       []string
-	Env                []string
-	DrainAck           bool
-	JSON               bool
+	// TriggerBeadID is the work bead this session was spawned FOR
+	// (GC_TRIGGER_WORK_BEAD_ID). When set, the claim prioritizes this exact
+	// bead over the arbitrary head of the shared routed queue, so a pool worker
+	// claims its own trigger bead instead of unrelated global work (gci-a8y).
+	TriggerBeadID string
+	Env           []string
+	DrainAck      bool
+	JSON          bool
 }
 
 type hookClaimOps struct {
@@ -158,6 +163,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
+	// Trigger scoping (gci-a8y): a session spawned FOR a specific bead must claim
+	// THAT bead, not the arbitrary head of the shared routed queue. Reordering the
+	// candidate slice makes both the adopt (hookClaimExistingOrAssigned) and the
+	// fresh-claim (claimFirstEligibleHookCandidate) passes consider the trigger
+	// first, while the route/assignee/readiness guards still apply — a stale or
+	// peer-claimed trigger falls through to the normal oldest-first order.
+	candidates = prioritizeTriggerBeadCandidate(candidates, opts.TriggerBeadID)
+
 	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
 	}
@@ -260,6 +273,35 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// prioritizeTriggerBeadCandidate reorders candidates so the bead this pool
+// worker was spawned for (opts.TriggerBeadID / GC_TRIGGER_WORK_BEAD_ID) is
+// considered first. It is a no-op when triggerID is empty or is not present in
+// the candidate set (e.g. a peer claimed it between spawn and claim); the
+// general oldest-first order is otherwise preserved for the remaining
+// candidates. Ordering only changes PRIORITY — the trigger bead must still pass
+// the same route/assignee/status guards, so a stale or wrong-route trigger is
+// never claimed by virtue of being first.
+func prioritizeTriggerBeadCandidate(candidates []beads.Bead, triggerID string) []beads.Bead {
+	triggerID = strings.TrimSpace(triggerID)
+	if triggerID == "" || len(candidates) < 2 {
+		return candidates
+	}
+	for i := range candidates {
+		if strings.TrimSpace(candidates[i].ID) != triggerID {
+			continue
+		}
+		if i == 0 {
+			return candidates
+		}
+		reordered := make([]beads.Bead, 0, len(candidates))
+		reordered = append(reordered, candidates[i])
+		reordered = append(reordered, candidates[:i]...)
+		reordered = append(reordered, candidates[i+1:]...)
+		return reordered
+	}
+	return candidates
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
