@@ -103,10 +103,34 @@ lost-race ⇒ drain. Proof: 4 unit + 2 end-to-end tests (nux's exact contract),
 RED verified genuine (disabling the branch makes the generic path claim
 `gc2-z7j83`). Files: `cmd/gc/cmd_hook_claim.go`, `cmd/gc/cmd_hook.go`.
 
-**Second lane (bd-shim, DevOps):** rig-scope the shim's reads so untriggered
-pool members and previews are rig-correct even without a trigger (ties into
-`bd-shim-v2-plan.md`). The gc-core fix stops the loop; this removes the latent
-trap.
+**Second lane — CORRECTED (do NOT narrow the shim).** An earlier draft said
+"rig-scope the shim's reads." That is wrong: `bdshim` (fork-owned,
+`cmd/bdshim`) is *intentionally* a city-wide federated client, and its width is
+by design — narrowing it fights the federation architecture. The real
+untriggered-path bug is a **missing filter, not excess scope**:
 
-**Still owed:** live proof via rebuilt binary + a codex polecat spawned for a
-trigger bead (loop should stop, trigger claimed). Deploy is DevOps's lane.
+- **CONFIRMED (live A/B):** the shim's routed `ready` path drops `--assignee`.
+  `cmd/bdshim/main.go` routes `ready` through the controller API
+  (`DispatchViaAPI`) and only applies a client-side filter for `--metadata-field`
+  (the guarded `list` path, `DispatchListMetadataGuarded`); there is no
+  equivalent for `--assignee`. So `bd ready --assignee=<id>` through the shim
+  returns the unfiltered city ready set (real `bd` returns empty; `bd list
+  --assignee` and `bd ready --metadata-field` are honored). The default
+  work_query's **assigned-ready tier** (`bd ready --assignee=$id`,
+  `standardAssignedReadyWorkQueryScript`) therefore short-circuits on global P1
+  work (`gc2-z7j83`) before the routed probe runs → the untriggered pool member
+  sees unrelated work → claim route-filter drains → loop. This is the
+  untriggered-path root cause (my trigger fix handles the demand-spawn case; this
+  fixes the rest).
+- **FIX (bd-shim lane, our code):** make the routed `ready` path honor
+  `--assignee` — either forward it to the controller ready endpoint (if it
+  supports assignee filtering) or apply a client-side assignee filter mirroring
+  `DispatchListMetadataGuarded`. Keep the shim wide. Tracked separately.
+- **Upstream note:** `bdshim` is fork-only (upstream has no such shim); real bd
+  filters correctly, so upstream's identical work_query is unaffected. Upstream
+  did refactor the work_query codegen (#4030/#4060, `Effective*Query`) — a
+  divergence to track when porting, not related to this bug.
+
+**Still owed:** (1) live proof of the gc-core trigger fix via rebuilt binary + a
+codex polecat (deploy is DevOps's lane); (2) the bdshim `--assignee` filter fix
+for untriggered pool members.
