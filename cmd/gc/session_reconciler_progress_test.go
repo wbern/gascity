@@ -681,6 +681,57 @@ func TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker(t *testing
 	}
 }
 
+// TestReconcileSessionBeads_ClaimHolderStallRecyclesMinFloorHolder proves the
+// min-active floor protects only a worker that is actually idle. A stale worker
+// at the floor which has already claimed in-progress work is the exact holder
+// the conservative holder recycler exists to recover.
+func TestReconcileSessionBeads_ClaimHolderStallRecyclesMinFloorHolder(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""       // isolate the holder recycler
+	env.cfg.Session.ClaimHolderStallTimeout = "20m" // holder recycler ON
+	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
+	seedInProgressClaim(t, env, sessionName)
+
+	// This single worker is the whole pool floor, but it is not idle: it holds
+	// claimed work and has been stale for an hour.
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; stale floor claim-holder should be recycled", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if !strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want claim-holder-stalled diagnostic", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_MinFloorClaimCheckErrorFailsSafe protects the
+// tri-state claim result after the floor exemption is moved after the query. A
+// store error leaves claim ownership unknown, so neither recycler may restart
+// the worker even when it otherwise looks like a stale floor worker.
+func TestReconcileSessionBeads_MinFloorClaimCheckErrorFailsSafe(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = "20m"
+	env.cfg.Session.ClaimHolderStallTimeout = "30m"
+	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
+	env.store = &assignedWorkListErrorStore{Store: env.store, err: errors.New("assigned work query failed")}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled; an unreadable floor claim check must not recycle a possible holder", sessionName)
+	}
+	if !strings.Contains(env.stderr.String(), "checking assigned work before progress-stall recycle") {
+		t.Fatalf("stderr = %q, want claim-check-error diagnostic", env.stderr.String())
+	}
+}
+
 // TestReconcileSessionBeads_ProgressStallRecyclesAboveFloorWorker is the
 // counter-case proving the floor exemption is floor-bounded, not blanket: with
 // the same min_active_sessions floor of 1 but two open sessions in the pool

@@ -2335,24 +2335,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						exempt = true
 					}
 				}
-				// Min-floor idle workers are legitimately unclaimed: they hold no
-				// bead because they are waiting for routed work to arrive, not
-				// because they parked on an error. Exempt them before the
-				// I/O-bound claim and provider-health checks so those queries
-				// are skipped entirely for floor workers every reconcile tick.
+				// A min-floor worker may be idle, but it can also be the sole
+				// worker holding in-progress work. Record floor candidacy here and
+				// apply the exemption only after the tri-state claim check below
+				// confirms it is not a holder. Otherwise the floor would make a
+				// wedged holder permanently ineligible for recovery.
+				minFloorIdleCandidate := false
+				minFloor, openInPool := 0, 0
 				if !exempt && cfg != nil {
 					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
-						minFloor := cfgAgent.EffectiveMinActiveSessions()
+						minFloor = cfgAgent.EffectiveMinActiveSessions()
 						if minFloor > 0 {
-							openInPool := openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)
+							openInPool = openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)
 							if isMinFloorIdleWorker(minFloor, openInPool) {
-								exempt = true
-								if trace != nil {
-									trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonMinFloorIdleWorker, TraceOutcomeExempt, tp.TemplateName, name, traceRecordPayload{
-										"pool_min":  minFloor,
-										"pool_open": openInPool,
-									})
-								}
+								minFloorIdleCandidate = true
 							}
 						}
 					}
@@ -2380,6 +2376,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						claimUnknown = true
 					} else {
 						holdsClaim = has
+					}
+				}
+				if !exempt && minFloorIdleCandidate && !holdsClaim && !claimUnknown {
+					exempt = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonMinFloorIdleWorker, TraceOutcomeExempt, tp.TemplateName, name, traceRecordPayload{
+							"pool_min":  minFloor,
+							"pool_open": openInPool,
+						})
 					}
 				}
 				providerHealthy := true
