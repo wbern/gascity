@@ -182,12 +182,19 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		rigFlag = prevRigFlag
 		contextFlag, cityURLFlag, cityNameFlag = prevContextFlag, prevCityURLFlag, prevCityNameFlag
 	}()
+	profiler := newBdInvocationProfiler(args, stderr)
+	defer profiler.close()
+	endEarlyShimProbe := profiler.phase("early_shim_probe")
 	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
+		endEarlyShimProbe()
 		return code
 	}
+	endEarlyShimProbe()
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
+	endTelemetryInit := profiler.phase("telemetry_init")
 	provider, err := initializeCLITelemetry(context.Background(), "gascity", version)
+	endTelemetryInit()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: telemetry init: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -197,11 +204,14 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			defer cancel()
 			_ = provider.Shutdown(ctx)
 		}()
+		// Close the profile before a potentially slow telemetry exporter flush.
+		defer profiler.close()
 		setCLIProcessOTELAttrs()
 	}
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter
+	endCommandTree := profiler.phase("command_tree")
 	options.invocationArgs = append([]string(nil), args...)
 	root := newRootCmdWithOptions(execStdout, stderr, options)
 	root.SetArgs(args)
@@ -210,6 +220,8 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	if options.discoverPackCommands {
 		materializePackCommandTreeForArgs(root, args, execStdout, stderr)
 	}
+	endCommandTree()
+	root.SetContext(withBdInvocationProfiler(context.Background(), profiler))
 	lifecycleBinding := bindProductMetricsInvocationLifecycle(root, args, lifecycle)
 	classification := lifecycleBinding.classification
 	lifecycle.prepareNotice(classification, stderr)
@@ -228,7 +240,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			return code
 		}
 	}
+	endCommandExecute := profiler.phase("command_execute")
 	executedCommand, executeErr := root.ExecuteC()
+	endCommandExecute()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)

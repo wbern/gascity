@@ -30,7 +30,37 @@ Describe what this agent should do here.
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	return loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+	return loadCityConfigProfiled(cityPath, disabledBdInvocationProfiler, warningWriter...)
+}
+
+// loadCityConfigProfiled is loadCityConfig with optional phase timing for the
+// per-invocation gc bd profiler. Outside that opt-in diagnostic it is exactly
+// the same load path as loadCityConfig.
+func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, warningWriter ...io.Writer) (*config.City, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	warningOutput := resolveLoadCityConfigWarningWriter(warningWriter...)
+	endBuiltinPackIncludes := profiler.phase("config_builtin_pack_includes")
+	err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, warningOutput)
+	endBuiltinPackIncludes()
+	if err != nil {
+		return nil, err
+	}
+	endLoadWithIncludes := profiler.phase("config_load_with_includes")
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	endLoadWithIncludes()
+	if err != nil {
+		return nil, err
+	}
+	endPostprocess := profiler.phase("config_postprocess")
+	emitLoadCityConfigWarnings(warningOutput, prov)
+	warnMissingRequiredBuiltinImports(fsys.OSFS{}, cfg, tomlPath, warningOutput)
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		endPostprocess()
+		return nil, err
+	}
+	applyFeatureFlags(cfg)
+	endPostprocess()
+	return cfg, nil
 }
 
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a

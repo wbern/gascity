@@ -21,6 +21,11 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	}
 }
 
+func isBuiltinBdInvocation(args []string) bool {
+	command, ok := firstRootCommand(args)
+	return ok && command == "bd"
+}
+
 // firstRootCommand returns the first command word under the root's narrow
 // persistent-scope grammar. Unknown flags fail closed because this pre-scan
 // cannot know whether a later token is their value. A separate known value
