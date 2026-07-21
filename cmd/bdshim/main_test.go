@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -159,6 +160,73 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
+func TestRunLoggingCannotChangePassthroughBehavior(t *testing.T) {
+	dir := t.TempDir()
+	noLogCalls := filepath.Join(dir, "without-log.txt")
+	withLogCalls := filepath.Join(dir, "with-log.txt")
+	noLogBD := fakeBd(t, dir, noLogCalls, 7)
+
+	t.Setenv("GC_BD_REAL", noLogBD)
+	t.Setenv("GC_BDSHIM_LOG", "")
+	var noLogStdout, noLogStderr bytes.Buffer
+	noLogCode := run([]string{"log", "--future-private-option", "secret-value"}, strings.NewReader(""), &noLogStdout, &noLogStderr)
+
+	withLogBD := fakeBd(t, dir, withLogCalls, 7)
+	t.Setenv("GC_BD_REAL", withLogBD)
+	t.Setenv("GC_BDSHIM_LOG", filepath.Join(dir, "bdshim.jsonl"))
+	var withLogStdout, withLogStderr bytes.Buffer
+	withLogCode := run([]string{"log", "--future-private-option", "secret-value"}, strings.NewReader(""), &withLogStdout, &withLogStderr)
+
+	if noLogCode != withLogCode || noLogStdout.String() != withLogStdout.String() || noLogStderr.String() != withLogStderr.String() {
+		t.Fatalf("logging changed passthrough result: without=(%d,%q,%q), with=(%d,%q,%q)",
+			noLogCode, noLogStdout.String(), noLogStderr.String(), withLogCode, withLogStdout.String(), withLogStderr.String())
+	}
+	noLogData, err := os.ReadFile(noLogCalls)
+	if err != nil {
+		t.Fatalf("read no-log real-bd call: %v", err)
+	}
+	withLogData, err := os.ReadFile(withLogCalls)
+	if err != nil {
+		t.Fatalf("read with-log real-bd call: %v", err)
+	}
+	if string(noLogData) != string(withLogData) {
+		t.Fatalf("logging changed real-bd args: without=%q, with=%q", noLogData, withLogData)
+	}
+}
+
+func TestRunLogsGlobalFlagsWithoutScopeValues(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "bdshim.jsonl")
+	bd := fakeBd(t, dir, filepath.Join(dir, "calls.txt"), 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_BDSHIM_LOG", logPath)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"--city", "/Users/willi/private-city",
+		"--rig=private-rig",
+		"--readonly", "log", "--future-private-option=secret-value",
+	}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read route log: %v", err)
+	}
+	for _, secret := range []string{"/Users/willi/private-city", "private-rig", "secret-value"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("route log leaked %q: %s", secret, data)
+		}
+	}
+	var got routeLogLine
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal route log: %v", err)
+	}
+	if got.Verb != "log" || got.Shape != "flags=--readonly,unknown" {
+		t.Fatalf("record = %+v, want log/flags=--readonly,unknown", got)
+	}
+}
+
 // TestRunRoutedReadFailsLoudWhenControllerDown verifies a routable READ dispatches
 // (and fails loudly rc!=0) rather than silently passing through to the work-only
 // bd when the controller is down — bd.real's cwd scope cannot answer a city-wide
@@ -223,5 +291,29 @@ func TestRunClaimFallsBackWhenControllerDown(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(out); !strings.Contains(string(got), "update gcw-1 --claim") {
 		t.Fatalf("expected claim passthrough to fake bd; calls=%q", string(got))
+	}
+}
+
+func TestRunMalformedHeartbeatLogsRedactedRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bdshim.jsonl")
+	t.Setenv("GC_BDSHIM_LOG", path)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"heartbeat", "secret id with spaces"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read route log: %v", err)
+	}
+	if strings.Contains(string(data), "secret id with spaces") {
+		t.Fatalf("route log leaked malformed positional: %s", data)
+	}
+	var got routeLogLine
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal route log: %v", err)
+	}
+	if got.Verb != "heartbeat" || got.Disposition != "refuse" || got.Exit != 1 || got.Shape != "flags=none" {
+		t.Fatalf("refusal record = %+v, want heartbeat/refuse/1/flags=none", got)
 	}
 }

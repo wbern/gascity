@@ -41,15 +41,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Strip the gc-only --city/--rig scope flags (raw bd does not accept them);
 	// --city overrides the routed target city, matching extractBdScopeFlags.
-	cityOverride, _, bdArgs := extractScopeFlags(args)
+	cityOverride, _, rawBDArgs := extractScopeFlags(args)
+	rawVerb, _ := bdshim.SplitGlobalFlags(rawBDArgs)
 
 	// Expand the gc-only `heartbeat <id>` verb into the bd write that performs it.
-	bdArgs, err := rewriteHeartbeatArgs(bdArgs)
+	bdArgs, err := rewriteHeartbeatArgs(rawBDArgs)
 	if err != nil {
+		logDisposition(rawVerb, rawBDArgs, "refuse", 1, start)
 		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if len(bdArgs) == 0 {
+		logDisposition(rawVerb, rawBDArgs, "refuse", 1, start)
 		fmt.Fprintln(stderr, "bdshim: missing bd subcommand") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -58,7 +61,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	passthrough := func() int {
 		code := execRealBd(bdArgs, nil, stdin, stdout, stderr)
-		logDisposition(verb, "passthrough", code, start)
+		logDisposition(verb, rawBDArgs, "passthrough", code, start)
 		return code
 	}
 
@@ -74,7 +77,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if controllerReachable(base) {
 				client := beadclient.NewCityScopedClient(base, city)
 				if code, handled := bddispatch.DispatchListMetadataGuarded(client, verbArgs, stdout, stderr); handled {
-					logDisposition(verb, "route", code, start)
+					logDisposition(verb, rawBDArgs, "route", code, start)
 					return code
 				}
 			}
@@ -113,7 +116,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			client := beadclient.NewCityScopedClient(base, city)
 			if code, handled := dispatchClaim(client, id, actor, stdout, stderr); handled {
-				logDisposition(verb, "route", code, start)
+				logDisposition(verb, rawBDArgs, "route", code, start)
 				return code
 			}
 			// Backend cannot claim on behalf of an actor (501): fall back.
@@ -126,7 +129,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// this hot path (a probe can spuriously trip under load and mis-route).
 		client := beadclient.NewCityScopedClient(base, city)
 		code := bddispatch.DispatchViaAPI(client, verb, verbArgs, stdout, stderr)
-		logDisposition(verb, "route", code, start)
+		logDisposition(verb, rawBDArgs, "route", code, start)
 		return code
 	case bdshim.Refuse:
 		// Unreachable while splitPhase is false (ClassifyVerb only returns Refuse

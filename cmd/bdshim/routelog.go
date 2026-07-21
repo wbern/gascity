@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bdshim"
 )
 
 // routeLogLine is one structured bdshim dispatch record, appended as JSONL for
@@ -14,25 +16,27 @@ import (
 type routeLogLine struct {
 	TS          string `json:"ts"`
 	Verb        string `json:"verb"`
-	Disposition string `json:"disposition"` // route | passthrough
+	Disposition string `json:"disposition"` // route | passthrough | refuse
 	Exit        int    `json:"exit"`
 	DurMS       int64  `json:"dur_ms"`
+	Shape       string `json:"shape,omitempty"`
 }
 
 // logDisposition appends a best-effort JSONL record of one dispatch. It never
 // fails the call: any error (no path, unwritable file, encode error) is silently
 // dropped, because logging must not break a bd invocation.
-func logDisposition(verb, disposition string, exit int, start time.Time) {
+func logDisposition(verb string, args []string, disposition string, exit int, start time.Time) {
 	path := routeLogPath()
 	if path == "" {
 		return
 	}
 	line := routeLogLine{
 		TS:          time.Now().UTC().Format(time.RFC3339Nano),
-		Verb:        verb,
+		Verb:        bdshim.CommandVerb(verb),
 		Disposition: disposition,
 		Exit:        exit,
 		DurMS:       time.Since(start).Milliseconds(),
+		Shape:       bdshim.CommandShape(args),
 	}
 	enc, err := json.Marshal(line)
 	if err != nil {
