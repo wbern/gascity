@@ -16,9 +16,10 @@ import (
 // Two invariants keep the cache sound:
 //   - Keyed by (cityPath, scope, resolved backend target), so a config/backend
 //     change (even an in-process reload) yields a different key and re-checks.
-//   - Only SUCCESSFUL results are cached (getOrCompute never stores an error), so
-//     a transient probe failure retries on the next open rather than permanently
-//     degrading the scope off the native store.
+//   - Successful identities are cached; transient probe failures are never
+//     cached, so they retry on the next open rather than permanently degrading
+//     the scope off the native store. The disk layer has one deliberately
+//     narrower exception for bd's deterministic non-repository context error.
 
 // preflightScopeMemo caches a per-key value computed by a slow probe.
 type preflightScopeMemo[T any] struct {
