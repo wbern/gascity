@@ -958,6 +958,27 @@ type BeadGraphResponse struct {
 	Root  Bead                   `json:"root"`
 }
 
+// BeadMetadataSearchInputBody defines model for BeadMetadataSearchInputBody.
+type BeadMetadataSearchInputBody struct {
+	// Assignee Optional exact assignee filter.
+	Assignee *string `json:"assignee,omitempty"`
+
+	// ExcludeTypes Issue types to omit after metadata matching.
+	ExcludeTypes *[]string `json:"exclude_types,omitempty"`
+
+	// Limit Maximum compact matches to return after sorting. Bounded results prevent this narrow lookup from becoming a city-wide export.
+	Limit int64 `json:"limit"`
+
+	// Metadata Metadata key-value pairs every returned bead must contain.
+	Metadata map[string]string `json:"metadata"`
+
+	// Rig Optional exact rig filter.
+	Rig *string `json:"rig,omitempty"`
+
+	// Status Optional exact status filter.
+	Status *string `json:"status,omitempty"`
+}
+
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {
 	// Assignee Assigned agent.
@@ -7076,6 +7097,12 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 }
 
+// PostV0CityByCityNameBeadsSearchParams defines parameters for PostV0CityByCityNameBeadsSearch.
+type PostV0CityByCityNameBeadsSearchParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
 type DeleteV0CityByCityNameConvoyByIdParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -7960,6 +7987,9 @@ type PostV0CityByCityNameBeadByIdUpdateJSONRequestBody = BeadUpdateBody
 
 // CreateBeadJSONRequestBody defines body for CreateBead for application/json ContentType.
 type CreateBeadJSONRequestBody = BeadCreateInputBody
+
+// PostV0CityByCityNameBeadsSearchJSONRequestBody defines body for PostV0CityByCityNameBeadsSearch for application/json ContentType.
+type PostV0CityByCityNameBeadsSearchJSONRequestBody = BeadMetadataSearchInputBody
 
 // PostV0CityByCityNameConvoyByIdAddJSONRequestBody defines body for PostV0CityByCityNameConvoyByIdAdd for application/json ContentType.
 type PostV0CityByCityNameConvoyByIdAddJSONRequestBody = ConvoyAddInputBody
@@ -14261,6 +14291,11 @@ type ClientInterface interface {
 	// GetV0CityByCityNameBeadsReady request
 	GetV0CityByCityNameBeadsReady(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameBeadsSearchWithBody request with any body
+	PostV0CityByCityNameBeadsSearchWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameBeadsSearch(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, body PostV0CityByCityNameBeadsSearchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameConfig request
 	GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15235,6 +15270,30 @@ func (c *Client) GetV0CityByCityNameBeadsGraphByRootId(ctx context.Context, city
 
 func (c *Client) GetV0CityByCityNameBeadsReady(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameBeadsReadyRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameBeadsSearchWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadsSearchRequestWithBody(c.Server, cityName, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameBeadsSearch(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, body PostV0CityByCityNameBeadsSearchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadsSearchRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19455,6 +19514,66 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameBeadsSearchRequest calls the generic PostV0CityByCityNameBeadsSearch builder with application/json body
+func NewPostV0CityByCityNameBeadsSearchRequest(server string, cityName string, params *PostV0CityByCityNameBeadsSearchParams, body PostV0CityByCityNameBeadsSearchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameBeadsSearchRequestWithBody(server, cityName, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameBeadsSearchRequestWithBody generates requests for PostV0CityByCityNameBeadsSearch with any type of body
+func NewPostV0CityByCityNameBeadsSearchRequestWithBody(server string, cityName string, params *PostV0CityByCityNameBeadsSearchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/beads/search", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -28011,6 +28130,11 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameBeadsReadyWithResponse request
 	GetV0CityByCityNameBeadsReadyWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsReadyResponse, error)
 
+	// PostV0CityByCityNameBeadsSearchWithBodyWithResponse request with any body
+	PostV0CityByCityNameBeadsSearchWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadsSearchResponse, error)
+
+	PostV0CityByCityNameBeadsSearchWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, body PostV0CityByCityNameBeadsSearchJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadsSearchResponse, error)
+
 	// GetV0CityByCityNameConfigWithResponse request
 	GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error)
 
@@ -29365,6 +29489,33 @@ func (r GetV0CityByCityNameBeadsReadyResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameBeadsReadyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameBeadsSearchResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ListBodyBead
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameBeadsSearchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameBeadsSearchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -33346,6 +33497,23 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadsReadyWithResponse(ctx cont
 	return ParseGetV0CityByCityNameBeadsReadyResponse(rsp)
 }
 
+// PostV0CityByCityNameBeadsSearchWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadsSearchResponse
+func (c *ClientWithResponses) PostV0CityByCityNameBeadsSearchWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadsSearchResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadsSearchWithBody(ctx, cityName, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameBeadsSearchResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameBeadsSearchWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameBeadsSearchParams, body PostV0CityByCityNameBeadsSearchJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadsSearchResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadsSearch(ctx, cityName, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameBeadsSearchResponse(rsp)
+}
+
 // GetV0CityByCityNameConfigWithResponse request returning *GetV0CityByCityNameConfigResponse
 func (c *ClientWithResponses) GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error) {
 	rsp, err := c.GetV0CityByCityNameConfig(ctx, cityName, reqEditors...)
@@ -36801,6 +36969,67 @@ func ParseGetV0CityByCityNameBeadsReadyResponse(rsp *http.Response) (*GetV0CityB
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameBeadsSearchResponse parses an HTTP response from a PostV0CityByCityNameBeadsSearchWithResponse call
+func ParsePostV0CityByCityNameBeadsSearchResponse(rsp *http.Response) (*PostV0CityByCityNameBeadsSearchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameBeadsSearchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodyBead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

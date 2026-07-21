@@ -195,6 +195,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// GET /beads also declares 400: an invalid pagination cursor is a typed
 	// invalid-cursor problem response, never a silent page-1 restart.
 	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/beads/search", (*Server).humaHandleBeadMetadataSearch, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/ephemeral", (*Server).humaHandleBeadEphemeral, errorStatuses(http.StatusBadRequest, http.StatusServiceUnavailable))

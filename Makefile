@@ -13,6 +13,7 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 
 BINARY     := gc
 BDSHIM    := bdshim
+BEAD_SEARCH := gc-bead-search
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -123,9 +124,13 @@ build: check-beads-bd-version
 	@# always CGO-free (no Dolt/ICU) and stripped; when present beside gc the
 	@# supervisor points the per-city `bd` shim at it, skipping gc's ~200ms boot.
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BUILD_DIR)/$(BDSHIM) ./cmd/bdshim
+	@# gc-bead-search is an explicit typed lookup for patrol automation. It is
+	@# independent of bd compatibility and never falls back to raw bd/Dolt.
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BUILD_DIR)/$(BEAD_SEARCH) ./cmd/gc-bead-search
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BDSHIM)
+	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BEAD_SEARCH)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -186,12 +191,21 @@ install: check-self-contained
 		chmod 0755 "$$tmp"; \
 		mv -f "$$tmp" "$(INSTALL_DIR)/$(BDSHIM)"; \
 		trap - EXIT INT TERM HUP
+	@set -e; \
+		tmp="$(INSTALL_DIR)/.$(BEAD_SEARCH).tmp.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+		cp -f "$(BUILD_DIR)/$(BEAD_SEARCH)" "$$tmp"; \
+		chmod 0755 "$$tmp"; \
+		mv -f "$$tmp" "$(INSTALL_DIR)/$(BEAD_SEARCH)"; \
+		trap - EXIT INT TERM HUP
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ] && [ -d "$(HOME)/.local/bin" ]; then \
 		ln -sf "$(INSTALL_DIR)/$(BDSHIM)" "$(HOME)/.local/bin/$(BDSHIM)"; \
+		ln -sf "$(INSTALL_DIR)/$(BEAD_SEARCH)" "$(HOME)/.local/bin/$(BEAD_SEARCH)"; \
 		echo "Symlinked $(HOME)/.local/bin/$(BDSHIM) -> $(INSTALL_DIR)/$(BDSHIM)"; \
 	fi
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
 	@echo "Installed $(BDSHIM) to $(INSTALL_DIR)/$(BDSHIM)"
+	@echo "Installed $(BEAD_SEARCH) to $(INSTALL_DIR)/$(BEAD_SEARCH)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -204,7 +218,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(BDSHIM)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(BDSHIM) $(BUILD_DIR)/$(BEAD_SEARCH)
 
 ## check: run fast quality gates (pre-commit: unit tests only)
 check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows test

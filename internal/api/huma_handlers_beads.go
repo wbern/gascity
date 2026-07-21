@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -278,6 +279,82 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		CacheAgeS: cacheAge,
 		Body:      body,
 	}, nil
+}
+
+// humaHandleBeadMetadataSearch returns the compact controller bead projection
+// matching all requested metadata pairs. Its contract is intentionally separate
+// from the external bd CLI: results are created-at ascending, then priority and
+// ID. The tie-break preserves the patrol's existing `bd list | jq
+// sort_by(.created_at)` selection when multiple beads share a timestamp.
+func (s *Server) humaHandleBeadMetadataSearch(_ context.Context, input *BeadMetadataSearchInput) (*ListOutput[beads.Bead], error) {
+	if err := cacheLiveOr503(s.state.CityBeadStore()); err != nil {
+		return nil, err
+	}
+	stores := s.state.BeadStores()
+	rigNames := sortedRigNames(stores)
+	if input.Body.Rig != "" {
+		if _, ok := stores[input.Body.Rig]; ok {
+			rigNames = []string{input.Body.Rig}
+		} else {
+			rigNames = nil
+		}
+	}
+	excluded := make(map[string]bool, len(input.Body.ExcludeTypes))
+	for _, typ := range input.Body.ExcludeTypes {
+		excluded[typ] = true
+	}
+	var matches []beads.Bead
+	var pa partialAggregator
+	for _, rig := range rigNames {
+		pa.attempt()
+		items, err := stores[rig].ListByMetadata(input.Body.Metadata, 0)
+		if err != nil {
+			pa.record("rig "+rig, err)
+			if !beads.IsPartialResult(err) || len(items) <= 0 {
+				continue
+			}
+		}
+		pa.success()
+		for _, b := range items {
+			if excluded[b.Type] || (input.Body.Status != "" && b.Status != input.Body.Status) || (input.Body.Assignee != "" && b.Assignee != input.Body.Assignee) {
+				continue
+			}
+			matches = append(matches, b)
+		}
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].CreatedAt.Equal(matches[j].CreatedAt) {
+			pi, pj := metadataSearchPriority(matches[i]), metadataSearchPriority(matches[j])
+			if pi != pj {
+				return pi < pj
+			}
+			return matches[i].ID < matches[j].ID
+		}
+		return matches[i].CreatedAt.Before(matches[j].CreatedAt)
+	})
+	total := len(matches)
+	if len(matches) > input.Body.Limit {
+		matches = matches[:input.Body.Limit]
+	}
+	return &ListOutput[beads.Bead]{
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(s.state.CityBeadStore()),
+		Body: ListBody[beads.Bead]{
+			Items: matches, Total: total, Partial: pa.partial(), PartialErrors: pa.messages(),
+		},
+	}, nil
+}
+
+// metadataSearchPriority reproduces beads' default priority for an omitted
+// priority, keeping the compact patrol lookup's timestamp ties aligned with bd.
+func metadataSearchPriority(b beads.Bead) int {
+	if b.Priority == nil {
+		return 2
+	}
+	return *b.Priority
 }
 
 // beadListSeek decodes the GET /v0/beads pagination cursor into a keyset seek

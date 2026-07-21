@@ -149,6 +149,76 @@ func TestEnsureCityBdShimbinCreatesSymlinks(t *testing.T) {
 	}
 }
 
+func TestBinaryBesideExeFindsExplicitBeadSearchHelper(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "gc")
+	if err := os.WriteFile(exe, []byte("gc"), 0o755); err != nil {
+		t.Fatalf("write gc: %v", err)
+	}
+	helper := filepath.Join(dir, beadSearchBinName)
+	if err := os.WriteFile(helper, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	if got := binaryBesideExe(exe, beadSearchBinName); got != helper {
+		t.Fatalf("binaryBesideExe = %q, want %q", got, helper)
+	}
+}
+
+func TestBinaryBesideExeFindsExplicitHelperBesideSymlinkTarget(t *testing.T) {
+	realDir := t.TempDir()
+	realExe := filepath.Join(realDir, "gc")
+	if err := os.WriteFile(realExe, []byte("gc"), 0o755); err != nil {
+		t.Fatalf("write gc: %v", err)
+	}
+	helper := filepath.Join(realDir, beadSearchBinName)
+	if err := os.WriteFile(helper, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	linkExe := filepath.Join(t.TempDir(), "gc")
+	if err := os.Symlink(realExe, linkExe); err != nil {
+		t.Fatalf("link gc: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(helper)
+	if err != nil {
+		t.Fatalf("resolve helper: %v", err)
+	}
+	if got := binaryBesideExe(linkExe, beadSearchBinName); got != want {
+		t.Fatalf("binaryBesideExe symlink = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureCityBdShimbinInstallsAndRemovesExplicitHelper(t *testing.T) {
+	binDir := t.TempDir()
+	gcExe := filepath.Join(binDir, "gc")
+	if err := os.WriteFile(gcExe, []byte("gc"), 0o755); err != nil {
+		t.Fatalf("write gc: %v", err)
+	}
+	helper := filepath.Join(binDir, beadSearchBinName)
+	if err := os.WriteFile(helper, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	realBdDir := t.TempDir()
+	writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", realBdDir)
+	cityPath := t.TempDir()
+	if err := ensureCityBdShimbinWithGCExe(cityPath, config.BdShimModeAuto, io.Discard, gcExe); err != nil {
+		t.Fatalf("install with helper: %v", err)
+	}
+	helperLink := filepath.Join(cityBdShimbinDir(cityPath), beadSearchBinName)
+	if got, err := os.Readlink(helperLink); err != nil || got != helper {
+		t.Fatalf("helper link = %q, %v; want %q", got, err, helper)
+	}
+	if err := os.Remove(helper); err != nil {
+		t.Fatalf("remove helper: %v", err)
+	}
+	if err := ensureCityBdShimbinWithGCExe(cityPath, config.BdShimModeAuto, io.Discard, gcExe); err != nil {
+		t.Fatalf("refresh without helper: %v", err)
+	}
+	if _, err := os.Lstat(helperLink); !os.IsNotExist(err) {
+		t.Fatalf("stale helper link survived rollback: %v", err)
+	}
+}
+
 func TestBdshimBesideExe(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "gc")

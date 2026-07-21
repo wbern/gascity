@@ -56,6 +56,10 @@ func cityBdShimbinDir(cityPath string) string {
 // directly (the traditional, shim-free path). gc itself is never a bd shim.
 const bdshimBinName = "bdshim"
 
+// beadSearchBinName is the explicit compact metadata-search helper installed
+// beside gc. It is not a bd replacement: callers opt in by invoking this name.
+const beadSearchBinName = "gc-bead-search"
+
 // bdshimBesideGC returns the absolute path of the bdshim binary installed in the
 // same directory as the running gc binary (following the gc symlink), or "" when
 // no executable bdshim is found there. Both the invoked path and its symlink-
@@ -66,7 +70,7 @@ func bdshimBesideGC() string {
 	if err != nil || exe == "" {
 		return ""
 	}
-	return bdshimBesideExe(exe)
+	return binaryBesideExe(exe, bdshimBinName)
 }
 
 // bdshimBesideExe returns the absolute path of an executable bdshim in the same
@@ -74,9 +78,25 @@ func bdshimBesideGC() string {
 // found. Split from bdshimBesideGC so the resolution is testable without mocking
 // os.Executable.
 func bdshimBesideExe(exe string) string {
-	candidates := []string{filepath.Join(filepath.Dir(exe), bdshimBinName)}
+	return binaryBesideExe(exe, bdshimBinName)
+}
+
+// beadSearchBesideGC returns the installed explicit metadata-search helper, or
+// an empty path when this gc build predates that optional helper.
+func beadSearchBesideGC() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return ""
+	}
+	return binaryBesideExe(exe, beadSearchBinName)
+}
+
+// binaryBesideExe resolves an executable sibling of exe, checking both the
+// invoked path and a symlink-resolved gc target.
+func binaryBesideExe(exe, binaryName string) string {
+	candidates := []string{filepath.Join(filepath.Dir(exe), binaryName)}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != exe {
-		candidates = append(candidates, filepath.Join(filepath.Dir(resolved), bdshimBinName))
+		candidates = append(candidates, filepath.Join(filepath.Dir(resolved), binaryName))
 	}
 	for _, cand := range candidates {
 		if !isExecutableFile(cand) {
@@ -175,12 +195,31 @@ func ensureCityBdShimbin(cityPath, mode string, stderr io.Writer) error {
 	if err != nil || gcExe == "" {
 		return fmt.Errorf("resolving gc binary: %w", err)
 	}
+	return ensureCityBdShimbinWithGCExe(cityPath, mode, stderr, gcExe)
+}
+
+// ensureCityBdShimbinWithGCExe contains the install operation after the
+// running gc binary is resolved. Splitting it lets tests prove optional sibling
+// helper installation and rollback without mutating the test runner's directory.
+func ensureCityBdShimbinWithGCExe(cityPath, mode string, stderr io.Writer, gcExe string) error {
 	dir := cityBdShimbinDir(cityPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating shim bin dir %q: %w", dir, err)
 	}
 	if err := atomicSymlinkShimbin(gcExe, cityBdShimbinGCPath(cityPath)); err != nil {
 		return fmt.Errorf("linking gc shim: %w", err)
+	}
+	// Keep an explicit helper on the worker's already-fronted shimbin PATH when
+	// this build ships it. It cannot be reached accidentally through `bd`, and a
+	// missing helper removes any stale link rather than pinning agents to an old
+	// binary after a rollback.
+	beadSearchLink := filepath.Join(dir, beadSearchBinName)
+	if helper := binaryBesideExe(gcExe, beadSearchBinName); helper != "" {
+		if err := atomicSymlinkShimbin(helper, beadSearchLink); err != nil {
+			return fmt.Errorf("linking bead search helper: %w", err)
+		}
+	} else if err := os.Remove(beadSearchLink); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing stale bead search helper: %w", err)
 	}
 	// The `bd` symlink targets the tiny bdshim thin client when it is installed
 	// beside the gc binary (the fast path — no 117MB gc cold-start per bd call),

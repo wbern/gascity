@@ -28,6 +28,21 @@ type BeadListInput struct {
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
 }
 
+// BeadMetadataSearchInput is the typed compact-bead search contract. It is a
+// distinct operation from bd list: its result ordering and JSON shape are
+// defined here rather than inheriting the external bd CLI's behavior.
+type BeadMetadataSearchInput struct {
+	CityScope
+	Body struct {
+		Metadata     map[string]string `json:"metadata" minProperties:"1" doc:"Metadata key-value pairs every returned bead must contain."`
+		ExcludeTypes []string          `json:"exclude_types,omitempty" doc:"Issue types to omit after metadata matching."`
+		Status       string            `json:"status,omitempty" doc:"Optional exact status filter."`
+		Assignee     string            `json:"assignee,omitempty" doc:"Optional exact assignee filter."`
+		Rig          string            `json:"rig,omitempty" doc:"Optional exact rig filter."`
+		Limit        int               `json:"limit" required:"true" minimum:"1" maximum:"1000" doc:"Maximum compact matches to return after sorting. Bounded results prevent this narrow lookup from becoming a city-wide export."`
+	}
+}
+
 // BeadEphemeralInput is the Huma input for GET /v0/city/{cityName}/beads/ephemeral.
 // It is the routed form of `bd query 'ephemeral=true AND ...'`: value-typed query
 // filters selecting the ephemeral/wisp tier. Modeled on BeadListInput but without

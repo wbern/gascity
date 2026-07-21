@@ -659,6 +659,82 @@ type ListBeadsOpts struct {
 	All      bool
 }
 
+// MetadataSearchOpts is the explicit compact-bead search contract served by
+// the controller. It is not a compatibility layer for the external bd list
+// command; results are created-at ascending, priority/ID tie-broken, and
+// limited after matching.
+type MetadataSearchOpts struct {
+	Metadata     map[string]string
+	ExcludeTypes []string
+	Status       string
+	Assignee     string
+	Rig          string
+	Limit        int
+}
+
+const metadataSearchMaxLimit = 1000
+
+// MetadataSearchResult is the controller's compact, bounded metadata-search
+// response. Partial results are deliberately represented rather than hidden:
+// an automation that needs an authoritative selection must fail closed when
+// Partial is true.
+type MetadataSearchResult struct {
+	Items         []beads.Bead
+	Total         int
+	Partial       bool
+	PartialErrors []string
+}
+
+// MetadataSearch returns compact controller bead matches for all Metadata
+// pairs. The controller reports a partial result in the body when a rig read
+// fails; callers that require an authoritative answer must reject it.
+func (c *Client) MetadataSearch(opts MetadataSearchOpts) (CachedRead[MetadataSearchResult], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MetadataSearchResult]{}, err
+	}
+	if len(opts.Metadata) == 0 {
+		return CachedRead[MetadataSearchResult]{}, fmt.Errorf("metadata search requires at least one metadata pair")
+	}
+	if opts.Limit < 1 || opts.Limit > metadataSearchMaxLimit {
+		return CachedRead[MetadataSearchResult]{}, fmt.Errorf("metadata search limit must be between 1 and 1000")
+	}
+	body := genclient.BeadMetadataSearchInputBody{Metadata: opts.Metadata, Limit: int64(opts.Limit)}
+	if len(opts.ExcludeTypes) > 0 {
+		body.ExcludeTypes = &opts.ExcludeTypes
+	}
+	if opts.Status != "" {
+		body.Status = &opts.Status
+	}
+	if opts.Assignee != "" {
+		body.Assignee = &opts.Assignee
+	}
+	if opts.Rig != "" {
+		body.Rig = &opts.Rig
+	}
+	resp, err := c.cw.PostV0CityByCityNameBeadsSearchWithResponse(context.Background(), c.cityName, &genclient.PostV0CityByCityNameBeadsSearchParams{XGCRequest: "true"}, body)
+	if err != nil {
+		return CachedRead[MetadataSearchResult]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MetadataSearchResult]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return CachedRead[MetadataSearchResult]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[MetadataSearchResult]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	bodyResult := MetadataSearchResult{
+		Items:   beadsFromGenList(resp.JSON200),
+		Total:   int(resp.JSON200.Total),
+		Partial: resp.JSON200.Partial != nil && *resp.JSON200.Partial,
+	}
+	if resp.JSON200.PartialErrors != nil {
+		bodyResult.PartialErrors = append([]string(nil), (*resp.JSON200.PartialErrors)...)
+	}
+	return CachedRead[MetadataSearchResult]{Body: bodyResult, AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse)}, nil
+}
+
 // ListBeads fetches beads across all rigs via
 // GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
 // query parameters. The CachedRead.AgeSeconds field carries the supervisor
