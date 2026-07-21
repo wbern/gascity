@@ -18,6 +18,12 @@ import (
 // resolve back to it and recurse. Mirrors cmd/gc's realBdEnvVar (GC_BD_REAL).
 const realBdEnvVar = "GC_BD_REAL"
 
+// passthroughSentinelEnv marks a direct child started for a raw-bd
+// passthrough. It is deliberately private to bdshim: if that child is another
+// copy of bdshim (or the target changes between stat and exec), the child
+// refuses before it can start a further process.
+const passthroughSentinelEnv = "GC_BDSHIM_PASSTHROUGH"
+
 // resolveRealBdPath returns the absolute path of the real bd binary. An explicit
 // GC_BD_REAL remains the normal production path. The PATH fallback keeps the
 // standalone binary usable, but it must never resolve to this running bdshim:
@@ -67,25 +73,47 @@ func refuseSelfBdPath(candidate, source string) error {
 	return nil
 }
 
+func passthroughAlreadyActive(env []string) bool {
+	prefix := passthroughSentinelEnv + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) && strings.TrimPrefix(entry, prefix) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func passthroughChildEnv(env []string) []string {
+	prefix := passthroughSentinelEnv + "="
+	child := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			child = append(child, entry)
+		}
+	}
+	return append(child, passthroughSentinelEnv+"=1")
+}
+
 // execRealBd runs the real bd binary with the given args, streaming its stdio and
 // propagating its exit code (preserving bd's exit-code contract). A nil env
-// defaults to the process environment and an empty dir defaults to the caller's
-// cwd — which is correct for an agent call, whose env and cwd already scope the
-// store. Mirrors cmd/gc's execRealBd.
-func execRealBd(args []string, dir string, env []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// defaults to the process environment, which already scopes an agent call to its
+// own store. Mirrors cmd/gc's execRealBd.
+func execRealBd(args []string, env []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if env == nil {
+		env = os.Environ()
+	}
+	if passthroughAlreadyActive(env) {
+		fmt.Fprintln(stderr, "bdshim: refusing recursive passthrough: passthrough child already active") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	bdPath, err := resolveRealBdPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if env == nil {
-		env = os.Environ()
-	}
+	env = passthroughChildEnv(env)
 	err = processretry.RunWithTransientStartRetry(func() error {
 		cmd := exec.Command(bdPath, args...)
-		if dir != "" {
-			cmd.Dir = dir
-		}
 		cmd.Stdin = stdin
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
