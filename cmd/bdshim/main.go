@@ -57,7 +57,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 
 	passthrough := func() int {
-		code := execRealBd(bdArgs, "", nil, stdin, stdout, stderr)
+		code := execRealBd(bdArgs, nil, stdin, stdout, stderr)
 		logDisposition(verb, "passthrough", code, start)
 		return code
 	}
