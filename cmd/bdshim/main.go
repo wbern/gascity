@@ -108,6 +108,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			id, ok := bddispatch.FirstBdPositional(verbArgs)
 			if !ok {
+				logDisposition(verb, rawBDArgs, "refuse", 1, start)
 				fmt.Fprintln(stderr, "bdshim: usage: update <id> --claim") //nolint:errcheck // best-effort stderr
 				return 1
 			}
