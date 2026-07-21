@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processretry"
 	"github.com/spf13/cobra"
 )
 
@@ -301,26 +302,27 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cmd := exec.Command(bdPath, bdArgs...)
-	cmd.Dir = target.ScopeRoot
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = stdout
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
 	// marker. Only stderr is teed: bd writes its auto-import banner there,
 	// not to stdout. See gastownhall/gascity#2080 (update path) and #2079
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
-	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-
 	traceStart := time.Now()
-	runErr := cmd.Run()
+	runErr := processretry.RunWithTransientStartRetry(func() error {
+		cmd := exec.Command(bdPath, bdArgs...)
+		cmd.Dir = target.ScopeRoot
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = stdout
+		cmd.Stderr = io.MultiWriter(stderr, stderrScan)
+		cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+		return cmd.Run()
+	})
 	traceExit := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError

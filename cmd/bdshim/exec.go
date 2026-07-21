@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/processretry"
 )
 
 // realBdEnvVar names the environment variable holding the absolute path of the
@@ -48,18 +50,21 @@ func execRealBd(args []string, dir string, env []string, stdin io.Reader, stdout
 		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cmd := exec.Command(bdPath, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = env
-	if err := cmd.Run(); err != nil {
+	err = processretry.RunWithTransientStartRetry(func() error {
+		cmd := exec.Command(bdPath, args...)
+		if dir != "" {
+			cmd.Dir = dir
+		}
+		cmd.Stdin = stdin
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		cmd.Env = env
+		return cmd.Run()
+	})
+	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
