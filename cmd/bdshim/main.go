@@ -9,8 +9,9 @@
 // gc's graphStoreSQLiteEnabled), but built as a ~small standalone binary that
 // imports only the dependency-light dispatch/classify packages (internal/bdshim,
 // internal/bddispatch → internal/api), never the SDK's config/session/worker
-// wiring. Routed verbs hit the same controller endpoints and produce byte-
-// identical output; passthrough execs bd.real with the caller's own env and cwd.
+// wiring. Routed verbs use the controller's typed contract; compatibility reads
+// whose bd output has no complete controller projection delegate to bd.real with
+// the caller's own env and cwd.
 //
 // Why this is safe: gc's graphStoreSQLiteEnabled is hardcoded false (identity
 // phase — one backend), so passthrough to the work-only bd is byte-identical to
@@ -60,26 +61,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code := execRealBd(bdArgs, "", nil, stdin, stdout, stderr)
 		logDisposition(verb, "passthrough", code, start)
 		return code
-	}
-
-	// A `bd list` with a metadata predicate is not statically routable (the list
-	// API has no server-side metadata filter), so route it opportunistically with
-	// a client-side filter under a truncation guard: DispatchListMetadataGuarded
-	// returns handled=false when the candidate set may be truncated at the page
-	// cap, and we pass through to the real bd so a match beyond the cap is never
-	// missed. Unreachable controller / no city also fall through to real bd.
-	if verb == "list" && bdshim.ListHasMetadataPredicate(verbArgs) {
-		if city := resolveCityName(cityOverride); city != "" {
-			base := controllerBaseURL()
-			if controllerReachable(base) {
-				client := beadclient.NewCityScopedClient(base, city)
-				if code, handled := bddispatch.DispatchListMetadataGuarded(client, verbArgs, stdout, stderr); handled {
-					logDisposition(verb, "route", code, start)
-					return code
-				}
-			}
-		}
-		return passthrough()
 	}
 
 	// splitPhase is pinned false to match gc's graphStoreSQLiteEnabled (identity

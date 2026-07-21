@@ -42,16 +42,17 @@ func (d Disposition) String() string {
 
 // RoutedVerbs are bd subcommands the shim translates to in-process Router
 // store ops so graph beads in the embedded SQLite store are seen and mutated,
-// not just Dolt work beads. Grown incrementally.
+// not just Dolt work beads. Grown incrementally. Show and list deliberately do
+// not appear here: bd's JSON projections carry backend-computed IssueDetails
+// and IssueWithCounts fields that the controller Bead does not retain. They
+// stay on the real CLI until a typed compatibility projection owns those fields.
 var RoutedVerbs = map[string]bool{
 	"close":  true,
-	"show":   true,
 	"ready":  true,
 	"update": true,
 	"reopen": true,
 	"delete": true,
 	"create": true,
-	"list":   true,
 }
 
 // CreateRoutableFlags are the `bd create` flags that map cleanly onto the
@@ -210,12 +211,11 @@ func ReadyRoutable(args []string) bool {
 	return true
 }
 
-// ListRoutableFlags are the `bd list` flags the shim can serve from the warm
-// controller's List (status/assignee/type/label/limit/all) — the cache-servable
-// subset that dominates agent traffic (the GUPP-hook AssignedInProgressQuery).
-// A list carrying any OTHER flag (--metadata-field, --exclude-type, --offset,
-// --sort, --no-assignee, …) passes through to the real bd rather than silently
-// mis-answering, because api.ListBeadsOpts cannot express it.
+// ListRoutableFlags defines the `bd list` grammar an eventual typed
+// compatibility projection would need to support. List currently always
+// delegates to real bd because its IssueWithCounts JSON cannot be produced from
+// the controller's Bead; this allowlist is retained as the candidate API shape,
+// not as permission to route a list today.
 var ListRoutableFlags = map[string]bool{
 	"--status":   true,
 	"-s":         true,
@@ -231,10 +231,9 @@ var ListRoutableFlags = map[string]bool{
 	"--json":     true,
 }
 
-// ListRoutable reports whether a `bd list` arg list is routable: every flag is
-// in the allowlist AND --json is present. --json is REQUIRED because raw
-// `bd list` defaults to a human tree; only --json emits the flat array the shim
-// renders, so routing a non-json list would change the output shape.
+// ListRoutable reports whether a `bd list` arg list fits the retained candidate
+// API grammar. ClassifyVerb deliberately does not route a true result until the
+// controller provides the complete typed IssueWithCounts projection.
 func ListRoutable(args []string) bool {
 	hasJSON := false
 	for _, a := range args {
@@ -256,10 +255,9 @@ func ListRoutable(args []string) bool {
 }
 
 // ListHasMetadataPredicate reports whether a `bd list` arg list carries a
-// metadata predicate (--metadata-field / --has-metadata-key). Such a list is
-// not statically routable (the API has no server-side metadata filter), but the
-// caller can route it opportunistically with a client-side filter under a
-// truncation guard — see bddispatch.DispatchListMetadataGuarded.
+// metadata predicate (--metadata-field / --has-metadata-key). It is retained
+// for the eventual typed list projection; current list invocations all delegate
+// to real bd regardless of this predicate.
 func ListHasMetadataPredicate(args []string) bool {
 	for _, a := range args {
 		name := a
@@ -314,6 +312,19 @@ const QueryRoutingEnabled = true
 // city is in the split phase (graph_store=sqlite active, so a distinct graph
 // backend exists). See the Disposition docs above.
 func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
+	// bd show and bd list have richer output contracts than the controller's
+	// Bead: show emits IssueDetails (including computed relation/comment counts)
+	// and list emits IssueWithCounts. Passing them through is therefore the only
+	// exact behavior in the identity phase. Once graph storage is split, a real
+	// bd fallback could omit graph-resident beads, so refuse loudly until a typed
+	// controller projection implements the complete contract.
+	if verb == "show" || verb == "list" {
+		if splitPhase {
+			return Refuse
+		}
+		return Passthrough
+	}
+
 	// `bd query` (ephemeral discovery) routes when it is the mappable ephemeral
 	// shape (`--json 'ephemeral=true AND <bare clauses>'`). An unmappable query
 	// under the split phase must REFUSE rather than passthrough: passing it to the

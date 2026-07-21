@@ -119,6 +119,26 @@ func fakeBd(t *testing.T, dir, outFile string, code int) string {
 	return p
 }
 
+// fakeBdOutput writes an executable stand-in for bd that emits output verbatim.
+// It lets compatibility tests prove that the shim preserves the real CLI stream
+// rather than re-encoding a lossy controller projection.
+func fakeBdOutput(t *testing.T, dir, output string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd shell script is POSIX-only")
+	}
+	fixture := filepath.Join(dir, "bd-output.json")
+	if err := os.WriteFile(fixture, []byte(output), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "bd.real")
+	script := "#!/bin/sh\ncat \"" + fixture + "\"\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -159,10 +179,11 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
-// TestRunRoutedReadFailsLoudWhenControllerDown verifies a routable READ dispatches
-// (and fails loudly rc!=0) rather than silently passing through to the work-only
-// bd when the controller is down — bd.real's cwd scope cannot answer a city-wide
-// read, so a silent passthrough would return wrong/empty output.
+// TestRunRoutedReadFailsLoudWhenControllerDown verifies a routable ready read
+// dispatches (and fails loudly rc!=0) rather than silently passing through to
+// the work-only bd when the controller is down — bd.real's cwd scope cannot
+// answer a city-wide read, so a silent passthrough would return wrong/empty
+// output.
 func TestRunRoutedReadFailsLoudWhenControllerDown(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "calls.txt")
@@ -173,11 +194,11 @@ func TestRunRoutedReadFailsLoudWhenControllerDown(t *testing.T) {
 	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	code := run([]string{"ready", "--json"}, strings.NewReader(""), &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("routed read with controller down: exit code = 0; want non-zero (loud fail)")
 	}
-	if got, _ := os.ReadFile(out); strings.Contains(string(got), "list") {
+	if got, _ := os.ReadFile(out); strings.Contains(string(got), "ready") {
 		t.Fatalf("routed read must NOT silently passthrough to bd; calls=%q", string(got))
 	}
 }
@@ -201,6 +222,36 @@ func TestRunRoutedCityUnresolvablePassesThrough(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(out); !strings.Contains(string(got), "list --json") {
 		t.Fatalf("expected passthrough to fake bd; calls=%q", string(got))
+	}
+}
+
+// TestRunCompatibilityReadsDelegateToRealBd proves the current compatibility
+// boundary for show/list: the shim streams the real bd output unchanged even
+// when a city and controller URL are available. This protects fields that bd
+// computes in its IssueDetails and IssueWithCounts projections but that the
+// controller's Bead model does not carry yet.
+func TestRunCompatibilityReadsDelegateToRealBd(t *testing.T) {
+	dir := t.TempDir()
+	output := "[{\"id\":\"gcw-1\",\"comment_count\":2,\"dependency_count\":1,\"dependent_count\":3,\"created_by\":\"agent\"}]\n"
+	bd := fakeBdOutput(t, dir, output)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_API_URL", "http://127.0.0.1:1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BDSHIM_LOG", "")
+
+	for _, args := range [][]string{
+		{"show", "gcw-1", "--json"},
+		{"list", "--status", "in_progress", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("run(%v) exit code = %d, want 0; stderr=%s", args, code, stderr.String())
+			}
+			if got := stdout.String(); got != output {
+				t.Fatalf("run(%v) stdout = %q, want exact real-bd output %q", args, got, output)
+			}
+		})
 	}
 }
 
