@@ -686,13 +686,12 @@ func applyListMetadataFilter(in []beads.Bead, f listMetadataFilter) []beads.Bead
 	return out
 }
 
-// DispatchListMetadataGuarded routes a `bd list` carrying --metadata-field /
-// --has-metadata-key by fetching the server-filterable candidate set and
-// applying the metadata predicates client-side. It returns handled=false —
-// signaling the caller to pass through to the real bd — when the candidate set
-// may be truncated at the pagination cap, so a match beyond the cap is never
-// missed. The user's --limit is applied after filtering (not pushed to the
-// server), so --limit bounds the matching set exactly like real bd.
+// DispatchListMetadataGuarded is a retained candidate for a future typed list
+// compatibility projection. It fetches server-filterable candidates and applies
+// metadata predicates client-side, returning handled=false when pagination may
+// truncate the set. The current classifier does not expose this path because a
+// filtered Bead response still cannot reproduce bd's complete IssueWithCounts
+// JSON contract.
 func DispatchListMetadataGuarded(client *beadclient.Client, args []string, stdout, stderr io.Writer) (int, bool) {
 	opts, err := ParseListOpts(args)
 	if err != nil {

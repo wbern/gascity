@@ -258,16 +258,15 @@ func earlyBdExperimentLogPath() string {
 	return ""
 }
 
+// earlyBdExperimentShape names the read shapes the direct arm may answer from
+// the controller projection. show and list are deliberately absent: their bd
+// output carries backend-computed IssueDetails / IssueWithCounts fields the
+// controller Bead does not retain, so the classifier passes them through to
+// real bd and they never reach this function. ShapeShowJSON / ShapeListJSON
+// remain defined in bdexperiment because historical observation records still
+// carry them.
 func earlyBdExperimentShape(verb string, args []string) (bdexperiment.Shape, bool) {
 	switch verb {
-	case "show":
-		if len(args) == 2 && args[1] == "--json" {
-			return bdexperiment.ShapeShowJSON, true
-		}
-	case "list":
-		if bdshim.ListRoutable(args) && !bdshim.ListHasMetadataPredicate(args) {
-			return bdexperiment.ShapeListJSON, true
-		}
 	case "query":
 		if bdshim.QueryRoutable(args) {
 			return bdexperiment.ShapeQueryEphemeral, true
@@ -397,10 +396,17 @@ func managedCityPath() string {
 	return ""
 }
 
-// earlyBdShimShowArgs accepts only `gc bd show <id> --json`. The controller
-// resolves a bead ID across the city's stores, while list/ready depend on rig
-// scope and mutations depend on gc bd's guards. Restricting this first slice to
-// a JSON point lookup makes the fast path auditable and safely expandable.
+// earlyBdShimShowArgs accepts only `gc bd show <id> --json`, and only while the
+// shim's classifier actually routes that shape through the controller. The
+// classifier is the single source of truth for which reads have a complete
+// controller projection: when it passes a verb through instead, the early path
+// must decline. Fast-pathing a passthrough shape would exec raw bd with the
+// caller's own cwd/env rather than gc's resolved scope, and would let the
+// direct experiment arm answer from a controller projection that drops the
+// bd-computed IssueDetails fields. Both are silent wrong answers, so this stays
+// keyed to ClassifyVerb rather than to a hardcoded verb list — if a typed
+// compatibility projection later restores show routing, the fast path returns
+// with it and no code here changes.
 func earlyBdShimShowArgs(args []string) ([]string, bool) {
 	if len(args) != 4 || args[0] != "bd" || args[1] != "show" || args[3] != "--json" {
 		return nil, false
@@ -410,5 +416,10 @@ func earlyBdShimShowArgs(args []string) ([]string, bool) {
 	if id == "" || id != rawID || strings.HasPrefix(id, "-") || strings.IndexFunc(id, unicode.IsSpace) >= 0 {
 		return nil, false
 	}
-	return []string{"show", id, "--json"}, true
+	bdArgs := []string{"show", id, "--json"}
+	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
+	if bdshim.ClassifyVerb(verb, verbArgs, false) != bdshim.Route {
+		return nil, false
+	}
+	return bdArgs, true
 }

@@ -15,7 +15,10 @@ func TestClassifyVerb(t *testing.T) {
 	}{
 		{"close", []string{"x"}, false, Route},
 		{"close", []string{"x"}, true, Route},
-		{"show", []string{"x", "--json"}, true, Route},
+		// show/list retain bd's richer output contract in the identity phase. In
+		// split phase they must refuse rather than silently omitting graph beads.
+		{"show", []string{"x", "--json"}, false, Passthrough},
+		{"show", []string{"x", "--json"}, true, Refuse},
 		{"version", nil, false, Passthrough},
 		{"version", nil, true, Passthrough},
 		{"mol", []string{"current", "m"}, false, Route},  // current|progress + id routes (graph-aware) in both phases
@@ -62,30 +65,29 @@ func TestClassifyVerb(t *testing.T) {
 	}
 }
 
-// TestClassifyVerbListRouting pins the `bd list` routing gate: the cache-servable
-// shapes route, everything else passes through byte-identically.
-func TestClassifyVerbListRouting(t *testing.T) {
+// TestClassifyVerbListCompatibility pins the conservative list policy: bd's
+// IssueWithCounts JSON includes backend-computed values the controller's Bead
+// does not retain, so every list shape delegates unchanged until a typed
+// compatibility projection exists.
+func TestClassifyVerbListCompatibility(t *testing.T) {
 	cases := []struct {
-		args []string
-		want Disposition
+		args  []string
+		split bool
+		want  Disposition
 	}{
-		// The GUPP-hook AssignedInProgressQuery — the dominant live shape.
-		{[]string{"--status", "in_progress", "--assignee=gc2-x", "--json", "--limit", "50"}, Route},
-		{[]string{"--status", "in_progress", "--json"}, Route},
-		{[]string{"-s", "open", "-a", "y", "-n", "10", "--json"}, Route},
-		{[]string{"--all", "--json"}, Route},
-		// --json is REQUIRED: raw `bd list` defaults to a human tree, so a
-		// non-json list must passthrough to preserve the output shape.
-		{[]string{"--status", "in_progress"}, Passthrough},
-		// Flags api.ListBeadsOpts cannot express passthrough (the refinery
-		// --metadata-field/--exclude-type shape, --offset, --sort, --no-assignee).
-		{[]string{"--metadata-field", "pr_number=5", "--exclude-type=epic", "--json"}, Passthrough},
-		{[]string{"--json", "--offset", "10"}, Passthrough},
-		{[]string{"--json", "--no-assignee"}, Passthrough},
+		{[]string{"--status", "in_progress", "--assignee=gc2-x", "--json", "--limit", "50"}, false, Passthrough},
+		{[]string{"--status", "in_progress", "--json"}, false, Passthrough},
+		{[]string{"-s", "open", "-a", "y", "-n", "10", "--json"}, false, Passthrough},
+		{[]string{"--all", "--json"}, false, Passthrough},
+		{[]string{"--status", "in_progress"}, false, Passthrough},
+		{[]string{"--metadata-field", "pr_number=5", "--exclude-type=epic", "--json"}, false, Passthrough},
+		{[]string{"--json", "--offset", "10"}, false, Passthrough},
+		{[]string{"--json", "--no-assignee"}, false, Passthrough},
+		{[]string{"--status", "in_progress", "--json"}, true, Refuse},
 	}
 	for _, tc := range cases {
-		if got := ClassifyVerb("list", tc.args, false); got != tc.want {
-			t.Errorf("ClassifyVerb(list, %v) = %v, want %v", tc.args, got, tc.want)
+		if got := ClassifyVerb("list", tc.args, tc.split); got != tc.want {
+			t.Errorf("ClassifyVerb(list, %v, split=%v) = %v, want %v", tc.args, tc.split, got, tc.want)
 		}
 	}
 }
