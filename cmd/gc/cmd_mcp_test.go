@@ -42,6 +42,73 @@ max_active_sessions = 1
 	}
 }
 
+func TestMcpValidateRejectsImplicitEmptyCatalogConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+command = "echo"
+prompt_mode = "none"
+`, `
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/notes.toml", `
+name = "notes"
+command = "npx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "validate"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc mcp validate unexpectedly passed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"MCP target conflict", "mayor", "claude"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+func TestMcpValidateAcceptsConsistentStage1Projection(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.gemini]
+command = "echo"
+prompt_mode = "none"
+`)
+	writeCatalogFile(t, cityDir, "agents/gemini/agent.toml", `
+provider = "gemini"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/gemini/mcp/notes.toml", `
+name = "notes"
+command = "npx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "validate"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc mcp validate exited %d: %s", code, stderr.String())
+	}
+	if got := stdout.String(); got != "MCP projection valid.\n" {
+		t.Fatalf("stdout = %q", got)
+	}
+}
+
 func TestMcpListAgentProjectedSummary(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

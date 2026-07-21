@@ -34,7 +34,35 @@ the agent has a single deterministic projection target from config, or
 		},
 	}
 	cmd.AddCommand(newMcpListCmd(stdout, stderr))
+	cmd.AddCommand(newMcpValidateCmd(stdout, stderr))
 	return cmd
+}
+
+func newMcpValidateCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate",
+		Short: "Validate startup MCP projection",
+		Long:  "Validate the read-only stage-1 MCP projection that city startup will build. This does not write provider config or probe MCP servers.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveCity()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mcp validate: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			cfg, err := loadCityConfig(cityPath, stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mcp validate: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if _, err := buildStage1MCPTargets(cityPath, cfg, exec.LookPath); err != nil {
+				fmt.Fprintf(stderr, "gc mcp validate: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			fmt.Fprintln(stdout, "MCP projection valid.") //nolint:errcheck // best-effort stdout
+			return nil
+		},
+	}
 }
 
 func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {

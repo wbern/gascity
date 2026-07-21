@@ -2475,6 +2475,7 @@ gc mcp
 | Subcommand | Description |
 |------------|-------------|
 | [gc mcp list](#gc-mcp-list) | Show projected MCP servers |
+| [gc mcp validate](#gc-mcp-validate) | Validate startup MCP projection |
 
 ## gc mcp list
 
@@ -2489,6 +2490,14 @@ gc mcp list [flags]
 | `--agent` | string |  | show the projected MCP config for this agent |
 | `--json` | bool |  | Output one JSONL result record |
 | `--session` | string |  | show the projected MCP config for this session |
+
+## gc mcp validate
+
+Validate the read-only stage-1 MCP projection that city startup will build. This does not write provider config or probe MCP servers.
+
+```
+gc mcp validate
+```
 
 ## gc metrics
 
