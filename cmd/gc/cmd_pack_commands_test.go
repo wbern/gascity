@@ -238,6 +238,84 @@ func TestNewRootCmdExposesRootPackCommands(t *testing.T) {
 	}
 }
 
+func TestNewRootCmdForArgsSkipsPackDiscoveryOnlyForBuiltinBd(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityDir, "commands", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"backstage\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "commands", "hello", "run.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	for _, args := range [][]string{
+		{"bd", "list"},
+		{"--city", cityDir, "bd", "show", "gcw-123"},
+		{"--city=" + cityDir, "bd", "list"},
+		{"--rig=gas-city-wbern", "bd", "ready"},
+	} {
+		root := newRootCmdForArgs(&bytes.Buffer{}, &bytes.Buffer{}, args)
+		if got := findSubcommand(root, "backstage"); got != nil {
+			t.Fatalf("newRootCmdForArgs(%v) registered pack command %q; gc bd must skip optional discovery", args, got.Name())
+		}
+	}
+	for _, args := range [][]string{
+		{"--future-root-flag", "bd", "list"},
+		{"--", "bd", "list"},
+	} {
+		root := newRootCmdForArgs(&bytes.Buffer{}, &bytes.Buffer{}, args)
+		if findSubcommand(root, "backstage") == nil {
+			t.Fatalf("newRootCmdForArgs(%v) skipped discovery for uncertain syntax", args)
+		}
+	}
+
+	root := newRootCmdForArgs(&bytes.Buffer{}, &bytes.Buffer{}, []string{"backstage", "hello"})
+	if findSubcommand(root, "backstage") == nil {
+		t.Fatal("non-bd invocation must retain eager pack command discovery")
+	}
+}
+
+func TestFirstRootCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+		ok   bool
+	}{
+		{name: "bare bd", args: []string{"bd", "list"}, want: "bd", ok: true},
+		{name: "city flag", args: []string{"--city", "/tmp/city", "bd", "list"}, want: "bd", ok: true},
+		{name: "both root flags", args: []string{"--city=/tmp/city", "--rig", "repo", "bd", "list"}, want: "bd", ok: true},
+		{name: "rig equals", args: []string{"--rig=repo", "bd", "ready"}, want: "bd", ok: true},
+		{name: "bd owned flags", args: []string{"bd", "--rig", "repo", "list"}, want: "bd", ok: true},
+		{name: "pack command", args: []string{"backstage", "hello"}, want: "backstage", ok: true},
+		{name: "unknown root flag", args: []string{"--future-flag", "bd"}, ok: false},
+		{name: "missing city value", args: []string{"--city"}, ok: false},
+		{name: "end of flags", args: []string{"--", "bd"}, ok: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := firstRootCommand(tc.args)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("firstRootCommand(%v) = (%q, %t), want (%q, %t)", tc.args, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestLegacyPackCommandHelpFlagUsesBuiltInHelp(t *testing.T) {
 	cityPath, packDir := setupPackCity(t)
 

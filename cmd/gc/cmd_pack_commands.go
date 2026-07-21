@@ -55,7 +55,15 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 // register pack-provided CLI commands as top-level subcommands. Fails
 // silently if not in a city or config fails to load — core commands
 // always work.
-func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
+//
+// A built-in bd invocation does not need this discovery: packs cannot shadow
+// the built-in command, and doBd loads the city config later for its actual
+// routing and safety checks. Skipping this optional first load removes one full
+// config expansion from every gc bd command without changing its behavior.
+func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer, invocationArgs []string) {
+	if isBuiltinBdInvocation(invocationArgs) {
+		return
+	}
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
@@ -70,6 +78,43 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	}
 
 	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, loadedCityName(cfg, cityPath), stdout, stderr, false)
+}
+
+func isBuiltinBdInvocation(args []string) bool {
+	command, ok := firstRootCommand(args)
+	return ok && command == "bd"
+}
+
+// firstRootCommand identifies the first command token after supported root
+// persistent flags. It deliberately returns false for unknown or malformed
+// root syntax, preserving eager discovery whenever command interpretation is
+// uncertain.
+func firstRootCommand(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			return "", false
+		case arg == "--city" || arg == "--rig":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", false
+			}
+			i++
+		case strings.HasPrefix(arg, "--city="):
+			if strings.TrimSpace(strings.TrimPrefix(arg, "--city=")) == "" {
+				return "", false
+			}
+		case strings.HasPrefix(arg, "--rig="):
+			if strings.TrimSpace(strings.TrimPrefix(arg, "--rig=")) == "" {
+				return "", false
+			}
+		case strings.HasPrefix(arg, "-"):
+			return "", false
+		default:
+			return arg, true
+		}
+	}
+	return "", false
 }
 
 // coreCommandNames returns the set of built-in command names that packs

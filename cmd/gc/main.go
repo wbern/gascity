@@ -134,6 +134,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
 		return code
 	}
+	if args == nil {
+		args = []string{}
+	}
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
@@ -152,10 +155,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter
-	root := newRootCmd(execStdout, stderr)
-	if args == nil {
-		args = []string{}
-	}
+	root := newRootCmdForArgs(execStdout, stderr, args)
 	bufferJSONExecution := shouldBufferJSONExecution(root, args)
 	reportJSONFailure := shouldReportJSONExecutionError(root, args)
 	if bufferJSONExecution {
@@ -209,6 +209,13 @@ func commandFailureMessage(err error) string {
 
 // newRootCmd creates the root cobra command with all subcommands.
 func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
+	return newRootCmdForArgs(stdout, stderr, nil)
+}
+
+// newRootCmdForArgs creates the root command for a specific invocation. The
+// invocation is used only to skip optional pack-command discovery for built-in
+// commands that packs cannot affect.
+func newRootCmdForArgs(stdout, stderr io.Writer, args []string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gc",
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",
@@ -303,7 +310,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
 
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	registerPackCommands(root, stdout, stderr)
+	registerPackCommands(root, stdout, stderr, args)
 
 	installArgUsageErrors(root, stderr)
 	installFlagGroupUsageErrors(root, stderr)
