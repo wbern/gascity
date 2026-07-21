@@ -131,15 +131,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
 	}()
+	profiler := newBdInvocationProfiler(args, stderr)
+	defer profiler.close()
+	endEarlyShimProbe := profiler.phase("early_shim_probe")
 	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
+		endEarlyShimProbe()
 		return code
 	}
+	endEarlyShimProbe()
 	if args == nil {
 		args = []string{}
 	}
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
+	endTelemetryInit := profiler.phase("telemetry_init")
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
+	endTelemetryInit()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc: telemetry init: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -149,13 +156,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 			defer cancel()
 			_ = provider.Shutdown(ctx)
 		}()
+		// The top-level defer covers early returns before telemetry setup. This
+		// second, idempotent close runs first here, so the profile measures the
+		// command rather than a potentially slow telemetry exporter flush.
+		defer profiler.close()
 		telemetry.SetProcessOTELAttrs()
 	}
 
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter
+	endCommandTree := profiler.phase("command_tree")
 	root := newRootCmdForArgs(execStdout, stderr, args)
+	endCommandTree()
+	root.SetContext(withBdInvocationProfiler(context.Background(), profiler))
 	bufferJSONExecution := shouldBufferJSONExecution(root, args)
 	reportJSONFailure := shouldReportJSONExecutionError(root, args)
 	if bufferJSONExecution {
@@ -173,7 +187,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
 		return code
 	}
-	if err := root.Execute(); err != nil {
+	endCommandExecute := profiler.phase("command_execute")
+	err = root.Execute()
+	endCommandExecute()
+	if err != nil {
 		code := commandExitCode(err)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {

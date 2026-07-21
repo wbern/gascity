@@ -83,21 +83,25 @@ so long-running workers can signal liveness to the dashboard.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
-auto-export behavior, invoke bd directly.`,
+auto-export behavior, invoke bd directly.
+
+Set GC_BD_PROFILE_DIR to an existing writable directory to write an
+opt-in CPU profile, Go runtime trace, and redacted phase-timing report for one
+gc bd invocation.`,
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now`,
 		DisableFlagParsing: true,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			// Plumb doBd's numeric exit code through exitForCode so the
 			// process exit code matches the documented contract above
 			// (bdSilentFallbackExitCode = 4) and bd's own exit codes are
 			// preserved. Returning errExit on any non-zero would collapse
 			// every code to 1 and defeat the operator/CI signal the loud-
 			// fail was meant to provide.
-			return exitForCode(doBd(args, stdout, stderr))
+			return exitForCode(doBdWithProfiler(args, stdout, stderr, bdInvocationProfilerFromContext(cmd.Context())))
 		},
 	}
 	return cmd
@@ -131,6 +135,10 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	// The profiler is scoped to this gc process. A child bd may itself be a
+	// wrapper that invokes gc, so inheriting its output directory would create
+	// nested, misleading profiles for an otherwise single invocation.
+	overrides[bdProfileDirEnv] = ""
 	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
 }
@@ -181,15 +189,23 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
+	return doBdWithProfiler(args, stdout, stderr, disabledBdInvocationProfiler)
+}
+
+func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvocationProfiler) int {
+	endRewriteHeartbeat := profiler.phase("rewrite_heartbeat")
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
+	endRewriteHeartbeat()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
+	endResolveCity := profiler.phase("resolve_city")
 	cityPath, err := resolveBdCity(cityName)
+	endResolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -200,18 +216,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
 	// in resolveBdScopeTarget / bdRigScopeTarget.
-	cfg, err := loadCityConfig(cityPath, stderr)
+	endLoadConfig := profiler.phase("load_city_config")
+	cfg, err := loadCityConfigProfiled(cityPath, profiler, stderr)
+	endLoadConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
+	endResolveScope := profiler.phase("resolve_scope")
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
+	endResolveScope()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
+	endProviderPreflight := profiler.phase("provider_preflight")
+	provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath)
+	providerSupported := providerUsesBdStoreContract(provider)
+	endProviderPreflight()
+	if !providerSupported {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
@@ -219,11 +243,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	endPrepareSubprocess := profiler.phase("prepare_subprocess")
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
+		endPrepareSubprocess()
 		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -240,14 +266,17 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
 	env, err := bdCommandEnv(cityPath, cfg, target)
+	endPrepareSubprocess()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
+	endBdSubprocess := profiler.phase("bd_subprocess")
 	traceStart := time.Now()
 	runErr := cmd.Run()
+	endBdSubprocess()
 	traceExit := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
