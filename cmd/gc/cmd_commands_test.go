@@ -2982,7 +2982,9 @@ func TestAddDiscoveredCommandsToRoot_HelpFlagShowsBuiltInHelp(t *testing.T) {
 
 func TestAddDiscoveredCommandsToRoot_CollisionProtection(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
-	root.AddCommand(&cobra.Command{Use: "start"})
+	start := &cobra.Command{Use: "start"}
+	start.AddCommand(&cobra.Command{Use: "native"})
+	root.AddCommand(start)
 
 	entries := []config.DiscoveredCommand{
 		{
@@ -2990,12 +2992,17 @@ func TestAddDiscoveredCommandsToRoot_CollisionProtection(t *testing.T) {
 			Command:     []string{"status"},
 			Description: "Show status",
 		},
+		{
+			BindingName: "start",
+			Command:     []string{"native"},
+			Description: "Must not replace native",
+		},
 	}
 
 	var stdout, stderr bytes.Buffer
 	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", &stdout, &stderr, true)
 
-	if !strings.Contains(stderr.String(), "shadows core command") {
+	if !strings.Contains(stderr.String(), `command "native" shadows core command`) {
 		t.Fatalf("expected collision warning, got stderr: %q", stderr.String())
 	}
 	startCount := 0
@@ -3006,6 +3013,13 @@ func TestAddDiscoveredCommandsToRoot_CollisionProtection(t *testing.T) {
 	}
 	if startCount != 1 {
 		t.Fatalf("got %d start commands, want 1", startCount)
+	}
+	if findSubcommand(start, "status") == nil {
+		t.Fatal("missing non-conflicting imported child under core namespace")
+	}
+	native := findSubcommand(start, "native")
+	if native == nil || native.Short == "Must not replace native" {
+		t.Fatal("import replaced native child command")
 	}
 }
 
@@ -3294,7 +3308,9 @@ func TestAddDiscoveredCommandsToRoot_DedupsDuplicateLeaf(t *testing.T) {
 
 func TestAddDiscoveredCommandsToRoot_CanSuppressCollisionWarnings(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
-	root.AddCommand(&cobra.Command{Use: "import"})
+	importCmd := &cobra.Command{Use: "import"}
+	importCmd.AddCommand(&cobra.Command{Use: "list"})
+	root.AddCommand(importCmd)
 
 	entries := []config.DiscoveredCommand{
 		{

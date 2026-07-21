@@ -118,14 +118,34 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 
 	for _, binding := range bindings {
 		if core[binding] {
-			if warnOnCollision {
-				fmt.Fprintf(stderr, "gc: import binding %q: name shadows core command, skipping\n", binding) //nolint:errcheck
-			}
+			coreCmd := findSubcommand(root, binding)
+			mergeDiscoveredNamespace(coreCmd, binding, grouped[binding], cityPath, cityName, stdout, stderr, warnOnCollision)
 			continue
 		}
 		nsCmd := newDiscoveredNamespaceCmd(binding, grouped[binding], cityPath, cityName, stdout, stderr)
 		root.AddCommand(nsCmd)
 		configureDiscoveredGroups(nsCmd)
+	}
+}
+
+// mergeDiscoveredNamespace extends an existing core command group without
+// allowing an import to replace any native child. This keeps collision
+// protection at the command leaf while allowing composable namespaces such as
+// a native `gc github pr` plus imported `gc github status` and `import-app`.
+func mergeDiscoveredNamespace(coreCmd *cobra.Command, binding string, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer, warnOnCollision bool) {
+	if coreCmd == nil {
+		return
+	}
+	imported := newDiscoveredNamespaceCmd(binding, entries, cityPath, cityName, stdout, stderr)
+	for _, child := range imported.Commands() {
+		if findSubcommand(coreCmd, child.Name()) != nil {
+			if warnOnCollision {
+				fmt.Fprintf(stderr, "gc: import binding %q: command %q shadows core command, skipping\n", binding, child.Name()) //nolint:errcheck
+			}
+			continue
+		}
+		coreCmd.AddCommand(child)
+		configureDiscoveredGroups(child)
 	}
 }
 
