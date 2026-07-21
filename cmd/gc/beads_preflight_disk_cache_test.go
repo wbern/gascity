@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,9 +20,11 @@ import (
 // sharing the on-disk L2 cache directory.
 func withFreshL1Memo(t *testing.T) {
 	t.Helper()
-	prev := preflightBDContextMemo
+	prevIdentity := preflightBDContextMemo
 	preflightBDContextMemo = newPreflightScopeMemo[preflightBDContextValue]()
-	t.Cleanup(func() { preflightBDContextMemo = prev })
+	t.Cleanup(func() {
+		preflightBDContextMemo = prevIdentity
+	})
 }
 
 // withFixedPreflightNow pins the injectable clock so TTL behavior is
@@ -117,6 +120,111 @@ func TestPreflightBDContextCached_StaleEntryReSpawns(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("run ran %d times, want 1 (stale entry must re-spawn)", calls)
+	}
+}
+
+func TestPreflightBDContextCached_CachesOnlyNotGitRepositoryFailure(t *testing.T) {
+	city := t.TempDir()
+	advance := withFixedPreflightNow(t, time.Unix(1000, 0))
+	key := preflightScopeKeyFor(city, city, "host:3306/db|ext=false")
+	notRepository := errors.New("exit status 1: cannot resolve repo context: cannot determine repository root: not a git repository")
+
+	withFreshL1Memo(t)
+	calls := 0
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return preflightBDContextValue{}, notRepository
+	}); !errors.Is(err, errPreflightBDContextNotGitRepository) {
+		t.Fatalf("first error = %v, want classified non-repository error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("first run calls = %d, want 1", calls)
+	}
+
+	// A new gc process has no L1 entry, so this verifies the persisted L2
+	// result prevents another bd context subprocess during the TTL.
+	withFreshL1Memo(t)
+	advance(time.Unix(1030, 0))
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return fakeIdentity(), nil
+	}); !errors.Is(err, errPreflightBDContextNotGitRepository) {
+		t.Fatalf("warm failure = %v, want classified non-repository error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("warm disk hit ran subprocess %d times, want 1", calls)
+	}
+
+	// Repository membership can change, so the deterministic result must expire
+	// on the same short TTL as a successful identity and then re-probe.
+	withFreshL1Memo(t)
+	advance(time.Unix(1000, 0).Add(preflightIdentityDiskTTL + time.Second))
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return fakeIdentity(), nil
+	}); err != nil {
+		t.Fatalf("expired failure re-probe error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expired failure calls = %d, want 2", calls)
+	}
+}
+
+func TestPreflightBDContextCached_DoesNotCacheOtherFailures(t *testing.T) {
+	city := t.TempDir()
+	withFixedPreflightNow(t, time.Unix(1000, 0))
+	key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
+	transient := errors.New("dial tcp 127.0.0.1:3306: connect: connection refused")
+
+	withFreshL1Memo(t)
+	calls := 0
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return preflightBDContextValue{}, transient
+	}); !errors.Is(err, transient) {
+		t.Fatalf("first error = %v, want transient error", err)
+	}
+
+	withFreshL1Memo(t)
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return preflightBDContextValue{}, transient
+	}); !errors.Is(err, transient) {
+		t.Fatalf("second error = %v, want transient error", err)
+	}
+	if calls != 2 {
+		t.Fatalf("transient failure calls = %d, want 2", calls)
+	}
+}
+
+func TestPreflightBDContextUnavailableReason_RequiresFullNonRepositorySignature(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "exact bd error",
+			err:  errors.New("cannot resolve repo context: cannot determine repository root: not a git repository"),
+			want: preflightBDContextUnavailableNotGitRepository,
+		},
+		{
+			name: "generic repository wording",
+			err:  errors.New("not a git repository"),
+		},
+		{
+			name: "transient root lookup failure",
+			err:  errors.New("cannot determine repository root: permission denied"),
+		},
+		{
+			name: "nil",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := preflightBDContextUnavailableReason(test.err); got != test.want {
+				t.Fatalf("reason = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
