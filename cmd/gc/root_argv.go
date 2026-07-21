@@ -13,7 +13,7 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !ok || command != "metrics"
+	discoverPackCommands := !ok || (command != "metrics" && command != "bd")
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,

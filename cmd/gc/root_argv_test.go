@@ -60,7 +60,7 @@ func TestFirstRootCommandMatchesPersistentScopeGrammar(t *testing.T) {
 	}
 }
 
-func TestRootCommandOptionsSkipPackDiscoveryOnlyForMetrics(t *testing.T) {
+func TestRootCommandOptionsSkipPackDiscoveryForBuiltinFastPaths(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -72,10 +72,16 @@ func TestRootCommandOptionsSkipPackDiscoveryOnlyForMetrics(t *testing.T) {
 		{name: "scoped metrics", args: []string{"--city", "/tmp/city", "--rig=tower", "metrics", "status"}, skip: true},
 		{name: "remote context metrics", args: []string{"--context=prod", "metrics", "status"}, skip: true},
 		{name: "remote URL metrics", args: []string{"--city-url", "https://city.example", "--city-name=remote", "metrics", "status"}, skip: true},
+		{name: "bd", args: []string{"bd", "show", "gcw-123"}, skip: true},
+		{name: "scoped bd", args: []string{"--city", "/tmp/city", "--rig=tower", "bd", "list"}, skip: true},
+		{name: "remote context bd", args: []string{"--context=prod", "bd", "ready"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
+		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
 		{name: "after terminator", args: []string{"--", "metrics"}},
+		{name: "bd after terminator", args: []string{"--", "bd"}},
 		{name: "unknown flag", args: []string{"--unknown", "metrics"}},
+		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
 	}
 
 	for _, test := range tests {
