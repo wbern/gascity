@@ -131,6 +131,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
 	}()
+	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
+		return code
+	}
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
