@@ -317,3 +317,26 @@ func TestRunMalformedHeartbeatLogsRedactedRefusal(t *testing.T) {
 		t.Fatalf("refusal record = %+v, want heartbeat/refuse/1/flags=none", got)
 	}
 }
+
+func TestRunClaimWithoutIDLogsRedactedRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bdshim.jsonl")
+	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("BEADS_ACTOR", "gas-city-wbern/architect")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"update", "--claim"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read route log: %v", err)
+	}
+	var got routeLogLine
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal route log: %v", err)
+	}
+	if got.Verb != "update" || got.Disposition != "refuse" || got.Exit != 1 || got.Shape != "flags=--claim" {
+		t.Fatalf("refusal record = %+v, want update/refuse/1/flags=--claim", got)
+	}
+}
