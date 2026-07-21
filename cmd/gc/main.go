@@ -182,6 +182,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		rigFlag = prevRigFlag
 		contextFlag, cityURLFlag, cityNameFlag = prevContextFlag, prevCityURLFlag, prevCityNameFlag
 	}()
+	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
+		return code
+	}
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := initializeCLITelemetry(context.Background(), "gascity", version)
