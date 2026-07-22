@@ -198,6 +198,28 @@ interval = "1h"
 	}
 }
 
+func TestScanAllOverrideCanEnableDisabledPackOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "patrol", `[order]
+exec = "scripts/patrol.sh"
+trigger = "cooldown"
+interval = "3m"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		Orders:        config.OrdersConfig{Overrides: []config.OrderOverride{{Name: "patrol", Enabled: &enabled}}},
+	}
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+	if len(aa) != 1 || aa[0].Name != "patrol" || !aa[0].IsEnabled() {
+		t.Fatalf("got %#v, want enabled patrol after override", aa)
+	}
+}
+
 func TestScanAllOverrideHandlerStillValidatesPartiallyModifiedOrders(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]

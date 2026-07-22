@@ -38,6 +38,18 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+	return scanRoots(fs, roots, skip, false)
+}
+
+// ScanRootsIncludingDisabled discovers the same layered order set as ScanRoots
+// but retains disabled orders so a later configuration layer can enable them.
+// Skip-list entries remain excluded: skip is an explicit removal policy, not a
+// default that an order override may reverse.
+func ScanRootsIncludingDisabled(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+	return scanRoots(fs, roots, skip, true)
+}
+
+func scanRoots(fs fsys.FS, roots []ScanRoot, skip []string, includeDisabled bool) ([]Order, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -74,7 +86,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 	var result []Order
 	for _, name := range order {
 		a := found[name]
-		if !a.IsEnabled() {
+		if !includeDisabled && !a.IsEnabled() {
 			continue
 		}
 		if skipSet[name] || hasSkippedAlias(a, skipSet) {

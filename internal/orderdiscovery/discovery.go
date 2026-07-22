@@ -51,7 +51,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	cityLayers := cityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRoots(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
+	cityOrders, err := orders.ScanRootsIncludingDisabled(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRoots(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
+		aa, err := orders.ScanRootsIncludingDisabled(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {

@@ -52,6 +52,30 @@ func TestScanEmpty(t *testing.T) {
 	}
 }
 
+func TestScanRootsIncludingDisabledRetainsDisabledButNotSkipped(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/layer/orders/patrol.toml"] = []byte(`[order]
+formula = "mol-patrol"
+trigger = "manual"
+enabled = false
+`)
+	root := ScanRoot{Dir: "/layer/orders", FormulaLayer: "/layer/formulas"}
+	got, err := ScanRootsIncludingDisabled(fs, []ScanRoot{root}, nil)
+	if err != nil {
+		t.Fatalf("ScanRootsIncludingDisabled: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "patrol" || got[0].IsEnabled() {
+		t.Fatalf("got %#v, want one retained disabled patrol", got)
+	}
+	got, err = ScanRootsIncludingDisabled(fs, []ScanRoot{root}, []string{"patrol"})
+	if err != nil {
+		t.Fatalf("ScanRootsIncludingDisabled(skip): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("skip returned %#v, want no orders", got)
+	}
+}
+
 func TestScanLayerOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	// Layer 1 (lower priority): digest with 24h.

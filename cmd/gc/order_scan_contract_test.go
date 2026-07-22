@@ -278,6 +278,29 @@ interval = "1h"
 	}
 }
 
+func TestOrderScanContractOverrideCanEnableDisabledSourceOrder(t *testing.T) {
+	cityPath, cityFormulasDir := contractCitySetup(t)
+	writeContractOrder(t, filepath.Join(cityPath, "orders"), "review", `[order]
+exec = "scripts/review.sh"
+trigger = "cooldown"
+interval = "3m"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityFormulasDir}},
+		Orders:        config.OrdersConfig{Overrides: []config.OrderOverride{{Name: "review", Enabled: &enabled}}},
+	}
+	var stderr bytes.Buffer
+	aa, code := loadAllOrders(cityPath, cfg, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders code %d; stderr: %s", code, stderr.String())
+	}
+	if len(aa) != 1 || aa[0].Name != "review" || !aa[0].IsEnabled() {
+		t.Fatalf("got %#v, want enabled review after override", aa)
+	}
+}
+
 func TestOrderScanContractOverrideEnvMergedBeforeReturning(t *testing.T) {
 	cityPath, cityFormulasDir := contractCitySetup(t)
 	writeContractOrder(t, filepath.Join(cityPath, "orders"), "db-sync", `[order]

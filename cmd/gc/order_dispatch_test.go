@@ -7736,6 +7736,38 @@ interval = "2m"
 	}
 }
 
+func TestBuildOrderDispatcherOverrideEnablesDisabledSourceOrder(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	orderDir := filepath.Join(dir, "orders")
+	if err := mkdirAll(formulaDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := mkdirAll(orderDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(orderDir, "review.toml"), `[order]
+exec = "scripts/review.sh"
+trigger = "cooldown"
+interval = "3m"
+enabled = false
+`)
+	enabled := true
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+		Orders:        config.OrdersConfig{Overrides: []config.OrderOverride{{Name: "review", Enabled: &enabled}}},
+	}
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected dispatcher; stderr: %s", stderr.String())
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	if len(mad.aa) != 1 || mad.aa[0].Name != "review" || !mad.aa[0].IsEnabled() {
+		t.Fatalf("dispatcher orders = %#v, want enabled review", mad.aa)
+	}
+}
+
 func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Single formula layer with beads-health only.
 	// Override targets wasteland-poll (nonexistent).
