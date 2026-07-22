@@ -261,6 +261,10 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
+Set GC_BD_PROFILE_DIR to an existing writable directory to write an
+opt-in CPU profile, Go runtime trace, and redacted phase-timing report for one
+gc bd invocation.
+
 ```
 gc bd [bd-args...]
 ```
