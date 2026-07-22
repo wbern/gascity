@@ -10,12 +10,14 @@ import (
 	"unicode"
 )
 
-// earlyBdShimPath resolves the standalone bdshim companion. It prefers the
-// binary installed beside gc. It deliberately never falls back to PATH: an
-// enabled fast path must not execute an unrelated or stale bdshim binary.
-var earlyBdShimPath = func() (string, error) {
+// earlyBdShimPath resolves the city-managed bd entry only after proving that
+// it targets the standalone bdshim companion installed beside gc. It
+// deliberately never falls back to PATH: an enabled fast path must not
+// execute an unrelated or stale bdshim binary, and it must retain the managed
+// entrypoint's argv[0] behavior.
+var earlyBdShimPath = func(cityPath string) (string, error) {
 	if gcPath, err := os.Executable(); err == nil && gcPath != "" {
-		if shimPath := earlyBdShimBesideGC(gcPath); shimPath != "" {
+		if shimPath := earlyBdShimForCity(gcPath, cityPath); shimPath != "" {
 			return shimPath, nil
 		}
 	}
@@ -38,6 +40,40 @@ func earlyBdShimBesideGC(gcPath string) string {
 	return ""
 }
 
+// earlyBdShimForCity returns the managed `bd` entry only when it resolves to
+// the executable companion trusted by gc. Calling the companion directly as
+// `bdshim` is observably different from calling the managed entry as `bd`:
+// bdshim uses argv[0] as part of its compatibility/routing contract. Requiring
+// identical resolved files preserves that contract without trusting city PATH.
+func earlyBdShimForCity(gcPath, cityPath string) string {
+	trustedPath := earlyBdShimBesideGC(gcPath)
+	trustedResolved, ok := resolvedExecutablePath(trustedPath)
+	if !ok {
+		return ""
+	}
+	managedPath := filepath.Join(cityPath, ".gc", "shimbin", "bd")
+	managedResolved, ok := resolvedExecutablePath(managedPath)
+	if !ok || managedResolved != trustedResolved {
+		return ""
+	}
+	return managedPath
+}
+
+func resolvedExecutablePath(path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return "", false
+	}
+	return filepath.Clean(resolved), true
+}
+
 // tryEarlyBdShim handles the deliberately tiny, opt-in read-only part of the
 // gc bd surface that has byte-level controller-rendering parity today. It is
 // called before telemetry, Cobra construction, and eager pack discovery, which
@@ -50,14 +86,15 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 	if strings.TrimSpace(os.Getenv("GC_BD_FASTPATH")) != "1" {
 		return 0, false
 	}
-	if !hasManagedCityContext() {
+	cityPath := managedCityPath()
+	if cityPath == "" {
 		return 0, false
 	}
 	bdArgs, ok := earlyBdShimShowArgs(args)
 	if !ok {
 		return 0, false
 	}
-	shimPath, err := earlyBdShimPath()
+	shimPath, err := earlyBdShimPath(cityPath)
 	if err != nil || shimPath == "" {
 		return 0, false
 	}
@@ -84,8 +121,16 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 // hasManagedCityContext matches the standalone bdshim's city-resolution
 // contract. Without it, the shim may legitimately pass through to raw bd; gc
 // bd must instead retain its full city/rig discovery semantics.
-func hasManagedCityContext() bool {
-	return strings.TrimSpace(os.Getenv("GC_CITY_PATH")) != "" || strings.TrimSpace(os.Getenv("GC_CITY")) != ""
+func managedCityPath() string {
+	if cityPath := strings.TrimSpace(os.Getenv("GC_CITY_PATH")); cityPath != "" {
+		return cityPath
+	}
+	// GC_CITY may be a city name, which needs full config resolution. Only an
+	// absolute path is enough context for this pre-Cobra fast path.
+	if cityPath := strings.TrimSpace(os.Getenv("GC_CITY")); filepath.IsAbs(cityPath) {
+		return cityPath
+	}
+	return ""
 }
 
 // earlyBdShimShowArgs accepts only `gc bd show <id> --json`. The controller

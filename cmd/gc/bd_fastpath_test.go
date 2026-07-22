@@ -15,7 +15,7 @@ func TestTryEarlyBdShimRoutesOptInJSONShow(t *testing.T) {
 
 	shim := writeEarlyBdShim(t, "printf 'shim:%s\\n' \"$*\"\n")
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) { return shim, nil }
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previous })
 
 	var stdout, stderr bytes.Buffer
@@ -25,6 +25,30 @@ func TestTryEarlyBdShimRoutesOptInJSONShow(t *testing.T) {
 	}
 	if got, want := stdout.String(), "shim:show gcw-123 --json\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestTryEarlyBdShimPreservesManagedBDEntrypointName(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	managedPath := filepath.Join(t.TempDir(), ".gc", "shimbin", "bd")
+	if err := os.MkdirAll(filepath.Dir(managedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managedPath, []byte("#!/bin/sh\nprintf '%s\\n' \"${0##*/}\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) { return managedPath, nil }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+
+	var stdout bytes.Buffer
+	code, handled := tryEarlyBdShim([]string{"bd", "show", "gcw-123", "--json"}, strings.NewReader(""), &stdout, io.Discard)
+	if !handled || code != 0 {
+		t.Fatalf("tryEarlyBdShim() = (%d, %t), want (0, true)", code, handled)
+	}
+	if got, want := stdout.String(), "bd\n"; got != want {
+		t.Fatalf("managed entrypoint name = %q, want %q", got, want)
 	}
 }
 
@@ -52,13 +76,50 @@ func TestEarlyBdShimBesideGCRequiresExecutableSibling(t *testing.T) {
 	}
 }
 
+func TestEarlyBdShimForCityUsesOnlyTrustedManagedBDAlias(t *testing.T) {
+	binDir := t.TempDir()
+	gcPath := filepath.Join(binDir, "gc")
+	trustedPath := filepath.Join(binDir, "bdshim")
+	for _, path := range []string{gcPath, trustedPath} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	city := t.TempDir()
+	managedDir := filepath.Join(city, ".gc", "shimbin")
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managedPath := filepath.Join(managedDir, "bd")
+	foreignPath := filepath.Join(t.TempDir(), "bdshim")
+	if err := os.WriteFile(foreignPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreignPath, managedPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := earlyBdShimForCity(gcPath, city); got != "" {
+		t.Fatalf("foreign managed entry = %q, want fallback", got)
+	}
+	if err := os.Remove(managedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(trustedPath, managedPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := earlyBdShimForCity(gcPath, city); got != managedPath {
+		t.Fatalf("trusted managed entry = %q, want %q", got, managedPath)
+	}
+}
+
 func TestTryEarlyBdShimFailsClosedForUnsafeShapes(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	called := false
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) {
+	earlyBdShimPath = func(_ string) (string, error) {
 		called = true
 		return "", nil
 	}
@@ -90,7 +151,7 @@ func TestRunUsesEarlyBdShim(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 	shim := writeEarlyBdShim(t, "printf '{\\\"id\\\":\\\"gcw-123\\\"}\\n'\n")
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) { return shim, nil }
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previous })
 
 	var stdout, stderr bytes.Buffer
@@ -108,7 +169,7 @@ func TestTryEarlyBdShimFallsBackWithoutManagedCityOrShim(t *testing.T) {
 	t.Setenv("GC_CITY", "")
 
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) {
+	earlyBdShimPath = func(_ string) (string, error) {
 		t.Fatal("bdshim path must not be resolved without managed city context")
 		return "", nil
 	}
@@ -121,11 +182,11 @@ func TestTryEarlyBdShimFallsBackWithoutManagedCityOrShim(t *testing.T) {
 
 func TestTryEarlyBdShimPreservesShimExitCode(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
-	t.Setenv("GC_CITY", "gc2")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "printf controller-down >&2\nexit 7\n")
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) { return shim, nil }
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previous })
 
 	var stderr bytes.Buffer
@@ -136,11 +197,11 @@ func TestTryEarlyBdShimPreservesShimExitCode(t *testing.T) {
 
 func TestTryEarlyBdShimNormalizesSignalExitToFailure(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
-	t.Setenv("GC_CITY", "gc2")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "kill -TERM $$\n")
 	previous := earlyBdShimPath
-	earlyBdShimPath = func() (string, error) { return shim, nil }
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previous })
 
 	if code, handled := tryEarlyBdShim([]string{"bd", "show", "gcw-123", "--json"}, strings.NewReader(""), io.Discard, io.Discard); !handled || code != 1 {
