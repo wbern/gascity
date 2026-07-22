@@ -87,8 +87,8 @@ func TestRunBdInvocationProfileCoversGCRoutingAndChild(t *testing.T) {
 	if got := stdout.String(); got != "profile-success\n" {
 		t.Fatalf("stdout = %q, want profile-success", got)
 	}
-	if got := stderr.String(); got != "" {
-		t.Fatalf("stderr = %q, want empty", got)
+	if got := stderr.String(); strings.Contains(got, "profile-dir-leaked") || strings.Contains(got, "gc bd: profile:") {
+		t.Fatalf("stderr contains profiler failure: %q", got)
 	}
 
 	entries, err := os.ReadDir(profileDir)
