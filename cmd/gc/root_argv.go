@@ -13,11 +13,22 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !ok || (command != "metrics" && command != "bd")
+	discoverPackCommands := !ok || !rootCommandSkipsPackDiscovery(command)
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,
 		eagerPackCommandDiscovery: discoverPackCommands,
+	}
+}
+
+// rootCommandSkipsPackDiscovery identifies built-in helpers that must remain
+// independent of pack config loading while the Beads provider is reloading.
+func rootCommandSkipsPackDiscovery(command string) bool {
+	switch command {
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+		return true
+	default:
+		return false
 	}
 }
 
