@@ -76,6 +76,29 @@ func TestNormalizeDiscoveryPathFallsBackToLongestExistingAncestor(t *testing.T) 
 	}
 }
 
+func TestFindCityResolvesSymlinkedCityDir(t *testing.T) {
+	realCity := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realCity, link); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	want, err := filepath.EvalSymlinks(realCity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := findCity(link)
+	if err != nil {
+		t.Fatalf("findCity(%q): %v", link, err)
+	}
+	if got != filepath.Clean(want) {
+		t.Errorf("findCity(%q) = %q, want %q", link, got, filepath.Clean(want))
+	}
+}
+
 func TestFindCitySymlinkedCeilingBoundsDiscovery(t *testing.T) {
 	root := t.TempDir()
 	realCeiling := filepath.Join(root, "ceiling")

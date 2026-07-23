@@ -1494,7 +1494,11 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
-	return filepath.Clean(scopeRoot)
+	scopeRoot = filepath.Clean(scopeRoot)
+	if resolved, err := filepath.EvalSymlinks(scopeRoot); err == nil {
+		scopeRoot = resolved
+	}
+	return scopeRoot
 }
 
 func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {

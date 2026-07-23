@@ -30,6 +30,9 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 	var legacy string
 	for {
 		if citylayout.HasCityConfig(dir) {
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				return resolved, nil
+			}
 			return dir, nil
 		}
 		if legacy == "" && !isCityDiscoveryCeiling(dir, opts.ceilingDirs) && citylayout.HasRuntimeRoot(dir) && !isIgnoredLegacyRuntimeRoot(dir, opts.ignoredLegacyRuntime) {
