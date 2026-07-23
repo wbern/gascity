@@ -74,7 +74,19 @@ func resolvedExecutablePath(path string) (string, bool) {
 	return filepath.Clean(resolved), true
 }
 
-// tryEarlyBdShim handles the deliberately tiny, opt-in read-only part of the
+// bdFastpathEnabled defaults the proven read-only fast path on for this fork.
+// Operators can set GC_BD_FASTPATH=0 to force the ordinary gc bd path. Unknown
+// values fail closed to that ordinary path instead of enabling unexpectedly.
+func bdFastpathEnabled(raw string) bool {
+	switch strings.TrimSpace(raw) {
+	case "", "1":
+		return true
+	default:
+		return false
+	}
+}
+
+// tryEarlyBdShim handles the deliberately tiny read-only part of the
 // gc bd surface that has byte-level controller-rendering parity today. It is
 // called before telemetry, Cobra construction, and eager pack discovery, which
 // are the dominant cost of a fresh gc bd invocation.
@@ -83,7 +95,7 @@ func resolvedExecutablePath(path string) (string, bool) {
 // the existing doBd path. In particular, it never bypasses rig resolution,
 // mutation guards, heartbeat rewriting, or the work-record close gate.
 func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int, handled bool) {
-	if strings.TrimSpace(os.Getenv("GC_BD_FASTPATH")) != "1" {
+	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
 		return 0, false
 	}
 	cityPath := managedCityPath()

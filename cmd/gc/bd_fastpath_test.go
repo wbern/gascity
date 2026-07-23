@@ -9,6 +9,27 @@ import (
 	"testing"
 )
 
+func TestBdFastpathEnabledDefaultsOnWithExplicitOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "unset", want: true},
+		{name: "enabled", raw: "1", want: true},
+		{name: "enabled trimmed", raw: " 1 ", want: true},
+		{name: "disabled", raw: "0", want: false},
+		{name: "disabled trimmed", raw: " 0 ", want: false},
+		{name: "invalid fails closed", raw: "yes", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bdFastpathEnabled(tc.raw); got != tc.want {
+				t.Fatalf("bdFastpathEnabled(%q) = %t, want %t", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTryEarlyBdShimRoutesOptInJSONShow(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
@@ -25,6 +46,22 @@ func TestTryEarlyBdShimRoutesOptInJSONShow(t *testing.T) {
 	}
 	if got, want := stdout.String(), "shim:show gcw-123 --json\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestTryEarlyBdShimHonorsExplicitOptOut(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "0")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) {
+		t.Fatal("explicit opt-out must not resolve the bdshim path")
+		return "", nil
+	}
+	t.Cleanup(func() { earlyBdShimPath = previous })
+
+	if code, handled := tryEarlyBdShim([]string{"bd", "show", "gcw-123", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+		t.Fatalf("tryEarlyBdShim() = (%d, %t) when disabled, want (0, false)", code, handled)
 	}
 }
 
