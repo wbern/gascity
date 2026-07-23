@@ -281,6 +281,9 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 		if len(args) > 0 && args[0] == "rev-parse" {
 			return commit + "\n", nil
 		}
+		if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("index refreshed by status"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		return "", nil // status --porcelain: clean
 	}
 	t.Cleanup(func() { runRepoCacheGit = orig })
