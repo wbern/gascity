@@ -444,6 +444,17 @@ func reopenClosedConfiguredNamedSessionBead(
 			batch[session.PrimedAtMetadataKey] = ""
 			batch[session.PrimingAttemptedAtMetadataKey] = ""
 			batch[session.PromptHashMetadataKey] = ""
+			// A reopened bead is a fresh spawn, not a continuation of its old
+			// quarantine or hold. Keep this reset aligned with the ordinary wake
+			// path so new wake blockers are not missed here.
+			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"])
+			delete(blockers, "state") // The reopen owns the requested state.
+			for key, value := range blockers {
+				batch[key] = value
+			}
+			// A fresh spawn always drops its prior sleep reason, including an
+			// unrecognized legacy reason.
+			batch["sleep_reason"] = ""
 		} else {
 			batch["pending_create_started_at"] = ""
 		}

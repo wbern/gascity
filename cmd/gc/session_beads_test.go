@@ -1188,6 +1188,8 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 		},
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	staleChurnCount := session.ChurnAccrualPatch(defaultMaxChurnCycles-1, defaultMaxChurnCycles, now).Patch["churn_count"]
+	staleWakeAttempts := session.WakeFailureAccrualPatch(defaultMaxWakeAttempts-1, defaultMaxWakeAttempts, now).Patch["wake_attempts"]
 	closed, err := store.Create(beads.Bead{
 		Title:  "mayor",
 		Type:   sessionBeadType,
@@ -1204,6 +1206,13 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 			"started_live_hash":          "old-live",
 			"live_hash":                  "old-runtime",
 			"startup_dialog_verified":    "true",
+			"sleep_reason":               "context-churn",
+			"churn_count":                staleChurnCount,
+			"quarantined_until":          now.Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+			"wake_attempts":              staleWakeAttempts,
+			"held_until":                 now.Add(-4 * time.Minute).UTC().Format(time.RFC3339),
+			"wait_hold":                  "wait",
+			"sleep_intent":               "wait",
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
@@ -1233,10 +1242,70 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 		"started_live_hash",
 		"live_hash",
 		"startup_dialog_verified",
+		"sleep_reason",
+		"quarantined_until",
+		"held_until",
+		"wait_hold",
+		"sleep_intent",
 	} {
 		if got := reopened.Metadata[key]; got != "" {
 			t.Fatalf("%s = %q, want empty on recreate", key, got)
 		}
+	}
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if got := reopened.Metadata[key]; got != "0" {
+			t.Fatalf("%s = %q, want %q on recreate", key, got, "0")
+		}
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadPreservesRequestedSuspendedState(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "mayor", Mode: "always"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	closed, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "mayor",
+			"template":                   "mayor",
+			"state":                      "suspended",
+			"sleep_reason":               "user-hold",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	reopened, _, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "mayor", sessionName, string(session.StateSuspended), now, nil, io.Discard,
+	)
+	if !ok {
+		t.Fatal("reopenClosedConfiguredNamedSessionBead failed")
+	}
+	if got := reopened.Metadata["state"]; got != string(session.StateSuspended) {
+		t.Fatalf("state = %q, want %q", got, session.StateSuspended)
+	}
+	if got := reopened.Metadata["sleep_reason"]; got != "" {
+		t.Fatalf("sleep_reason = %q, want empty", got)
 	}
 }
 
