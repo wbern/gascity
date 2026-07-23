@@ -2157,6 +2157,49 @@ func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
 	}
 }
 
+func TestHookClaimSkipsMessageBeadsAheadOfRoutedWork(t *testing.T) {
+	const (
+		identity = "builder"
+		mailID   = "ra-wisp-message"
+		workID   = "ga-routed-work"
+	)
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"` + mailID + `","status":"open","issue_type":"message","assignee":"` + identity + `"},
+			{"id":"` + workID + `","status":"open","issue_type":"task","metadata":{"gc.routed_to":"` + identity + `"}}
+		]`, nil
+	}
+	claimed := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+			if id != workID {
+				t.Fatalf("Claim called for %q, want routed work %q", id, workID)
+			}
+			claimed = true
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Type: "task"}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           identity,
+		IdentityCandidates: hookClaimIdentityCandidates(identity, "", identity, identity, identity),
+		RouteTargets:       hookClaimRouteTargets(identity, identity),
+		JSON:               true,
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != workID || code != 0 {
+		t.Fatalf("want claimed routed work %q, got %+v (code %d)", workID, result, code)
+	}
+	if !claimed {
+		t.Fatal("Claim was not called for routed work")
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }

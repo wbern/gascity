@@ -390,6 +390,9 @@ func reportHookClaimRejected(candidate, claimed beads.Bead, opts hookClaimOption
 
 func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
 			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 			result := hookClaimJSONResult{
@@ -406,6 +409,9 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 		}
 	}
 	for _, candidate := range candidates {
+		if hookClaimCandidateIsMessage(candidate) {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "open") &&
 			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
 			result := hookClaimJSONResult{
@@ -422,6 +428,10 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 		}
 	}
 	return hookClaimJSONResult{}, beads.Bead{}, false
+}
+
+func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }
 
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
