@@ -289,11 +289,11 @@ func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cityCfg.Rigs[0].DoltHost; got != "db.example.com" {
-		t.Fatalf("city.toml rig DoltHost = %q, want %q", got, "db.example.com")
+	if got := cityCfg.Rigs[0].DoltHost; got != "" {
+		t.Fatalf("city.toml rig DoltHost = %q, want empty", got)
 	}
-	if got := cityCfg.Rigs[0].DoltPort; got != "3307" {
-		t.Fatalf("city.toml rig DoltPort = %q, want %q", got, "3307")
+	if got := cityCfg.Rigs[0].DoltPort; got != "" {
+		t.Fatalf("city.toml rig DoltPort = %q, want empty", got)
 	}
 	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
 		t.Fatalf("expected inherited external rig to remove port file, stat err = %v", err)

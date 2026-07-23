@@ -706,8 +706,15 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 		if !strings.EqualFold(cfg.Rigs[i].Name, rigName) {
 			continue
 		}
-		cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
-		cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		// An inherited rig must not carry a per-rig endpoint in city.toml:
+		// that turns the inherited state into an explicit override on reconcile.
+		if state.EndpointOrigin == contract.EndpointOriginInheritedCity {
+			cfg.Rigs[i].DoltHost = ""
+			cfg.Rigs[i].DoltPort = ""
+		} else {
+			cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
+			cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+		}
 		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}
 	return fmt.Errorf("rig %q not found in city config", rigName)
