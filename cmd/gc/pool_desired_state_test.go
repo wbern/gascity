@@ -195,6 +195,7 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	work := []beads.Bead{
 		workBead("w1", "rig/claude", "sess-1", "in_progress", 5),
 	}
+	work[0].Title = "retain worktree title"
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	scaleCheck := map[string]int{"rig/claude": 2}
 
@@ -213,6 +214,9 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	}
 	if reqs[0].SessionBeadID != "sess-1" {
 		t.Errorf("first request session = %q, want sess-1", reqs[0].SessionBeadID)
+	}
+	if got := reqs[0].WorkBeadTitle; got != work[0].Title {
+		t.Errorf("resume WorkBeadTitle = %q, want %q", got, work[0].Title)
 	}
 	if reqs[1].Tier != "new" {
 		t.Errorf("second request tier = %q, want new", reqs[1].Tier)
@@ -429,11 +433,15 @@ func TestComputePoolDesiredStates_WakesReadyOpenAssignedBead(t *testing.T) {
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(8), 0)},
 	}
 	ready := workBead("rdy-1", "rig/claude", "rig/claude", "open", 5) // no defer_until
+	ready.Title = "wake title retained"
 
 	result := ComputePoolDesiredStates(cfg, []beads.Bead{ready}, nil, nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "wake-known-identity" {
 		t.Fatalf("ready open assigned bead: want one wake-known-identity request, got %+v", result)
+	}
+	if got := result[0].Requests[0].WorkBeadTitle; got != ready.Title {
+		t.Errorf("wake-known-identity WorkBeadTitle = %q, want %q", got, ready.Title)
 	}
 }
 
