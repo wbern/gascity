@@ -94,6 +94,14 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 	return context.WithTimeout(parent, bdCommandTimeout)
 }
 
+func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
+	if plan == nil {
+		return bdCommandTimeout
+	}
+	const perItem = 2 * time.Second
+	return bdCommandTimeout + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
+}
+
 func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), bdCommandTimeout)
 }
@@ -799,7 +807,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	}
 	defer release()
 
-	ctx, cancel := nativeDoltOperationContext(parent)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
 	keyToID := make(map[string]string, len(plan.Nodes))
