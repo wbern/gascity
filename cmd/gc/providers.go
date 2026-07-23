@@ -669,17 +669,15 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
-	if samePath(resolvedScopeRoot, runtimeCityPath) {
-		return provider
-	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
 	// file-backed city (and vice versa). Prefer explicit scope-local store
-	// markers over the city default so scoped commands keep talking to the
-	// rig's actual beads backend. The bd routing identity is metadata.json;
-	// config.yaml is a compatibility mirror and can survive migrations.
+	// markers over the configured default so every scope, including the city
+	// root, uses the backend recorded on disk. The bd routing identity is
+	// metadata.json; config.yaml is a compatibility mirror and can survive
+	// migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
 		return "bd"
 	}
