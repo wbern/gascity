@@ -304,6 +304,19 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 		t.Fatalf("second validation re-ran git (%d→%d); want cached (no new git)", first, calls)
 	}
 
+	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index.lock"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("post-.git-touch validate: %v", err)
+	}
+	if calls != first {
+		t.Fatalf(".git-dir touch busted the memo (%d→%d); want cached (no new git)", first, calls)
+	}
+	if err := os.Remove(filepath.Join(cacheDir, ".git", "index.lock")); err != nil {
+		t.Fatal(err)
+	}
+
 	// Touching the checkout invalidates the fingerprint → revalidate.
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
 		t.Fatal(err)
