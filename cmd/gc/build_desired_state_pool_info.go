@@ -115,6 +115,9 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if isFailedCreateSessionInfo(info) {
 		return false
 	}
+	if strings.TrimSpace(info.MetadataState) == string(session.StateDraining) {
+		return false
+	}
 	if info.MetadataState == "asleep" {
 		return false
 	}

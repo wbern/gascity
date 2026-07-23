@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
@@ -253,6 +254,20 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 			})
 		}
 	})
+}
+
+func TestReusablePoolSessionInfoDrainingSessionIsNotReusable(t *testing.T) {
+	info := session.Info{
+		ID:                  "session-draining",
+		Template:            "repo/worker",
+		SessionNameMetadata: "worker-1",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       string(session.StateDraining),
+	}
+	if reusablePoolSessionInfo(&agentBuildParams{}, &config.Agent{Name: "worker", Dir: "repo"}, "repo/worker", info, nil) {
+		t.Fatalf("draining session must not be reusable as a pool slot")
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
