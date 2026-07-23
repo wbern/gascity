@@ -56,54 +56,61 @@ printf '\n'
 	}
 }
 
-func TestAggregateLocalTestEntrypointsFailClosed(t *testing.T) {
+func TestParallelLocalTestEntrypointsFailClosed(t *testing.T) {
 	repoRoot := repoRoot(t)
-	guard := "./scripts/refuse-local-aggregate-test"
+	guard := "./scripts/refuse-local-parallel-test"
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
 	for _, target := range []string{
-		"test",
-		"test-mac",
 		"test-fast-parallel",
-		"test-cmd-gc-process",
 		"test-cmd-gc-process-parallel",
-		"test-acceptance-all",
-		"test-integration",
-		"test-integration-shards",
 		"test-integration-shards-parallel",
-		"test-integration-shards-cover",
 		"test-local-full-parallel",
-		"test-cover",
-		"test-cover-mac",
 	} {
-		want := target + ":\n\t@$(LOCAL_AGGREGATE_TEST_GUARD) \"make $@\""
+		want := target + ":\n\t@$(LOCAL_PARALLEL_TEST_GUARD) \"make $@\""
 		if !strings.Contains(string(makefile), want) {
 			t.Fatalf("%s must fail closed before prerequisites or test work; missing %q", target, want)
 		}
 	}
-	if !strings.Contains(string(makefile), "LOCAL_AGGREGATE_TEST_GUARD := "+guard) {
-		t.Fatalf("Makefile must use %s for every disabled aggregate target", guard)
+	for _, target := range []string{
+		"test",
+		"test-mac",
+		"test-cmd-gc-process",
+		"test-acceptance-all",
+		"test-integration",
+		"test-integration-shards",
+		"test-integration-shards-cover",
+		"test-cover",
+		"test-cover-mac",
+	} {
+		forbidden := target + ":\n\t@$(LOCAL_PARALLEL_TEST_GUARD)"
+		if strings.Contains(string(makefile), forbidden) {
+			t.Fatalf("%s is serial or explicitly scoped and must remain runnable", target)
+		}
 	}
-	guardScript, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "refuse-local-aggregate-test"))
+	if !strings.Contains(string(makefile), "LOCAL_PARALLEL_TEST_GUARD := "+guard) {
+		t.Fatalf("Makefile must use %s for every disabled parallel target", guard)
+	}
+	guardScript, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "refuse-local-parallel-test"))
 	if err != nil {
-		t.Fatalf("read aggregate-test guard: %v", err)
+		t.Fatalf("read parallel-test guard: %v", err)
 	}
 	for _, forbidden := range []string{"go test", "xargs", "mktemp"} {
 		if strings.Contains(string(guardScript), forbidden) {
-			t.Fatalf("aggregate-test guard must not invoke %q", forbidden)
+			t.Fatalf("parallel-test guard must not invoke %q", forbidden)
 		}
 	}
 	if !strings.Contains(string(guardScript), "exit 2") {
-		t.Fatal("aggregate-test guard must return a clear non-zero refusal")
+		t.Fatal("parallel-test guard must return a clear non-zero refusal")
 	}
 
 	localRunner, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "test-local-parallel"))
 	if err != nil {
 		t.Fatalf("read local parallel runner: %v", err)
 	}
-	if !strings.Contains(string(localRunner), "refuse-local-aggregate-test") {
+	if !strings.Contains(string(localRunner), "refuse-local-parallel-test") {
 		t.Fatal("direct scripts/test-local-parallel calls must use the same guard")
 	}
 	for _, forbidden := range []string{"gc_test_slice_reexec", "xargs", "go env", "mktemp"} {
@@ -113,7 +120,7 @@ func TestAggregateLocalTestEntrypointsFailClosed(t *testing.T) {
 	}
 }
 
-func TestPrePushDoesNotRunAggregateLocalTests(t *testing.T) {
+func TestPrePushDoesNotRunParallelLocalTests(t *testing.T) {
 	repoRoot := repoRoot(t)
 	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-push"))
 	if err != nil {
@@ -126,16 +133,21 @@ func TestPrePushDoesNotRunAggregateLocalTests(t *testing.T) {
 		}
 	}
 	if !strings.Contains(content, "disabled") {
-		t.Fatal("pre-push hook must explain that aggregate local tests are disabled")
+		t.Fatal("pre-push hook must explain that parallel local tests are disabled")
 	}
 
 	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "mac-regression.yml"))
 	if err != nil {
 		t.Fatalf("read Mac workflow: %v", err)
 	}
-	for _, want := range []string{"make test-mac-ci", "make test-cover-mac-ci"} {
+	for _, want := range []string{"make test-mac", "make test-cover-mac"} {
 		if !strings.Contains(string(workflow), want) {
 			t.Fatalf("Mac CI must retain its broad coverage via %q", want)
+		}
+	}
+	for _, unwanted := range []string{"make test-mac-ci", "make test-cover-mac-ci"} {
+		if strings.Contains(string(workflow), unwanted) {
+			t.Fatalf("Mac CI should use the ordinary serial target, not fork-only alias %q", unwanted)
 		}
 	}
 }

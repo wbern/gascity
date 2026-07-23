@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+entrypoint="${1:-parallel local test runner}"
+
+cat >&2 <<EOF
+${entrypoint} is disabled in the wbern fork.
+
+Parallel local test fan-out has exhausted this workstation. Use a focused
+package, an ordinary serial target, or one named shard. See TESTING.md.
+EOF
+
+exit 2

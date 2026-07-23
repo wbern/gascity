@@ -114,7 +114,6 @@ endif
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-beads-bd-version check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go
 .PHONY: check-release-dist-ignore
-.PHONY: test-mac-ci test-cover-mac-ci
 
 ## build: compile gc binary with version metadata (CGO_ENABLED=0 by default —
 ## server-mode/DoltLite thin client; override CGO_ENABLED=1 for a native build)
@@ -444,27 +443,23 @@ test-ci-policy:
 	$(TEST_ENV) PYTHONDONTWRITEBYTECODE=1 python3 -S -m unittest discover -s .github/workflows/scripts -p 'test_ci_suite_coverage.py'
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 
-LOCAL_AGGREGATE_TEST_GUARD := ./scripts/refuse-local-aggregate-test
+LOCAL_PARALLEL_TEST_GUARD := ./scripts/refuse-local-parallel-test
 
-## Aggregate test runners are intentionally disabled on local workstations.
-test:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
+test: test-fsys-darwin-compile
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
 MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 
-## test-mac: disabled locally; test-mac-ci remains the dedicated CI recipe.
-test-mac:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
-
-## test-mac-ci: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
-test-mac-ci: test-fsys-darwin-compile
+## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
+test-mac: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
 
-## test-fast-parallel: disabled local aggregate runner.
+## test-fast-parallel: disabled local parallel fan-out runner.
 test-fast-parallel:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	@$(LOCAL_PARALLEL_TEST_GUARD) "make $@"
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.
@@ -497,9 +492,10 @@ test-native-doltlite-beads:
 sync-bd-corpus:
 	scripts/sync-bd-corpus.sh
 
-## test-cmd-gc-process: disabled local aggregate suite.
+## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
+## process-backed lifecycle coverage routed out of the default fast loop
 test-cmd-gc-process:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout 25m ./cmd/gc
 
 CMD_GC_PROCESS_SHARD ?= 1
 CMD_GC_PROCESS_TOTAL ?= 6
@@ -508,9 +504,9 @@ CMD_GC_COVER_SHARD ?= 1
 test-cmd-gc-process-shard:
 	$(TEST_ENV) GC_FAST_UNIT=0 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_PROCESS_SHARD) $(CMD_GC_PROCESS_TOTAL)
 
-## test-cmd-gc-process-parallel: disabled local aggregate runner.
+## test-cmd-gc-process-parallel: disabled local parallel fan-out runner.
 test-cmd-gc-process-parallel:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	@$(LOCAL_PARALLEL_TEST_GUARD) "make $@"
 
 ## test-worker-core: run deterministic worker transcript and continuation conformance
 test-worker-core:
@@ -564,33 +560,30 @@ test-acceptance-b:
 test-acceptance-c:
 	$(TEST_ENV) go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
 
-## test-acceptance-all: disabled local aggregate suite.
-test-acceptance-all:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+## test-acceptance-all: run all acceptance tiers
+test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c
 
-## test-integration: disabled local aggregate suite.
+## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	$(TEST_ENV) go test -tags integration -timeout 30m ./...
 
 ## test-integration-huma: run just the Huma binary smoke test
 test-integration-huma:
 	$(TEST_ENV) go test -tags integration -timeout 2m -run TestHumaBinary ./test/integration/
 
-## test-integration-shards: disabled local aggregate suite.
-test-integration-shards:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+## test-integration-shards: run the CI integration shards sequentially
+test-integration-shards: test-integration-packages test-integration-review-formulas test-integration-bdstore test-integration-rest-smoke test-integration-rest-full
 
-## test-integration-shards-parallel: disabled local aggregate runner.
+## test-integration-shards-parallel: disabled local parallel fan-out runner.
 test-integration-shards-parallel:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	@$(LOCAL_PARALLEL_TEST_GUARD) "make $@"
 
-## test-local-full-parallel: disabled local aggregate runner.
+## test-local-full-parallel: disabled local parallel fan-out runner.
 test-local-full-parallel:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+	@$(LOCAL_PARALLEL_TEST_GUARD) "make $@"
 
-## test-integration-shards-cover: disabled local aggregate suite.
-test-integration-shards-cover:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+## test-integration-shards-cover: run the CI integration coverage shards sequentially
+test-integration-shards-cover: test-integration-packages-cover test-integration-review-formulas-cover test-integration-bdstore-cover test-integration-rest-smoke-cover test-integration-rest-full-cover
 
 ## test-integration-packages: run all integration-tagged packages except ./test/integration
 ## cmd/gc package shards default to GC_FAST_UNIT=1; use test-cmd-gc-process for the slow process suite.
@@ -715,17 +708,20 @@ check-docs:
 # cmd/gc excluded: CI runs its coverage through test-cover-cmdgc-shard.
 UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
 
-## test-cover: disabled local aggregate suite.
-test-cover:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
+## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
+test-cover: test-fsys-darwin-compile
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@rm -f coverage.cmdgc.*.txt
+	@for s in $$(seq 1 $(CMD_GC_COVER_TOTAL)); do \
+		$(TEST_ENV) GO_TEST_COVERPROFILE="coverage.cmdgc.$$s.txt" \
+		GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=10m \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_COVER_TOTAL) || exit 1; \
+	done
+	./scripts/merge-coverprofiles coverage.txt coverage.noncmdgc.txt coverage.cmdgc.*.txt
 
-## test-cover-mac: disabled locally; test-cover-mac-ci remains the dedicated CI recipe.
-test-cover-mac:
-	@$(LOCAL_AGGREGATE_TEST_GUARD) "make $@"
-
-## test-cover-mac-ci: Mac coverage sweep with cmd/gc excluded; cmd/gc runs via the Mac sharded job.
+## test-cover-mac: Mac coverage sweep with cmd/gc excluded; cmd/gc runs via the Mac sharded job.
 ## Running the full test-cover cmd/gc shards sequentially on Mac would exceed the 25m job cap.
-test-cover-mac-ci: test-fsys-darwin-compile
+test-cover-mac: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
 
 ## test-cover-noncmdgc: run unit coverage for all packages except cmd/gc (CI parallel half).

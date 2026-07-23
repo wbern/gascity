@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This fork deliberately disables aggregate local test suites: their fan-out
-# can exhaust a developer workstation. Keep the hook non-blocking while CI
-# retains broad coverage.
+# This fork disables automatic parallel test fan-out because it can exhaust a
+# developer workstation. Keep the hook non-blocking; focused and serial tests
+# remain available explicitly.
 cat >/dev/null
-echo "aggregate local test suite disabled in the wbern fork; use focused tests and CI" >&2
+echo "automatic parallel test fan-out disabled in the wbern fork; use focused or serial tests" >&2

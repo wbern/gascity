@@ -212,9 +212,11 @@ Codecov flags.
 
 #### Local fork safety
 
-This fork deliberately disables aggregate local test targets. Their parallel
-compiler fan-out can exhaust a developer workstation. CI retains the broad,
-sharded coverage; local validation should be the narrowest command that proves
+This fork disables only the local parallel fan-out targets and
+`scripts/test-local-parallel`. Their concurrent compiler and process fan-out
+can exhaust a developer workstation. Focused tests, ordinary serial targets,
+and individual named shards remain available. CI retains broad parallel
+coverage; local validation should still be the narrowest command that proves
 the changed behavior.
 
 For a focused package, use a named test:

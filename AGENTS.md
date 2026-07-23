@@ -388,9 +388,9 @@ becoming more useful as models improve — it becomes LESS useful instead.
   must be checked manually.
 
 - `TESTING.md` — testing philosophy and tier boundaries. Read before writing
-  any test. This fork disables aggregate local test suites because their
-  compiler fan-out can exhaust a workstation; use focused packages or one
-  named shard locally while CI owns broad coverage.
+  any test. This fork disables the local parallel fan-out runner because its
+  concurrent compiler load can exhaust a workstation. Focused tests, serial
+  targets, and individual named shards remain available.
 
 ## Build Cache Conventions
 
@@ -436,7 +436,7 @@ concurrent builds.
 
 Before considering any task complete:
 
-- Relevant focused package tests pass; do not run aggregate local test targets
+- Relevant focused package tests pass; do not run local parallel fan-out targets
 - Broader process and integration coverage remains a CI responsibility; local
   proof should be the narrowest command that covers the change
 - `go vet ./...` clean
