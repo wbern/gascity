@@ -34,11 +34,16 @@ func TestClassifyVerb(t *testing.T) {
 		{"ready", []string{"--exclude-type=epic", "--json"}, false, Route},
 		// A ready flag the shim does not model still passes through (byte-identical).
 		{"ready", []string{"--label", "pool:worker", "--json"}, true, Passthrough},
-		// update: the cleanly-mappable flag set routes (the canonical graph-worker
-		// close), but flags with no UpdateOpts mapping (--notes/--claim/...)
-		// passthrough — byte-identical in the identity phase.
+		// Update routes only the cleanly-mappable shape. Body or notes mutations
+		// without a controller translation refuse rather than reaching bd.real.
 		{"update", []string{"x", "--set-metadata", "gc.outcome=pass", "--status", "closed"}, true, Route},
-		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, Passthrough},
+		{"update", []string{"x", "-d", "replacement body"}, false, Route},
+		{"update", []string{"x", "-d", "--body-file"}, false, Route},
+		{"update", []string{"x", "--body-file", "body.md"}, false, Refuse},
+		{"update", []string{"x", "--stdin"}, false, Refuse},
+		{"update", []string{"x", "--append-notes", "progress"}, false, Refuse},
+		{"update", []string{"x", "--allow-empty-description", "-d", "replacement body"}, false, Refuse},
+		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, Refuse},
 		// claim: the pure-claim shape (optionally --json) now routes to the warm
 		// controller (POST /bead/{id}/claim); runBdShim gates on BEADS_ACTOR and
 		// falls back to real bd when the actor is unset or the backend can't claim.

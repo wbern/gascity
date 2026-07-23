@@ -160,6 +160,40 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
+// TestRunRefusesUnsupportedBodyMutations prevents an unsupported body or notes
+// write from falling through to real bd. On a fastpath city that command may
+// write a different Dolt working set while bdshim reports success, so it must
+// fail loudly until the controller API has a faithful translation.
+func TestRunRefusesUnsupportedBodyMutations(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "calls.txt")
+	bd := fakeBd(t, dir, out, 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BDSHIM_LOG", "")
+
+	for _, args := range [][]string{
+		{"update", "gcw-1", "--body-file", "body.md"},
+		{"update", "gcw-1", "--stdin"},
+		{"update", "gcw-1", "--append-notes", "progress"},
+		{"update", "gcw-1", "--notes", "progress"},
+		{"update", "gcw-1", "--allow-empty-description", "-d", "replacement body"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, strings.NewReader("replacement body"), &stdout, &stderr); code == 0 {
+			t.Fatalf("run(%v) = 0; want non-zero refusal", args)
+		}
+		if !strings.Contains(stderr.String(), "refusing") {
+			t.Fatalf("run(%v) stderr = %q; want refusal diagnostic", args, stderr.String())
+		}
+	}
+	if got, err := os.ReadFile(out); err == nil && strings.TrimSpace(string(got)) != "" {
+		t.Fatalf("unsupported body mutation reached real bd: %q", got)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read fake bd calls: %v", err)
+	}
+}
+
 func TestRunLoggingCannotChangePassthroughBehavior(t *testing.T) {
 	dir := t.TempDir()
 	noLogCalls := filepath.Join(dir, "without-log.txt")

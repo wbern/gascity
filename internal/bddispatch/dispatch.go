@@ -741,6 +741,9 @@ func ParseUpdateOpts(args []string) (beads.UpdateOpts, error) {
 			hasVal = true
 			i++
 		}
+		if bdshim.UpdateFlagNeedsValue[name] && !hasVal {
+			return opts, fmt.Errorf("%s expects a value", name)
+		}
 		switch name {
 		case "--status":
 			s := val
@@ -754,7 +757,7 @@ func ParseUpdateOpts(args []string) (beads.UpdateOpts, error) {
 		case "--type":
 			s := val
 			opts.Type = &s
-		case "--description":
+		case "--description", "-d":
 			s := val
 			opts.Description = &s
 		case "--parent":
