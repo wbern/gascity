@@ -62,12 +62,7 @@ const nativeDoltStoreActor = "gascity"
 
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
-	beadslib.StatusBlocked,
 	beadslib.StatusDeferred,
-	beadslib.Status("pinned"),
-	beadslib.Status("hooked"),
-	beadslib.Status("review"),
-	beadslib.Status("testing"),
 }
 
 var (
