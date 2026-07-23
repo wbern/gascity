@@ -43,6 +43,7 @@ var commandShapeFlags = map[string]string{
 	"--claim":             "--claim",
 	"--defer-until":       "--defer-until",
 	"--description":       "--description",
+	"-d":                  "--description",
 	"--ephemeral":         "--ephemeral",
 	"--exclude-type":      "--exclude-type",
 	"--force":             "--force",

@@ -90,10 +90,9 @@ func CreateRoutable(args []string) bool {
 }
 
 // UpdateRoutableFlags are the `bd update` flags that map cleanly onto
-// beads.UpdateOpts. A bd update carrying any OTHER flag (--claim, --notes,
-// --note, --persistent, --unset-metadata, ...) has no faithful in-process
-// translation yet, so it passes through to the real bd (byte-identical in the
-// identity phase) rather than silently losing the unmapped effect.
+// beads.UpdateOpts. An update whose body or notes mutation has no faithful
+// translation is refused loudly; other unsupported flags pass through to real
+// bd in the identity phase rather than being silently dropped.
 var UpdateRoutableFlags = map[string]bool{
 	"--status":       true,
 	"--set-metadata": true,
@@ -104,6 +103,7 @@ var UpdateRoutableFlags = map[string]bool{
 	"--type":         true,
 	"--priority":     true,
 	"--description":  true,
+	"-d":             true,
 	"--parent":       true,
 	"--json":         true,
 }
@@ -120,7 +120,35 @@ var UpdateFlagNeedsValue = map[string]bool{
 	"--type":         true,
 	"--priority":     true,
 	"--description":  true,
+	"-d":             true,
 	"--parent":       true,
+}
+
+// UnsupportedUpdateMutationFlag reports body-like update flags that the shim
+// cannot faithfully translate to the controller API. They must be refused, not
+// passed through to bd.real: in a fastpath city that write can target a
+// different Dolt working set while the next shim read returns stale data.
+func UnsupportedUpdateMutationFlag(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name := a
+		hasInlineValue := false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name = a[:eq]
+			hasInlineValue = true
+		}
+		switch name {
+		case "--allow-empty-description", "--body-file", "--stdin", "--append-notes", "--notes", "--design", "--design-file", "--acceptance":
+			return name, true
+		}
+		if !hasInlineValue && UpdateFlagNeedsValue[name] && i+1 < len(args) {
+			i++
+		}
+	}
+	return "", false
 }
 
 // UpdateClaimShape reports whether a `bd update` arg list is the pure-claim
@@ -153,16 +181,22 @@ func UpdateClaimShape(args []string) bool {
 // UpdateRoutable reports whether a `bd update` arg list uses only flags that
 // map onto beads.UpdateOpts, so the shim can serve it in-process.
 func UpdateRoutable(args []string) bool {
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if !strings.HasPrefix(a, "-") {
 			continue // the id positional or a space-separated flag value
 		}
 		name := a
-		if i := strings.IndexByte(a, '='); i >= 0 {
-			name = a[:i]
+		hasInlineValue := false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name = a[:eq]
+			hasInlineValue = true
 		}
 		if !UpdateRoutableFlags[name] {
 			return false
+		}
+		if !hasInlineValue && UpdateFlagNeedsValue[name] && i+1 < len(args) {
+			i++
 		}
 	}
 	return true
@@ -347,6 +381,9 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 				return Passthrough
 			}
 		case "update":
+			if _, unsupported := UnsupportedUpdateMutationFlag(args); unsupported {
+				return Refuse
+			}
 			// The pure-claim shape routes to the atomic claim endpoint; the
 			// actor gate and fallback live in runBdShim (env-dependent, kept
 			// out of this pure classifier).

@@ -239,11 +239,37 @@ func TestDispatchViaAPIRoutesVerbs(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
+	if code := DispatchViaAPI(client, "update", []string{"gcg-2", "-d", "replacement description"}, &out, &errb); code != 0 {
+		t.Fatalf("short description update via API: code=%d err=%s", code, errb.String())
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v0/city/alpha/bead/gcg-2/update" {
+		t.Fatalf("short description update -> %s %s", gotMethod, gotPath)
+	}
+	if gotBody["description"] != "replacement description" {
+		t.Fatalf("short description update body = %v, want replacement description", gotBody["description"])
+	}
+
+	out.Reset()
+	errb.Reset()
 	if code := DispatchViaAPI(client, "ready", []string{"--assignee=worker", "--json"}, &out, &errb); code != 0 {
 		t.Fatalf("ready via API: code=%d err=%s", code, errb.String())
 	}
 	if gotMethod != http.MethodGet || gotPath != "/v0/city/alpha/beads/ready" {
 		t.Fatalf("ready -> %s %s, want GET /v0/city/alpha/beads/ready", gotMethod, gotPath)
+	}
+}
+
+func TestParseUpdateOptsDescription(t *testing.T) {
+	opts, err := ParseUpdateOpts([]string{"gcg-2", "-d", "--body-file"})
+	if err != nil {
+		t.Fatalf("ParseUpdateOpts(-d): %v", err)
+	}
+	if opts.Description == nil || *opts.Description != "--body-file" {
+		t.Fatalf("ParseUpdateOpts(-d) description = %v, want %q", opts.Description, "--body-file")
+	}
+
+	if _, err := ParseUpdateOpts([]string{"gcg-2", "-d"}); err == nil {
+		t.Fatal("ParseUpdateOpts(-d without value) = nil error, want error")
 	}
 }
 

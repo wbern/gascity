@@ -133,10 +133,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		logDisposition(verb, rawBDArgs, "route", code, start)
 		return code
 	case bdshim.Refuse:
-		// Unreachable while splitPhase is false (ClassifyVerb only returns Refuse
-		// under the split phase); fall back to passthrough defensively rather than
-		// hard-failing a verb that is byte-identical through raw bd.
-		return passthrough()
+		if verb == "update" {
+			if flag, unsupported := bdshim.UnsupportedUpdateMutationFlag(verbArgs); unsupported {
+				logDisposition(verb, rawBDArgs, "refuse", 1, start)
+				fmt.Fprintf(stderr, "bdshim: refusing update %s: this body/notes mutation is not routed to the controller\n", flag) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+		logDisposition(verb, rawBDArgs, "refuse", 1, start)
+		fmt.Fprintf(stderr, "bdshim: refusing unsupported %s command\n", verb) //nolint:errcheck // best-effort stderr
+		return 1
 	default: // bdshim.Passthrough
 		return passthrough()
 	}
