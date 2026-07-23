@@ -1198,7 +1198,11 @@ verify_counts() {
 # verified set, their current values are already proven equal to the
 # pre-flight snapshot and the drift is absorbed working-set state. Any table
 # outside the verified set (system tables such as dolt_schemas), an empty
-# diff, or a probe failure fails closed.
+# diff, or a probe failure fails closed. The sole exception is the managed
+# read-only probe table: it is intentionally excluded from verification, but
+# an absent-at-preflight table with exactly one added row is safely absorbed by
+# the flatten. Any pre-existing, deleted, or modified probe row still fails
+# closed.
 db_root_drift_within_verified_tables() {
   db="$1"
   from="$2"
@@ -1207,20 +1211,37 @@ db_root_drift_within_verified_tables() {
   [ -n "$from" ] && [ -n "$to" ] || return 1
   stat_tmp=$(mktemp)
   if ! dolt_query "$db" \
-    "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
+    "SELECT table_name, rows_added, rows_deleted, rows_modified, old_row_count, new_row_count FROM DOLT_DIFF_STAT('$from', '$to')" \
     > "$stat_tmp" 2>/dev/null; then
     rm -f "$stat_tmp"
     return 1
   fi
-  drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
+  drift_tables=$(awk -F '|' 'NR>=4 && /^\|/ {
+    for (i = 2; i <= 7; i++) { gsub(/^ +| +$/, "", $i) }
+    if ($2 != "") print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7
+  }' "$stat_tmp")
   rm -f "$stat_tmp"
   [ -n "$drift_tables" ] || return 1
-  for drift_t in $drift_tables; do
-    if ! awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
-      return 1
+  while IFS='	' read -r drift_t rows_added rows_deleted rows_modified old_row_count new_row_count; do
+    [ -n "$drift_t" ] || continue
+    if awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+      continue
     fi
-  done
-  db_root_drift_proven_tables="$drift_tables"
+    case "$drift_t:$rows_added:$rows_deleted:$rows_modified:$old_row_count:$new_row_count" in
+      __gc_read_only_probe:1:0:0:0:1)
+        preflight_committed_tables=$(committed_tables "$db" "$from") || return 1
+        if printf '%s\n' "$preflight_committed_tables" | grep -Fqx '__gc_read_only_probe'; then
+          return 1
+        fi
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done <<EOF
+$drift_tables
+EOF
+  db_root_drift_proven_tables=$(printf '%s\n' "$drift_tables" | cut -f1 | tr '\n' ' ')
   return 0
 }
 
