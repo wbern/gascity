@@ -387,11 +387,10 @@ becoming more useful as models improve — it becomes LESS useful instead.
   override it. No field-sync test exists for Rig today; the patch path
   must be checked manually.
 
-- `TESTING.md` — testing philosophy, tier boundaries, and sharded local
-  runners. Read before writing any test. For broad local sweeps, prefer the
-  documented shard targets (`make test-fast-parallel`,
-  `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
-  `make test-local-full-parallel`) over raw `go test`.
+- `TESTING.md` — testing philosophy and tier boundaries. Read before writing
+  any test. This fork disables aggregate local test suites because their
+  compiler fan-out can exhaust a workstation; use focused packages or one
+  named shard locally while CI owns broad coverage.
 
 ## Build Cache Conventions
 
@@ -437,10 +436,9 @@ concurrent builds.
 
 Before considering any task complete:
 
-- Fast unit baseline passes (`make test`, or `make test-fast-parallel` on
-  machines where sharding is useful)
-- Broader process/integration coverage uses the sharded targets documented in
-  `TESTING.md` instead of one monolithic `go test ./...` sweep
+- Relevant focused package tests pass; do not run aggregate local test targets
+- Broader process and integration coverage remains a CI responsibility; local
+  proof should be the narrowest command that covers the change
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change

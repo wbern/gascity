@@ -210,39 +210,20 @@ fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
 
-#### Sharded local runners
+#### Local fork safety
 
-For broad local runs, prefer the repo's sharded wrappers over raw `go test`
-commands. They use the same buckets as CI, run under a scrubbed environment,
-and split single-package bottlenecks such as `cmd/gc` across multiple
-processes.
+This fork deliberately disables aggregate local test targets. Their parallel
+compiler fan-out can exhaust a developer workstation. CI retains the broad,
+sharded coverage; local validation should be the narrowest command that proves
+the changed behavior.
 
-Use these as the default entry points:
-
-```bash
-# Fast unit baseline, with cmd/gc split into shards.
-make test-fast-parallel
-
-# Full process-backed cmd/gc suite, sharded.
-make test-cmd-gc-process-parallel
-
-# CI integration buckets, sharded.
-make test-integration-shards-parallel
-
-# Fast + process-backed cmd/gc + integration shards.
-make test-local-full-parallel
-```
-
-By default, the local runners bound concurrency by both detected CPUs and
-available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
-If memory cannot be detected, they use three jobs. An explicit override always
-wins:
+For a focused package, use a named test:
 
 ```bash
-LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
+go test -count=1 ./internal/beads -run '^TestName$'
 ```
 
-For one package, shard top-level Go tests directly:
+For a large package that needs a single targeted shard, invoke one shard only:
 
 ```bash
 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
@@ -371,10 +352,9 @@ unrelated Tier A flows.
 #### Resource isolation via gascity-test.slice
 
 On hosts that provision a `gascity-test.slice` systemd user slice (resource
-limits for test workloads), the test entrypoints — `scripts/go-test-observable`
-(behind `make test` and `make test-cmd-gc-process`), `scripts/test-go-test-shard`,
-`scripts/test-integration-shard`, and `scripts/test-local-parallel` — re-exec
-themselves inside that slice via
+limits for test workloads), the enabled test entrypoints —
+`scripts/go-test-observable`, `scripts/test-go-test-shard`, and
+`scripts/test-integration-shard` — re-exec themselves inside that slice via
 `systemd-run --user --slice=gascity-test.slice --scope --collect --quiet --`.
 
 Enrollment is automatic and strictly best-effort: it only happens when

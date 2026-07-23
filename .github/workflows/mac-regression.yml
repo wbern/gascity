@@ -192,8 +192,8 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
-      - name: Run make test-mac
-        run: make test-mac
+      - name: Run Mac unit suite
+        run: make test-mac-ci
 
   # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
   # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
@@ -304,10 +304,10 @@ jobs:
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
-      - name: Run test-cover-mac
+      - name: Run Mac coverage suite
         id: cover
         continue-on-error: true
-        run: make test-cover-mac
+        run: make test-cover-mac-ci
       - name: Upload coverage artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -31,8 +31,8 @@ gc_test_slice_should_wrap() {
   [[ "${GC_TEST_SLICE_ENROLLED:-0}" != "1" ]] || return 1
   command -v systemd-run >/dev/null 2>&1 || return 1
   command -v systemctl >/dev/null 2>&1 || return 1
-  # Already inside the slice: nested runners (test-local-parallel invoking
-  # the shard scripts) skip wrapping. cgroup membership survives the env -i
+  # Already inside the slice: nested enabled wrappers skip wrapping. Cgroup
+  # membership survives the env -i
   # scrubbing those runners apply, unlike an env-var guard.
   if grep -qsF "$GC_TEST_SLICE_UNIT" "$GC_TEST_SLICE_CGROUP_FILE"; then
     return 1

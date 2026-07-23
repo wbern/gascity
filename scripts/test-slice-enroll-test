@@ -51,7 +51,7 @@ fi
 # workloads are confined by the Docker daemon's cgroups, not the user
 # slice, and this suite exercises gc_test_slice_reexec against fake
 # toolboxes, so wrapping the suite itself would defeat its scenarios.
-for entrypoint in go-test-observable test-go-test-shard test-integration-shard test-local-parallel; do
+for entrypoint in go-test-observable test-go-test-shard test-integration-shard; do
   path="$repo_root/scripts/$entrypoint"
   if ! grep -qF 'lib/test-slice.sh' "$path" || ! grep -qF 'gc_test_slice_reexec' "$path"; then
     fail "wiring: scripts/$entrypoint does not enroll via lib/test-slice.sh"
