@@ -128,6 +128,50 @@ echo "otel=$OTEL_SERVICE_NAME"
 	}
 }
 
+func TestPinInvokingGCBinaryReplacesAmbientValue(t *testing.T) {
+	env := []string{"PATH=/bin", "GC_BIN=/tmp/stale-gc", "HOME=/tmp/home"}
+	got := pinInvokingGCBinary(env, "/tmp/current-gc")
+
+	gcBinValues := []string{}
+	for _, entry := range got {
+		key, value, ok := strings.Cut(entry, "=")
+		if key == "GC_BIN" && ok {
+			gcBinValues = append(gcBinValues, value)
+		}
+	}
+	if !reflect.DeepEqual(gcBinValues, []string{"/tmp/current-gc"}) {
+		t.Fatalf("GC_BIN values = %q, want [/tmp/current-gc]", gcBinValues)
+	}
+	for _, entry := range pinInvokingGCBinary(env, "") {
+		if strings.HasPrefix(entry, "GC_BIN=") {
+			t.Fatalf("empty executable retained ambient GC_BIN in %q", entry)
+		}
+	}
+}
+
+func TestRunDiscoveredCommandFailsWhenInvokingExecutableCannotBeResolved(t *testing.T) {
+	old := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return "", errors.New("executable unavailable") }
+	t.Cleanup(func() { resolveInvokingExecutable = old })
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "must-not-run.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := config.DiscoveredCommand{BindingName: "test", Command: []string{"status"}, RunScript: scriptPath, SourceDir: dir}
+	var stdout, stderr bytes.Buffer
+	if code := runDiscoveredCommand(entry, dir, "testcity", nil, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want child command not to run", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "resolving invoking gc executable: executable unavailable") {
+		t.Fatalf("stderr = %q, want executable resolution error", stderr.String())
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
