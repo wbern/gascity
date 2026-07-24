@@ -1206,8 +1206,10 @@ verify_counts() {
 # diff, or a probe failure fails closed. The sole exception is the managed
 # read-only probe table: it is intentionally excluded from verification, but
 # an absent-at-preflight table with exactly one added row is safely absorbed by
-# the flatten. Any pre-existing, deleted, or modified probe row still fails
-# closed.
+# the flatten. A pre-existing probe that is in the verified set follows the
+# generic proven-working-set path; this special exception rejects a
+# pre-existing probe that was excluded from verification via the committed-root
+# guard. Deleted or modified probe rows still fail closed.
 db_root_drift_within_verified_tables() {
   db="$1"
   from="$2"
