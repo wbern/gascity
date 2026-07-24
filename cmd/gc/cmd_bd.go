@@ -284,9 +284,9 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	//
 	// Note: gc bd show (read passthrough) does NOT have this guard and still
 	// substring-resolves. That is intentional — reads are non-destructive.
-	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
+	if writeIDs, writeOK, ambiguous, unknownFlag := bdMutationWriteIDs(bdArgs); writeOK {
 		if ambiguous {
-			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, bdMutationAmbiguityDiagnostic(unknownFlag)) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(writeIDs) > 0 {
@@ -416,6 +416,8 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 //     might consume the next argument as its value. In that case the caller
 //     must fail-closed — forwarding the command unguarded risks the original
 //     substring-resolution bug (gcy-g4o).
+//   - unknownFlag: the unrecognized flag when ambiguous is true. It is safe to
+//     report because the scanner never returns the following user-supplied value.
 //
 // The scanner has complete knowledge of every value-consuming flag for each
 // subcommand (sourced from `bd <sub> --help`). Unknown flags that start with
@@ -425,15 +427,15 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
-func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
+func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool, unknownFlag string) {
 	if len(args) == 0 {
-		return nil, false, false
+		return nil, false, false, ""
 	}
 	sub := args[0]
 	switch sub {
 	case "update", "close", "reopen", "delete":
 	default:
-		return nil, false, false
+		return nil, false, false, ""
 	}
 
 	// valueFlags is the complete set of flags that consume the next argument as
@@ -487,9 +489,15 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		return nil, true, true, arg
 	}
-	return ids, true, false
+	return ids, true, false, ""
+}
+
+// bdMutationAmbiguityDiagnostic explains a rejected write without echoing the
+// rest of the command, which may contain a multiline work report or secrets.
+func bdMutationAmbiguityDiagnostic(flag string) string {
+	return fmt.Sprintf("gc bd: refusing write with unrecognized flag %q; no mutation ran because exact bead IDs cannot be safely verified. For a durable progress record, use `gc bd comment <id> --file <path>`; otherwise run `bd update --help` for supported flags.", flag)
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in
@@ -511,7 +519,7 @@ func bdSubcmdBoolFlags(sub string) map[string]bool {
 // bdMutationWriteID is a compatibility shim retained for callers that only
 // need the first ID. Prefer bdMutationWriteIDs for new code.
 func bdMutationWriteID(args []string) (string, bool) {
-	ids, ok, ambiguous := bdMutationWriteIDs(args)
+	ids, ok, ambiguous, _ := bdMutationWriteIDs(args)
 	if !ok || ambiguous || len(ids) == 0 {
 		return "", false
 	}

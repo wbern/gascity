@@ -133,7 +133,7 @@ func workRecordCloseTargets(bdArgs []string) ([]string, bool) {
 	default:
 		return nil, false
 	}
-	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
+	ids, ok, ambiguous, _ := bdMutationWriteIDs(bdArgs)
 	if !ok || ambiguous || len(ids) == 0 {
 		return nil, false
 	}

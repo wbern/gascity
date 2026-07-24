@@ -175,8 +175,8 @@ func TestRunRefusesUnsupportedBodyMutations(t *testing.T) {
 	for _, args := range [][]string{
 		{"update", "gcw-1", "--body-file", "body.md"},
 		{"update", "gcw-1", "--stdin"},
-		{"update", "gcw-1", "--append-notes", "progress"},
-		{"update", "gcw-1", "--notes", "progress"},
+		{"update", "gcw-1", "--append-notes", "first line\nsecond line"},
+		{"update", "gcw-1", "--notes", "first line\nsecond line"},
 		{"update", "gcw-1", "--allow-empty-description", "-d", "replacement body"},
 	} {
 		var stdout, stderr bytes.Buffer
@@ -185,6 +185,17 @@ func TestRunRefusesUnsupportedBodyMutations(t *testing.T) {
 		}
 		if !strings.Contains(stderr.String(), "refusing") {
 			t.Fatalf("run(%v) stderr = %q; want refusal diagnostic", args, stderr.String())
+		}
+		if strings.Contains(strings.Join(args, " "), "--notes") || strings.Contains(strings.Join(args, " "), "--append-notes") {
+			if !strings.Contains(stderr.String(), "gc bd comment <id> --file <path>") {
+				t.Fatalf("run(%v) stderr = %q; want comment fallback", args, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "gcw-9tpw.1") {
+				t.Fatalf("run(%v) stderr = %q; want temporary-workaround retirement reference", args, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "second line") {
+				t.Fatalf("run(%v) stderr leaked note payload: %q", args, stderr.String())
+			}
 		}
 	}
 	if got, err := os.ReadFile(out); err == nil && strings.TrimSpace(string(got)) != "" {

@@ -309,11 +309,26 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			if err != nil {
 				return nil, err
 			}
+			comment, err := agentScriptBDUpdateComment(arg, ctx)
+			if err != nil {
+				return nil, err
+			}
 			beadID := ""
 			if len(args) >= 2 {
 				beadID = args[1]
 			}
-			return nil, e.runBDForBead(beadID, args...)
+			// A notes-only action becomes a comment; retain the prior bd update
+			// behavior for an otherwise empty update so validation/error semantics
+			// do not silently change.
+			if len(args) > 2 || comment == "" {
+				if err := e.runBDForBead(beadID, args...); err != nil {
+					return nil, err
+				}
+			}
+			if comment != "" {
+				return nil, e.runCommand("gc", "bd", "comment", beadID, comment)
+			}
+			return nil, nil
 		case "exit":
 			code, err := agentScriptIntArg(name, arg)
 			if err != nil {
@@ -384,13 +399,6 @@ func agentScriptBDUpdateArgs(arg any, ctx agentScriptContext) ([]string, error) 
 	if status != "" {
 		args = append(args, "--status", status)
 	}
-	notes, err := agentScriptOptionalStringField(m, "notes", ctx)
-	if err != nil {
-		return nil, err
-	}
-	if notes != "" {
-		args = append(args, "--notes", notes)
-	}
 	if rawMetadata, ok := m["metadata"]; ok {
 		metadata, err := agentScriptMapArg("bd_update metadata", rawMetadata)
 		if err != nil {
@@ -410,6 +418,16 @@ func agentScriptBDUpdateArgs(arg any, ctx agentScriptContext) ([]string, error) 
 		}
 	}
 	return args, nil
+}
+
+// agentScriptBDUpdateComment maps the legacy progress-only notes field to a
+// controller-safe comment until typed Bead Notes are implemented.
+func agentScriptBDUpdateComment(arg any, ctx agentScriptContext) (string, error) {
+	m, err := agentScriptMapArg("bd_update", arg)
+	if err != nil {
+		return "", err
+	}
+	return agentScriptOptionalStringField(m, "notes", ctx)
 }
 
 func agentScriptMailSendArgs(arg any, ctx agentScriptContext) ([]string, error) {

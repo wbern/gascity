@@ -2057,6 +2057,7 @@ func TestBdMutationWriteIDs(t *testing.T) {
 		ids       []string
 		ok        bool
 		ambiguous bool
+		unknown   string
 	}
 	cases := []struct {
 		name string
@@ -2189,12 +2190,12 @@ func TestBdMutationWriteIDs(t *testing.T) {
 		{
 			name: "unknown value flag triggers fail-closed",
 			args: []string{"close", "--unknown-future-flag", "gcy-realbead", "gcy-dv7"},
-			want: result{ok: true, ambiguous: true},
+			want: result{ok: true, ambiguous: true, unknown: "--unknown-future-flag"},
 		},
 		{
 			name: "unknown short flag triggers fail-closed",
 			args: []string{"update", "-z", "something", "gcy-dv7"},
-			want: result{ok: true, ambiguous: true},
+			want: result{ok: true, ambiguous: true, unknown: "-z"},
 		},
 
 		// --- Non-write subcommands ---
@@ -2224,17 +2225,37 @@ func TestBdMutationWriteIDs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ids, ok, ambiguous := bdMutationWriteIDs(tc.args)
+			ids, ok, ambiguous, unknown := bdMutationWriteIDs(tc.args)
 			if ok != tc.want.ok {
 				t.Errorf("ok = %v, want %v", ok, tc.want.ok)
 			}
 			if ambiguous != tc.want.ambiguous {
 				t.Errorf("ambiguous = %v, want %v", ambiguous, tc.want.ambiguous)
 			}
+			if unknown != tc.want.unknown {
+				t.Errorf("unknown flag = %q, want %q", unknown, tc.want.unknown)
+			}
 			if !bdTestSlicesEqual(ids, tc.want.ids) {
 				t.Errorf("ids = %v, want %v", ids, tc.want.ids)
 			}
 		})
+	}
+}
+
+func TestBdMutationAmbiguityDiagnosticDoesNotEchoPayload(t *testing.T) {
+	const payload = "first line\nsecond line\n--not-a-flag"
+	got := bdMutationAmbiguityDiagnostic("--note")
+	if !strings.Contains(got, `unrecognized flag "--note"`) {
+		t.Fatalf("diagnostic = %q, want offending flag", got)
+	}
+	if !strings.Contains(got, "no mutation ran") {
+		t.Fatalf("diagnostic = %q, want explicit no-mutation guarantee", got)
+	}
+	if !strings.Contains(got, "gc bd comment <id> --file <path>") {
+		t.Fatalf("diagnostic = %q, want safe progress-record command", got)
+	}
+	if strings.Contains(got, payload) || strings.Contains(got, "second line") {
+		t.Fatalf("diagnostic leaked payload: %q", got)
 	}
 }
 
