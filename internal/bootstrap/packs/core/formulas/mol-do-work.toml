@@ -98,8 +98,8 @@ gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.work_commit="$COMMIT" \
   --set-metadata gc.work_branch="$WORK_BRANCH" \
   --set-metadata gc.work_verification="<commands you ran>" \
-  --status=closed \
-  --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+  --status=closed
+gc bd comment "$WORK_BEAD_ID" "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
 ```
 
 **No-op** (the bead needed no change — already satisfied / duplicate):
@@ -107,8 +107,8 @@ gc bd update "$WORK_BEAD_ID" \
 gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=no-op \
-  --status=closed \
-  --notes "No-op: <why no change was needed>."
+  --status=closed
+gc bd comment "$WORK_BEAD_ID" "No-op: <why no change was needed>."
 ```
 For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
 Witness.
@@ -120,7 +120,8 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+  gc bd comment "$GC_BEAD_ID" "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
 fi
 ```
 
@@ -143,7 +144,8 @@ session:
 
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+  gc bd comment "$GC_BEAD_ID" "Drain acknowledged."
 fi
 gc runtime drain-ack
 ```

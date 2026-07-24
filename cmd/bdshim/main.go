@@ -136,7 +136,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if verb == "update" {
 			if flag, unsupported := bdshim.UnsupportedUpdateMutationFlag(verbArgs); unsupported {
 				logDisposition(verb, rawBDArgs, "refuse", 1, start)
-				fmt.Fprintf(stderr, "bdshim: refusing update %s: this body/notes mutation is not routed to the controller\n", flag) //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, unsupportedUpdateMutationDiagnostic(flag)) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
@@ -146,6 +146,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default: // bdshim.Passthrough
 		return passthrough()
 	}
+}
+
+func unsupportedUpdateMutationDiagnostic(flag string) string {
+	if flag == "--notes" || flag == "--append-notes" {
+		return fmt.Sprintf("bdshim: refusing update %s: Bead Notes are not controller-routed, so no mutation ran. For a durable progress record, use `gc bd comment <id> --file <path>`. This is temporary until controller-routed Bead Notes parity (gcw-9tpw.1) is merged and deployed.", flag)
+	}
+	return fmt.Sprintf("bdshim: refusing update %s: this mutation is not routed to the controller, so no mutation ran.", flag)
 }
 
 // extractScopeFlags strips the gc-only --city/--rig flags from a bd arg list,

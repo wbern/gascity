@@ -460,16 +460,40 @@ func TestAgentScriptRunActionBuildsBDUpdateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAction: %v", err)
 	}
-	want := []string{
+	wantUpdate := []string{
 		"bd", "update", "ga-123",
 		"--assignee", "demo/lifecycle.refinery",
 		"--status", "closed",
-		"--notes", "merged polecat/ga-123",
 		"--set-metadata", "alpha=first",
 		"--set-metadata", "zeta=last",
 	}
-	if len(calls) != 1 || !slices.Equal(calls[0], want) {
-		t.Fatalf("calls = %#v, want %#v", calls, [][]string{want})
+	wantComment := []string{"gc", "bd", "comment", "ga-123", "merged polecat/ga-123"}
+	if len(calls) != 2 || !slices.Equal(calls[0], wantUpdate) || !slices.Equal(calls[1], wantComment) {
+		t.Fatalf("calls = %#v, want %#v then %#v", calls, wantUpdate, wantComment)
+	}
+}
+
+func TestAgentScriptNotesOnlyUpdateUsesComment(t *testing.T) {
+	var calls [][]string
+	exec := agentScriptExecutor{
+		runCommand: func(name string, args ...string) error {
+			calls = append(calls, append([]string{name}, args...))
+			return nil
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	_, err := exec.runAction(agentScriptAction{"bd_update": map[string]any{
+		"id":    "ga-123",
+		"notes": "completed investigation",
+	}}, agentScriptContext{})
+	if err != nil {
+		t.Fatalf("runAction: %v", err)
+	}
+	want := [][]string{{"gc", "bd", "comment", "ga-123", "completed investigation"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
 	}
 }
 
@@ -809,7 +833,8 @@ func TestAgentScriptRunsShippedLifecyclePolecatScript(t *testing.T) {
 	wantCommands := [][]string{
 		{"bd", "update", "ga-123", "--claim", "--actor", "demo/lifecycle.polecat"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.refinery", "-s", "CLAIMED: Demo work (ga-123)", "-m", "scripted polecat demo/lifecycle.polecat claimed ga-123; branch polecat/ga-123."},
-		{"bd", "update", "ga-123", "--assignee", "demo/lifecycle.refinery", "--notes", "scripted polecat: implemented ga-123, handed off to refinery"},
+		{"bd", "update", "ga-123", "--assignee", "demo/lifecycle.refinery"},
+		{"gc", "bd", "comment", "ga-123", "scripted polecat: implemented ga-123, handed off to refinery"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.refinery", "-s", "READY FOR MERGE: polecat/ga-123 (ga-123)", "-m", "scripted polecat demo/lifecycle.polecat pushed polecat/ga-123 for demo/lifecycle.refinery."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -849,6 +874,8 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 			switch {
 			case name == "bd":
 				actionOrder = append(actionOrder, "cmd:bd_update")
+			case name == "gc" && len(args) >= 2 && args[0] == "bd" && args[1] == "comment":
+				actionOrder = append(actionOrder, "cmd:bd_comment")
 			case name == "gc" && len(args) >= 2 && args[0] == "mail" && args[1] == "send":
 				actionOrder = append(actionOrder, "cmd:mail_send")
 			default:
@@ -907,7 +934,8 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 
 	wantCommands := [][]string{
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGING: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery is merging polecat/ga-123."},
-		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into main", "--set-metadata", "merge_result=merged"},
+		{"bd", "update", "ga-123", "--status", "closed", "--set-metadata", "merge_result=merged"},
+		{"gc", "bd", "comment", "ga-123", "scripted refinery: merged polecat/ga-123 into main"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into main."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -929,6 +957,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 		"shell:merge",
 		"shell:push",
 		"cmd:bd_update",
+		"cmd:bd_comment",
 		"shell:cleanup",
 		"cmd:mail_send",
 	}

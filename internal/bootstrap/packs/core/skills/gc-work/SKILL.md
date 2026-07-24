@@ -48,8 +48,29 @@ gc bd show <id>                           # Show bead details
 gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress)
 gc bd update <id> --status in_progress    # Update status
 gc bd update <id> --label <key>=<value>   # Add/update labels
-gc bd update <id> --note "progress..."    # Add a note
+gc bd comment <id> "progress..."          # Add a durable progress comment
 ```
+
+### Temporary Notes workaround (gcw-9tpw.1)
+
+The managed shim does not yet have controller-routed Bead Notes. Until
+**gcw-9tpw.1 — Add controller-routed Bead Notes parity** is merged and deployed,
+record append-only progress or findings with a comment:
+
+```
+gc bd comment <id> --file <path>           # Multiline report
+gc bd comment <id> "short progress update" # Short update
+```
+
+Do not use `gc bd update --note` (it is not a valid `bd` flag), or
+`--notes` / `--append-notes` in a managed shimmed session (they are deliberately
+refused rather than creating divergent state). Update status, metadata, and
+priority in a separate `gc bd update` command, then verify it with
+`gc bd show <id> --json`.
+
+This is a compatibility bridge, not the permanent Notes design. Remove this
+workaround only after gcw-9tpw.1 has landed in a release and that release is
+deployed to the city.
 
 ## Closing work
 
