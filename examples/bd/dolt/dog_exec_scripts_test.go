@@ -747,7 +747,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_HASHOF_DB"*)
-    if [ "$mode" = "absorbed_ws_db_hash_drift" ] || [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_modified" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_deleted" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_mixed" ] || [ "$mode" = "absorbed_ws_db_hash_drift_unknown_table_with_space" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_table_list_failure" ]; then
+    if [ "$mode" = "absorbed_ws_db_hash_drift" ] || [ "$mode" = "absorbed_ws_db_hash_drift_system_table" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_preexisting_committed" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_modified" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_deleted" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_mixed" ] || [ "$mode" = "absorbed_ws_db_hash_drift_unknown_table_with_space" ] || [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_table_list_failure" ]; then
       # Standing uncommitted working-set state absorbed by the flatten's -Am:
       # the committed root legitimately differs across the flatten while HEAD
       # never moves and every per-table working-set hash stays stable.
@@ -862,6 +862,13 @@ case "$query" in
     exit 0
     ;;
   *"SHOW TABLES AS OF"*|*"information_schema.tables"*)
+    if [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_preexisting_committed" ]; then
+      case "$query" in
+        *"SHOW TABLES AS OF"*) print_cells beads __gc_read_only_probe ;;
+        *) print_cell beads ;;
+      esac
+      exit 0
+    fi
     if [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_table_list_failure" ] && [[ "$query" == *"SHOW TABLES AS OF"* ]]; then
       calls_file="$state_file.probe-table-list-calls"
       calls=0
@@ -992,6 +999,10 @@ case "$query" in
       exit 0
     fi
     if [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe" ]; then
+      print_diff_stat __gc_read_only_probe 1 0 0 0 1
+      exit 0
+    fi
+    if [ "$mode" = "absorbed_ws_db_hash_drift_read_only_probe_preexisting_committed" ]; then
       print_diff_stat __gc_read_only_probe 1 0 0 0 1
       exit 0
     fi
@@ -2711,6 +2722,25 @@ func TestCompactScriptDefersAbsorbedReadOnlyProbeDbHashDrift(t *testing.T) {
 	}
 	if strings.Contains(string(data), "DOLT_GC") {
 		t.Fatalf("absorbed read-only probe drift must defer GC this run:\n%s", data)
+	}
+}
+
+func TestCompactScriptQuarantinesPreexistingReadOnlyProbeExcludedFromVerification(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "absorbed_ws_db_hash_drift_read_only_probe_preexisting_committed", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("pre-existing unverified read-only probe drift must quarantine:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, quarantine, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify db hash drift, got %q", reason)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read fake dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("pre-existing unverified read-only probe drift must block full GC:\n%s", data)
 	}
 }
 
