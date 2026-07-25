@@ -16,6 +16,70 @@ import (
 // long-lived city, so keep the interval above the worst observed scan.
 const storeHealthCacheTTL = 3 * time.Minute
 
+const storeHealthRetryDelay = 30 * time.Second
+
+var errStoreHealthMeasurementPending = errors.New("measurement pending")
+
+// statusStoreHealth returns a completed health measurement without making an
+// interactive status request wait for a cold or expired refresh. A cold read
+// starts one background refresh and reports a typed-status partial through the
+// caller; an expired completed value remains visible while its replacement is
+// measured. Failed cold refreshes are retried after a short cooldown.
+func (s *Server) statusStoreHealth(now time.Time) (*StatusStoreHealth, error) {
+	if s.state == nil || s.state.CityPath() == "" {
+		return nil, nil
+	}
+	s.storeHealthMu.Lock()
+	if s.storeHealthEntry != nil {
+		entry := s.storeHealthEntry
+		if now.Before(s.storeHealthExpires) {
+			s.storeHealthMu.Unlock()
+			return entry, nil
+		}
+		s.startStoreHealthRefreshLocked()
+		s.storeHealthMu.Unlock()
+		return entry, nil
+	}
+	if s.storeHealthRefreshing {
+		s.storeHealthMu.Unlock()
+		return nil, errStoreHealthMeasurementPending
+	}
+	if s.storeHealthLastErr != nil && now.Before(s.storeHealthRetryAfter) {
+		err := s.storeHealthLastErr
+		s.storeHealthMu.Unlock()
+		return nil, err
+	}
+	s.startStoreHealthRefreshLocked()
+	s.storeHealthMu.Unlock()
+	return nil, errStoreHealthMeasurementPending
+}
+
+// startStoreHealthRefreshLocked schedules a single refresh. Caller holds
+// storeHealthMu. The size walk itself is intentionally detached from request
+// cancellation because WalkSize is synchronous; a request must never own that
+// latency.
+func (s *Server) startStoreHealthRefreshLocked() {
+	if s.storeHealthRefreshing {
+		return
+	}
+	s.storeHealthRefreshing = true
+	s.backgroundTasks.Add(1)
+	go func() {
+		defer s.backgroundTasks.Done()
+		_, err := s.cachedStoreHealth(context.Background(), time.Now())
+		s.storeHealthMu.Lock()
+		defer s.storeHealthMu.Unlock()
+		s.storeHealthRefreshing = false
+		if err != nil {
+			s.storeHealthLastErr = err
+			s.storeHealthRetryAfter = time.Now().Add(storeHealthRetryDelay)
+			return
+		}
+		s.storeHealthLastErr = nil
+		s.storeHealthRetryAfter = time.Time{}
+	}()
+}
+
 // cachedStoreHealth returns the memoized StoreHealth block, refreshing
 // when the TTL has elapsed. Concurrent refreshes are coalesced through a
 // singleflight group so a single scan serves every waiting caller. Failed
