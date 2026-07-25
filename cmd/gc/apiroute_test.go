@@ -154,3 +154,65 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 		}
 	})
 }
+
+func TestStatusAPIClientsRouteAliveNoAPICityToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+
+	t.Run("city-and-rig-status-use-the-warm-supervisor-view", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForStatus := range map[string]func(string) (*api.Client, string){
+			"city": cityStatusAPIClient,
+			"rig":  rigStatusAPIClient,
+		} {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForStatus(dir)
+				if got != sentinel || reason != "" {
+					t.Fatalf("status client = (%p, %q), want supervisor client (%p, \"\")", got, reason, sentinel)
+				}
+			})
+		}
+	})
+
+	t.Run("GC_NO_API-remains-an-escape-hatch", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "1")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client {
+			t.Fatal("supervisor client must not bypass GC_NO_API")
+			return nil
+		}
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForStatus := range map[string]func(string) (*api.Client, string){
+			"city": cityStatusAPIClient,
+			"rig":  rigStatusAPIClient,
+		} {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForStatus(dir)
+				if got != nil || reason != "escape-hatch" {
+					t.Fatalf("status client = (%p, %q), want (nil, escape-hatch)", got, reason)
+				}
+			})
+		}
+	})
+
+	t.Run("unavailable-supervisor-preserves-local-fallback", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		got, reason := statusReadAPIClient(dir)
+		if got != nil || reason != "controller-down" {
+			t.Fatalf("status client = (%p, %q), want (nil, controller-down)", got, reason)
+		}
+	})
+}
