@@ -323,6 +323,60 @@ func TestReadFilteredAcrossArchivesAppliesLimit(t *testing.T) {
 	}
 }
 
+func TestReadFilteredWithWarningsKeepsReadableHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	corrupt := formatArchiveBasename(time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC), 1, 2)
+	if err := os.WriteFile(filepath.Join(dir, corrupt), []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"seq":3,"type":"bead.created","subject":"current"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, warnings, err := ReadFilteredWithWarnings(path, Filter{Type: BeadCreated})
+	if err != nil {
+		t.Fatalf("ReadFilteredWithWarnings: %v", err)
+	}
+	if len(got) != 1 || got[0].Subject != "current" {
+		t.Fatalf("events = %+v, want readable active event", got)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], corrupt) {
+		t.Fatalf("warnings = %v, want corrupt archive %q", warnings, corrupt)
+	}
+}
+
+func TestReadLatestMatchFindsNewestArchiveMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	writeArchive := func(ts time.Time, first, last uint64, lines string) {
+		t.Helper()
+		rotating := filepath.Join(dir, formatRotatingBasename(ts, first, last))
+		if err := os.WriteFile(rotating, []byte(lines), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := gzipAndArchive(rotating, filepath.Join(dir, formatArchiveBasename(ts, first, last)), &stderr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	older := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(24 * time.Hour)
+	writeArchive(older, 1, 2, `{"seq":1,"type":"controller.started","subject":"older","ts":"2026-05-01T12:00:00Z"}`+"\n"+`{"seq":2,"type":"bead.created"}`+"\n")
+	writeArchive(newer, 3, 4, `{"seq":3,"type":"bead.created"}`+"\n"+`{"seq":4,"type":"controller.started","subject":"newest","ts":"2026-05-02T12:00:00Z"}`+"\n")
+
+	got, ok, warnings, err := ReadLatestMatch(path, Filter{Type: ControllerStarted})
+	if err != nil {
+		t.Fatalf("ReadLatestMatch: %v", err)
+	}
+	if !ok || got.Subject != "newest" || got.Seq != 4 {
+		t.Fatalf("event = %+v ok=%v, want newest archive match", got, ok)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
 func TestReadLatestSeqSpansArchiveOnlyLog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

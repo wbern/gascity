@@ -120,33 +120,19 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read order firing events: %v", err)
-		return result
-	}
-	startedAt, err := latestControllerStartedAt(eventPath)
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read controller start events: %v", err)
-		return result
-	}
-
 	now := c.clock()
 	if now.IsZero() {
 		now = time.Now()
 	}
 	cronIntervals := map[string]time.Duration{}
-	worst := StatusOK
-	monitored := 0
-	var firstNonOK string
-	// Track severity contributions across error-level entries. Warnings should
-	// stay visible without converting an advisory error into a blocking gate.
-	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
-
+	type monitoredOrder struct {
+		order    orders.Order
+		expected time.Duration
+		err      error
+	}
+	var monitored []monitoredOrder
+	var maxExpected time.Duration
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
 			continue
@@ -154,18 +140,60 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
 			continue
 		}
-		monitored++
-		expected, err := expectedIntervalForOrder(order, cronIntervals)
-		if err != nil {
+		mo := monitoredOrder{order: order}
+		mo.expected, mo.err = expectedIntervalForOrder(order, cronIntervals)
+		if mo.err == nil && mo.expected > maxExpected {
+			maxExpected = mo.expected
+		}
+		monitored = append(monitored, mo)
+	}
+	if len(monitored) == 0 {
+		result.Status = StatusOK
+		result.Message = "no cron or cooldown orders"
+		return result
+	}
+
+	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
+	firedFilter := events.Filter{Type: events.OrderFired}
+	if maxExpected > 0 {
+		// A fire older than the stale boundary cannot change this check's
+		// verdict. The persisted order-run lookup below retains the exact last
+		// run time for stale orders, so this bounds event history without
+		// weakening freshness classification.
+		firedFilter.Since = now.Add(-3 * maxExpected)
+	}
+	firedEvents, firedWarnings, err := events.ReadFilteredWithWarnings(eventPath, firedFilter)
+	if err != nil {
+		result.Status = StatusError
+		result.Message = fmt.Sprintf("read order firing events: %v", err)
+		return result
+	}
+	startedAt, startWarnings, err := latestControllerStartedAt(eventPath)
+	if err != nil {
+		result.Status = StatusError
+		result.Message = fmt.Sprintf("read controller start events: %v", err)
+		return result
+	}
+	degraded := make([]string, 0, len(firedWarnings)+len(startWarnings))
+	degraded = append(degraded, firedWarnings...)
+	degraded = append(degraded, startWarnings...)
+	worst := StatusOK
+	var firstNonOK string
+	// Track severity contributions across error-level entries. Warnings should
+	// stay visible without converting an advisory error into a blocking gate.
+	var blockingErrors, advisoryErrors int
+	for _, mo := range monitored {
+		order := mo.order
+		if mo.err != nil {
 			worst = worseStatus(worst, StatusError)
-			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), err))
+			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), mo.err))
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
+		lastFired, err := c.latestOrderFiredAt(firedEvents, order, mo.expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -175,7 +203,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, mo.expected, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -192,12 +220,6 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if monitored == 0 {
-		result.Status = StatusOK
-		result.Message = "no cron or cooldown orders"
-		return result
-	}
-
 	result.Status = worst
 	switch worst {
 	case StatusOK:
@@ -206,6 +228,15 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
 		result.Message = "scheduled orders are stale"
+	}
+	if len(degraded) > 0 {
+		for _, warning := range degraded {
+			result.Details = append(result.Details, "degraded: "+warning)
+		}
+		if result.Status == StatusOK {
+			result.Status = StatusWarning
+			result.Message = "order event history degraded (skipped unreadable archives)"
+		}
 	}
 	if blockingErrors == 0 && advisoryErrors > 0 {
 		result.Severity = SeverityAdvisory
@@ -549,18 +580,15 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 	}
 }
 
-func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+func latestControllerStartedAt(eventPath string) (time.Time, []string, error) {
+	event, ok, warnings, err := events.ReadLatestMatch(eventPath, events.Filter{Type: events.ControllerStarted})
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, nil, err
 	}
-	var latest time.Time
-	for _, event := range startEvents {
-		if event.Ts.After(latest) {
-			latest = event.Ts
-		}
+	if !ok {
+		return time.Time{}, warnings, nil
 	}
-	return latest, nil
+	return event.Ts, warnings, nil
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
@@ -598,7 +626,7 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
-			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
+			return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
 		if uptime >= expected+expected/2 {

@@ -371,12 +371,111 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-13 * time.Hour)},
 	)
 
-	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	// Production wires doctor to persisted order-run history. Once the event
+	// read is bounded, this old fire intentionally falls outside that window;
+	// the persisted run preserves the exact stale timestamp and severity.
+	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+		return now.Add(-13 * time.Hour), nil
+	}))
+	check.clock = func() time.Time { return now }
+	result := check.Run(&CheckContext{CityPath: cityPath})
 	if result.Status != StatusError {
 		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
 		t.Fatalf("details = %v, want stale detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_PrunesHistoryBeforeFreshnessHorizon(t *testing.T) {
+	// A corrupt archive predating the order's stale horizon must not be opened:
+	// it cannot affect the verdict, and treating it as degraded would make a
+	// healthy current order look unhealthy as city history grows.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-time.Hour)},
+	)
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-1-2.gz", now.Add(-30*24*time.Hour).UTC().Format("20060102T150405Z"))
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", name), []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK because pre-horizon archive is irrelevant; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "degraded") {
+		t.Fatalf("details = %v, want no degraded archive warning for pre-horizon history", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_UnknownControllerStartIsNotHealthy(t *testing.T) {
+	// A missing fire plus a missing controller-start record is incomplete
+	// history, not proof that the order is healthy.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning for incomplete history; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "controller start unknown") {
+		t.Fatalf("details = %v, want controller-start-unknown diagnostic", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_CorruptRecentArchiveIsDegraded(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-time.Hour)},
+	)
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-1-2.gz", now.Add(-2*time.Hour).UTC().Format("20060102T150405Z"))
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", name), []byte("not a gzip stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning for degraded history; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), name) {
+		t.Fatalf("details = %v, want degraded archive %q", result.Details, name)
+	}
+}
+
+func TestOrderFiringCurrent_FindsControllerStartInArchive(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	recorder, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.Record(events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)})
+	rotation, err := recorder.ForceRotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotation.Done != nil {
+		<-rotation.Done
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError || result.Severity != SeverityAdvisory {
+		t.Fatalf("status=%v severity=%v, want advisory error from archived controller start; msg=%s details=%v", result.Status, result.Severity, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "never fired since controller start") {
+		t.Fatalf("details = %v, want archived controller-start verdict", result.Details)
 	}
 }
 
