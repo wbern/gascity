@@ -1755,14 +1755,14 @@ func (s *SessionConfig) PoolRespawnBackoffMaxDuration() time.Duration {
 	if base <= 0 {
 		return 0
 	}
-	max := durationOr(s.PoolRespawnBackoffMax, DefaultPoolRespawnBackoffMax)
-	if max > PoolRespawnBackoffCeiling {
-		max = PoolRespawnBackoffCeiling
+	maxDuration := durationOr(s.PoolRespawnBackoffMax, DefaultPoolRespawnBackoffMax)
+	if maxDuration > PoolRespawnBackoffCeiling {
+		maxDuration = PoolRespawnBackoffCeiling
 	}
-	if max < base {
+	if maxDuration < base {
 		return base
 	}
-	return max
+	return maxDuration
 }
 
 // PoolRespawnBackoffResetQuietDuration returns the decay quiet-gap after which
@@ -1771,13 +1771,13 @@ func (s *SessionConfig) PoolRespawnBackoffMaxDuration() time.Duration {
 // window would fire mid-storm), and is clamped to twice the ceiling so the
 // tracker's comparison math cannot overflow.
 func (s *SessionConfig) PoolRespawnBackoffResetQuietDuration() time.Duration {
-	max := s.PoolRespawnBackoffMaxDuration()
-	if max <= 0 {
+	maxDuration := s.PoolRespawnBackoffMaxDuration()
+	if maxDuration <= 0 {
 		return 0
 	}
-	q := durationOr(s.PoolRespawnBackoffResetQuiet, 2*max)
-	if q < max {
-		return max
+	q := durationOr(s.PoolRespawnBackoffResetQuiet, 2*maxDuration)
+	if q < maxDuration {
+		return maxDuration
 	}
 	if q > 2*PoolRespawnBackoffCeiling {
 		return 2 * PoolRespawnBackoffCeiling

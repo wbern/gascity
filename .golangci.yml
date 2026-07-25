@@ -28,6 +28,10 @@ linters:
       locale: US
 
   exclusions:
+    paths:
+      # npm installs this vendored Go fixture for the dashboard build; it is not
+      # Gas City source and must not enter the repository-wide Go lint domain.
+      - internal/api/dashboardspa/web/node_modules/
     rules:
       # runtime shadows stdlib but is isolated to internal/.
       - path: internal/runtime/

@@ -293,10 +293,28 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
+export type BeadClaimInputBody = {
+    /**
+     * Actor to claim the bead for (the calling agent's identity).
+     */
+    actor: string;
+};
+
 export type BeadClaimRejectedPayload = {
     attempted_claimant: string;
     bead_id: string;
     existing_claimant: string;
+};
+
+export type BeadClaimResult = {
+    /**
+     * The bead's current state: the claim on success, or the winning holder on a lost race.
+     */
+    bead: Bead;
+    /**
+     * True when the actor now holds the bead; false when another actor won the race.
+     */
+    claimed: boolean;
 };
 
 export type BeadCreateInputBody = {
@@ -8871,6 +8889,74 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
+export type PostV0CityByCityNameBeadByIdClaimData = {
+    body: BeadClaimInputBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/claim';
+};
+
+export type PostV0CityByCityNameBeadByIdClaimErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PostV0CityByCityNameBeadByIdClaimError = PostV0CityByCityNameBeadByIdClaimErrors[keyof PostV0CityByCityNameBeadByIdClaimErrors];
+
+export type PostV0CityByCityNameBeadByIdClaimResponses = {
+    /**
+     * OK
+     */
+    200: BeadClaimResult;
+};
+
+export type PostV0CityByCityNameBeadByIdClaimResponse = PostV0CityByCityNameBeadByIdClaimResponses[keyof PostV0CityByCityNameBeadByIdClaimResponses];
+
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;
     headers: {
@@ -9247,6 +9333,81 @@ export type CreateBeadResponses = {
 };
 
 export type CreateBeadResponse = CreateBeadResponses[keyof CreateBeadResponses];
+
+export type GetV0CityByCityNameBeadsEphemeralData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Pagination cursor from a previous response's next_cursor field.
+         */
+        cursor?: string;
+        /**
+         * Maximum number of results to return. 0 = server default.
+         */
+        limit?: number;
+        /**
+         * Filter by bead status.
+         */
+        status?: string;
+        /**
+         * Filter by bead type.
+         */
+        type?: string;
+        /**
+         * Filter by label.
+         */
+        label?: string;
+        /**
+         * Filter by assignee.
+         */
+        assignee?: string;
+        /**
+         * Filter by parent bead ID.
+         */
+        parent?: string;
+        /**
+         * Include closed beads.
+         */
+        all?: boolean;
+    };
+    url: '/v0/city/{cityName}/beads/ephemeral';
+};
+
+export type GetV0CityByCityNameBeadsEphemeralErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadsEphemeralError = GetV0CityByCityNameBeadsEphemeralErrors[keyof GetV0CityByCityNameBeadsEphemeralErrors];
+
+export type GetV0CityByCityNameBeadsEphemeralResponses = {
+    /**
+     * OK
+     */
+    200: ListBodyBead;
+};
+
+export type GetV0CityByCityNameBeadsEphemeralResponse = GetV0CityByCityNameBeadsEphemeralResponses[keyof GetV0CityByCityNameBeadsEphemeralResponses];
 
 export type GetV0CityByCityNameBeadsGraphByRootIdData = {
     body?: never;

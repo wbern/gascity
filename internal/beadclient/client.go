@@ -1,4 +1,4 @@
-// Package api contains the Gas City supervisor API and generated-client adapter.
+// Package beadclient contains the Gas City supervisor API client adapter.
 //
 // This file is a thin adapter over the generated client in
 // internal/api/genclient. The adapter preserves the small surface that
@@ -12,14 +12,11 @@
 package beadclient
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -27,7 +24,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 )
 
 // connError wraps transport-level errors (connection refused, timeout, etc.)
@@ -322,8 +318,6 @@ func (c *Client) bearerToken() (string, error) {
 	return c.tokenSource()
 }
 
-const sessionMessageTimeout = 4 * time.Minute
-
 // defaultClientTimeout is the overall HTTP timeout for control-plane client
 // calls. The read paths (ListBeads, GetBead, GetStatus, ListMailInbox,
 // ListConvoys, ...) pass context.Background() and rely solely on this ceiling,
@@ -332,265 +326,6 @@ const sessionMessageTimeout = 4 * time.Minute
 // healthy-but-slow federated reads. Most calls return in milliseconds; this
 // only bounds the slow federated reads and genuinely hung requests.
 const defaultClientTimeout = 60 * time.Second
-
-// sseEvent is a parsed SSE frame from the event stream.
-type sseEvent struct {
-	Event string
-	Data  string
-}
-
-// sseEnvelope is the JSON envelope of a typed event on the stream. Seq is the
-// per-city monotonic sequence number the wire emits on every typed envelope
-// (convoy_event_stream.go:135); a reconnecting wait resumes from the last
-// consumed frame via after_seq=<seq>. Heartbeat frames carry no seq/type key,
-// so they decode to Seq:0, Type:"" — skipped by the type match, and (because a
-// cursor only advances on env.Seq > lastSeq) unable to regress the resume point.
-type sseEnvelope struct {
-	Seq     uint64          `json:"seq"`
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// sseConnectError is a non-2xx SSE connect response carried as a typed error so
-// a reconnecting wait can classify the status (transient vs permanent) and honor
-// Retry-After. Error() renders the exact string waitForEvent produced before the
-// reconnect core was split out, so single-shot session waits stay byte-stable.
-type sseConnectError struct {
-	Status     int    // HTTP status code, for retry classification
-	StatusLine string // raw resp.Status ("401 Unauthorized"), for byte-stable rendering
-	RetryAfter string // Retry-After header value, if any
-	Detail     string // response body detail (or the status line when the body was empty)
-}
-
-func (e *sseConnectError) Error() string {
-	return fmt.Sprintf("SSE connect failed: %s: %s", e.StatusLine, e.Detail)
-}
-
-// ssePayloadDecodeError is a matching (success- or failed-type) frame whose
-// typed payload failed to decode. It carries the frame's seq so a reconnecting
-// caller can re-read the SAME frame once (a transient truncation decodes cleanly
-// on the retry) and, if the identical seq fails to decode again, surface a
-// permanent "malformed terminal event at seq N" error — instead of advancing the
-// resume cursor past the terminal and hanging to the absolute watchdog.
-//
-// Its Error() delegates to the wrapped error so the single-shot session wait
-// (waitForEvent) keeps its byte-stable "decode <type> payload: ..." string.
-type ssePayloadDecodeError struct {
-	Seq uint64
-	Err error
-}
-
-func (e *ssePayloadDecodeError) Error() string { return e.Err.Error() }
-func (e *ssePayloadDecodeError) Unwrap() error { return e.Err }
-
-// waitForEvent connects to the appropriate SSE stream, reads frames until it
-// finds an event matching the given request_id (in success or failure
-// payloads), and returns the envelope. The caller decodes the typed payload.
-//
-// It is single-shot — one connect, scan to a match or die — and is the wait
-// every session async op (SendSessionMessage, SubmitSession) transits, so its
-// behavior and error strings are byte-stable. It delegates to waitForEventOnce
-// with no progress tap and surfaces its error as-is. Rig-create uses the
-// reconnecting waitForEventReconnecting instead.
-func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp, eventCursor string) (*sseEnvelope, error) {
-	env, _, _, err := c.waitForEventOnce(ctx, requestID, successType, failOp, eventCursor, nil)
-	return env, err
-}
-
-// waitForEventOnce is one SSE connect-and-scan, the shared core of the
-// single-shot waitForEvent and the reconnecting waitForEventReconnecting.
-// afterSeq is the cursor for THIS connection (the 202 EventCursor on the first
-// attempt, the last consumed seq on a reconnect). onEnvelope, when non-nil, is
-// invoked for every decoded typed envelope before matching (the progress tap).
-//
-// It returns the matched envelope, the resume cursor (the max seq of a frame
-// FULLY processed without error — a decode failure returns the PRE-frame cursor
-// so the reconnect re-reads the failing frame rather than skipping past it),
-// whether any line at all was scanned (a live-peer signal — including a ': ping'
-// comment keepalive — that resets the reconnect budget), and any error. A non-2xx
-// connect returns a *sseConnectError; a matching frame whose payload fails to
-// decode returns an *ssePayloadDecodeError carrying its seq; a
-// transport/scan/idle-watchdog failure returns a plain wrapped error (all treated
-// as transient by the reconnecting caller).
-func (c *Client) waitForEventOnce(ctx context.Context, requestID, successType, failOp, afterSeq string, onEnvelope func(*sseEnvelope)) (env *sseEnvelope, lastSeq uint64, sawFrame bool, err error) {
-	streamURL := c.baseURL + "/v0/events/stream"
-	cursor := strings.TrimSpace(afterSeq)
-	if c.cityName != "" {
-		if cursor == "" {
-			cursor = "0"
-		}
-		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=" + url.QueryEscape(cursor)
-	} else {
-		if cursor == "" {
-			cursor = "0"
-		}
-		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
-	}
-	// For a remote client, an idle watchdog cancels a stalled stream: the stream
-	// transport has no hard http.Client.Timeout (a long-lived SSE stream must
-	// not be capped), so a per-frame-reset timer is the only bound on a silent
-	// connection. Local clients keep the caller's context unchanged.
-	readCtx := ctx
-	var resetIdle func()
-	if c.streamClient != nil {
-		var cancel context.CancelFunc
-		readCtx, cancel = context.WithCancel(ctx)
-		defer cancel()
-		idle := time.AfterFunc(remoteStreamIdleTimeout, cancel)
-		defer idle.Stop()
-		resetIdle = func() { idle.Reset(remoteStreamIdleTimeout) }
-	}
-
-	req, err := http.NewRequestWithContext(readCtx, http.MethodGet, streamURL, nil)
-	if err != nil {
-		return nil, lastSeq, sawFrame, fmt.Errorf("build SSE request: %w", err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("X-GC-Request", "true")
-	// Attach a fresh bearer per (re)connect so a rotated/re-minted credential
-	// takes effect on reconnect. No-op for a local client (nil token source).
-	if tok, terr := c.bearerToken(); terr != nil {
-		return nil, lastSeq, sawFrame, terr
-	} else if tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-
-	httpClient := c.streamClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, lastSeq, sawFrame, ctxErr
-		}
-		return nil, lastSeq, sawFrame, fmt.Errorf("SSE connect: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		detail := strings.TrimSpace(string(body))
-		if detail == "" {
-			detail = resp.Status
-		}
-		return nil, lastSeq, sawFrame, &sseConnectError{
-			Status:     resp.StatusCode,
-			StatusLine: resp.Status,
-			RetryAfter: resp.Header.Get("Retry-After"),
-			Detail:     detail,
-		}
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var current sseEvent
-	for scanner.Scan() {
-		// Any scanned line — a data/event line, a blank frame terminator, or a
-		// ': ping' comment keepalive — is proof the peer is alive: reset both the
-		// per-frame idle watchdog and the cross-connection silent-attempt budget
-		// (sawFrame). An intermediary that emits only comment keepalives plus
-		// periodic clean closes must not burn the silent budget on a live provision.
-		sawFrame = true
-		if resetIdle != nil {
-			resetIdle()
-		}
-		line := scanner.Text()
-		switch {
-		case strings.HasPrefix(line, "event:"):
-			current.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		case strings.HasPrefix(line, "data:"):
-			data := strings.TrimPrefix(line, "data:")
-			data = strings.TrimPrefix(data, " ")
-			if current.Data == "" {
-				current.Data = data
-			} else {
-				current.Data += "\n" + data
-			}
-		case line == "":
-			if current.Data == "" {
-				current = sseEvent{}
-				continue
-			}
-			var evt sseEnvelope
-			if uerr := json.Unmarshal([]byte(current.Data), &evt); uerr != nil {
-				return nil, lastSeq, sawFrame, fmt.Errorf("decode SSE event: %w", uerr)
-			}
-			// The resume cursor (lastSeq) must advance ONLY for a frame this
-			// connection fully processed. A matching frame whose payload fails to
-			// decode returns below WITHOUT advancing lastSeq, so the reconnect
-			// resumes at the pre-frame cursor and re-reads THIS frame (the server
-			// delivers strictly-greater than after_seq).
-			if onEnvelope != nil {
-				onEnvelope(&evt)
-			}
-			if evt.Type == successType {
-				matches, merr := payloadContainsRequestID(evt.Payload, requestID)
-				if merr != nil {
-					return nil, lastSeq, sawFrame, &ssePayloadDecodeError{Seq: evt.Seq, Err: fmt.Errorf("decode %s payload: %w", successType, merr)}
-				}
-				if matches {
-					out := evt
-					if evt.Seq > lastSeq {
-						lastSeq = evt.Seq
-					}
-					return &out, lastSeq, sawFrame, nil
-				}
-			}
-			if evt.Type == events.RequestFailed {
-				matches, merr := payloadMatchesRequest(evt.Payload, requestID, failOp)
-				if merr != nil {
-					return nil, lastSeq, sawFrame, &ssePayloadDecodeError{Seq: evt.Seq, Err: fmt.Errorf("decode %s payload: %w", events.RequestFailed, merr)}
-				}
-				if matches {
-					out := evt
-					if evt.Seq > lastSeq {
-						lastSeq = evt.Seq
-					}
-					return &out, lastSeq, sawFrame, nil
-				}
-			}
-			// Fully processed (heartbeat, non-matching, or a decoded match for
-			// another request_id): now it is safe to advance past this frame.
-			if evt.Seq > lastSeq {
-				lastSeq = evt.Seq
-			}
-			current = sseEvent{}
-		}
-	}
-	if serr := scanner.Err(); serr != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, lastSeq, sawFrame, ctxErr
-		}
-		return nil, lastSeq, sawFrame, fmt.Errorf("SSE scan: %w", serr)
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, lastSeq, sawFrame, ctxErr
-	}
-	return nil, lastSeq, sawFrame, fmt.Errorf("SSE stream closed before event for %s arrived", requestID)
-}
-
-func payloadContainsRequestID(raw json.RawMessage, requestID string) (bool, error) {
-	// Success event types are per-operation, so the typed envelope selects the
-	// operation and the payload only needs the unique correlation ID.
-	var p struct {
-		RequestID string `json:"request_id"`
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return false, err
-	}
-	return p.RequestID == requestID, nil
-}
-
-func payloadMatchesRequest(raw json.RawMessage, requestID, operation string) (bool, error) {
-	var p struct {
-		RequestID string `json:"request_id"`
-		Operation string `json:"operation"`
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return false, err
-	}
-	return p.RequestID == requestID && p.Operation == operation, nil
-}
 
 // NewClient creates a new supervisor-scope API client targeting the
 // given base URL (e.g., "http://127.0.0.1:8080"). Supervisor-scope
@@ -764,14 +499,6 @@ type SlingResult struct {
 	AttachedBeadID string
 	Mode           string
 	Warnings       []string
-}
-
-// setStrPtr points *dst at a copy of v when v is non-empty, leaving it nil
-// otherwise, so an omitempty pointer field is only set for a present value.
-func setStrPtr(dst **string, v string) {
-	if v != "" {
-		*dst = &v
-	}
 }
 
 var errClientUninitialized = errors.New("api client not initialized")
@@ -963,25 +690,12 @@ func extractMaintenanceStartedAt(detail string) string {
 	return body.StartedAt
 }
 
-func derefStr(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
-}
-
-func derefBool(p *bool) bool {
-	if p == nil {
-		return false
-	}
-	return *p
-}
-
 // ---- bd-shim v1 client methods (ported from upstream/deploy/sqlite-dispatch-fix @9596b6f08) ----
 // Thin HTTP client methods the bd shim routes through; every genclient endpoint
 // already exists on develop. EphemeralBeads/ReleaseBeadIfCurrent/ClaimBead are
 // intentionally NOT ported in v1 (their endpoints are not yet on this fork).
 
+// EphemeralBeadsOpts filters Client.EphemeralBeads results.
 type EphemeralBeadsOpts struct {
 	Status   string
 	Type     string
@@ -1042,6 +756,7 @@ func (c *Client) EphemeralBeads(opts EphemeralBeadsOpts) (CachedRead[[]beads.Bea
 	}, nil
 }
 
+// BeadGraphDep is one directed edge in a BeadGraph.
 type BeadGraphDep struct {
 	From string
 	To   string
@@ -1121,7 +836,6 @@ func (c *Client) ReadyBeads() (CachedRead[[]beads.Bead], error) {
 }
 
 // CloseBead closes a bead via POST /v0/city/{cityName}/bead/{id}/close.
-
 func (c *Client) CloseBead(id string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
@@ -1217,6 +931,7 @@ func (c *Client) ClaimBead(id, actor string) (beads.Bead, bool, error) {
 	return beadFromGen(resp.JSON200.Bead), resp.JSON200.Claimed, nil
 }
 
+// CreateBead creates b through the city-scoped API.
 func (c *Client) CreateBead(b beads.Bead) (beads.Bead, error) {
 	if err := c.requireCityScope(); err != nil {
 		return beads.Bead{}, err

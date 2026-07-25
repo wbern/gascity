@@ -1849,6 +1849,7 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 // already exists on develop. EphemeralBeads/ReleaseBeadIfCurrent/ClaimBead are
 // intentionally NOT ported in v1 (their endpoints are not yet on this fork).
 
+// EphemeralBeadsOpts filters Client.EphemeralBeads results.
 type EphemeralBeadsOpts struct {
 	Status   string
 	Type     string
@@ -1909,6 +1910,7 @@ func (c *Client) EphemeralBeads(opts EphemeralBeadsOpts) (CachedRead[[]beads.Bea
 	}, nil
 }
 
+// BeadGraphDep is one directed edge in a BeadGraph.
 type BeadGraphDep struct {
 	From string
 	To   string
@@ -1988,7 +1990,6 @@ func (c *Client) ReadyBeads() (CachedRead[[]beads.Bead], error) {
 }
 
 // CloseBead closes a bead via POST /v0/city/{cityName}/bead/{id}/close.
-
 func (c *Client) CloseBead(id string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
@@ -2084,6 +2085,7 @@ func (c *Client) ClaimBead(id, actor string) (beads.Bead, bool, error) {
 	return beadFromGen(resp.JSON200.Bead), resp.JSON200.Claimed, nil
 }
 
+// CreateBead creates b through the city-scoped API.
 func (c *Client) CreateBead(b beads.Bead) (beads.Bead, error) {
 	if err := c.requireCityScope(); err != nil {
 		return beads.Bead{}, err

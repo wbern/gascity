@@ -59,8 +59,10 @@ func TestOrderExecEnvInjectsGCBdReal(t *testing.T) {
 func TestOrderExecEnvRejectsOrderOverridingGCBdReal(t *testing.T) {
 	cityDir := t.TempDir()
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}
-	a := orders.Order{Name: "custom", Trigger: "condition", Exec: "true",
-		Env: map[string]string{citylayout.RealBdEnvVar: "/opt/custom/bd"}}
+	a := orders.Order{
+		Name: "custom", Trigger: "condition", Exec: "true",
+		Env: map[string]string{citylayout.RealBdEnvVar: "/opt/custom/bd"},
+	}
 	if _, err := orderExecEnvWithError(cityDir, nil, target, a, nil); err == nil {
 		t.Fatalf("expected [order.env] override of reserved %s to be rejected", citylayout.RealBdEnvVar)
 	}
