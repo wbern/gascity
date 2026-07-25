@@ -36,6 +36,23 @@ type countingReadyStore struct {
 	readyCalls int
 }
 
+type contextAwareListStore struct {
+	*beads.MemStore
+	listCalls    int
+	listCtxCalls int
+}
+
+func (s *contextAwareListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
+}
+
+func (s *contextAwareListStore) ListCtx(ctx context.Context, _ beads.ListQuery) ([]beads.Bead, error) {
+	s.listCtxCalls++
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (s *countingReadyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	s.readyCalls++
 	return s.MemStore.Ready(query...)
@@ -81,6 +98,25 @@ func TestStatusSessionSnapshotUsesScopedStoreWhenAvailable(t *testing.T) {
 	}
 	if _, ok := snapshot.bySessionName["shared-session"]; ok {
 		t.Error("snapshot contains shared-session, want the shared store bypassed in favor of the scoped one")
+	}
+}
+
+func TestStatusListStoreWithTimeoutCancelsContextAwareStore(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	store := &contextAwareListStore{MemStore: beads.NewMemStore()}
+	start := time.Now()
+	_, err := statusListStoreWithTimeout(context.Background(), newFakeState(t), store, beads.ListQuery{AllowScan: true})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("statusListStoreWithTimeout error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("statusListStoreWithTimeout took %s, want bounded return", elapsed)
+	}
+	if store.listCtxCalls != 1 || store.listCalls != 0 {
+		t.Fatalf("store calls = ListCtx:%d List:%d, want ListCtx:1 List:0", store.listCtxCalls, store.listCalls)
 	}
 }
 

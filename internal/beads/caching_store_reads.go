@@ -14,6 +14,19 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	return c.ListCtx(context.Background(), query)
+}
+
+// ListCtx implements CtxLister. Cache-only reads preserve List semantics;
+// every fallback to the backing store uses its CtxLister capability when
+// available so callers can cancel the backend read.
+func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -21,7 +34,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
 		c.mu.RUnlock()
-		items, err := c.backing.List(query)
+		items, err := c.backingListCtx(ctx, query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, items)
 		}
@@ -60,10 +73,10 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		// The cache never has a complete closed-only or parent-history view, so
 		// preserve the old backing-store behavior for those query shapes.
 		if query.Status == "closed" || query.ParentID != "" {
-			return c.backing.List(liveListQuery(query))
+			return c.backingListCtx(ctx, liveListQuery(query))
 		}
 
-		all, err := c.backing.List(liveListQuery(query))
+		all, err := c.backingListCtx(ctx, liveListQuery(query))
 		if err != nil {
 			if !IsPartialResult(err) {
 				c.recordProblem("list include closed backing failure", err)
@@ -87,7 +100,14 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		}
 		return finish(cached, err)
 	}
-	return c.backing.List(liveListQuery(query))
+	return c.backingListCtx(ctx, liveListQuery(query))
+}
+
+func (c *CachingStore) backingListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if lister, ok := c.backing.(CtxLister); ok {
+		return lister.ListCtx(ctx, query)
+	}
+	return c.backing.List(query)
 }
 
 func liveListQuery(query ListQuery) ListQuery {

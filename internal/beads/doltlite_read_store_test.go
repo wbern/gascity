@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +41,37 @@ func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
 	}
 	if !slices.Contains(got.Labels, "gc:session") {
 		t.Fatalf("labels = %v, missing gc:session", got.Labels)
+	}
+}
+
+func TestDoltliteReadStoreListCtxHonorsCancelledContext(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.ListCtx(ctx, ListQuery{AllowScan: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCtx(cancelled ctx) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestDoltliteReadStoreListCtxCancelsWhileWaitingForReadConnection(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquiring only read connection: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = store.ListCtx(ctx, ListQuery{AllowScan: true})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ListCtx(waiting for connection) error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -972,7 +1004,7 @@ func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
 	// (not all five matches), proving the SQL LIMIT is applied during selection
 	// rather than after hydrating full matching history.
 	sets := doltliteTableSetsForMode(TierIssues)
-	ids, err := store.selectBoundedTopNIDs(ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
+	ids, err := store.selectBoundedTopNIDs(context.Background(), ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
 	if err != nil {
 		t.Fatalf("selectBoundedTopNIDs: %v", err)
 	}
@@ -1257,14 +1289,14 @@ func TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet(t *testing.T) {
 		t.Fatalf("TierIssues table sets = %d, want >= 2 to exercise the guard", len(sets))
 	}
 	const customOrder = "ORDER BY i.created_at ASC, i.id ASC"
-	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
+	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
 		t.Fatal("custom orderBy with multiple table sets should error, got nil")
 	} else if !strings.Contains(err.Error(), "single table set") {
 		t.Fatalf("error = %q, want it to mention the single-table-set invariant", err)
 	}
 
 	// The same custom orderBy against a single table set is allowed.
-	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
+	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
 		t.Fatalf("custom orderBy with a single table set should succeed, got %v", err)
 	}
 }
