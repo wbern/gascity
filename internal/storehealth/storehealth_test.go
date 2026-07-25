@@ -185,3 +185,105 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
+
+type tailCallRecorder struct {
+	*events.Fake
+	listCalls        int
+	listTailCalls    int
+	lastTailLimit    int
+	maxTailResultLen int
+}
+
+// listOnlyProvider deliberately exposes only events.Provider even when its
+// delegate has extra capabilities. It verifies the compatibility path used by
+// third-party providers that have not implemented TailProvider.
+type listOnlyProvider struct {
+	events.Provider
+	listCalls int
+}
+
+func (p *listOnlyProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.Provider.List(filter)
+}
+
+func (r *tailCallRecorder) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *tailCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	r.lastTailLimit = limit
+	events, err := r.Fake.ListTail(filter, limit)
+	if len(events) > r.maxTailResultLen {
+		r.maxTailResultLen = len(events)
+	}
+	return events, err
+}
+
+func TestLastMaintenanceUsesBoundedTailWhenAvailable(t *testing.T) {
+	recorder := &tailCallRecorder{Fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(recorder)
+	if recorder.listTailCalls != 2 {
+		t.Fatalf("ListTail calls = %d, want one bounded tail read per maintenance event type", recorder.listTailCalls)
+	}
+	if recorder.listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0 when ListTail is available", recorder.listCalls)
+	}
+	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
+		t.Fatalf("ListTail limit = %d, want a small positive bound", recorder.lastTailLimit)
+	}
+	if !ts.Equal(newer) || status != "failed" {
+		t.Fatalf("LastMaintenance = (%v, %q), want (%v, failed)", ts, status, newer)
+	}
+}
+
+func TestLastMaintenanceTailReadStaysBoundedForLongHistory(t *testing.T) {
+	const totalEvents = 10_000
+
+	recorder := &tailCallRecorder{Fake: events.NewFake()}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	var latest time.Time
+	for i := 0; i < totalEvents; i++ {
+		latest = base.Add(time.Duration(i) * time.Minute)
+		recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: latest, Payload: payload})
+	}
+
+	ts, status := LastMaintenance(recorder)
+	if recorder.listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0 for a tail-capable %d-event provider", recorder.listCalls, totalEvents)
+	}
+	if recorder.maxTailResultLen > lastMaintenanceTailLimit {
+		t.Fatalf("ListTail returned %d events, want <= limit %d regardless of %d-event history", recorder.maxTailResultLen, lastMaintenanceTailLimit, totalEvents)
+	}
+	if !ts.Equal(latest) || status != "success" {
+		t.Fatalf("LastMaintenance = (%v, %q), want (%v, success)", ts, status, latest)
+	}
+}
+
+func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
+	provider := &listOnlyProvider{Provider: events.NewFake()}
+	then := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	payload, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	provider.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: then, Payload: payload})
+
+	ts, status := LastMaintenance(provider)
+	if provider.listCalls != 2 {
+		t.Fatalf("List calls = %d, want one full-list fallback per maintenance event type", provider.listCalls)
+	}
+	if !ts.Equal(then) {
+		t.Fatalf("ts = %v, want %v", ts, then)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
