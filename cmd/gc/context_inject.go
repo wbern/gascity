@@ -7,6 +7,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // Context-usage injection — the context-pressure sibling of clock_inject.go.
@@ -79,6 +81,14 @@ func contextInjectLine(hookInput []byte) string {
 // contextWindowTokens), so a smaller-window sidecar/compaction call logged in
 // the same transcript can't shrink the main-loop session's window.
 func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
+	if codexUsages, err := sessionlog.ExtractCodexTailUsage(path); err == nil && len(codexUsages) > 0 {
+		last := codexUsages[len(codexUsages)-1]
+		tokens = last.InputTokens + last.CacheReadTokens + last.CacheCreationTokens
+		if tokens > 0 {
+			return tokens, []string{last.Model}, true
+		}
+	}
+
 	const tailBytes = 2 << 20 // last 2MiB is ample for the newest entries
 	f, err := os.Open(path)   //nolint:gosec // path comes from the provider hook input
 	if err != nil {
@@ -136,6 +146,9 @@ func contextWindowTokens(models []string) int {
 	}
 	best := 0
 	for _, m := range models {
+		if w := sessionlog.ModelContextWindow(m); w > best {
+			best = w
+		}
 		if w := classifyWindow(m); w > best {
 			best = w
 		}

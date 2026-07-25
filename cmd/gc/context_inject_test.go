@@ -27,6 +27,12 @@ func hookInputFor(path string) []byte {
 	return []byte(fmt.Sprintf(`{"transcript_path":%q,"hook_event_name":"UserPromptSubmit"}`, path))
 }
 
+func codexTokenCountLine(input, cached, total int) string {
+	return fmt.Sprintf(
+		`{"timestamp":"2026-07-25T03:08:25Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":%d},"last_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"total_tokens":%d},"model_context_window":258400}}}`,
+		total, input, cached, input)
+}
+
 func TestContextInjectSilentBelowAdvisory(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
 	// 100k of 1M = 10% — well below the 60% advisory threshold.
@@ -62,6 +68,37 @@ func TestContextInjectUrgentBand(t *testing.T) {
 	}
 	if !strings.Contains(got, "operator") {
 		t.Errorf("urgent line must preserve the operator-stay-up override: %q", got)
+	}
+}
+
+func TestContextInjectCodexUrgentBeforeCompaction(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// Codex reports cached_input_tokens as a subset of input_tokens. This is the
+	// real pre-compaction shape: 224,795 of a 258,400-token window.
+	p := writeTranscript(t,
+		`{"timestamp":"2026-07-25T03:08:25Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		codexTokenCountLine(224_795, 224_690, 225_170),
+	)
+	got := contextInjectLine(hookInputFor(p))
+	if !strings.Contains(got, "225k/258k") || !strings.Contains(got, "~87%") {
+		t.Fatalf("Codex pre-compaction pressure must be reported accurately, got %q", got)
+	}
+	if !strings.Contains(got, "HIGH") {
+		t.Fatalf("Codex urgent guidance must be marked HIGH, got %q", got)
+	}
+}
+
+func TestContextInjectCodexLastTokenCountWinsAfterCompaction(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// A high pre-compaction count followed by a compacted one must become
+	// silent. Codex's total remains cumulative while last_token_usage resets.
+	p := writeTranscript(t,
+		`{"timestamp":"2026-07-25T03:08:25Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		codexTokenCountLine(224_795, 224_690, 225_170),
+		codexTokenCountLine(48_276, 48_171, 226_002),
+	)
+	if got := contextInjectLine(hookInputFor(p)); got != "" {
+		t.Fatalf("latest Codex count after compaction must be silent, got %q", got)
 	}
 }
 
