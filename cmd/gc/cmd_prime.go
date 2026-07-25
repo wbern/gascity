@@ -693,8 +693,8 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("%v", err)
 		return
 	}
-	if fromHookStdin && sessionProviderFamily(info) != "codex" {
-		warn("hook stdin provider session id is only accepted for codex session %q", gcSessionID)
+	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) {
+		warn("hook stdin provider session id is only accepted for codex/claude session %q", gcSessionID)
 		return
 	}
 	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
@@ -702,6 +702,23 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	}
 	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
+		return
+	}
+	if stderr != nil {
+		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
+	}
+}
+
+// providerAcceptsHookStdinSessionID reports whether a provider family delivers
+// its authoritative resume ID on the SessionStart hook's stdin JSON. Other
+// providers supply their session ID through the environment and are handled
+// before this gate.
+func providerAcceptsHookStdinSessionID(family string) bool {
+	switch family {
+	case "codex", "claude":
+		return true
+	default:
+		return false
 	}
 }
 

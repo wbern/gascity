@@ -7153,7 +7153,6 @@ prompt_template = "prompts/probe.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
 	}
-
 	updatedStore, err := openCityStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -7275,11 +7274,102 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
+func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) {
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
 	setPrimeHookStdinJSON(t, map[string]string{
 		"session_id":      "claude-provider-session",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "probe prompt") {
+		t.Fatalf("stdout = %q, want hook prompt to remain on stdout", stdout.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "claude-provider-session" {
+		t.Fatalf("session_key = %q, want Claude provider session ID from hook stdin", got)
+	}
+	if !strings.Contains(stderr.String(), "persisted resume session_key") {
+		t.Fatalf("stderr = %q, want successful session-key persistence diagnostic", stderr.String())
+	}
+}
+
+func TestDoPrimeClaudeHookRejectsProviderSessionIDEqualToGCSessionID(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
+base = "builtin:claude"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      sessionID,
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode(nil, &stdout, &stderr, true, false); code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty when provider ID equals GC session ID", got)
+	}
+}
+
+func TestDoPrimeClaudeHookDoesNotOverwriteExistingProviderSessionKey(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
+base = "builtin:claude"`)
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(sessionID, "session_key", "existing-claude-session"); err != nil {
+		t.Fatal(err)
+	}
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "new-claude-session",
+		"hook_event_name": "SessionStart",
+		"source":          "resume",
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode(nil, &stdout, &stderr, true, false); code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updated, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "existing-claude-session" {
+		t.Fatalf("session_key = %q, want existing key preserved", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "gemini-provider-session",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})
@@ -7299,7 +7389,17 @@ base = "builtin:claude"`)
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty for hook stdin session ID from unsupported provider", got)
+	}
+}
+
+func TestProviderAcceptsHookStdinSessionID(t *testing.T) {
+	for family, want := range map[string]bool{
+		"codex": true, "claude": true, "gemini": false, "opencode": false, "": false,
+	} {
+		if got := providerAcceptsHookStdinSessionID(family); got != want {
+			t.Errorf("providerAcceptsHookStdinSessionID(%q) = %v, want %v", family, got, want)
+		}
 	}
 }
 
