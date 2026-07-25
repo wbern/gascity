@@ -85,12 +85,12 @@ func stageProviderOverlaysToPod(ctx context.Context, ops k8sOps, podName string,
 	seedExistingInstructions(cfg.WorkDir, stageDir, warn)
 	providers := runtime.EffectiveOverlayProviderNames(cfg)
 	for _, od := range cfg.PackOverlayDirs {
-		if err := stageProviderOverlay(od, stageDir, providers, "pack overlay", warn); err != nil {
+		if err := stageProviderOverlay(od, stageDir, providers, cfg.PreparedMergeablePaths, "pack overlay", warn); err != nil {
 			return err
 		}
 	}
 	if cfg.OverlayDir != "" {
-		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, providers, "overlay", warn); err != nil {
+		if err := stageProviderOverlay(cfg.OverlayDir, stageDir, providers, cfg.PreparedMergeablePaths, "overlay", warn); err != nil {
 			return err
 		}
 	}
@@ -116,9 +116,9 @@ func seedExistingInstructions(workDir, stageDir string, warn io.Writer) {
 	}
 }
 
-func stageProviderOverlay(srcDir, dstDir string, providers []string, label string, warn io.Writer) error {
+func stageProviderOverlay(srcDir, dstDir string, providers, preparedPaths []string, label string, warn io.Writer) error {
 	var warnings bytes.Buffer
-	if err := runtime.StageProviderOverlayDir(srcDir, dstDir, providers, &warnings); err != nil {
+	if err := runtime.StageProviderOverlayDirForPreparedFiles(srcDir, dstDir, providers, preparedPaths, &warnings); err != nil {
 		return fmt.Errorf("staging %s %s: %w", label, srcDir, err)
 	}
 	if warnings.Len() > 0 {

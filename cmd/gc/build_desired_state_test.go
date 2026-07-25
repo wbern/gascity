@@ -2853,6 +2853,9 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 	}
 
 	firstCfg := templateParamsToConfig(firstTP)
+	if got, want := firstCfg.PreparedMergeablePaths, []string{filepath.Join(".gemini", "settings.json")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PreparedMergeablePaths = %v, want %v", got, want)
+	}
 	wantRelDst := path.Join("worker", ".gemini", "settings.json")
 	foundHook := false
 	for _, entry := range firstCfg.CopyFiles {
@@ -3023,6 +3026,45 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 	staged := filepath.Join(rigDir, ".pi", "extensions", "gc-hooks.js")
 	if _, err := os.Stat(staged); err != nil {
 		t.Fatalf("family pi overlay not materialized before fingerprint for custom pi-vllm provider (gc-6bw8o): %v", err)
+	}
+}
+
+func TestPrepareTemplateResolutionFallsBackToOverlayWhenHookInstallFails(t *testing.T) {
+	cityDir := t.TempDir()
+	overlayDir := filepath.Join(cityDir, "packs", "core", "overlay")
+	overlayHook := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	const overlayHookContent = `{"hooks":{"SessionStart":[]}}`
+	if err := os.WriteFile(overlayHook, []byte(overlayHookContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay hook): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace:       config.Workspace{Name: "test-city", Provider: "test"},
+		Providers:       map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		PackOverlayDirs: []string{overlayDir},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           "worker",
+			InstallAgentHooks: []string{"codex"},
+		}},
+	}
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	fakeFS := fsys.NewFake()
+	hookPath := filepath.Join(cityDir, "worker", ".codex", "hooks.json")
+	fakeFS.Errors[hookPath] = errors.New("injected hook write failure")
+	bp.fs = fakeFS
+
+	if got := prepareTemplateResolution(bp, &cfg.Agents[0], "worker", io.Discard); len(got) != 0 {
+		t.Fatalf("PreparedMergeablePaths after failed hook install = %v, want none", got)
+	}
+	if got, err := os.ReadFile(hookPath); err != nil {
+		t.Fatalf("read fallback-staged hook: %v", err)
+	} else if !strings.Contains(string(got), `"SessionStart"`) || strings.Contains(string(got), "GC_MANAGED_SESSION_HOOK=1") {
+		t.Fatalf("fallback-staged hook = %q, want the ordinary overlay hook without a managed controller command", got)
 	}
 }
 

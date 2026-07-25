@@ -104,14 +104,14 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	overlayProviders := runtime.EffectiveOverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := runtime.StageProviderOverlayDirForPreparedFiles(od, cfg.WorkDir, overlayProviders, cfg.PreparedMergeablePaths, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+		if err := runtime.StageProviderOverlayDirForPreparedFiles(cfg.OverlayDir, cfg.WorkDir, overlayProviders, cfg.PreparedMergeablePaths, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}

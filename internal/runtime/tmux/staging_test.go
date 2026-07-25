@@ -49,6 +49,50 @@ func TestStageStartFilesSurfacesKiroPreservationWarning(t *testing.T) {
 	}
 }
 
+func TestStageStartFilesPreservesControllerPreparedMergeableHooks(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	overlayDir := t.TempDir()
+	managedHook := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(managedHook), 0o755); err != nil {
+		t.Fatalf("mkdir managed hook directory: %v", err)
+	}
+	const canonicalHook = `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc --city /city prime --hook --hook-format codex"}]}]}}`
+	if err := os.WriteFile(managedHook, []byte(canonicalHook), 0o644); err != nil {
+		t.Fatalf("write managed hook: %v", err)
+	}
+	overlayHook := filepath.Join(overlayDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir overlay hook directory: %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("write overlay hook: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "AGENTS.md"), []byte("overlay instructions"), 0o644); err != nil {
+		t.Fatalf("write overlay instructions: %v", err)
+	}
+
+	if err := stageStartFiles(runtime.Config{
+		WorkDir:                workDir,
+		ProviderName:           "codex",
+		PackOverlayDirs:        []string{overlayDir},
+		PreparedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+	}, nil); err != nil {
+		t.Fatalf("stageStartFiles: %v", err)
+	}
+	if got, err := os.ReadFile(managedHook); err != nil {
+		t.Fatalf("read managed hook: %v", err)
+	} else if string(got) != canonicalHook {
+		t.Fatalf("managed hook = %q, want canonical controller-owned bytes", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(workDir, "AGENTS.md")); err != nil {
+		t.Fatalf("read staged instructions: %v", err)
+	} else if string(got) != "overlay instructions" {
+		t.Fatalf("staged instructions = %q, want overlay content", got)
+	}
+}
+
 func TestStageStartFilesKeepsScaffoldOutOfSpawnerCWD(t *testing.T) {
 	root := t.TempDir()
 	sharedWorktree := filepath.Join(root, "shared-builder")

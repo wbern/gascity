@@ -634,6 +634,13 @@ type Config struct {
 	// .gemini/settings.json for parallel tooling.
 	InstallAgentHooks []string
 
+	// PreparedMergeablePaths lists workdir-relative settings and hook files
+	// successfully installed by the controller. Runtime overlay staging leaves
+	// only these paths to their canonical controller owner while continuing to
+	// stage every other overlay file. This transient preparation outcome is not
+	// desired configuration and is excluded from fingerprints.
+	PreparedMergeablePaths []string
+
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.

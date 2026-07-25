@@ -190,6 +190,19 @@ func TestConfigFingerprintIncludesMouseOn(t *testing.T) {
 	}
 }
 
+func TestPreparedMergeablePathsDoNotAffectFingerprint(t *testing.T) {
+	base := Config{Command: "codex"}
+	prepared := base
+	prepared.PreparedMergeablePaths = []string{filepath.Join(".codex", "hooks.json")}
+
+	if got, want := CoreFingerprint(prepared), CoreFingerprint(base); got != want {
+		t.Fatalf("CoreFingerprint changed for transient prepared paths: got %q want %q", got, want)
+	}
+	if got, want := LiveFingerprint(prepared), LiveFingerprint(base); got != want {
+		t.Fatalf("LiveFingerprint changed for transient prepared paths: got %q want %q", got, want)
+	}
+}
+
 func TestConfigFingerprintIncludesLifecycle(t *testing.T) {
 	persistent := Config{Command: "custom-once"}
 	oneShot := Config{Command: "custom-once", Lifecycle: LifecycleOneShot}

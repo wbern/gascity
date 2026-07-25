@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -169,6 +170,41 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		}
 	}
 	return nil
+}
+
+// ManagedWorkDirMergeablePaths returns the mergeable workdir-relative files
+// written by a successful InstallWithResolver call for providers. City-wide
+// providers such as Claude are intentionally omitted. The result is sorted
+// and de-duplicated so callers can safely carry it as a runtime preparation
+// outcome.
+func ManagedWorkDirMergeablePaths(providers []string, resolve FamilyResolver) []string {
+	seen := make(map[string]struct{})
+	for _, provider := range providers {
+		family := resolveFamily(resolve, provider)
+		switch family {
+		case "claude":
+			continue
+		case "groq", "cerebras":
+			family = "opencode"
+		}
+		base := path.Join("overlay", "per-provider", family)
+		_ = iofs.WalkDir(core.PackFS, base, func(name string, d iofs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || name == base {
+				return nil
+			}
+			rel := strings.TrimPrefix(name, base+"/")
+			if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
+				seen[filepath.FromSlash(rel)] = struct{}{}
+			}
+			return nil
+		})
+	}
+	paths := make([]string, 0, len(seen))
+	for rel := range seen {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error {

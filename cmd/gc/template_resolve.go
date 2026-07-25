@@ -65,6 +65,9 @@ type TemplateParams struct {
 	Upstream string
 	// Hints contains startup behavior (pre_start, session_setup, etc.).
 	Hints agent.StartupHints
+	// PreparedMergeablePaths contains workdir-relative hook/settings files the
+	// controller successfully prepared before runtime staging.
+	PreparedMergeablePaths []string
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
 	// SessionName is the computed tmux session name.
@@ -855,6 +858,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 		cfg.MCPServers = tp.MCPServers
 	}
 	cfg.WorkDir = tp.WorkDir
+	cfg.PreparedMergeablePaths = append([]string(nil), tp.PreparedMergeablePaths...)
 	cfg.FingerprintExtra = tp.FPExtra
 	// Prompt delivery may prepend the startup prompt to the configured nudge.
 	cfg.Nudge = nudge

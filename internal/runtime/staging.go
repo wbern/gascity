@@ -35,12 +35,12 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 	if cfg.WorkDir != "" {
 		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDirForPreparedFiles(od, cfg.WorkDir, overlayProviders, cfg.PreparedMergeablePaths, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDirForPreparedFiles(cfg.OverlayDir, cfg.WorkDir, overlayProviders, cfg.PreparedMergeablePaths, warnings); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
@@ -104,8 +104,38 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 // StageProviderOverlayDir copies a provider-aware overlay directory into a
 // work directory and writes nonfatal preservation warnings to warnings.
 func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+	return stageProviderOverlayDir(srcDir, dstDir, providers, nil, warnings)
+}
+
+// StageProviderOverlayDirSkippingPaths stages a provider-aware overlay while
+// leaving only the supplied workdir-relative paths untouched.
+func StageProviderOverlayDirSkippingPaths(srcDir, dstDir string, providers, preparedPaths []string, warnings io.Writer) error {
+	if len(preparedPaths) == 0 {
+		return StageProviderOverlayDir(srcDir, dstDir, providers, warnings)
+	}
+	prepared := make(map[string]struct{}, len(preparedPaths))
+	for _, relPath := range preparedPaths {
+		prepared[filepath.Clean(relPath)] = struct{}{}
+	}
+	skip := func(relPath string, isDir bool) bool {
+		if isDir {
+			return false
+		}
+		_, ok := prepared[filepath.Clean(relPath)]
+		return ok
+	}
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings)
+}
+
+// StageProviderOverlayDirForPreparedFiles selects mergeable-file preservation
+// only after the controller has successfully prepared those files.
+func StageProviderOverlayDirForPreparedFiles(srcDir, dstDir string, providers, preparedPaths []string, warnings io.Writer) error {
+	return StageProviderOverlayDirSkippingPaths(srcDir, dstDir, providers, preparedPaths, warnings)
+}
+
+func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip overlay.SkipFunc, warnings io.Writer) error {
 	var stderr bytes.Buffer
-	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+	if err := overlay.CopyDirForProvidersWithSkip(srcDir, dstDir, providers, skip, &stderr); err != nil {
 		return err
 	}
 	nonfatal, fatal := splitOverlayWarnings(stderr.String())

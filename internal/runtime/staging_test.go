@@ -2,9 +2,11 @@ package runtime
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -132,6 +134,89 @@ func TestStageSessionWorkDirUsesConcreteProviderOverlayName(t *testing.T) {
 		t.Fatal("staged Claude overlay for Kiro provider inheriting Claude launch behavior")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat Claude overlay: %v", err)
+	}
+}
+
+func TestStageProviderOverlayDirSkippingPreparedPathsPreservesManagedHooks(t *testing.T) {
+	t.Parallel()
+
+	overlayDir := t.TempDir()
+	workDir := t.TempDir()
+	managedHook := filepath.Join(workDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(managedHook), 0o755); err != nil {
+		t.Fatalf("mkdir managed hook directory: %v", err)
+	}
+	const canonicalHook = `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc --city /city prime --hook --hook-format codex"}]}]}}`
+	if err := os.WriteFile(managedHook, []byte(canonicalHook), 0o644); err != nil {
+		t.Fatalf("write managed hook: %v", err)
+	}
+
+	overlayHook := filepath.Join(overlayDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir overlay hook directory: %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("write overlay hook: %v", err)
+	}
+	otherManagedFile := filepath.Join(overlayDir, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(otherManagedFile), 0o755); err != nil {
+		t.Fatalf("mkdir other managed file directory: %v", err)
+	}
+	if err := os.WriteFile(otherManagedFile, []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatalf("write other managed file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "AGENTS.md"), []byte("overlay instructions"), 0o644); err != nil {
+		t.Fatalf("write overlay instructions: %v", err)
+	}
+
+	if err := StageProviderOverlayDirSkippingPaths(overlayDir, workDir, []string{"codex"}, []string{filepath.Join(".codex", "hooks.json")}, nil); err != nil {
+		t.Fatalf("StageProviderOverlayDirSkippingPaths: %v", err)
+	}
+	if got, err := os.ReadFile(managedHook); err != nil {
+		t.Fatalf("read managed hook: %v", err)
+	} else if string(got) != canonicalHook {
+		t.Fatalf("managed hook = %q, want canonical controller-owned bytes", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(workDir, "AGENTS.md")); err != nil {
+		t.Fatalf("read staged instruction file: %v", err)
+	} else if string(got) != "overlay instructions" {
+		t.Fatalf("staged instructions = %q, want overlay content", got)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".gemini", "settings.json")); err != nil {
+		t.Fatalf("unprepared mergeable file was not staged: %v", err)
+	}
+}
+
+func TestStageSessionWorkDirStagesMergeableHooksWithoutControllerPreparation(t *testing.T) {
+	t.Parallel()
+
+	overlayDir := t.TempDir()
+	workDir := t.TempDir()
+	overlayHook := filepath.Join(overlayDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir overlay hook directory: %v", err)
+	}
+	const stagedHook = `{"hooks":{"SessionStart":[]}}`
+	if err := os.WriteFile(overlayHook, []byte(stagedHook), 0o644); err != nil {
+		t.Fatalf("write overlay hook: %v", err)
+	}
+
+	if err := StageSessionWorkDir(Config{WorkDir: workDir, ProviderName: "codex", PackOverlayDirs: []string{overlayDir}}); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("read staged hook: %v", err)
+	} else {
+		var want, actual map[string]any
+		if err := json.Unmarshal([]byte(stagedHook), &want); err != nil {
+			t.Fatalf("unmarshal expected staged hook: %v", err)
+		}
+		if err := json.Unmarshal(got, &actual); err != nil {
+			t.Fatalf("unmarshal staged hook: %v", err)
+		}
+		if !reflect.DeepEqual(actual, want) {
+			t.Fatalf("staged hook = %#v, want %#v", actual, want)
+		}
 	}
 }
 

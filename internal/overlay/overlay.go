@@ -45,7 +45,7 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 // If srcDir does not exist, returns nil (no-op).
 // Individual file copy failures are logged to stderr but don't abort.
 func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
-	return copyDir(srcDir, dstDir, stderr, nil)
+	return copyDir(srcDir, dstDir, stderr, nil, nil)
 }
 
 type preserveExistingFunc func(relPath string) bool
@@ -66,7 +66,7 @@ func skipRuntimeMirror(relPath string) bool {
 	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
 }
 
-func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil // Missing source dir is a no-op (like Gas Town).
@@ -77,11 +77,11 @@ func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveE
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
-	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting)
+	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting, skip)
 }
 
 // copyDirRecursive walks srcBase/rel and copies files into dstBase/rel.
-func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	srcPath := srcBase
 	if rel != "" {
 		srcPath = filepath.Join(srcBase, rel)
@@ -101,6 +101,9 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		if skipRuntimeMirror(entryRel) {
 			continue
 		}
+		if skip != nil && skip(entryRel, entry.IsDir()) {
+			continue
+		}
 
 		if entry.IsDir() {
 			// Create destination subdirectory and recurse.
@@ -109,7 +112,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				fmt.Fprintf(stderr, "overlay: mkdir %q: %v\n", dstSubDir, err) //nolint:errcheck
 				continue
 			}
-			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting); err != nil {
+			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting, skip); err != nil {
 				fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 			}
 			continue
@@ -250,7 +253,7 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 	// Step 2: copy provider-specific files (flattened into dst).
 	if providerName != "" {
 		providerDir := filepath.Join(srcDir, PerProviderDir, providerName)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName)); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName), nil); err != nil {
 			return err
 		}
 	}
@@ -270,6 +273,15 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 // wins when two providers ship the same rel path (last-writer-wins via
 // overwrite or JSON merge).
 func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer) error {
+	return CopyDirForProvidersWithSkip(srcDir, dstDir, providers, nil, stderr)
+}
+
+// CopyDirForProvidersWithSkip behaves like CopyDirForProviders but additionally
+// omits paths selected by skip in both the universal and provider-specific
+// phases. Callers use this when another component has already prepared the
+// mergeable settings and hook files in the destination, while ordinary overlay
+// scaffolding must still be staged.
+func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip SkipFunc, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -281,15 +293,18 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
 
-	// Step 1: copy universal files (skip per-provider/).
-	skip := func(relPath string, _ bool) bool {
+	// Step 1: copy universal files (skip per-provider/ and caller-selected paths).
+	universalSkip := func(relPath string, isDir bool) bool {
 		if skipRuntimeMirror(relPath) {
 			return true
 		}
-		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
-			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
+		if relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
+			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator) {
+			return true
+		}
+		return skip != nil && skip(relPath, isDir)
 	}
-	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+	if err := CopyDirWithSkip(srcDir, dstDir, universalSkip, stderr); err != nil {
 		return err
 	}
 
@@ -301,11 +316,15 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		}
 		seen[p] = true
 		providerDir := filepath.Join(srcDir, PerProviderDir, p)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p)); err != nil {
+		if err := copyDirWithProviderSkip(providerDir, dstDir, stderr, providerPreserveExisting(p), skip); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func copyDirWithProviderSkip(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
+	return copyDir(srcDir, dstDir, stderr, preserveExisting, skip)
 }
 
 func providerPreserveExisting(providerName string) preserveExistingFunc {

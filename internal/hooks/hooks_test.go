@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,6 +65,17 @@ func TestSupportedProviders(t *testing.T) {
 		if !want[p] {
 			t.Errorf("unexpected provider %q", p)
 		}
+	}
+}
+
+func TestManagedWorkDirMergeablePathsExcludesCityWideClaudeSettings(t *testing.T) {
+	got := ManagedWorkDirMergeablePaths([]string{"claude", "gemini", "codex"}, nil)
+	want := []string{
+		filepath.Join(".codex", "hooks.json"),
+		filepath.Join(".gemini", "settings.json"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ManagedWorkDirMergeablePaths = %v, want %v", got, want)
 	}
 }
 

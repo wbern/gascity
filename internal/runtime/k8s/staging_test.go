@@ -119,6 +119,38 @@ func TestStageFilesStagesKiroPackOverlayAtWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestStageFilesSkipsOnlyControllerPreparedMergeablePaths(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	overlayHook := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay hook): %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay hook): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packOverlay, "AGENTS.md"), []byte("overlay instructions"), 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay instructions): %v", err)
+	}
+
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-codex", runtime.Config{
+		WorkDir:                workDir,
+		ProviderName:           "codex",
+		PackOverlayDirs:        []string{packOverlay},
+		PreparedMergeablePaths: []string{filepath.Join(".codex", "hooks.json")},
+	}, "", io.Discard)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if _, ok := ops.files["/workspace/.codex/hooks.json"]; ok {
+		t.Fatalf("Kubernetes staging copied controller-prepared hook: %#v", ops.files)
+	}
+	if got := ops.files["/workspace/AGENTS.md"]; got != "overlay instructions" {
+		t.Fatalf("staged AGENTS.md = %q, want ordinary overlay content", got)
+	}
+}
+
 func TestStageFilesStagesKiroPackOverlayAtPodWorkDirForRigWorkDir(t *testing.T) {
 	cityRoot := t.TempDir()
 	workDir := filepath.Join(cityRoot, "rigs", "team")

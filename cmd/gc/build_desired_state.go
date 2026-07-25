@@ -4555,29 +4555,34 @@ func agentInSuspendedRig(
 // prepareTemplateResolution installs any hook-backed files that must exist
 // before resolveTemplate fingerprints CopyFiles. This keeps generated hook
 // files from looking like config drift on the next reconcile tick.
-func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, stderr io.Writer) {
+func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, stderr io.Writer) []string {
 	if bp == nil || cfgAgent == nil {
-		return
+		return nil
 	}
 	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
 	if err != nil {
-		return
+		return nil
 	}
 	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
 		}
-		return
+		return nil
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
-	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
+	preparedPaths := hooks.ManagedWorkDirMergeablePaths(ih, resolver)
+	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, preparedPaths, stderr)
+	if len(ih) > 0 {
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
+			materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, nil, stderr)
+			return nil
 		}
 	}
+	return preparedPaths
 }
 
 func materializeProviderOverlaysBeforeFingerprint(
@@ -4587,6 +4592,7 @@ func materializeProviderOverlaysBeforeFingerprint(
 	qualifiedName string,
 	rigName string,
 	workDir string,
+	preparedPaths []string,
 	stderr io.Writer,
 ) {
 	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
@@ -4606,12 +4612,12 @@ func materializeProviderOverlaysBeforeFingerprint(
 		OverlayDir:          overlayDir,
 	})
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirForPreparedFiles(od, workDir, overlayProviders, preparedPaths, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirForPreparedFiles(overlayDir, workDir, overlayProviders, preparedPaths, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
@@ -4621,8 +4627,13 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
-	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+	preparedPaths := prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	tp, err := resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+	if err != nil {
+		return TemplateParams{}, err
+	}
+	tp.PreparedMergeablePaths = preparedPaths
+	return tp, nil
 }
 
 func validateAgentSessionTransportForBuild(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string) error {
