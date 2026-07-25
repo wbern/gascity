@@ -671,6 +671,9 @@ func seedStatusBodyState(t *testing.T) *fakeState {
 func TestBuildStatusBodyFullIncludesExpensiveBlocks(t *testing.T) {
 	state := seedStatusBodyState(t)
 	s := &Server{state: state}
+	if _, err := s.cachedStoreHealth(context.Background(), time.Now()); err != nil {
+		t.Fatalf("priming store health: %v", err)
+	}
 
 	body := s.buildStatusBody(context.Background(), false)
 	if body.StoreHealth == nil {

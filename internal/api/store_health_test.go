@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -553,6 +554,9 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
 	s := &Server{state: state}
+	if _, err := s.cachedStoreHealth(context.Background(), time.Now()); err != nil {
+		t.Fatalf("priming store health: %v", err)
+	}
 
 	body := s.buildStatusBody(context.Background(), false)
 	if body.StoreHealth == nil {
@@ -566,6 +570,118 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	}
 }
 
+func TestBuildStatusBodyReturnsWhileColdStoreHealthRefreshes(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &Server{state: state}
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+		close(started)
+		<-release
+		return &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}, nil
+	}
+
+	bodies := make(chan StatusBody, 1)
+	go func() { bodies <- s.buildStatusBody(context.Background(), false) }()
+	<-started
+
+	select {
+	case body := <-bodies:
+		if body.StoreHealth != nil {
+			t.Fatalf("cold StoreHealth = %+v, want omitted while refresh is pending", body.StoreHealth)
+		}
+		if !body.Partial || !slices.Contains(body.PartialErrors, "store health: measurement pending") {
+			t.Fatalf("cold status partials = %q, want store-health pending", body.PartialErrors)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("buildStatusBody waited for cold store-health measurement")
+	}
+
+	close(release)
+	s.waitForBackground()
+
+	warm := s.buildStatusBody(context.Background(), false)
+	if warm.StoreHealth == nil || warm.StoreHealth.SizeBytes != 123 {
+		t.Fatalf("warm StoreHealth = %+v, want completed measurement", warm.StoreHealth)
+	}
+	if warm.Partial {
+		t.Fatalf("warm status is partial: %q", warm.PartialErrors)
+	}
+}
+
+func TestStatusStoreHealthCoalescesColdRefresh(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	s := &Server{}
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return &StatusStoreHealth{SizeBytes: 123}, nil
+	}
+
+	for range 8 {
+		got, err := s.statusStoreHealth(time.Now())
+		if got != nil || !errors.Is(err, errStoreHealthMeasurementPending) {
+			t.Fatalf("cold statusStoreHealth = (%+v, %v), want (nil, pending)", got, err)
+		}
+	}
+	<-started
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("cold refresh calls = %d, want 1", got)
+	}
+
+	close(release)
+	s.waitForBackground()
+	got, err := s.statusStoreHealth(time.Now())
+	if err != nil || got == nil || got.SizeBytes != 123 {
+		t.Fatalf("warm statusStoreHealth = (%+v, %v), want cached completed value", got, err)
+	}
+}
+
+func TestStatusStoreHealthServesStaleMeasurementDuringRefresh(t *testing.T) {
+	stale := &StatusStoreHealth{SizeBytes: 1}
+	fresh := &StatusStoreHealth{SizeBytes: 2}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &Server{
+		storeHealthEntry:   stale,
+		storeHealthExpires: time.Now().Add(-time.Second),
+		storeHealthComputer: func(context.Context) (*StatusStoreHealth, error) {
+			close(started)
+			<-release
+			return fresh, nil
+		},
+	}
+
+	got, err := s.statusStoreHealth(time.Now())
+	if err != nil || got != stale {
+		t.Fatalf("expired statusStoreHealth = (%+v, %v), want stale value while refreshing", got, err)
+	}
+	<-started
+	close(release)
+	s.waitForBackground()
+
+	got, err = s.statusStoreHealth(time.Now())
+	if err != nil || got != fresh {
+		t.Fatalf("refreshed statusStoreHealth = (%+v, %v), want fresh value", got, err)
+	}
+}
+
+func TestStatusStoreHealthSkipsEmptyCityPath(t *testing.T) {
+	s := &Server{state: newFakeState(t)}
+	s.state.(*fakeState).cityPath = ""
+
+	got, err := s.statusStoreHealth(time.Now())
+	if got != nil || err != nil {
+		t.Fatalf("empty-city statusStoreHealth = (%+v, %v), want (nil, nil)", got, err)
+	}
+}
+
 func TestBuildStatusBodyOmitsUnavailableStoreHealthAndReportsPartialError(t *testing.T) {
 	wantErr := errors.New("store health row scan failed")
 	state := newFakeState(t)
@@ -574,6 +690,8 @@ func TestBuildStatusBodyOmitsUnavailableStoreHealthAndReportsPartialError(t *tes
 		return nil, wantErr
 	}
 
+	_ = s.buildStatusBody(context.Background(), false)
+	s.waitForBackground()
 	body := s.buildStatusBody(context.Background(), false)
 	if body.StoreHealth != nil {
 		t.Errorf("StoreHealth = %+v, want omitted when unavailable", body.StoreHealth)
