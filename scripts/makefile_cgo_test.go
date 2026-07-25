@@ -315,7 +315,9 @@ print-cgo-flags:
 	// under test run unobstructed.
 	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\n")
 
-	cmdArgs := append([]string{"--no-print-directory", "-f", testMakefile, "print-cgo-flags"}, args...)
+	// The fallback is intentionally inert for the default CGO_ENABLED=0 build.
+	// These tests exercise its active CGO build path.
+	cmdArgs := append([]string{"--no-print-directory", "-f", testMakefile, "print-cgo-flags", "CGO_ENABLED=1"}, args...)
 	cmd := makeCommand(cmdArgs...)
 	cmd.Dir = repoRoot
 	cmd.Env = append(filteredMakefileCGOTestEnv(),
@@ -337,7 +339,7 @@ func filteredMakefileCGOTestEnv() []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") {
+		if strings.HasPrefix(entry, "CGO_") || strings.HasPrefix(entry, "PATH=") || strings.HasPrefix(entry, "HOME=") {
 			continue
 		}
 		filtered = append(filtered, entry)

@@ -66,6 +66,14 @@ var allowedNonMetadata = map[string]string{
 	"gc.test":    "go test binary name marker (cmd/gc/test_guard.go)",
 }
 
+// allowedMetadataMirrors records the rare production dependency boundaries
+// where a tiny binary must mirror a bead metadata literal instead of importing
+// this package. Each entry needs a test that pins its local constant to the
+// canonical beadmeta constant.
+var allowedMetadataMirrors = map[string]string{
+	"gc.last_heartbeat_at": "cmd/bdshim heartbeat key; TestHeartbeatKeyInSync pins the mirror",
+}
+
 // excludedDirs are package directories whose gc.* literals belong to a different
 // owner than the bead-metadata vocabulary and are therefore not scanned.
 var excludedDirs = []string{
@@ -135,6 +143,9 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 				if _, ok := allowedNonMetadata[val]; ok {
 					return true
 				}
+				if _, ok := allowedMetadataMirrors[val]; ok {
+					return true
+				}
 				line := fset.Position(lit.Pos()).Line
 				if _, ok := declared[val]; ok {
 					violations = append(violations, fmt.Sprintf("  %s:%d  %q is declared — reference the beadmeta constant instead of the raw literal", rel, line, val))
@@ -154,7 +165,8 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 		t.Fatalf("found %d raw gc.* bead-metadata key literal(s) in non-test Go.\n"+
 			"Use the beadmeta constant (declaring it in internal/beadmeta/keys.go and\n"+
 			"KnownMetadataKeys if new), or, if the literal is not a bead-metadata key, add\n"+
-			"it to allowedNonMetadata with a justification:\n%s",
+			"it to allowedNonMetadata with a justification. A dependency-boundary mirror\n"+
+			"belongs in allowedMetadataMirrors and must have a pinning test:\n%s",
 			len(violations), strings.Join(violations, "\n"))
 	}
 }
