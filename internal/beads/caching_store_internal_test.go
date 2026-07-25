@@ -14,6 +14,41 @@ import (
 	"time"
 )
 
+type contextAwareListBacking struct {
+	*MemStore
+	listCalls    int
+	listCtxCalls int
+}
+
+func (s *contextAwareListBacking) List(query ListQuery) ([]Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
+}
+
+func (s *contextAwareListBacking) ListCtx(ctx context.Context, _ ListQuery) ([]Bead, error) {
+	s.listCtxCalls++
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCachingStoreListCtxUsesContextAwareBacking(t *testing.T) {
+	backing := &contextAwareListBacking{MemStore: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := cache.ListCtx(ctx, ListQuery{Live: true, AllowScan: true})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ListCtx error = %v, want context deadline exceeded", err)
+	}
+	if backing.listCtxCalls != 1 {
+		t.Fatalf("backing ListCtx calls = %d, want 1", backing.listCtxCalls)
+	}
+	if backing.listCalls != 0 {
+		t.Fatalf("backing List calls = %d, want 0", backing.listCalls)
+	}
+}
+
 func TestCachingStoreReadyContextRejectsIncompleteDependencyProjection(t *testing.T) {
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	cache.mu.Lock()
