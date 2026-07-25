@@ -127,6 +127,11 @@ func TestArchiveOverlapsFilter(t *testing.T) {
 		{"BeforeSeq at archive first seq", Filter{BeforeSeq: 100}, false},
 		{"BeforeSeq below archive range", Filter{BeforeSeq: 50}, false},
 		{"AfterSeq and BeforeSeq window inside range", Filter{AfterSeq: 120, BeforeSeq: 180}, true},
+		{"Since before archive timestamp keeps", Filter{Since: info.Timestamp.Add(-time.Hour)}, true},
+		{"Since equal to archive timestamp keeps", Filter{Since: info.Timestamp}, true},
+		{"Since after archive timestamp prunes", Filter{Since: info.Timestamp.Add(time.Hour)}, false},
+		{"Since prune composes with AfterSeq keep", Filter{AfterSeq: 50, Since: info.Timestamp.Add(time.Hour)}, false},
+		{"Until never prunes even when archive is newer", Filter{Until: info.Timestamp.Add(-time.Hour)}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

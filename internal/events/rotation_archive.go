@@ -134,6 +134,13 @@ func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
 	if filter.BeforeSeq > 0 && info.FirstSeq >= filter.BeforeSeq {
 		return false
 	}
+	// Timestamp is the rotation instant and therefore an upper bound on the
+	// archive's newest event. It is safe to skip only archives that ended
+	// before Since; there is no recorded lower time bound, so Until cannot
+	// safely prune an archive.
+	if !filter.Since.IsZero() && info.Timestamp.Before(filter.Since) {
+		return false
+	}
 	return true
 }
 
