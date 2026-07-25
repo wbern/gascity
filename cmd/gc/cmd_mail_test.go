@@ -4587,6 +4587,73 @@ func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
 	}
 }
 
+func TestRenderMailCheckFromAPIInjectCodexEmitsContextWithoutMail(t *testing.T) {
+	cr := api.CachedRead[api.MailListView]{}
+	const contextLine = "Context usage: 225k/258k (~87%) — HIGH."
+
+	var stdout bytes.Buffer
+	if code := renderMailCheckFromAPIWithInjectPrefix(cr, "mayor", true, hookOutputFormatCodex, contextLine, &stdout); code != 0 {
+		t.Fatalf("renderMailCheckFromAPIWithInjectPrefix = %d, want 0", code)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("Codex hook output must remain one JSON document, got %q", stdout.String())
+	}
+	var out struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode Codex hook JSON: %v\n%s", err, stdout.String())
+	}
+	if out.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+		t.Fatalf("hookEventName = %q, want UserPromptSubmit", out.HookSpecificOutput.HookEventName)
+	}
+	if !strings.Contains(out.HookSpecificOutput.AdditionalContext, contextLine) {
+		t.Fatalf("additionalContext = %q, want context guidance", out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestRenderMailCheckFromAPIInjectCodexRoutesTranscriptContextWithMail(t *testing.T) {
+	p := writeTranscript(t,
+		`{"timestamp":"2026-07-25T03:08:25Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		codexTokenCountLine(224_795, 224_690, 225_170),
+	)
+	contextLine := contextInjectLine(hookInputFor(p))
+	if contextLine == "" {
+		t.Fatal("real Codex transcript shape must produce context guidance")
+	}
+	cr := api.CachedRead[api.MailListView]{
+		Body: api.MailListView{Items: []mail.Message{{
+			ID:        "msg-1",
+			From:      "human",
+			To:        "mayor",
+			Body:      "review this",
+			CreatedAt: time.Date(2026, 7, 25, 3, 8, 0, 0, time.UTC),
+		}}},
+	}
+
+	var stdout bytes.Buffer
+	if code := renderMailCheckFromAPIWithInjectPrefix(cr, "mayor", true, hookOutputFormatCodex, contextLine, &stdout); code != 0 {
+		t.Fatalf("renderMailCheckFromAPIWithInjectPrefix = %d, want 0", code)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("Codex hook output must remain one JSON document, got %q", stdout.String())
+	}
+	var out struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode Codex hook JSON: %v\n%s", err, stdout.String())
+	}
+	if !strings.Contains(out.HookSpecificOutput.AdditionalContext, "225k/258k") || !strings.Contains(out.HookSpecificOutput.AdditionalContext, "msg-1") {
+		t.Fatalf("additionalContext = %q, want both context guidance and mail", out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
 func TestRouteMailPeek_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeMailTestCity(t)

@@ -516,6 +516,10 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	injectPrefix := ""
+	if inject {
+		injectPrefix = contextInjectLine(readHookStdin())
+	}
 	cityPath, cityPathErr := resolveCity()
 	if cityPathErr == nil {
 		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
@@ -527,10 +531,10 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 		}
 	}
 	if cityPathErr != nil {
-		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+		return doMailCheckFallbackWithInjectPrefix(args, inject, hookFormat, injectPrefix, stdout, stderr)
 	}
 	c, reason := mailCheckAPIClient(cityPath)
-	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
+	return routeMailCheckWithInjectPrefix(cityPath, args, inject, hookFormat, injectPrefix, c, reason, stdout, stderr)
 }
 
 // mailCheckAPIClient returns (client, "") when the API path is available,
@@ -551,6 +555,10 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 // after successful injection.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+	return routeMailCheckWithInjectPrefix("", args, inject, hookFormat, "", c, nilReason, stdout, stderr)
+}
+
+func routeMailCheckWithInjectPrefix(_ string, args []string, inject bool, hookFormat, injectPrefix string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {
@@ -566,19 +574,19 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 					if mailListHasStoreSlowPartial(cr.Body) {
 						notice = formatMailCheckDegradedNotice()
 					}
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", mergeHookInjection(injectPrefix, notice))
 					return 0
 				}
 			} else if !api.ShouldFallbackForRead(c, err) {
 				logRoute(stderr, cmdName, "api", "error")
 				if api.IsStoreSlowError(err) {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatMailCheckDegradedNotice())
+					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", mergeHookInjection(injectPrefix, formatMailCheckDegradedNotice()))
 				}
 				return 0
 			}
 		}
 		logRoute(stderr, cmdName, "fallback", "inject-local-side-effects")
-		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+		return doMailCheckFallbackWithInjectPrefix(args, inject, hookFormat, injectPrefix, stdout, stderr)
 	}
 	if c != nil {
 		cr, err := c.ListMailInbox(recipient, "")
@@ -589,7 +597,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 				return 1
 			}
 			logRoute(stderr, cmdName, "api", "")
-			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
+			return renderMailCheckFromAPIWithInjectPrefix(cr, recipient, inject, hookFormat, injectPrefix, stdout)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -600,7 +608,7 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
-	return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
+	return doMailCheckFallbackWithInjectPrefix(args, inject, hookFormat, injectPrefix, stdout, stderr)
 }
 
 // renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
@@ -609,10 +617,19 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 // local fallback contract; human output appends a stale-read banner when the
 // supervisor cache is > 30 s old.
 func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
+	return renderMailCheckFromAPIWithInjectPrefix(cr, recipient, inject, hookFormat, "", stdout)
+}
+
+func renderMailCheckFromAPIWithInjectPrefix(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat, injectPrefix string, stdout io.Writer) int {
 	messages := cr.Body.Items
 	if inject {
+		content := ""
 		if len(messages) > 0 {
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
+			content = formatInjectOutput(messages)
+		}
+		content = mergeHookInjection(injectPrefix, content)
+		if content != "" {
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", content)
 		}
 		return 0
 	}
@@ -673,8 +690,34 @@ func formatMailCheckPartialDegradedNotice() string {
 	return "<system-reminder>\n" + mailCheckPartialDegradedNotice + "\n</system-reminder>\n"
 }
 
+// mergeHookInjection combines trusted hook guidance with an optional mail
+// reminder without emitting two provider hook documents. Mail reminders already
+// carry a system-reminder wrapper; keep both kinds of guidance inside it.
+func mergeHookInjection(prefix, content string) string {
+	if prefix == "" {
+		return content
+	}
+	if content == "" {
+		return prefix
+	}
+	const open = "<system-reminder>\n"
+	const close = "</system-reminder>\n"
+	if strings.HasPrefix(content, open) && strings.HasSuffix(content, close) {
+		body := strings.TrimSuffix(strings.TrimPrefix(content, open), close)
+		if !strings.HasSuffix(prefix, "\n") {
+			prefix += "\n"
+		}
+		return open + prefix + body + close
+	}
+	return prefix + content
+}
+
 // doMailCheckFallback is the direct-bd path for `gc mail check`.
 func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	return doMailCheckFallbackWithInjectPrefix(args, inject, hookFormat, "", stdout, stderr)
+}
+
+func doMailCheckFallbackWithInjectPrefix(args []string, inject bool, hookFormat, injectPrefix string, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail check")
 	if mp == nil {
 		if inject {
@@ -691,7 +734,7 @@ func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, 
 		return 1
 	}
 
-	return doMailCheckTargetWithFormat(mp, target, inject, hookFormat, stdout, stderr)
+	return doMailCheckTargetWithInjectPrefix(mp, target, inject, hookFormat, injectPrefix, stdout, stderr)
 }
 
 // doMailCheck checks for unread messages. Without --inject, prints the count
@@ -706,19 +749,29 @@ func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool,
 }
 
 func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	return doMailCheckTargetWithInjectPrefix(mp, target, inject, hookFormat, "", stdout, stderr)
+}
+
+func doMailCheckTargetWithInjectPrefix(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat, injectPrefix string, stdout, stderr io.Writer) int {
 	messages, err := collectMailMessages(mp.Check, target.recipients)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 0                                        // --inject always exits 0
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix)
+			return 0 // --inject always exits 0
 		}
 		fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if inject {
+		content := ""
 		if len(messages) > 0 {
-			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages)); err != nil {
+			content = formatInjectOutput(messages)
+		}
+		content = mergeHookInjection(injectPrefix, content)
+		if content != "" {
+			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", content); err != nil {
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
