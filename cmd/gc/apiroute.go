@@ -59,12 +59,31 @@ func apiClient(cityPath string) *api.Client {
 	}
 	if apiRouteControllerAliveHook(cityPath) != 0 {
 		// Alive socket: use the standalone HTTP endpoint when configured, else
-		// return nil so the caller takes its local fallback. A supervisor-managed
-		// city (no standalone [api] port) reaches the supervisor client only via
-		// maintenanceAPIClient, which has no local fallback.
+		// return nil so callers with a local fallback can choose it. Commands
+		// with an explicit supervisor route, such as maintenance and status,
+		// perform that fall-through at their own boundary.
 		return standaloneControllerClient(cityPath)
 	}
 	return apiRouteSupervisorClientHook(cityPath)
+}
+
+// statusReadAPIClient resolves the API client for status read commands. Unlike
+// generic commands, status has a costly local fallback, so an alive
+// supervisor-managed city without a standalone [api] port should use the
+// supervisor's warm StatusView. GC_NO_API remains an explicit operator escape
+// hatch and must never be bypassed by this status-specific fall-through.
+func statusReadAPIClient(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	reason := apiClientFallbackReason(cityPath)
+	if reason == "escape-hatch" {
+		return nil, reason
+	}
+	if c := apiRouteSupervisorClientHook(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, reason
 }
 
 // standaloneControllerClient builds an API client for a standalone controller
