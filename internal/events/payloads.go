@@ -133,3 +133,44 @@ func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt stri
 	})
 	return b
 }
+
+// SessionContinuationObservedPayload is the diagnostic payload for
+// session.continuation_observed events. Correlation fields deliberately use
+// the persisted string forms so an initial value such as generation "0" is
+// distinguishable from an absent value. InstanceTokenFingerprint must contain
+// only a one-way digest; raw instance tokens never belong in event data.
+type SessionContinuationObservedPayload struct {
+	SchemaVersion            string   `json:"schema_version" doc:"Payload schema version. Version 1 is emitted by this release."`
+	Boundary                 string   `json:"boundary" doc:"Observed boundary: reset, runtime_stop, runtime_start, provider_hook, or mail_injection."`
+	Source                   string   `json:"source" doc:"Code path that reached the boundary, such as explicit_reset, session_reconciler, or pre_compact."`
+	Outcome                  string   `json:"outcome" doc:"Result observed at this boundary. This is diagnostic evidence, not an end-to-end delivery guarantee."`
+	SessionName              string   `json:"session_name,omitempty" doc:"Stable runtime session name when known."`
+	Template                 string   `json:"template,omitempty" doc:"Configured agent template when known."`
+	Generation               string   `json:"generation,omitempty" doc:"Persisted session generation, kept as a string so generation 0 differs from an absent value."`
+	ContinuationEpoch        string   `json:"continuation_epoch,omitempty" doc:"Persisted provider-continuation epoch when known."`
+	InstanceTokenFingerprint string   `json:"instance_token_fingerprint,omitempty" doc:"SHA-256 fingerprint used to correlate an opaque session instance token without exposing the token."`
+	HookEvent                string   `json:"hook_event,omitempty" doc:"Provider hook event, such as SessionStart, PreCompact, or UserPromptSubmit."`
+	HookSource               string   `json:"hook_source,omitempty" doc:"Bounded provider hook-origin label when supplied by the runtime."`
+	OldWorkID                string   `json:"old_work_id,omitempty" doc:"Work bead associated with the session before the boundary."`
+	NewWorkID                string   `json:"new_work_id,omitempty" doc:"Work bead associated with the session after the boundary."`
+	MailIDs                  []string `json:"mail_ids,omitempty" doc:"Mail bead IDs written to or injected by the hook boundary."`
+	MessageCount             *int     `json:"message_count,omitempty" doc:"Number of messages handled by a mail hook. Zero is present only when the hook counted zero messages."`
+	BodyBytes                *int     `json:"body_bytes,omitempty" doc:"Byte length of the provider hook context written; the context body itself is never recorded."`
+	Route                    string   `json:"route,omitempty" doc:"Observed command or provider route, such as fallback, suspended, codex, or gemini."`
+	ErrorCode                string   `json:"error_code,omitempty" doc:"Stable coarse failure code. Raw error strings are never recorded."`
+}
+
+// IsEventPayload marks SessionContinuationObservedPayload as an events.Payload
+// variant.
+func (SessionContinuationObservedPayload) IsEventPayload() {}
+
+// SessionContinuationObservedPayloadJSON builds the JSON wire form for
+// attachment to an Event.Payload field.
+func SessionContinuationObservedPayloadJSON(p SessionContinuationObservedPayload) json.RawMessage {
+	b, _ := json.Marshal(p)
+	return b
+}
+
+func init() {
+	RegisterPayload(SessionContinuationObserved, SessionContinuationObservedPayload{})
+}

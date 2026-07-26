@@ -2409,6 +2409,9 @@
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionContinuationObservedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
@@ -7126,6 +7129,98 @@
           "ExpiresAt",
           "BindingGeneration",
           "Metadata"
+        ],
+        "type": "object"
+      },
+      "SessionContinuationObservedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "body_bytes": {
+            "description": "Byte length of the provider hook context written; the context body itself is never recorded.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "boundary": {
+            "description": "Observed boundary: reset, runtime_stop, runtime_start, provider_hook, or mail_injection.",
+            "type": "string"
+          },
+          "continuation_epoch": {
+            "description": "Persisted provider-continuation epoch when known.",
+            "type": "string"
+          },
+          "error_code": {
+            "description": "Stable coarse failure code. Raw error strings are never recorded.",
+            "type": "string"
+          },
+          "generation": {
+            "description": "Persisted session generation, kept as a string so generation 0 differs from an absent value.",
+            "type": "string"
+          },
+          "hook_event": {
+            "description": "Provider hook event, such as SessionStart, PreCompact, or UserPromptSubmit.",
+            "type": "string"
+          },
+          "hook_source": {
+            "description": "Bounded provider hook-origin label when supplied by the runtime.",
+            "type": "string"
+          },
+          "instance_token_fingerprint": {
+            "description": "SHA-256 fingerprint used to correlate an opaque session instance token without exposing the token.",
+            "type": "string"
+          },
+          "mail_ids": {
+            "description": "Mail bead IDs written to or injected by the hook boundary.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "message_count": {
+            "description": "Number of messages handled by a mail hook. Zero is present only when the hook counted zero messages.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "new_work_id": {
+            "description": "Work bead associated with the session after the boundary.",
+            "type": "string"
+          },
+          "old_work_id": {
+            "description": "Work bead associated with the session before the boundary.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Result observed at this boundary. This is diagnostic evidence, not an end-to-end delivery guarantee.",
+            "type": "string"
+          },
+          "route": {
+            "description": "Observed command or provider route, such as fallback, suspended, codex, or gemini.",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "Payload schema version. Version 1 is emitted by this release.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Stable runtime session name when known.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Code path that reached the boundary, such as explicit_reset, session_reconciler, or pre_compact.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Configured agent template when known.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "boundary",
+          "source",
+          "outcome"
         ],
         "type": "object"
       },
@@ -11913,6 +12008,7 @@
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
+            "session.continuation_observed": "#/components/schemas/TypedEventStreamEnvelopeSessionContinuationObserved",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
@@ -12103,6 +12199,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionContinuationObserved"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
@@ -13091,6 +13190,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.continuation_observed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -15110,6 +15210,57 @@
         "title": "TypedEventStreamEnvelope session.cold_start_timeout",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionContinuationObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionContinuationObservedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.continuation_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.continuation_observed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionCrashed": {
         "additionalProperties": false,
         "properties": {
@@ -16291,6 +16442,7 @@
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
+            "session.continuation_observed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionContinuationObserved",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
@@ -16481,6 +16633,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionContinuationObserved"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
@@ -17540,6 +17695,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.continuation_observed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
                 "bead.created",
@@ -19710,6 +19866,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.cold_start_timeout",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionContinuationObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionContinuationObservedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.continuation_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.continuation_observed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionCrashed": {

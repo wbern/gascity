@@ -56,6 +56,21 @@ type primeHookContext struct {
 	ProviderSessionID string
 }
 
+type primeHookCountingWriter struct {
+	writer   io.Writer
+	bytes    int
+	writeErr error
+}
+
+func (w *primeHookCountingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.bytes += n
+	if err != nil && w.writeErr == nil {
+		w.writeErr = err
+	}
+	return n, err
+}
+
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
@@ -174,13 +189,53 @@ func primeInvocationAgentName(args []string) (string, bool) {
 	return strings.TrimSpace(agentName), sessionTemplateContext
 }
 
-func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) (code int) {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false
 	if hookMode {
 		hookContext = readPrimeHookContext()
 		suppressHookPrompt = managedSessionHookPromptAlreadyDelivered(hookContext)
+	}
+	var hookOutput *primeHookCountingWriter
+	hookCityPath := ""
+	hookEventsConfig := config.EventsConfig{}
+	if hookMode && primeHookSessionStart(hookContext) {
+		hookOutput = &primeHookCountingWriter{writer: stdout}
+		stdout = hookOutput
+		defer func() {
+			if hookCityPath == "" {
+				return
+			}
+			outcome := continuationOutcomeObserved
+			errorCode := ""
+			if hookOutput.writeErr != nil {
+				outcome = continuationOutcomeFailed
+				errorCode = continuationErrorHookOutput
+			} else if code != 0 {
+				outcome = continuationOutcomeFailed
+				errorCode = continuationErrorHookProcessing
+			}
+			recordContinuationObservation(
+				openCityRecorderAtWithConfig(hookCityPath, hookEventsConfig, stderr),
+				continuationObservation{
+					Boundary:          continuationBoundaryProviderHook,
+					Source:            continuationSourceSessionStart,
+					Outcome:           outcome,
+					SessionID:         os.Getenv("GC_SESSION_ID"),
+					SessionName:       os.Getenv("GC_SESSION_NAME"),
+					Template:          os.Getenv("GC_TEMPLATE"),
+					Generation:        os.Getenv("GC_RUNTIME_EPOCH"),
+					ContinuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+					InstanceToken:     os.Getenv("GC_INSTANCE_TOKEN"),
+					HookEvent:         hookContext.HookEventName,
+					HookSource:        hookContext.Source,
+					BodyBytes:         continuationInt(hookOutput.bytes),
+					Route:             hookFormat,
+					ErrorCode:         errorCode,
+				},
+			)
+		}()
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
 	// In strict mode, we defer them until after strict checks pass so that a
@@ -213,6 +268,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 		return 0
 	}
+	hookCityPath = cityPath
 	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 		return 0
@@ -233,6 +289,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, stepReminder)
 		return 0
 	}
+	hookEventsConfig = cfg.Events
 	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {

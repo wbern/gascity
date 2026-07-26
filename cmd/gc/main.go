@@ -1192,6 +1192,10 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		eventsCfg = cfg.Events
 	}
+	return openCityRecorderAtWithConfig(cityPath, eventsCfg, stderr)
+}
+
+func openCityRecorderAtWithConfig(cityPath string, eventsCfg config.EventsConfig, stderr io.Writer) events.Recorder {
 	rec, err := newFileEventsRecorder(
 		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
 	if err != nil {

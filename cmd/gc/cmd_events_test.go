@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,6 +52,63 @@ func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
 	}
 	if got[0].Type != "bead.created" || got[1].Type != "session.woke" {
 		t.Fatalf("unexpected events: %+v", got)
+	}
+}
+
+func TestDoEventsFiltersContinuationObservationQueryRecipe(t *testing.T) {
+	cityDir := t.TempDir()
+	rec := newTestProvider(t, filepath.Join(cityDir, ".gc"))
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:    continuationBoundaryReset,
+		Source:      continuationSourceSessionReconciler,
+		Outcome:     continuationOutcomeFailed,
+		SessionName: "demo/planner",
+		ErrorCode:   continuationErrorRuntimeStop,
+	})
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:    continuationBoundaryRuntimeStart,
+		Source:      continuationSourceSessionReconciler,
+		Outcome:     continuationOutcomeSucceeded,
+		SessionName: "demo/worker",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(
+		eventsAPIScope{cityName: "test-city", cityPath: cityDir, localOnly: true},
+		events.SessionContinuationObserved,
+		"",
+		map[string][]string{
+			"session_name": {"demo/planner"},
+			"boundary":     {continuationBoundaryReset},
+			"outcome":      {continuationOutcomeFailed},
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doEvents = %d; stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		raw, _ := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+		t.Fatalf("query returned no events; event log=%s", raw)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("query returned %d lines, want 1; output=%q", len(lines), stdout.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("decode query output: %v", err)
+	}
+	payload, ok := got["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("query payload = %#v", got["payload"])
+	}
+	if got["type"] != events.SessionContinuationObserved ||
+		payload["session_name"] != "demo/planner" ||
+		payload["boundary"] != continuationBoundaryReset ||
+		payload["outcome"] != continuationOutcomeFailed {
+		t.Fatalf("query result = %#v", got)
 	}
 }
 

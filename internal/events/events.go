@@ -89,6 +89,10 @@ const (
 	// timeout. Operators use the typed payload to correlate the stuck
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
+	// SessionContinuationObserved records a boundary in a session's
+	// continuation lifecycle. It is diagnostic only: emitters must not use
+	// recording success or failure to influence session behavior.
+	SessionContinuationObserved = "session.continuation_observed"
 	// SessionWorkQueryFailed fires when the current managed session's
 	// work-discovery query subprocess is killed by an external signal or
 	// aborted by the runner-imposed timeout before producing output.
@@ -252,6 +256,7 @@ var KnownEventTypes = []string{
 	SessionStranded,
 	SessionUnknownState,
 	SessionResetStalled,
+	SessionContinuationObserved,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,

@@ -46,7 +46,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr, events.Discard)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 		"resume_style":        "flag",
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr, events.Discard)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -323,6 +323,53 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyEndToEnd(t
 	}
 }
 
+func TestResetConfiguredNamedSessionForConfigDrift_RecordsStopAndResetCommit(t *testing.T) {
+	env := newReconcilerTestEnv()
+	session := env.createSessionBead("mayor", "mayor")
+	env.setSessionMetadata(&session, map[string]string{
+		"generation":         "4",
+		"continuation_epoch": "9",
+		"instance_token":     "config-drift-token",
+	})
+	if err := env.sp.Start(context.Background(), "mayor", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	rec := &continuationObservationRecorder{}
+
+	resetConfiguredNamedSessionForConfigDriftInfo(
+		env.sessionInfo(session.ID),
+		env.store,
+		env.sp,
+		"mayor",
+		true,
+		"creating",
+		time.Now().UTC(),
+		&env.stderr,
+		rec,
+	)
+
+	if len(rec.recorded) != 2 {
+		t.Fatalf("recorded %d continuation events, want stop and reset commit", len(rec.recorded))
+	}
+	wantBoundaries := []string{continuationBoundaryRuntimeStop, continuationBoundaryReset}
+	wantOutcomes := []string{continuationOutcomeSucceeded, continuationOutcomeCommitted}
+	for index, event := range rec.recorded {
+		decoded, _, err := events.DecodePayload(event.Type, event.Payload)
+		if err != nil {
+			t.Fatalf("decode event %d: %v", index, err)
+		}
+		payload := decoded.(events.SessionContinuationObservedPayload)
+		if event.SessionID != session.ID ||
+			payload.Boundary != wantBoundaries[index] ||
+			payload.Source != continuationSourceConfigDrift ||
+			payload.Outcome != wantOutcomes[index] ||
+			payload.Generation != "4" ||
+			payload.ContinuationEpoch != "9" {
+			t.Fatalf("event %d = envelope %#v payload %#v", index, event, payload)
+		}
+	}
+}
+
 // TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey
 // guards the complementary case: when the reset transitions to asleep (the
 // asleep-named-session repair path), the helper must clear started_config_hash
@@ -341,7 +388,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_AsleepResetClearsHashAndKey(t
 		"started_config_hash": priorStartedConfigHash,
 	})
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr, events.Discard)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -368,7 +415,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_GeneratesKeyWhenNoneToPreserv
 	session := env.createSessionBead("mayor", "mayor")
 	// No session_key, no started_config_hash — the session never started.
 
-	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr)
+	resetConfiguredNamedSessionForConfigDriftInfo(env.sessionInfo(session.ID), env.store, env.sp, "mayor", false, "creating", time.Now().UTC(), &env.stderr, events.Discard)
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {

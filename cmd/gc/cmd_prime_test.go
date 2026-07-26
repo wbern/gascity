@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,8 +12,29 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+type primeHookFailWriter struct {
+	err error
+}
+
+func (w primeHookFailWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestPrimeHookCountingWriterCapturesWriteFailure(t *testing.T) {
+	wantErr := errors.New("provider hook output unavailable")
+	writer := &primeHookCountingWriter{writer: primeHookFailWriter{err: wantErr}}
+
+	if _, err := writer.Write([]byte("hook output")); !errors.Is(err, wantErr) {
+		t.Fatalf("Write error = %v, want %v", err, wantErr)
+	}
+	if !errors.Is(writer.writeErr, wantErr) {
+		t.Fatalf("captured write error = %v, want %v", writer.writeErr, wantErr)
+	}
+}
 
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
 	t.Setenv("GC_RIG", "demo")
@@ -560,6 +582,9 @@ prompt_template = "prompts/worker.md"
 	t.Setenv(managedSessionHookEnv, "1")
 	t.Setenv("GC_HOOK_SOURCE", "startup")
 	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv("GC_RUNTIME_EPOCH", "6")
+	t.Setenv("GC_CONTINUATION_EPOCH", "12")
+	t.Setenv("GC_INSTANCE_TOKEN", "session-start-secret")
 	t.Setenv(startupPromptDeliveredEnv, "1")
 	withPrimeHookStdin(t)
 
@@ -583,6 +608,37 @@ prompt_template = "prompts/worker.md"
 	}
 	if !strings.Contains(context, "[gastown] worker") {
 		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+	recorded, err := events.ReadFiltered(
+		filepath.Join(cityDir, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("continuation events = %d, want one SessionStart observation", len(recorded))
+	}
+	decoded, _, err := events.DecodePayload(recorded[0].Type, recorded[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	continuation := decoded.(events.SessionContinuationObservedPayload)
+	if recorded[0].SessionID != sessionID ||
+		continuation.Boundary != continuationBoundaryProviderHook ||
+		continuation.Source != continuationSourceSessionStart ||
+		continuation.Outcome != continuationOutcomeObserved ||
+		continuation.HookEvent != "SessionStart" ||
+		continuation.HookSource != "startup" ||
+		continuation.Generation != "6" ||
+		continuation.ContinuationEpoch != "12" ||
+		continuation.BodyBytes == nil ||
+		*continuation.BodyBytes != stdout.Len() ||
+		continuation.Route != hookOutputFormatGemini {
+		t.Fatalf("SessionStart continuation event = envelope %#v payload %#v", recorded[0], continuation)
+	}
+	if strings.Contains(string(recorded[0].Payload), "session-start-secret") {
+		t.Fatal("SessionStart observation leaked the raw instance token")
 	}
 }
 

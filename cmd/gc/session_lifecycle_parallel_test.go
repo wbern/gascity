@@ -4152,8 +4152,9 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 		finished:        clk.Now(),
 		rollbackPending: true,
 	}
+	rec := events.NewFake()
 
-	if commitStartResult(result, sessionFrontDoor(store), clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+	if commitStartResult(result, sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
 		t.Fatal("rollback-pending error should not count as committed")
 	}
 	updated, err := store.Get(session.ID)
@@ -4171,6 +4172,23 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	}
 	if pendingCreateStartInFlightInfo(sessiontest.SeedBead(t, updated), clk, 0) {
 		t.Fatal("rollback-pending error left the pending-create bead leased")
+	}
+	continuations, err := rec.List(events.Filter{Type: events.SessionContinuationObserved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(continuations) != 1 {
+		t.Fatalf("continuation events = %d, want one failed runtime-start result", len(continuations))
+	}
+	decoded, _, err := events.DecodePayload(continuations[0].Type, continuations[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryRuntimeStart ||
+		payload.Outcome != continuationOutcomeFailed ||
+		payload.ErrorCode != continuationErrorRuntimeStart {
+		t.Fatalf("continuation payload = %#v", payload)
 	}
 }
 
@@ -4315,6 +4333,23 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 		}
 		if len(woke) != 1 {
 			t.Fatalf("session.woke events = %d, want exactly 1 after the durable commit", len(woke))
+		}
+		continuations, err := rec.List(events.Filter{Type: events.SessionContinuationObserved})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(continuations) != 1 {
+			t.Fatalf("session.continuation_observed events = %d, want exactly 1 runtime-start result", len(continuations))
+		}
+		decoded, _, err := events.DecodePayload(continuations[0].Type, continuations[0].Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := decoded.(events.SessionContinuationObservedPayload)
+		if payload.Boundary != continuationBoundaryRuntimeStart ||
+			payload.Source != continuationSourceSessionReconciler ||
+			payload.Outcome != continuationOutcomeSucceeded {
+			t.Fatalf("continuation payload = %#v", payload)
 		}
 	})
 }

@@ -206,6 +206,44 @@ func TestReconcileSessionBeads_RestartRequestRotatesKeyForSessionIDProviders(t *
 	}
 }
 
+func TestReconcileSessionBeads_RestartRequestRecordsStopAndResetCommit(t *testing.T) {
+	env, session, sessionName := newLiveRestartRequestScenario(t)
+	rec := &continuationObservationRecorder{}
+	env.rec = rec
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_epoch": "7",
+	})
+
+	env.reconcileWithPoolDesiredAndDrainOps(
+		[]beads.Bead{session},
+		map[string]int{"worker": 0},
+		newDrainOps(env.sp),
+	)
+
+	if len(rec.recorded) != 2 {
+		t.Fatalf("recorded %d continuation events, want stop and reset commit", len(rec.recorded))
+	}
+	wantBoundaries := []string{continuationBoundaryRuntimeStop, continuationBoundaryReset}
+	wantOutcomes := []string{continuationOutcomeSucceeded, continuationOutcomeCommitted}
+	for index, event := range rec.recorded {
+		decoded, registered, err := events.DecodePayload(event.Type, event.Payload)
+		if err != nil || !registered {
+			t.Fatalf("decode event %d: registered=%v err=%v", index, registered, err)
+		}
+		payload := decoded.(events.SessionContinuationObservedPayload)
+		if event.SessionID != session.ID || event.Subject != sessionName {
+			t.Fatalf("event %d envelope = %#v", index, event)
+		}
+		if payload.Boundary != wantBoundaries[index] ||
+			payload.Source != continuationSourceSessionReconciler ||
+			payload.Outcome != wantOutcomes[index] ||
+			payload.Generation != "1" ||
+			payload.ContinuationEpoch != "7" {
+			t.Fatalf("event %d payload = %#v", index, payload)
+		}
+	}
+}
+
 func TestReconcileSessionBeads_RestartRequestClearsKeyForResumeOnlyProviders(t *testing.T) {
 	env := newRestartRequestTestEnv()
 	env.cfg = &config.City{
@@ -342,6 +380,8 @@ func TestReconcileSessionBeads_RestartRequestSuppressesGoneClearRestartRequested
 
 func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *testing.T) {
 	env := newRestartRequestTestEnv()
+	rec := &continuationObservationRecorder{}
+	env.rec = rec
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -395,6 +435,19 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 	}
 	if got := env.stderr.String(); !strings.Contains(got, "stopping restart-requested") || !strings.Contains(got, "kill denied") {
 		t.Fatalf("stderr = %q, want kill failure diagnostic", got)
+	}
+	if len(rec.recorded) != 1 {
+		t.Fatalf("recorded %d continuation events, want one failed stop", len(rec.recorded))
+	}
+	decoded, _, err := events.DecodePayload(rec.recorded[0].Type, rec.recorded[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryRuntimeStop ||
+		payload.Outcome != continuationOutcomeFailed ||
+		payload.ErrorCode != continuationErrorRuntimeStop {
+		t.Fatalf("continuation payload = %#v", payload)
 	}
 }
 

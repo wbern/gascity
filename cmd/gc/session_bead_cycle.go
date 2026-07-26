@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -73,6 +74,7 @@ func cycleAliveSessionForFreshReassign(
 	now time.Time,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
+	rec events.Recorder,
 ) (bool, sessionpkg.MetadataPatch) {
 	if store == nil {
 		return false, nil
@@ -83,13 +85,54 @@ func cycleAliveSessionForFreshReassign(
 	}
 	prevBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
 	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+		recordContinuationObservation(rec, continuationObservation{
+			Boundary:          continuationBoundaryRuntimeStop,
+			Source:            continuationSourceSessionReconciler,
+			Outcome:           continuationOutcomeFailed,
+			SessionID:         info.ID,
+			SessionName:       name,
+			Template:          tp.TemplateName,
+			Generation:        info.Generation,
+			ContinuationEpoch: info.ContinuationEpoch,
+			InstanceToken:     info.InstanceToken,
+			OldWorkID:         prevBeadID,
+			NewWorkID:         newBeadID,
+			ErrorCode:         continuationErrorRuntimeStop,
+		})
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 		}
 		return false, nil
 	}
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:          continuationBoundaryRuntimeStop,
+		Source:            continuationSourceSessionReconciler,
+		Outcome:           continuationOutcomeSucceeded,
+		SessionID:         info.ID,
+		SessionName:       name,
+		Template:          tp.TemplateName,
+		Generation:        info.Generation,
+		ContinuationEpoch: info.ContinuationEpoch,
+		InstanceToken:     info.InstanceToken,
+		OldWorkID:         prevBeadID,
+		NewWorkID:         newBeadID,
+	})
 	if identity := namedSessionIdentityInfo(info); identity != "" {
 		if err := resetSessionCircuitBreakerState(store, info.ID, identity, cb); err != nil {
+			recordContinuationObservation(rec, continuationObservation{
+				Boundary:          continuationBoundaryReset,
+				Source:            continuationSourceSessionReconciler,
+				Outcome:           continuationOutcomeFailed,
+				SessionID:         info.ID,
+				SessionName:       name,
+				Template:          tp.TemplateName,
+				Generation:        info.Generation,
+				ContinuationEpoch: info.ContinuationEpoch,
+				InstanceToken:     info.InstanceToken,
+				OldWorkID:         prevBeadID,
+				NewWorkID:         newBeadID,
+				ErrorCode:         continuationErrorCircuitReset,
+			})
 			if stderr != nil {
 				fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 			}
@@ -103,11 +146,38 @@ func cycleAliveSessionForFreshReassign(
 	}
 	batch[sessionpkg.CurrentBeadIDKey] = newBeadID
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
+		recordContinuationObservation(rec, continuationObservation{
+			Boundary:          continuationBoundaryReset,
+			Source:            continuationSourceSessionReconciler,
+			Outcome:           continuationOutcomeFailed,
+			SessionID:         info.ID,
+			SessionName:       name,
+			Template:          tp.TemplateName,
+			Generation:        info.Generation,
+			ContinuationEpoch: info.ContinuationEpoch,
+			InstanceToken:     info.InstanceToken,
+			OldWorkID:         prevBeadID,
+			NewWorkID:         newBeadID,
+			ErrorCode:         continuationErrorMetadataWrite,
+		})
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording fresh-cycle handoff for %s: %v\n", name, err) //nolint:errcheck
 		}
 		return false, nil
 	}
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:          continuationBoundaryReset,
+		Source:            continuationSourceSessionReconciler,
+		Outcome:           continuationOutcomeCommitted,
+		SessionID:         info.ID,
+		SessionName:       name,
+		Template:          tp.TemplateName,
+		Generation:        info.Generation,
+		ContinuationEpoch: info.ContinuationEpoch,
+		InstanceToken:     info.InstanceToken,
+		OldWorkID:         prevBeadID,
+		NewWorkID:         newBeadID,
+	})
 	// The returned fold carries every batch key EXCEPT the durable reset commit
 	// marker: keeping ResetCommittedAtKey out of this tick's snapshot mirrors the
 	// restart-requested handoff so on-demand sessions are not force-woken without

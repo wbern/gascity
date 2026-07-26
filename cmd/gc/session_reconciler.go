@@ -2486,6 +2486,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			beadRequested := infoByID[id].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
+				continuationBase := continuationObservation{
+					Source:            continuationSourceSessionReconciler,
+					SessionID:         id,
+					SessionName:       name,
+					Template:          tp.TemplateName,
+					Generation:        infoByID[id].Generation,
+					ContinuationEpoch: infoByID[id].ContinuationEpoch,
+					InstanceToken:     infoByID[id].InstanceToken,
+					OldWorkID:         infoByID[id].CurrentlyProcessingBeadID,
+				}
 				// A pinned configured named session is an operator-declared
 				// critical conversation (for example, the mayor). Do not let
 				// collateral reconciler restart flags (progress-stall, stale
@@ -2511,12 +2521,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				if runtimeRunning {
 					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+						observation := continuationBase
+						observation.Boundary = continuationBoundaryRuntimeStop
+						observation.Outcome = continuationOutcomeFailed
+						observation.ErrorCode = continuationErrorRuntimeStop
+						recordContinuationObservation(rec, observation)
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
+					observation := continuationBase
+					observation.Boundary = continuationBoundaryRuntimeStop
+					observation.Outcome = continuationOutcomeSucceeded
+					recordContinuationObservation(rec, observation)
 				}
 				if identity := namedSessionIdentityInfo(infoByID[id]); identity != "" {
 					if err := resetSessionCircuitBreakerState(store, id, identity, cb); err != nil {
+						observation := continuationBase
+						observation.Boundary = continuationBoundaryReset
+						observation.Outcome = continuationOutcomeFailed
+						observation.ErrorCode = continuationErrorCircuitReset
+						recordContinuationObservation(rec, observation)
 						fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
@@ -2535,9 +2559,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					batch["session_key"] = ""
 				}
 				if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
+					observation := continuationBase
+					observation.Boundary = continuationBoundaryReset
+					observation.Outcome = continuationOutcomeFailed
+					observation.ErrorCode = continuationErrorMetadataWrite
+					recordContinuationObservation(rec, observation)
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
 					continue
 				}
+				observation := continuationBase
+				observation.Boundary = continuationBoundaryReset
+				observation.Outcome = continuationOutcomeCommitted
+				recordContinuationObservation(rec, observation)
 				// Fold the batch onto the snapshot (Step 6d write-returns-Info), so the
 				// restart handoff — which CONSUMES the restart_requested marker
 				// (RestartRequestPatch sets it to "") and clears started_config_hash /
@@ -2850,7 +2883,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// write-returns-Info). The alive lane falls through to the
 							// aggregating refresh @~2710 today, but folding here future-proofs
 							// that refresh's retirement (STEP6-PREPASS-AUDIT group 10).
-							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
+							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr, rec))
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRestartInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 							}
@@ -3070,7 +3103,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// write-returns-Info); this asleep lane `continue`s, so the fold must
 						// run before the continue. Clears restart_requested on the snapshot
 						// (#2574). Pre-pass-masked (STEP6-PREPASS-AUDIT group 10).
-						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
+						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], store, sp, name, false, "asleep", clk.Now().UTC(), stderr, rec))
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRepairInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 						}
@@ -3529,7 +3562,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// See #1893 (controller: alive on_demand session ignores
 			// bd update --assignee).
 			if decision.RequiresFreshCycle && info.WakeMode == "fresh" {
-				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace, rec); ran {
 					if fold != nil {
 						tick.apply(target.info.ID, fold)
 					}
@@ -5060,16 +5093,37 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	nextState string,
 	now time.Time,
 	stderr io.Writer,
+	rec events.Recorder,
 ) map[string]string {
 	if store == nil {
 		return nil
+	}
+	continuationBase := continuationObservation{
+		Source:            continuationSourceConfigDrift,
+		SessionID:         info.ID,
+		SessionName:       sessionName,
+		Template:          info.Template,
+		Generation:        info.Generation,
+		ContinuationEpoch: info.ContinuationEpoch,
+		InstanceToken:     info.InstanceToken,
+		OldWorkID:         info.CurrentlyProcessingBeadID,
 	}
 	if nextState == "" {
 		nextState = "asleep"
 	}
 	if alive && sp != nil && sessionName != "" {
 		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
+			observation := continuationBase
+			observation.Boundary = continuationBoundaryRuntimeStop
+			observation.Outcome = continuationOutcomeFailed
+			observation.ErrorCode = continuationErrorRuntimeStop
+			recordContinuationObservation(rec, observation)
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
+		} else {
+			observation := continuationBase
+			observation.Boundary = continuationBoundaryRuntimeStop
+			observation.Outcome = continuationOutcomeSucceeded
+			recordContinuationObservation(rec, observation)
 		}
 	}
 	nextSessionState := sessionpkg.State(nextState)
@@ -5093,9 +5147,18 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
+		observation := continuationBase
+		observation.Boundary = continuationBoundaryReset
+		observation.Outcome = continuationOutcomeFailed
+		observation.ErrorCode = continuationErrorMetadataWrite
+		recordContinuationObservation(rec, observation)
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return nil
 	}
+	observation := continuationBase
+	observation.Boundary = continuationBoundaryReset
+	observation.Outcome = continuationOutcomeCommitted
+	recordContinuationObservation(rec, observation)
 	return batch
 }
 

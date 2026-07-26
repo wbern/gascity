@@ -154,6 +154,27 @@ The same rule applies to both list mode and stream mode.
 payload objects. For example, use
 `--payload-match bead.issue_type=task` to match bead events by issue type.
 
+### Trace a session continuation
+
+`session.continuation_observed` records reset, runtime stop/start, provider-hook,
+and mail-injection boundaries. Filter by the stable session name first:
+
+```bash
+gc events \
+  --type session.continuation_observed \
+  --since 1h \
+  --payload-match session_name=demo/planner
+```
+
+Add `--payload-match boundary=reset` or
+`--payload-match outcome=failed` to narrow the result. Correlate records with
+`generation`, `continuation_epoch`, work IDs, and the instance-token
+fingerprint when those fields are present.
+
+These records are best-effort diagnostics. They show what Gas City attempted
+or observed at a boundary; they do not guarantee that a provider delivered a
+prompt or that a session resumed its previous work.
+
 ## Machine-Readable Schema
 
 The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>
