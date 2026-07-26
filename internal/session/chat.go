@@ -240,6 +240,10 @@ var (
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
+	// ErrFreshStartPending reports that a controller-owned fresh start has not
+	// completed. Generic lifecycle operations cannot materialize the resolved
+	// prompt and startup delivery required for that start.
+	ErrFreshStartPending = errors.New("controller-managed fresh start is pending")
 	// ErrNoPendingInteraction reports that a session has nothing awaiting
 	// user input or approval resolution.
 	ErrNoPendingInteraction = errors.New("session has no pending interaction")
@@ -333,6 +337,9 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if b.Metadata["continuation_reset_pending"] == "true" {
+		return fmt.Errorf("%w: %s; wait for the controller to complete the configured start", ErrFreshStartPending, id)
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {

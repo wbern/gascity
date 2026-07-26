@@ -2171,6 +2171,69 @@ func TestAttachClosedErrors(t *testing.T) {
 	}
 }
 
+func TestAttachRefusesControllerManagedFreshStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Template: "helper",
+		Title:    "fresh restart pending",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("SetMetadata(continuation_reset_pending): %v", err)
+	}
+
+	err = mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	if !errors.Is(err, ErrFreshStartPending) {
+		t.Fatalf("Attach error = %v, want %v", err, ErrFreshStartPending)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatal("Attach started a controller-managed fresh session")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Start" || call.Method == "Attach" {
+			t.Fatalf("runtime calls = %#v, must not start or attach a fresh-reset session", sp.Calls)
+		}
+	}
+}
+
+func TestStartRefusesControllerManagedFreshStart(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Template: "helper",
+		Title:    "fresh restart pending",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("SetMetadata(continuation_reset_pending): %v", err)
+	}
+
+	err = mgr.Start(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	if !errors.Is(err, ErrFreshStartPending) {
+		t.Fatalf("Start error = %v, want %v", err, ErrFreshStartPending)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatal("Start launched a controller-managed fresh session")
+	}
+}
+
 func TestSessionNameFor(t *testing.T) {
 	tests := []struct {
 		beadID string
