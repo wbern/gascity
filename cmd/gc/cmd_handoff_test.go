@@ -649,11 +649,25 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	if !persistCalled {
 		t.Error("persistRestart was not called for always-mode named session")
 	}
-	if len(rec.Events) != 2 {
-		t.Fatalf("got %d events, want 2", len(rec.Events))
+	if len(rec.Events) != 3 {
+		t.Fatalf("got %d events, want 3", len(rec.Events))
 	}
 	if rec.Events[1].Type != events.SessionDraining {
 		t.Fatalf("event[1].Type = %q, want %q", rec.Events[1].Type, events.SessionDraining)
+	}
+	if rec.Events[2].Type != events.SessionContinuationObserved {
+		t.Fatalf("event[2].Type = %q, want %q", rec.Events[2].Type, events.SessionContinuationObserved)
+	}
+	decoded, _, err := events.DecodePayload(rec.Events[2].Type, rec.Events[2].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryReset ||
+		payload.Source != continuationSourceHandoff ||
+		payload.Outcome != continuationOutcomeRequested ||
+		payload.SessionName != "mayor" {
+		t.Fatalf("handoff continuation payload = %#v", payload)
 	}
 }
 
