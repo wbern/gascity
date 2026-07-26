@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBdFastpathEnabledDefaultsOnWithExplicitOptOut(t *testing.T) {
@@ -27,6 +31,132 @@ func TestBdFastpathEnabledDefaultsOnWithExplicitOptOut(t *testing.T) {
 				t.Fatalf("bdFastpathEnabled(%q) = %t, want %t", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunEarlyBdDirectDispatchesApprovedList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/v0/city/gc2/beads"; got != want {
+			t.Fatalf("request path = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	if code := runEarlyBdDirect(server.URL, "gc2", "list", []string{"--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("runEarlyBdDirect() = %d, stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "[]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunEarlyBdDirectFailsLoudlyOnControllerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"title":"controller unavailable"}`))
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	if code := runEarlyBdDirect(server.URL, "gc2", "list", []string{"--json"}, &stdout, &stderr); code == 0 {
+		t.Fatal("runEarlyBdDirect() succeeded after controller failure")
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "list via API") {
+		t.Fatalf("controller failure output = stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestTryEarlyBdShimReadUsesDirectExperimentArm(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BD_EXPERIMENT_ARMS", "shim=0,direct=100,legacy=0")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}})
+	}))
+	defer server.Close()
+	t.Setenv("GC_API_URL", server.URL)
+
+	shim := writeEarlyBdShim(t, "exit 99\n")
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+	setEarlyBDLookPath(t, shim)
+
+	var stdout, stderr bytes.Buffer
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "list", "--json"}, strings.NewReader(""), &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), stderr=%q", code, handled, stderr.String())
+	}
+	if got, want := stdout.String(), "[]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestDirectExperimentObservationRedactsInvocationValues(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BD_EXPERIMENT_ARMS", "shim=0,direct=100,legacy=0")
+	secret := "private-agent-and-path"
+	logPath := filepath.Join(t.TempDir(), "experiment.jsonl")
+	t.Setenv("GC_BD_EXPERIMENT_LOG", logPath)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}})
+	}))
+	defer server.Close()
+	t.Setenv("GC_API_URL", server.URL)
+
+	shim := writeEarlyBdShim(t, "exit 99\n")
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+	setEarlyBDLookPath(t, shim)
+
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "list", "--json", "--assignee", secret}, strings.NewReader(""), io.Discard, io.Discard); !handled || code != 0 {
+		t.Fatalf("tryEarlyBdShimRead() = (%d, %t)", code, handled)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read observation: %v", err)
+	}
+	if strings.Contains(string(data), secret) || strings.Contains(string(data), server.URL) {
+		t.Fatalf("observation leaked invocation data: %s", data)
+	}
+}
+
+func TestTryEarlyBdShimReadLegacyArmDefersObservationUntilCommandExit(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BD_EXPERIMENT_ARMS", "shim=100,direct=0,legacy=0")
+	t.Setenv("GC_BD_EXPERIMENT_FORCE_ARM", "legacy")
+	logPath := filepath.Join(t.TempDir(), "experiment.jsonl")
+	t.Setenv("GC_BD_EXPERIMENT_LOG", logPath)
+
+	shim := writeEarlyBdShim(t, "exit 99\n")
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+	setEarlyBDLookPath(t, shim)
+
+	_, handled, legacy := tryEarlyBdShimReadOutcome([]string{"bd", "list", "--json"}, strings.NewReader(""), io.Discard, io.Discard, time.Now())
+	if handled || legacy == nil {
+		t.Fatalf("legacy outcome = (handled=%t, observation=%v), want unhandled observation", handled, legacy)
+	}
+	observeLegacyBdExperiment(*legacy, 17, time.Now(), 7)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read observation: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode observation: %v", err)
+	}
+	if got["arm"] != "legacy" || got["exit"] != float64(7) || got["stdout_bytes"] != float64(17) {
+		t.Fatalf("legacy observation = %v", got)
 	}
 }
 

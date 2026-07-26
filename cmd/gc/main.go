@@ -152,12 +152,13 @@ var setCLIProcessOTELAttrs = telemetry.SetProcessOTELAttrs
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	started := time.Now()
 	if args == nil {
 		args = []string{}
 	}
 	lifecycle := openProductMetricsInvocationLifecycle(args)
 	defer lifecycle.Close()
-	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, rootCommandOptionsForArgs(args), lifecycle)
+	return runWithRootCommandOptionsAndLifecycleAt(args, stdout, stderr, rootCommandOptionsForArgs(args), lifecycle, started)
 }
 
 // runWithRootCommandOptions preserves an explicit eager/lazy construction
@@ -169,10 +170,10 @@ func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options 
 	}
 	lifecycle := openProductMetricsInvocationLifecycle(args)
 	defer lifecycle.Close()
-	return runWithRootCommandOptionsAndLifecycle(args, stdout, stderr, options, lifecycle)
+	return runWithRootCommandOptionsAndLifecycleAt(args, stdout, stderr, options, lifecycle, time.Now())
 }
 
-func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
+func runWithRootCommandOptionsAndLifecycleAt(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle, started time.Time) (exit int) {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
@@ -185,15 +186,27 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	profiler := newBdInvocationProfiler(args, stderr)
 	defer profiler.close()
 	endEarlyShimProbe := profiler.phase("early_shim_probe")
-	if code, handled := tryEarlyBdShim(args, os.Stdin, stdout, stderr); handled {
+	var legacyObservation *earlyBdLegacyObservation
+	code, handled, legacy := tryEarlyBdShimOutcome(args, os.Stdin, stdout, stderr, started)
+	if handled {
 		endEarlyShimProbe()
 		return code
 	}
-	if code, handled := tryEarlyBdShimRead(args, os.Stdin, stdout, stderr); handled {
+	legacyObservation = legacy
+	code, handled, legacy = tryEarlyBdShimReadOutcome(args, os.Stdin, stdout, stderr, started)
+	if handled {
 		endEarlyShimProbe()
 		return code
+	}
+	if legacyObservation == nil {
+		legacyObservation = legacy
 	}
 	endEarlyShimProbe()
+	if legacyObservation != nil {
+		observed := &countingWriter{target: stdout}
+		stdout = observed
+		defer func() { observeLegacyBdExperiment(*legacyObservation, observed.BytesWritten(), started, exit) }()
+	}
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	endTelemetryInit := profiler.phase("telemetry_init")
