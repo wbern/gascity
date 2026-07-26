@@ -1684,6 +1684,15 @@ export const zSessionRespondOutputBody = z.object({
     status: z.string()
 });
 
+export const zSessionStartupUninitializedPayload = z.object({
+    elapsed_s: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    primed_at_present: z.boolean(),
+    reset_committed_at: z.string(),
+    session_name: z.string(),
+    started_config_present: z.boolean(),
+    template: z.string()
+});
+
 export const zSessionStrandedPayload = z.object({
     session_id: z.string(),
     session_name: z.string().optional(),
@@ -2296,6 +2305,7 @@ export const zEventPayload = z.union([
     zSessionLifecyclePayload,
     zSessionMessageSucceededPayload,
     zSessionResetStalledPayload,
+    zSessionStartupUninitializedPayload,
     zSessionStrandedPayload,
     zSessionSubmitSucceededPayload,
     zSessionUnknownStatePayload,
@@ -3489,6 +3499,23 @@ export const zTypedEventStreamEnvelopeSessionResetStalled = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.startup_uninitialized
+ */
+export const zTypedEventStreamEnvelopeSessionStartupUninitialized = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zSessionStartupUninitializedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.startup_uninitialized'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.stopped
  */
 export const zTypedEventStreamEnvelopeSessionStopped = z.object({
@@ -3812,6 +3839,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedEventStreamEnvelopeSessionQuarantined.extend({ type: z.literal('session.quarantined') }),
     zTypedEventStreamEnvelopeSessionResetStalled.extend({ type: z.literal('session.reset_stalled') }),
+    zTypedEventStreamEnvelopeSessionStartupUninitialized.extend({ type: z.literal('session.startup_uninitialized') }),
     zTypedEventStreamEnvelopeSessionStopped.extend({ type: z.literal('session.stopped') }),
     zTypedEventStreamEnvelopeSessionStranded.extend({ type: z.literal('session.stranded') }),
     zTypedEventStreamEnvelopeSessionSuspended.extend({ type: z.literal('session.suspended') }),
@@ -4991,6 +5019,24 @@ export const zTypedTaggedEventStreamEnvelopeSessionResetStalled = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.startup_uninitialized
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionStartupUninitialized = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zSessionStartupUninitializedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.startup_uninitialized'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.stopped
  */
 export const zTypedTaggedEventStreamEnvelopeSessionStopped = z.object({
@@ -5329,6 +5375,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionQuarantined.extend({ type: z.literal('session.quarantined') }),
     zTypedTaggedEventStreamEnvelopeSessionResetStalled.extend({ type: z.literal('session.reset_stalled') }),
+    zTypedTaggedEventStreamEnvelopeSessionStartupUninitialized.extend({ type: z.literal('session.startup_uninitialized') }),
     zTypedTaggedEventStreamEnvelopeSessionStopped.extend({ type: z.literal('session.stopped') }),
     zTypedTaggedEventStreamEnvelopeSessionStranded.extend({ type: z.literal('session.stranded') }),
     zTypedTaggedEventStreamEnvelopeSessionSuspended.extend({ type: z.literal('session.suspended') }),

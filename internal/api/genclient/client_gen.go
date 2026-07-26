@@ -3450,6 +3450,16 @@ type SessionResponse struct {
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
 
+// SessionStartupUninitializedPayload defines model for SessionStartupUninitializedPayload.
+type SessionStartupUninitializedPayload struct {
+	ElapsedS             int64  `json:"elapsed_s"`
+	PrimedAtPresent      bool   `json:"primed_at_present"`
+	ResetCommittedAt     string `json:"reset_committed_at"`
+	SessionName          string `json:"session_name"`
+	StartedConfigPresent bool   `json:"started_config_present"`
+	Template             string `json:"template"`
+}
+
 // SessionStrandedPayload defines model for SessionStrandedPayload.
 type SessionStrandedPayload struct {
 	// SessionId Canonical session bead ID for the stranded pool session (also the envelope Subject).
@@ -5062,6 +5072,21 @@ type TypedEventStreamEnvelopeSessionResetStalled struct {
 	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionStartupUninitialized defines model for TypedEventStreamEnvelopeSessionStartupUninitialized.
+type TypedEventStreamEnvelopeSessionStartupUninitialized struct {
+	Actor     string                             `json:"actor"`
+	Message   *string                            `json:"message,omitempty"`
+	Payload   SessionStartupUninitializedPayload `json:"payload"`
+	RunId     *string                            `json:"run_id,omitempty"`
+	Seq       int64                              `json:"seq"`
+	SessionId *string                            `json:"session_id,omitempty"`
+	StepId    *string                            `json:"step_id,omitempty"`
+	Subject   *string                            `json:"subject,omitempty"`
+	Ts        time.Time                          `json:"ts"`
+	Type      string                             `json:"type"`
+	Workflow  *WorkflowEventProjection           `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor     string                   `json:"actor"`
@@ -6314,6 +6339,22 @@ type TypedTaggedEventStreamEnvelopeSessionResetStalled struct {
 	Ts        time.Time                  `json:"ts"`
 	Type      string                     `json:"type"`
 	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionStartupUninitialized defines model for TypedTaggedEventStreamEnvelopeSessionStartupUninitialized.
+type TypedTaggedEventStreamEnvelopeSessionStartupUninitialized struct {
+	Actor     string                             `json:"actor"`
+	City      string                             `json:"city"`
+	Message   *string                            `json:"message,omitempty"`
+	Payload   SessionStartupUninitializedPayload `json:"payload"`
+	RunId     *string                            `json:"run_id,omitempty"`
+	Seq       int64                              `json:"seq"`
+	SessionId *string                            `json:"session_id,omitempty"`
+	StepId    *string                            `json:"step_id,omitempty"`
+	Subject   *string                            `json:"subject,omitempty"`
+	Ts        time.Time                          `json:"ts"`
+	Type      string                             `json:"type"`
+	Workflow  *WorkflowEventProjection           `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionStopped defines model for TypedTaggedEventStreamEnvelopeSessionStopped.
@@ -8957,6 +8998,32 @@ func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayl
 	return err
 }
 
+// AsSessionStartupUninitializedPayload returns the union data inside the EventPayload as a SessionStartupUninitializedPayload
+func (t EventPayload) AsSessionStartupUninitializedPayload() (SessionStartupUninitializedPayload, error) {
+	var body SessionStartupUninitializedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStartupUninitializedPayload overwrites any union data inside the EventPayload as the provided SessionStartupUninitializedPayload
+func (t *EventPayload) FromSessionStartupUninitializedPayload(v SessionStartupUninitializedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStartupUninitializedPayload performs a merge with any union data inside the EventPayload, using the provided SessionStartupUninitializedPayload
+func (t *EventPayload) MergeSessionStartupUninitializedPayload(v SessionStartupUninitializedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionStrandedPayload returns the union data inside the EventPayload as a SessionStrandedPayload
 func (t EventPayload) AsSessionStrandedPayload() (SessionStrandedPayload, error) {
 	var body SessionStrandedPayload
@@ -11209,6 +11276,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionResetStal
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionStartupUninitialized returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStartupUninitialized
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStartupUninitialized() (TypedEventStreamEnvelopeSessionStartupUninitialized, error) {
+	var body TypedEventStreamEnvelopeSessionStartupUninitialized
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionStartupUninitialized overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionStartupUninitialized
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStartupUninitialized(v TypedEventStreamEnvelopeSessionStartupUninitialized) error {
+	v.Type = "session.startup_uninitialized"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionStartupUninitialized performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStartupUninitialized
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStartupUninitialized(v TypedEventStreamEnvelopeSessionStartupUninitialized) error {
+	v.Type = "session.startup_uninitialized"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionStopped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStopped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStopped() (TypedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedEventStreamEnvelopeSessionStopped
@@ -11799,6 +11894,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
 		return t.AsTypedEventStreamEnvelopeSessionResetStalled()
+	case "session.startup_uninitialized":
+		return t.AsTypedEventStreamEnvelopeSessionStartupUninitialized()
 	case "session.stopped":
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
@@ -13608,6 +13705,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionStartupUninitialized returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStartupUninitialized
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStartupUninitialized() (TypedTaggedEventStreamEnvelopeSessionStartupUninitialized, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionStartupUninitialized
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionStartupUninitialized overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionStartupUninitialized
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionStartupUninitialized(v TypedTaggedEventStreamEnvelopeSessionStartupUninitialized) error {
+	v.Type = "session.startup_uninitialized"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionStartupUninitialized performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStartupUninitialized
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStartupUninitialized(v TypedTaggedEventStreamEnvelopeSessionStartupUninitialized) error {
+	v.Type = "session.startup_uninitialized"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionStopped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStopped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStopped() (TypedTaggedEventStreamEnvelopeSessionStopped, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionStopped
@@ -14198,6 +14323,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionResetStalled()
+	case "session.startup_uninitialized":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionStartupUninitialized()
 	case "session.stopped":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":

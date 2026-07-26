@@ -276,6 +276,79 @@ func recordResetStallIfDue(
 	}
 }
 
+// recordStartupUninitializedIfDue exposes a live session that bypassed the
+// controller-managed fresh-start path. A normal restart is deliberately given
+// the configured startup timeout to complete, and any persisted start or
+// prompt-delivery marker clears the diagnostic latch.
+func recordStartupUninitializedIfDue(
+	info sessionpkg.Info,
+	template string,
+	name string,
+	alive bool,
+	startupTimeout time.Duration,
+	now time.Time,
+	dt *drainTracker,
+	rec events.Recorder,
+	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) {
+	resetCommittedAt, committedAt, pending := resetPendingCommittedAtInfo(info)
+	startedConfigPresent := strings.TrimSpace(info.StartedConfigHash) != ""
+	primedAtPresent := strings.TrimSpace(info.PrimedAtMetadata) != ""
+	if !pending || !sessionpkg.IsNamedSessionInfo(info) || startedConfigPresent || primedAtPresent || !alive || startupTimeout <= 0 {
+		if dt != nil {
+			dt.clearStartupUninitialized(info.ID)
+		}
+		return
+	}
+	elapsed := now.Sub(committedAt)
+	if elapsed <= startupTimeout {
+		return
+	}
+	if dt != nil && !dt.markStartupUninitialized(info.ID, resetCommittedAt) {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	elapsedSeconds := int(elapsed / time.Second)
+	msg := fmt.Sprintf(
+		"session reconciler: startup uninitialized for %s: elapsed_s=%d reset_committed_at=%s started_config_present=false primed_at_present=false bead_id=%s",
+		name, elapsedSeconds, resetCommittedAt, info.ID,
+	)
+	fmt.Fprintln(stderr, msg) //nolint:errcheck
+
+	if rec != nil {
+		rec.Record(events.Event{
+			Type:      events.SessionStartupUninitialized,
+			Actor:     "gc",
+			Subject:   name,
+			Message:   msg,
+			SessionID: info.ID,
+			Payload: events.SessionStartupUninitializedPayloadJSON(
+				name, template, resetCommittedAt, elapsedSeconds, startedConfigPresent, primedAtPresent,
+			),
+		})
+	}
+	if trace != nil {
+		trace.RecordDecision(
+			TraceSiteReconcilerStartupUninitialized,
+			TraceReasonStartupUninitialized,
+			TraceOutcomeFailed,
+			template,
+			name,
+			map[string]any{
+				"bead_id":                info.ID,
+				"elapsed_s":              elapsedSeconds,
+				"reset_committed_at":     resetCommittedAt,
+				"started_config_present": startedConfigPresent,
+				"primed_at_present":      primedAtPresent,
+				"startup_timeout_s":      int(startupTimeout / time.Second),
+			},
+		)
+	}
+}
+
 func drainAckAsyncStopKey(sessionID, name string) string {
 	if id := strings.TrimSpace(sessionID); id != "" {
 		return "id:" + id
@@ -2070,6 +2143,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		recordStartupUninitializedIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// markProviderTerminalError persists + folds its write onto the snapshot in one

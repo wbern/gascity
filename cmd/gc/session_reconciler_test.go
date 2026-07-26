@@ -9942,6 +9942,196 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_RecordsStartupUninitializedDiagnostic(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		sessionpkg.NamedSessionMetadataKey: "true",
+		"continuation_reset_pending":       "true",
+		sessionpkg.ResetCommittedAtKey:     committedAt,
+		"started_config_hash":              "",
+		sessionpkg.PrimedAtMetadataKey:     "",
+	})
+
+	tracer := newSessionReconcilerTracer(t.TempDir(), "test-city", io.Discard)
+	t.Cleanup(func() { _ = tracer.Close() })
+	tracer.detail = map[string]TraceSource{"worker": TraceSourceManual}
+	trace := tracer.BeginCycle(TraceTickTriggerPatrol, "", env.clk.Now().UTC(), env.cfg)
+
+	reconcileSessionBeadsTraced(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		configuredSessionNames(env.cfg, "", env.store),
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		nil,
+		nil,
+		nil,
+		env.dt,
+		map[string]int{"worker": 0},
+		false,
+		nil,
+		"test-city",
+		nil,
+		env.clk,
+		rec,
+		env.cfg.Session.StartupTimeoutDuration(),
+		0,
+		&env.stdout,
+		&env.stderr,
+		trace,
+	)
+
+	wantMessage := fmt.Sprintf(
+		"session reconciler: startup uninitialized for worker: elapsed_s=75 reset_committed_at=%s started_config_present=false primed_at_present=false bead_id=%s",
+		committedAt,
+		session.ID,
+	)
+	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
+		t.Fatalf("stderr = %q, want %q", got, wantMessage)
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1: %#v", len(rec.Events), rec.Events)
+	}
+	gotEvent := rec.Events[0]
+	if gotEvent.Type != events.SessionStartupUninitialized {
+		t.Fatalf("event type = %q, want %q", gotEvent.Type, events.SessionStartupUninitialized)
+	}
+	if gotEvent.Message != wantMessage {
+		t.Fatalf("event message = %q, want %q", gotEvent.Message, wantMessage)
+	}
+	var payload events.SessionStartupUninitializedPayload
+	if err := json.Unmarshal(gotEvent.Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.SessionName != "worker" || payload.Template != "worker" || payload.ResetCommittedAt != committedAt || payload.ElapsedSeconds != 75 || payload.StartedConfigPresent || payload.PrimedAtPresent {
+		t.Fatalf("payload = %+v, want worker with reset_committed_at %q, elapsed_s 75, and absent startup markers", payload, committedAt)
+	}
+
+	foundTrace := false
+	if trace != nil {
+		for _, record := range trace.records {
+			if record.SiteCode == TraceSiteReconcilerStartupUninitialized &&
+				record.ReasonCode == TraceReasonStartupUninitialized &&
+				record.OutcomeCode == TraceOutcomeFailed &&
+				record.Template == "worker" &&
+				record.SessionName == "worker" {
+				foundTrace = true
+				break
+			}
+		}
+	}
+	if !foundTrace {
+		t.Fatalf("startup uninitialized trace decision not recorded; records=%+v", trace.records)
+	}
+}
+
+func TestRecordStartupUninitializedIfDue_RequiresLiveNamedSessionWithoutStartupMarkers(t *testing.T) {
+	committedAt := time.Date(2026, 3, 8, 11, 58, 45, 0, time.UTC)
+	now := committedAt.Add(75 * time.Second)
+	base := sessionpkg.Info{
+		ID:                       "session-1",
+		ConfiguredNamedSession:   true,
+		ContinuationResetPending: "true",
+		ResetCommittedAt:         committedAt.Format(time.RFC3339),
+	}
+
+	for _, tc := range []struct {
+		name  string
+		info  sessionpkg.Info
+		alive bool
+	}{
+		{name: "runtime not live", info: base, alive: false},
+		{name: "not a named session", info: func() sessionpkg.Info { info := base; info.ConfiguredNamedSession = false; return info }(), alive: true},
+		{name: "controller start recorded", info: func() sessionpkg.Info { info := base; info.StartedConfigHash = "config-hash"; return info }(), alive: true},
+		{name: "prompt delivery recorded", info: func() sessionpkg.Info {
+			info := base
+			info.PrimedAtMetadata = committedAt.Add(time.Second).Format(time.RFC3339)
+			return info
+		}(), alive: true},
+		{name: "startup still within timeout", info: func() sessionpkg.Info {
+			info := base
+			info.ResetCommittedAt = now.Add(-60 * time.Second).Format(time.RFC3339)
+			return info
+		}(), alive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := events.NewFake()
+			var stderr bytes.Buffer
+			recordStartupUninitializedIfDue(tc.info, "worker", "worker", tc.alive, 60*time.Second, now, newDrainTracker(), rec, &stderr, nil)
+			if got := strings.TrimSpace(stderr.String()); got != "" {
+				t.Fatalf("stderr = %q, want no diagnostic", got)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("recorded events = %d, want 0: %#v", len(rec.Events), rec.Events)
+			}
+		})
+	}
+}
+
+func TestRecordStartupUninitializedIfDue_DebouncesIndependentlyFromResetStall(t *testing.T) {
+	committedAt := time.Date(2026, 3, 8, 11, 58, 45, 0, time.UTC)
+	now := committedAt.Add(75 * time.Second)
+	info := sessionpkg.Info{
+		ID:                       "session-1",
+		ConfiguredNamedSession:   true,
+		ContinuationResetPending: "true",
+		ResetCommittedAt:         committedAt.Format(time.RFC3339),
+	}
+	dt := newDrainTracker()
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+
+	recordStartupUninitializedIfDue(info, "worker", "worker", true, 60*time.Second, now, dt, rec, &stderr, nil)
+	recordStartupUninitializedIfDue(info, "worker", "worker", true, 60*time.Second, now, dt, rec, &stderr, nil)
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("startup-uninitialized events = %d, want 1 after duplicate pass", got)
+	}
+
+	recordResetStallIfDue(info, "worker", "worker", false, 60*time.Second, now, dt, rec, &stderr, nil)
+	if got := len(rec.Events); got != 2 {
+		t.Fatalf("events after independent reset-stall diagnostic = %d, want 2", got)
+	}
+	if got := rec.Events[1].Type; got != events.SessionResetStalled {
+		t.Fatalf("second event type = %q, want %q", got, events.SessionResetStalled)
+	}
+
+	info.StartedConfigHash = "controller-started"
+	recordStartupUninitializedIfDue(info, "worker", "worker", true, 60*time.Second, now, dt, rec, &stderr, nil)
+	info.StartedConfigHash = ""
+	recordStartupUninitializedIfDue(info, "worker", "worker", true, 60*time.Second, now, dt, rec, &stderr, nil)
+	if got := len(rec.Events); got != 3 {
+		t.Fatalf("events after recovery and second uninitialized start = %d, want 3", got)
+	}
+	if got := rec.Events[2].Type; got != events.SessionStartupUninitialized {
+		t.Fatalf("third event type = %q, want %q", got, events.SessionStartupUninitialized)
+	}
+
+	info.StartedConfigHash = ""
+	info.ResetCommittedAt = now.Add(time.Minute).Format(time.RFC3339)
+	recordStartupUninitializedIfDue(info, "worker", "worker", true, 60*time.Second, now.Add(2*time.Minute+time.Second), dt, rec, &stderr, nil)
+	if got := len(rec.Events); got != 4 {
+		t.Fatalf("events after a distinct reset commit = %d, want 4", got)
+	}
+	if got := rec.Events[3].Type; got != events.SessionStartupUninitialized {
+		t.Fatalf("fourth event type = %q, want %q", got, events.SessionStartupUninitialized)
+	}
+}
+
 // TestRecordResetStallIfDue_FreshWakeCycleDoesNotFalseAlarm reproduces the
 // gcw-8co2 storm at the recordResetStallIfDue level: a wake_mode=fresh
 // session that already came alive after a committed restart (PreWakePatch

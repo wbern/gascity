@@ -96,6 +96,7 @@ const (
 	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
 	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
 	TraceSiteReconcilerResetStalled         TraceSiteCode = "reconciler.session.reset_stalled"
+	TraceSiteReconcilerStartupUninitialized TraceSiteCode = "reconciler.session.startup_uninitialized"
 	TraceSiteReconcilerProgressStallExempt  TraceSiteCode = "reconciler.session.progress_stall_exempt"
 	TraceSiteReconcilerWakeDecision         TraceSiteCode = "reconciler.session.wake_decision"
 	TraceSiteReconcilerDrainDecision        TraceSiteCode = "reconciler.session.drain"
@@ -167,6 +168,7 @@ const (
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
+	TraceReasonStartupUninitialized   TraceReasonCode = "startup_uninitialized"
 
 	TraceReasonRateLimit                     TraceReasonCode = "rate_limit"
 	TraceReasonPendingCreate                 TraceReasonCode = "pending_create"

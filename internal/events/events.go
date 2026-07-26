@@ -89,6 +89,11 @@ const (
 	// timeout. Operators use the typed payload to correlate the stuck
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
+	// SessionStartupUninitialized fires when a configured named session remains
+	// live past the startup timeout after a fresh reset, but neither controller
+	// startup marker was recorded. This distinguishes a live generic runtime
+	// attach from a controller-managed fresh start that delivered its prompt.
+	SessionStartupUninitialized = "session.startup_uninitialized"
 	// SessionContinuationObserved records a boundary in a session's
 	// continuation lifecycle. It is diagnostic only: emitters must not use
 	// recording success or failure to influence session behavior.
@@ -288,6 +293,7 @@ var KnownEventTypes = []string{
 	SessionStranded,
 	SessionUnknownState,
 	SessionResetStalled,
+	SessionStartupUninitialized,
 	SessionContinuationObserved,
 	SessionWorkQueryFailed,
 	SessionColdStartTimeout,

@@ -2456,6 +2456,9 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionStartupUninitializedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionStrandedPayload"
           },
           {
@@ -7660,6 +7663,39 @@
         ],
         "type": "object"
       },
+      "SessionStartupUninitializedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "elapsed_s": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "primed_at_present": {
+            "type": "boolean"
+          },
+          "reset_committed_at": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "started_config_present": {
+            "type": "boolean"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_name",
+          "template",
+          "reset_committed_at",
+          "elapsed_s",
+          "started_config_present",
+          "primed_at_present"
+        ],
+        "type": "object"
+      },
       "SessionStrandedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -9172,6 +9208,7 @@
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
+            "session.startup_uninitialized": "#/components/schemas/TypedEventStreamEnvelopeSessionStartupUninitialized",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
@@ -9379,6 +9416,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStartupUninitialized"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped"
@@ -10346,6 +10386,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.startup_uninitialized",
                 "session.continuation_observed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
@@ -12774,6 +12815,57 @@
         "title": "TypedEventStreamEnvelope session.reset_stalled",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionStartupUninitialized": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartupUninitializedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.startup_uninitialized",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.startup_uninitialized",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionStopped": {
         "additionalProperties": false,
         "properties": {
@@ -13606,6 +13698,7 @@
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
+            "session.startup_uninitialized": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartupUninitialized",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
@@ -13813,6 +13906,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStartupUninitialized"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped"
@@ -14851,6 +14947,7 @@
                 "session.stranded",
                 "session.unknown_state",
                 "session.reset_stalled",
+                "session.startup_uninitialized",
                 "session.continuation_observed",
                 "session.work_query_failed",
                 "session.cold_start_timeout",
@@ -17462,6 +17559,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.reset_stalled",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionStartupUninitialized": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStartupUninitializedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.startup_uninitialized",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.startup_uninitialized",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionStopped": {

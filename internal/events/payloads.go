@@ -134,6 +134,36 @@ func SessionResetStalledPayloadJSON(sessionName, template, resetCommittedAt stri
 	return b
 }
 
+// SessionStartupUninitializedPayload is the typed payload for
+// session.startup_uninitialized events. It identifies the configured named
+// session that is still live after a fresh reset without the controller's
+// start and prompt-delivery markers.
+type SessionStartupUninitializedPayload struct {
+	SessionName          string `json:"session_name"`
+	Template             string `json:"template"`
+	ResetCommittedAt     string `json:"reset_committed_at"`
+	ElapsedSeconds       int    `json:"elapsed_s"`
+	StartedConfigPresent bool   `json:"started_config_present"`
+	PrimedAtPresent      bool   `json:"primed_at_present"`
+}
+
+// IsEventPayload marks SessionStartupUninitializedPayload as an events.Payload variant.
+func (SessionStartupUninitializedPayload) IsEventPayload() {}
+
+// SessionStartupUninitializedPayloadJSON builds the JSON wire form for
+// attachment to an Event.Payload field.
+func SessionStartupUninitializedPayloadJSON(sessionName, template, resetCommittedAt string, elapsedSeconds int, startedConfigPresent, primedAtPresent bool) json.RawMessage {
+	b, _ := json.Marshal(SessionStartupUninitializedPayload{
+		SessionName:          sessionName,
+		Template:             template,
+		ResetCommittedAt:     resetCommittedAt,
+		ElapsedSeconds:       elapsedSeconds,
+		StartedConfigPresent: startedConfigPresent,
+		PrimedAtPresent:      primedAtPresent,
+	})
+	return b
+}
+
 // SessionContinuationObservedPayload is the diagnostic payload for
 // session.continuation_observed events. Correlation fields deliberately use
 // the persisted string forms so an initial value such as generation "0" is
