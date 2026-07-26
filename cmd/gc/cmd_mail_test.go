@@ -3565,6 +3565,177 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	}
 }
 
+func TestCmdMailCheckInjectRecordsUserPromptSubmitObservation(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+	t.Setenv("GC_HOOK_SOURCE", "codex-provider")
+	t.Setenv("GC_RUNTIME_EPOCH", "7")
+	t.Setenv("GC_CONTINUATION_EPOCH", "13")
+	t.Setenv("GC_INSTANCE_TOKEN", "prompt-hook-secret")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":              "mayor",
+			"session_name":       "mayor",
+			"template":           "mayor",
+			"generation":         "7",
+			"continuation_epoch": "13",
+			"instance_token":     "prompt-hook-secret",
+			"state":              "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	auto, err := store.Create(beads.Bead{
+		Title:       "context cycle",
+		Description: "continue the active task",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "mayor",
+		Labels:      []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+
+	oldAPIClient := mailCheckAPIClient
+	mailCheckAPIClient = func(string) (*api.Client, string) { return nil, "test-forced-fallback" }
+	t.Cleanup(func() { mailCheckAPIClient = oldAPIClient })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("hook output missing injected mail %s:\n%s", auto.ID, stdout.String())
+	}
+
+	recorded, err := events.ReadFiltered(
+		filepath.Join(cityPath, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("continuation events = %d, want one UserPromptSubmit observation", len(recorded))
+	}
+	decoded, _, err := events.DecodePayload(recorded[0].Type, recorded[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	continuation := decoded.(events.SessionContinuationObservedPayload)
+	if recorded[0].SessionID != sessionBead.ID ||
+		continuation.Boundary != continuationBoundaryMailInjection ||
+		continuation.Source != continuationSourceUserPromptSubmit ||
+		continuation.Outcome != continuationOutcomeInjected ||
+		continuation.HookEvent != "UserPromptSubmit" ||
+		continuation.HookSource != "codex-provider" ||
+		continuation.Generation != "7" ||
+		continuation.ContinuationEpoch != "13" ||
+		continuation.MessageCount == nil ||
+		*continuation.MessageCount != 1 ||
+		len(continuation.MailIDs) != 1 ||
+		continuation.MailIDs[0] != auto.ID ||
+		continuation.BodyBytes == nil ||
+		*continuation.BodyBytes == 0 ||
+		continuation.Route != "fallback" {
+		t.Fatalf("UserPromptSubmit continuation event = envelope %#v payload %#v", recorded[0], continuation)
+	}
+	if strings.Contains(string(recorded[0].Payload), "prompt-hook-secret") ||
+		strings.Contains(string(recorded[0].Payload), "continue the active task") {
+		t.Fatal("UserPromptSubmit observation leaked raw token or mail body")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("empty cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	recorded, err = events.ReadFiltered(
+		filepath.Join(cityPath, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered after empty check: %v", err)
+	}
+	if len(recorded) != 2 {
+		t.Fatalf("continuation events after empty check = %d, want 2", len(recorded))
+	}
+	decoded, _, err = events.DecodePayload(recorded[1].Type, recorded[1].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload empty observation: %v", err)
+	}
+	empty := decoded.(events.SessionContinuationObservedPayload)
+	if empty.Outcome != continuationOutcomeEmpty ||
+		empty.MessageCount == nil ||
+		*empty.MessageCount != 0 ||
+		empty.BodyBytes == nil ||
+		*empty.BodyBytes != 0 ||
+		len(empty.MailIDs) != 0 {
+		t.Fatalf("empty UserPromptSubmit payload = %#v", empty)
+	}
+}
+
+func TestCmdMailCheckInjectRecordsSuspendedHookAsSkipped(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SUSPENDED", "1")
+	t.Setenv("GC_SESSION_NAME", "test-city/worker")
+	t.Setenv("GC_HOOK_SOURCE", "codex-provider")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	recorded, err := events.ReadFiltered(
+		filepath.Join(cityDir, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("continuation events = %d, want one skipped hook", len(recorded))
+	}
+	decoded, _, err := events.DecodePayload(recorded[0].Type, recorded[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := decoded.(events.SessionContinuationObservedPayload)
+	if observation.Outcome != continuationOutcomeSkipped || observation.Route != "suspended" {
+		t.Fatalf("suspended hook observation = %#v", observation)
+	}
+}
+
 // TestMailCheckInjectArchivesEphemeralAutoHandoffMessages verifies that
 // ephemeral (wisp-tier) auto-handoff mail is archived after injection.
 // gc handoff --auto creates Ephemeral:true beads; BdStore.Get must fall back
@@ -4057,7 +4228,7 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cityPath := writeMailTestCity(t)
+			writeMailTestCity(t)
 			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
@@ -4068,7 +4239,7 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, tc.nilReason, &stdout, &stderr)
+			code := routeMailCheck([]string{"mayor"}, false, c, tc.nilReason, &stdout, &stderr)
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
 			}
@@ -4126,14 +4297,14 @@ func TestRouteMailCountPartialStoreSlowJSONReturnsError(t *testing.T) {
 }
 
 func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4147,14 +4318,14 @@ func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
 }
 
 func TestRouteMailCheckPartialStoreSlowInjectEmitsDegradedNotice(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4165,14 +4336,14 @@ func TestRouteMailCheckPartialStoreSlowInjectEmitsDegradedNotice(t *testing.T) {
 }
 
 func TestRouteMailCheckPartialStoreSlowNonInjectReturnsError(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4186,14 +4357,14 @@ func TestRouteMailCheckPartialStoreSlowNonInjectReturnsError(t *testing.T) {
 }
 
 func TestRouteMailCheckPartialProviderErrorInjectEmitsDegradedNotice(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(partialProviderErrorMailCheckHandler(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4207,14 +4378,14 @@ func TestRouteMailCheckPartialProviderErrorInjectEmitsDegradedNotice(t *testing.
 }
 
 func TestRouteMailCheckPartialProviderErrorNonInjectReturnsError(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(partialProviderErrorMailCheckHandler(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4228,14 +4399,14 @@ func TestRouteMailCheckPartialProviderErrorNonInjectReturnsError(t *testing.T) {
 }
 
 func TestRouteMailCheckStoreSlowNonInjectReturnsError(t *testing.T) {
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 	t.Setenv("GC_DEBUG", "1")
 	srv := httptest.NewServer(mailProblemHandler(http.StatusServiceUnavailable, "store_slow: mail read timed out after 8s")(t))
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4456,7 +4627,7 @@ func TestRouteMailCount_SixRowMatrix(t *testing.T) {
 
 func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
-	cityPath := writeMailTestCity(t)
+	writeMailTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-GC-Cache-Age-S", "45")
@@ -4472,7 +4643,7 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {
@@ -4526,7 +4697,7 @@ name = "mayor"
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck(cityPath, nil, true, "", c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck(nil, true, c, "", &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	assertMailRouteLog(t, stderr.String(), "fallback", "inject-local-side-effects")

@@ -119,3 +119,40 @@ func TestRegisterSameTypeIdempotent(t *testing.T) {
 	// Second call with same type must not panic.
 	RegisterPayload(evt, samplePayload{})
 }
+
+func TestSessionContinuationObservedPayloadContract(t *testing.T) {
+	zero := 0
+	sample, ok := LookupPayload(SessionContinuationObserved)
+	if !ok {
+		t.Fatalf("payload for %q is not registered", SessionContinuationObserved)
+	}
+	if _, ok := sample.(SessionContinuationObservedPayload); !ok {
+		t.Fatalf("payload for %q has type %T, want SessionContinuationObservedPayload", SessionContinuationObserved, sample)
+	}
+
+	raw := SessionContinuationObservedPayloadJSON(SessionContinuationObservedPayload{
+		SchemaVersion:            "1",
+		Boundary:                 "reset",
+		Source:                   "session_reconciler",
+		Outcome:                  "committed",
+		SessionName:              "rig/worker",
+		Template:                 "worker",
+		Generation:               "0",
+		ContinuationEpoch:        "4",
+		InstanceTokenFingerprint: "sha256:0123456789abcdef",
+		HookEvent:                "PreCompact",
+		HookSource:               "provider",
+		OldWorkID:                "work-old",
+		NewWorkID:                "work-new",
+		MailIDs:                  []string{"mail-1", "mail-2"},
+		MessageCount:             &zero,
+		BodyBytes:                &zero,
+		Route:                    "local",
+		ErrorCode:                "runtime_stop_failed",
+	})
+
+	const want = `{"schema_version":"1","boundary":"reset","source":"session_reconciler","outcome":"committed","session_name":"rig/worker","template":"worker","generation":"0","continuation_epoch":"4","instance_token_fingerprint":"sha256:0123456789abcdef","hook_event":"PreCompact","hook_source":"provider","old_work_id":"work-old","new_work_id":"work-new","mail_ids":["mail-1","mail-2"],"message_count":0,"body_bytes":0,"route":"local","error_code":"runtime_stop_failed"}`
+	if string(raw) != want {
+		t.Fatalf("payload JSON = %s, want %s", raw, want)
+	}
+}

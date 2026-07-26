@@ -114,8 +114,8 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 
 	// Verify events recorded.
-	if len(rec.Events) != 2 {
-		t.Fatalf("got %d events, want 2", len(rec.Events))
+	if len(rec.Events) != 3 {
+		t.Fatalf("got %d events, want 3", len(rec.Events))
 	}
 	if rec.Events[0].Type != events.MailSent {
 		t.Errorf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
@@ -125,6 +125,19 @@ func TestHandoffSuccess(t *testing.T) {
 	}
 	if rec.Events[1].Message != "handoff" {
 		t.Errorf("event[1].Message = %q, want %q", rec.Events[1].Message, "handoff")
+	}
+	if rec.Events[2].Type != events.SessionContinuationObserved {
+		t.Fatalf("event[2].Type = %q, want %q", rec.Events[2].Type, events.SessionContinuationObserved)
+	}
+	decoded, _, err := events.DecodePayload(rec.Events[2].Type, rec.Events[2].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryReset ||
+		payload.Source != continuationSourceHandoff ||
+		payload.Outcome != continuationOutcomeRequested {
+		t.Fatalf("handoff continuation payload = %#v", payload)
 	}
 
 	// Verify stdout confirmation.
@@ -284,6 +297,7 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_ALIAS", "mayor")
 	t.Setenv("GC_SESSION_NAME", "mayor")
+	t.Setenv("GC_HOOK_SOURCE", "codex-provider")
 
 	var stdout, stderr bytes.Buffer
 	cmd := newHandoffCmd(&stdout, &stderr)
@@ -320,6 +334,32 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, all[0].ID) {
 		t.Fatalf("additionalContext = %q, want handoff mail id %s", payload.HookSpecificOutput.AdditionalContext, all[0].ID)
 	}
+	recorded, err := events.ReadFiltered(
+		filepath.Join(cityDir, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("continuation events = %d, want one PreCompact observation", len(recorded))
+	}
+	decoded, _, err := events.DecodePayload(recorded[0].Type, recorded[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	continuation := decoded.(events.SessionContinuationObservedPayload)
+	if continuation.Boundary != continuationBoundaryProviderHook ||
+		continuation.Source != continuationSourcePreCompact ||
+		continuation.Outcome != continuationOutcomeObserved ||
+		continuation.HookEvent != "PreCompact" ||
+		continuation.HookSource != "codex-provider" ||
+		continuation.MessageCount == nil ||
+		*continuation.MessageCount != 1 ||
+		len(continuation.MailIDs) != 1 ||
+		continuation.MailIDs[0] != all[0].ID {
+		t.Fatalf("PreCompact continuation payload = %#v", continuation)
+	}
 }
 
 func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
@@ -337,6 +377,19 @@ func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {
 	all := listOpenMessagesBothTiers(t, store)
 	if len(all) != 1 {
 		t.Fatalf("open beads = %d, want handoff mail still created", len(all))
+	}
+	if len(rec.Events) != 2 {
+		t.Fatalf("events = %d, want MailSent and failed PreCompact observation", len(rec.Events))
+	}
+	decoded, _, err := events.DecodePayload(rec.Events[1].Type, rec.Events[1].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryProviderHook ||
+		payload.Outcome != continuationOutcomeFailed ||
+		payload.ErrorCode != continuationErrorHookOutput {
+		t.Fatalf("failed PreCompact payload = %#v", payload)
 	}
 }
 
@@ -378,6 +431,45 @@ type errWriter struct{}
 
 func (errWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write failed")
+}
+
+type handoffCreateFailStore struct {
+	beads.Store
+}
+
+func (s handoffCreateFailStore) Create(beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("mail store unavailable")
+}
+
+func TestDoHandoffAutoRecordsMailCreationFailure(t *testing.T) {
+	store := handoffCreateFailStore{Store: beads.NewMemStore()}
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	if code := doHandoffAuto(store, store, rec, "mayor", []string{"context cycle"}, "codex", &stdout, &stderr); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	continuations, err := rec.List(events.Filter{Type: events.SessionContinuationObserved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(continuations) != 1 {
+		t.Fatalf("continuation events = %d, want one failed PreCompact observation", len(continuations))
+	}
+	decoded, _, err := events.DecodePayload(continuations[0].Type, continuations[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryProviderHook ||
+		payload.Source != continuationSourcePreCompact ||
+		payload.Outcome != continuationOutcomeFailed ||
+		payload.ErrorCode != continuationErrorHandoffMail {
+		t.Fatalf("failed PreCompact payload = %#v", payload)
+	}
+	if strings.Contains(string(continuations[0].Payload), "mail store unavailable") {
+		t.Fatal("failed PreCompact observation leaked the raw store error")
+	}
 }
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
@@ -724,15 +816,28 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Error("target session should be stopped")
 	}
 
-	// Verify events: MailSent + SessionStopped.
-	if len(rec.Events) != 2 {
-		t.Fatalf("got %d events, want 2", len(rec.Events))
+	// Verify events: MailSent + SessionStopped + continuation boundary.
+	if len(rec.Events) != 3 {
+		t.Fatalf("got %d events, want 3", len(rec.Events))
 	}
 	if rec.Events[0].Type != events.MailSent {
 		t.Errorf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
 	}
 	if rec.Events[1].Type != events.SessionStopped {
 		t.Errorf("event[1].Type = %q, want %q", rec.Events[1].Type, events.SessionStopped)
+	}
+	if rec.Events[2].Type != events.SessionContinuationObserved {
+		t.Fatalf("event[2].Type = %q, want %q", rec.Events[2].Type, events.SessionContinuationObserved)
+	}
+	decoded, _, err := events.DecodePayload(rec.Events[2].Type, rec.Events[2].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if payload.Boundary != continuationBoundaryRuntimeStop ||
+		payload.Source != continuationSourceHandoff ||
+		payload.Outcome != continuationOutcomeSucceeded {
+		t.Fatalf("remote handoff continuation payload = %#v", payload)
 	}
 
 	// Verify stdout says killed.

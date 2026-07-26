@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -18,6 +19,8 @@ import (
 // the next wake starts fresh on the newly assigned bead.
 func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testing.T) {
 	env := newRestartRequestTestEnv()
+	rec := &continuationObservationRecorder{}
+	env.rec = rec
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -42,6 +45,7 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 		"state":                      "active",
 		"wake_mode":                  "fresh",
 		"session_key":                "conversation-A",
+		"continuation_epoch":         "3",
 		sessionpkg.CurrentBeadIDKey:  "wb-A",
 	})
 	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
@@ -72,6 +76,33 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 	}
 	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "conversation-A" {
 		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+
+	if len(rec.recorded) != 2 {
+		t.Fatalf("recorded %d continuation events, want stop and reset commit", len(rec.recorded))
+	}
+	wantBoundaries := []string{continuationBoundaryRuntimeStop, continuationBoundaryReset}
+	wantOutcomes := []string{continuationOutcomeSucceeded, continuationOutcomeCommitted}
+	for index, event := range rec.recorded {
+		if event.Type != events.SessionContinuationObserved {
+			t.Fatalf("event %d type = %q", index, event.Type)
+		}
+		decoded, _, err := events.DecodePayload(event.Type, event.Payload)
+		if err != nil {
+			t.Fatalf("decode event %d: %v", index, err)
+		}
+		payload := decoded.(events.SessionContinuationObservedPayload)
+		if payload.Boundary != wantBoundaries[index] || payload.Outcome != wantOutcomes[index] {
+			t.Fatalf("event %d boundary/outcome = %s/%s, want %s/%s", index, payload.Boundary, payload.Outcome, wantBoundaries[index], wantOutcomes[index])
+		}
+		if payload.Source != continuationSourceSessionReconciler ||
+			payload.OldWorkID != "wb-A" || payload.NewWorkID != "wb-B" ||
+			payload.Generation != "1" || payload.ContinuationEpoch != "3" {
+			t.Fatalf("event %d payload = %#v", index, payload)
+		}
+		if payload.InstanceTokenFingerprint == "" || payload.InstanceTokenFingerprint == "test-token" {
+			t.Fatalf("event %d fingerprint = %q", index, payload.InstanceTokenFingerprint)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -287,25 +288,72 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 		Subject: sessionAddress,
 		Message: "handoff",
 	})
+	observation := handoffContinuationObservation(sessStore, sessionName)
+	observation.Outcome = continuationOutcomeRequested
+	recordContinuationObservation(rec, observation)
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", b.ID) //nolint:errcheck // best-effort stdout
 	return handoffOutcome{code: 0, restartRequested: true}
 }
 
+func handoffContinuationObservation(sessStore beads.Store, sessionName string) continuationObservation {
+	observation := continuationObservation{
+		Boundary:    continuationBoundaryReset,
+		Source:      continuationSourceHandoff,
+		SessionName: sessionName,
+	}
+	if sessStore == nil {
+		return observation
+	}
+	sessionID, err := resolveSessionID(sessStore, sessionName)
+	if err != nil {
+		return observation
+	}
+	observation.SessionID = sessionID
+	bead, err := sessStore.Get(sessionID)
+	if err != nil {
+		return observation
+	}
+	observation.SessionName = firstNonEmptyGCString(bead.Metadata["session_name"], sessionName)
+	observation.Template = bead.Metadata["template"]
+	observation.Generation = bead.Metadata["generation"]
+	observation.ContinuationEpoch = bead.Metadata["continuation_epoch"]
+	observation.InstanceToken = bead.Metadata["instance_token"]
+	observation.OldWorkID = bead.Metadata[session.CurrentBeadIDKey]
+	return observation
+}
+
 // doHandoffAuto sends handoff mail to self without requesting restart.
 func doHandoffAuto(store, sessStore beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
+	observation := handoffContinuationObservation(sessStore, sessionAddress)
+	observation.Boundary = continuationBoundaryProviderHook
+	observation.Source = continuationSourcePreCompact
+	observation.HookEvent = "PreCompact"
+	observation.HookSource = os.Getenv("GC_HOOK_SOURCE")
+	observation.Route = hookFormat
 	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
 	}, stderr)
 	if !ok {
+		observation.Outcome = continuationOutcomeFailed
+		observation.ErrorCode = continuationErrorHandoffMail
+		recordContinuationObservation(rec, observation)
 		return 1
 	}
+	observation.MailIDs = []string{b.ID}
+	observation.MessageCount = continuationInt(1)
+	observation.BodyBytes = continuationInt(len([]byte(b.Body)))
 	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
 	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
+		observation.Outcome = continuationOutcomeFailed
+		observation.ErrorCode = continuationErrorHookOutput
+		recordContinuationObservation(rec, observation)
 		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	observation.Outcome = continuationOutcomeObserved
+	recordContinuationObservation(rec, observation)
 	return 0
 }
 
@@ -445,7 +493,12 @@ func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runti
 	// still live. The metric label uses the agent identity (not the sanitized
 	// runtime session name) so handoff stops join the start/crash/kill counters.
 	agentIdentity := sessionAgentMetricIdentityByName(sessStore, sessionName)
+	continuation := handoffContinuationObservation(sessStore, sessionName)
+	continuation.Boundary = continuationBoundaryRuntimeStop
 	if err := workerKillSessionTargetWithConfig("", sessStore, sp, nil, sessionName); err != nil {
+		continuation.Outcome = continuationOutcomeFailed
+		continuation.ErrorCode = continuationErrorRuntimeStop
+		recordContinuationObservation(rec, continuation)
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -463,6 +516,8 @@ func doHandoffRemote(store, sessStore beads.Store, rec events.Recorder, sp runti
 		Message: "handoff",
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "handoff"),
 	})
+	continuation.Outcome = continuationOutcomeSucceeded
+	recordContinuationObservation(rec, continuation)
 	telemetry.RecordAgentStop(context.Background(), sessionName, agentIdentity, "handoff", nil)
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout

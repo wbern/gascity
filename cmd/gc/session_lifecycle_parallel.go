@@ -2037,9 +2037,34 @@ func commitStartResultTraced(
 		return false
 	}
 	if result.err != nil {
+		recordContinuationObservation(rec, continuationObservation{
+			Boundary:          continuationBoundaryRuntimeStart,
+			Source:            continuationSourceSessionReconciler,
+			Outcome:           continuationOutcomeFailed,
+			SessionID:         info.ID,
+			SessionName:       name,
+			Template:          tp.TemplateName,
+			Generation:        info.Generation,
+			ContinuationEpoch: info.ContinuationEpoch,
+			InstanceToken:     info.InstanceToken,
+			OldWorkID:         info.CurrentlyProcessingBeadID,
+			ErrorCode:         continuationErrorRuntimeStart,
+		})
 		commitStartFailure(result, sessFront, clk, rec, wave, stderr, trace)
 		return false
 	}
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:          continuationBoundaryRuntimeStart,
+		Source:            continuationSourceSessionReconciler,
+		Outcome:           continuationOutcomeSucceeded,
+		SessionID:         info.ID,
+		SessionName:       name,
+		Template:          tp.TemplateName,
+		Generation:        info.Generation,
+		ContinuationEpoch: info.ContinuationEpoch,
+		InstanceToken:     info.InstanceToken,
+		OldWorkID:         info.CurrentlyProcessingBeadID,
+	})
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)

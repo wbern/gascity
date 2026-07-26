@@ -862,7 +862,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3040,6 +3040,81 @@ export type SessionBindingRecord = {
     Status: BindingStatus;
 };
 
+export type SessionContinuationObservedPayload = {
+    /**
+     * Byte length of the provider hook context written; the context body itself is never recorded.
+     */
+    body_bytes?: number;
+    /**
+     * Observed boundary: reset, runtime_stop, runtime_start, provider_hook, or mail_injection.
+     */
+    boundary: string;
+    /**
+     * Persisted provider-continuation epoch when known.
+     */
+    continuation_epoch?: string;
+    /**
+     * Stable coarse failure code. Raw error strings are never recorded.
+     */
+    error_code?: string;
+    /**
+     * Persisted session generation, kept as a string so generation 0 differs from an absent value.
+     */
+    generation?: string;
+    /**
+     * Provider hook event, such as SessionStart, PreCompact, or UserPromptSubmit.
+     */
+    hook_event?: string;
+    /**
+     * Bounded provider hook-origin label when supplied by the runtime.
+     */
+    hook_source?: string;
+    /**
+     * SHA-256 fingerprint used to correlate an opaque session instance token without exposing the token.
+     */
+    instance_token_fingerprint?: string;
+    /**
+     * Mail bead IDs written to or injected by the hook boundary.
+     */
+    mail_ids?: Array<string> | null;
+    /**
+     * Number of messages handled by a mail hook. Zero is present only when the hook counted zero messages.
+     */
+    message_count?: number;
+    /**
+     * Work bead associated with the session after the boundary.
+     */
+    new_work_id?: string;
+    /**
+     * Work bead associated with the session before the boundary.
+     */
+    old_work_id?: string;
+    /**
+     * Result observed at this boundary. This is diagnostic evidence, not an end-to-end delivery guarantee.
+     */
+    outcome: string;
+    /**
+     * Observed command or provider route, such as fallback, suspended, codex, or gemini.
+     */
+    route?: string;
+    /**
+     * Payload schema version. Version 1 is emitted by this release.
+     */
+    schema_version: string;
+    /**
+     * Stable runtime session name when known.
+     */
+    session_name?: string;
+    /**
+     * Code path that reached the boundary, such as explicit_reset, session_reconciler, or pre_compact.
+     */
+    source: string;
+    /**
+     * Configured agent template when known.
+     */
+    template?: string;
+};
+
 export type SessionCreateBody = {
     /**
      * Optional session alias.
@@ -4164,6 +4239,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.continuation_observed';
+} & TypedEventStreamEnvelopeSessionContinuationObserved) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -5164,6 +5241,23 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.continuation_observed
+ */
+export type TypedEventStreamEnvelopeSessionContinuationObserved = {
+    actor: string;
+    message?: string;
+    payload: SessionContinuationObservedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.continuation_observed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -5653,6 +5747,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.continuation_observed';
+} & TypedTaggedEventStreamEnvelopeSessionContinuationObserved) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.drain_acked_with_assigned_work';
@@ -6705,6 +6801,24 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
     subject?: string;
     ts: string;
     type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.continuation_observed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionContinuationObserved = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionContinuationObservedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.continuation_observed';
     workflow?: WorkflowEventProjection;
 };
 

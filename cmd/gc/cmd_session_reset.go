@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -92,18 +93,41 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		fmt.Fprintf(stderr, "gc session reset: loading session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rec := openCityRecorderAt(cityPath, stderr)
+	continuationBase := continuationObservation{
+		Boundary:          continuationBoundaryReset,
+		Source:            continuationSourceExplicitReset,
+		SessionID:         sessionID,
+		SessionName:       bead.Metadata["session_name"],
+		Template:          bead.Metadata["template"],
+		Generation:        bead.Metadata["generation"],
+		ContinuationEpoch: bead.Metadata["continuation_epoch"],
+		InstanceToken:     bead.Metadata["instance_token"],
+		OldWorkID:         bead.Metadata[session.CurrentBeadIDKey],
+	}
 	identity := namedSessionIdentity(bead)
 	if identity != "" {
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			observation := continuationBase
+			observation.Outcome = continuationOutcomeFailed
+			observation.ErrorCode = continuationErrorCircuitReset
+			recordContinuationObservation(rec, observation)
 			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
 	if err := handle.Reset(context.Background()); err != nil {
+		observation := continuationBase
+		observation.Outcome = continuationOutcomeFailed
+		observation.ErrorCode = continuationErrorResetRequest
+		recordContinuationObservation(rec, observation)
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	observation := continuationBase
+	observation.Outcome = continuationOutcomeCommitted
+	recordContinuationObservation(rec, observation)
 
 	_ = pokeController(cityPath)
 

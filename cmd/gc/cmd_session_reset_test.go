@@ -610,6 +610,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			"session_key":                "original-key",
 			"started_config_hash":        "hash-before-reset",
 			"continuation_reset_pending": "",
+			"generation":                 "5",
+			"continuation_epoch":         "8",
+			"instance_token":             "explicit-reset-token",
 		},
 	})
 	if err != nil {
@@ -707,6 +710,33 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 	}
 	if got.Metadata["started_config_hash"] != "hash-before-reset" {
 		t.Fatalf("started_config_hash = %q, want original hash preserved until reconcile", got.Metadata["started_config_hash"])
+	}
+
+	recorded, err := events.ReadFiltered(
+		filepath.Join(cityDir, ".gc", "events.jsonl"),
+		events.Filter{Type: events.SessionContinuationObserved},
+	)
+	if err != nil {
+		t.Fatalf("ReadFiltered(session.continuation_observed): %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("continuation events = %d, want explicit reset request", len(recorded))
+	}
+	decoded, _, err := events.DecodePayload(recorded[0].Type, recorded[0].Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	payload := decoded.(events.SessionContinuationObservedPayload)
+	if recorded[0].SessionID != bead.ID ||
+		payload.Boundary != continuationBoundaryReset ||
+		payload.Source != continuationSourceExplicitReset ||
+		payload.Outcome != continuationOutcomeCommitted ||
+		payload.Generation != "5" ||
+		payload.ContinuationEpoch != "8" {
+		t.Fatalf("continuation event = envelope %#v payload %#v", recorded[0], payload)
+	}
+	if strings.Contains(string(recorded[0].Payload), "explicit-reset-token") {
+		t.Fatal("continuation event leaked the raw instance token")
 	}
 }
 

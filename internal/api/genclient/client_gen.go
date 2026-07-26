@@ -3209,6 +3209,63 @@ type SessionBindingRecord struct {
 	Status BindingStatus `json:"Status"`
 }
 
+// SessionContinuationObservedPayload defines model for SessionContinuationObservedPayload.
+type SessionContinuationObservedPayload struct {
+	// BodyBytes Byte length of the provider hook context written; the context body itself is never recorded.
+	BodyBytes *int64 `json:"body_bytes,omitempty"`
+
+	// Boundary Observed boundary: reset, runtime_stop, runtime_start, provider_hook, or mail_injection.
+	Boundary string `json:"boundary"`
+
+	// ContinuationEpoch Persisted provider-continuation epoch when known.
+	ContinuationEpoch *string `json:"continuation_epoch,omitempty"`
+
+	// ErrorCode Stable coarse failure code. Raw error strings are never recorded.
+	ErrorCode *string `json:"error_code,omitempty"`
+
+	// Generation Persisted session generation, kept as a string so generation 0 differs from an absent value.
+	Generation *string `json:"generation,omitempty"`
+
+	// HookEvent Provider hook event, such as SessionStart, PreCompact, or UserPromptSubmit.
+	HookEvent *string `json:"hook_event,omitempty"`
+
+	// HookSource Bounded provider hook-origin label when supplied by the runtime.
+	HookSource *string `json:"hook_source,omitempty"`
+
+	// InstanceTokenFingerprint SHA-256 fingerprint used to correlate an opaque session instance token without exposing the token.
+	InstanceTokenFingerprint *string `json:"instance_token_fingerprint,omitempty"`
+
+	// MailIds Mail bead IDs written to or injected by the hook boundary.
+	MailIds *[]string `json:"mail_ids,omitempty"`
+
+	// MessageCount Number of messages handled by a mail hook. Zero is present only when the hook counted zero messages.
+	MessageCount *int64 `json:"message_count,omitempty"`
+
+	// NewWorkId Work bead associated with the session after the boundary.
+	NewWorkId *string `json:"new_work_id,omitempty"`
+
+	// OldWorkId Work bead associated with the session before the boundary.
+	OldWorkId *string `json:"old_work_id,omitempty"`
+
+	// Outcome Result observed at this boundary. This is diagnostic evidence, not an end-to-end delivery guarantee.
+	Outcome string `json:"outcome"`
+
+	// Route Observed command or provider route, such as fallback, suspended, codex, or gemini.
+	Route *string `json:"route,omitempty"`
+
+	// SchemaVersion Payload schema version. Version 1 is emitted by this release.
+	SchemaVersion string `json:"schema_version"`
+
+	// SessionName Stable runtime session name when known.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Source Code path that reached the boundary, such as explicit_reset, session_reconciler, or pre_compact.
+	Source string `json:"source"`
+
+	// Template Configured agent template when known.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionCreateBody defines model for SessionCreateBody.
 type SessionCreateBody struct {
 	// Alias Optional session alias.
@@ -4885,6 +4942,21 @@ type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionContinuationObserved defines model for TypedEventStreamEnvelopeSessionContinuationObserved.
+type TypedEventStreamEnvelopeSessionContinuationObserved struct {
+	Actor     string                             `json:"actor"`
+	Message   *string                            `json:"message,omitempty"`
+	Payload   SessionContinuationObservedPayload `json:"payload"`
+	RunId     *string                            `json:"run_id,omitempty"`
+	Seq       int64                              `json:"seq"`
+	SessionId *string                            `json:"session_id,omitempty"`
+	StepId    *string                            `json:"step_id,omitempty"`
+	Subject   *string                            `json:"subject,omitempty"`
+	Ts        time.Time                          `json:"ts"`
+	Type      string                             `json:"type"`
+	Workflow  *WorkflowEventProjection           `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor     string                   `json:"actor"`
@@ -6114,6 +6186,22 @@ type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionContinuationObserved defines model for TypedTaggedEventStreamEnvelopeSessionContinuationObserved.
+type TypedTaggedEventStreamEnvelopeSessionContinuationObserved struct {
+	Actor     string                             `json:"actor"`
+	City      string                             `json:"city"`
+	Message   *string                            `json:"message,omitempty"`
+	Payload   SessionContinuationObservedPayload `json:"payload"`
+	RunId     *string                            `json:"run_id,omitempty"`
+	Seq       int64                              `json:"seq"`
+	SessionId *string                            `json:"session_id,omitempty"`
+	StepId    *string                            `json:"step_id,omitempty"`
+	Subject   *string                            `json:"subject,omitempty"`
+	Ts        time.Time                          `json:"ts"`
+	Type      string                             `json:"type"`
+	Workflow  *WorkflowEventProjection           `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
@@ -8713,6 +8801,32 @@ func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
 	return err
 }
 
+// AsSessionContinuationObservedPayload returns the union data inside the EventPayload as a SessionContinuationObservedPayload
+func (t EventPayload) AsSessionContinuationObservedPayload() (SessionContinuationObservedPayload, error) {
+	var body SessionContinuationObservedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionContinuationObservedPayload overwrites any union data inside the EventPayload as the provided SessionContinuationObservedPayload
+func (t *EventPayload) FromSessionContinuationObservedPayload(v SessionContinuationObservedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionContinuationObservedPayload performs a merge with any union data inside the EventPayload, using the provided SessionContinuationObservedPayload
+func (t *EventPayload) MergeSessionContinuationObservedPayload(v SessionContinuationObservedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionCreateSucceededPayload returns the union data inside the EventPayload as a SessionCreateSucceededPayload
 func (t EventPayload) AsSessionCreateSucceededPayload() (SessionCreateSucceededPayload, error) {
 	var body SessionCreateSucceededPayload
@@ -10871,6 +10985,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionColdStart
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionContinuationObserved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionContinuationObserved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionContinuationObserved() (TypedEventStreamEnvelopeSessionContinuationObserved, error) {
+	var body TypedEventStreamEnvelopeSessionContinuationObserved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionContinuationObserved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionContinuationObserved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionContinuationObserved(v TypedEventStreamEnvelopeSessionContinuationObserved) error {
+	v.Type = "session.continuation_observed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionContinuationObserved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionContinuationObserved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionContinuationObserved(v TypedEventStreamEnvelopeSessionContinuationObserved) error {
+	v.Type = "session.continuation_observed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCrashed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCrashed() (TypedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedEventStreamEnvelopeSessionCrashed
@@ -11641,6 +11783,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.continuation_observed":
+		return t.AsTypedEventStreamEnvelopeSessionContinuationObserved()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
 	case "session.drain_acked_with_assigned_work":
@@ -13240,6 +13384,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionContinuationObserved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionContinuationObserved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionContinuationObserved() (TypedTaggedEventStreamEnvelopeSessionContinuationObserved, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionContinuationObserved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionContinuationObserved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionContinuationObserved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionContinuationObserved(v TypedTaggedEventStreamEnvelopeSessionContinuationObserved) error {
+	v.Type = "session.continuation_observed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionContinuationObserved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionContinuationObserved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionContinuationObserved(v TypedTaggedEventStreamEnvelopeSessionContinuationObserved) error {
+	v.Type = "session.continuation_observed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCrashed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCrashed() (TypedTaggedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionCrashed
@@ -14010,6 +14182,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.continuation_observed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionContinuationObserved()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
 	case "session.drain_acked_with_assigned_work":
