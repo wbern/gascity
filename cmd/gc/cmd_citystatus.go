@@ -201,9 +201,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	return statusReadAPIClient(cityPath)
-}
+var cityStatusAPIClient = statusReadAPIClient
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.

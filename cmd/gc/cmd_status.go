@@ -135,9 +135,7 @@ type RigStatusAgent struct {
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var rigStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	return statusReadAPIClient(cityPath)
-}
+var rigStatusAPIClient = statusReadAPIClient
 
 // routeRigStatus dispatches `gc rig status <name>` to the supervisor API
 // when a controller is up; otherwise falls back to the local observation
