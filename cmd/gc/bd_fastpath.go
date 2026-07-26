@@ -102,6 +102,9 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
 		return 0, false
 	}
+	if hasAmbientDoltOverride() {
+		return 0, false
+	}
 	cityPath := managedCityPath()
 	if cityPath == "" {
 		return 0, false
@@ -111,17 +114,17 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 		return 0, false
 	}
 	shimPath, err := earlyBdShimPath(cityPath)
-	if err != nil || shimPath == "" {
+	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
 		return 0, false
 	}
 	return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true
 }
 
-// tryEarlyBdShimRead routes list/ready directly to bdshim only when ordinary
-// gc bd would execute that exact managed shim from PATH. That condition makes
-// this a startup optimization of the already-selected controller behavior; a
-// terminal whose normal gc bd resolves the real bd retains the full path and
-// its rig-local/raw-bd contract.
+// tryEarlyBdShimRead routes controller-only reads directly to bdshim only when
+// ordinary gc bd would execute that exact managed shim from PATH. That
+// condition makes this a startup optimization of the already-selected
+// controller behavior; a terminal whose normal gc bd resolves the real bd
+// retains the full path and its rig-local/raw-bd contract.
 func tryEarlyBdShimRead(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int, handled bool) {
 	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
 		return 0, false
@@ -201,10 +204,11 @@ func runEarlyBdShim(shimPath string, bdArgs []string, stdin io.Reader, stdout, s
 	return 0
 }
 
-// earlyBdShimReadArgs accepts only list/ready forms the shim's classifier
-// serves through the controller. Shapes which might make the shim pass through
-// to raw bd keep the normal gc bd path, because that path supplies its resolved
-// scope and managed child environment.
+// earlyBdShimReadArgs accepts only read forms the shim's classifier serves
+// through the controller. Shapes which might make the shim pass through to raw
+// bd keep the normal gc bd path, because that path supplies its resolved scope
+// and managed child environment. Writes stay on doBd even when the shim can
+// route them, preserving gc's mutation guards and close gate.
 func earlyBdShimReadArgs(args []string) ([]string, bool) {
 	if len(args) < 2 || args[0] != "bd" {
 		return nil, false
@@ -212,7 +216,12 @@ func earlyBdShimReadArgs(args []string) ([]string, bool) {
 	bdArgs := args[1:]
 	_, _, unscoped := extractBdScopeFlags(bdArgs)
 	verb, verbArgs := bdshim.SplitGlobalFlags(unscoped)
-	if (verb != "list" && verb != "ready") || bdshim.ClassifyVerb(verb, verbArgs, false) != bdshim.Route {
+	switch verb {
+	case "list", "ready", "query", "mol":
+	default:
+		return nil, false
+	}
+	if bdshim.ClassifyVerb(verb, verbArgs, false) != bdshim.Route {
 		return nil, false
 	}
 	return bdArgs, true
