@@ -3,13 +3,19 @@ package main
 import (
 	"errors"
 	"io"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
+	"github.com/gastownhall/gascity/internal/bddispatch"
+	"github.com/gastownhall/gascity/internal/bdexperiment"
+	"github.com/gastownhall/gascity/internal/bdroute"
 	"github.com/gastownhall/gascity/internal/bdshim"
+	"github.com/gastownhall/gascity/internal/beadclient"
 )
 
 // earlyBdShimPath resolves the city-managed bd entry only after proving that
@@ -27,6 +33,8 @@ var earlyBdShimPath = func(cityPath string) (string, error) {
 }
 
 var earlyBdLookPath = exec.LookPath
+
+var earlyBdExperimentNext = rand.IntN
 
 // earlyBdShimBesideGC finds an executable bdshim beside the supplied gc path
 // or the target when gc is a symlink. Keeping this lookup separate makes the
@@ -99,25 +107,34 @@ func bdFastpathEnabled(raw string) bool {
 // the existing doBd path. In particular, it never bypasses rig resolution,
 // mutation guards, heartbeat rewriting, or the work-record close gate.
 func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int, handled bool) {
+	return tryEarlyBdShimAt(args, stdin, stdout, stderr, time.Now())
+}
+
+func tryEarlyBdShimAt(args []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (code int, handled bool) {
+	code, handled, _ = tryEarlyBdShimOutcome(args, stdin, stdout, stderr, mainStarted)
+	return code, handled
+}
+
+func tryEarlyBdShimOutcome(args []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (code int, handled bool, legacy *earlyBdLegacyObservation) {
 	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
-		return 0, false
+		return 0, false, nil
 	}
 	if hasAmbientDoltOverride() {
-		return 0, false
+		return 0, false, nil
 	}
 	cityPath := managedCityPath()
 	if cityPath == "" {
-		return 0, false
+		return 0, false, nil
 	}
 	bdArgs, ok := earlyBdShimShowArgs(args)
 	if !ok {
-		return 0, false
+		return 0, false, nil
 	}
 	shimPath, err := earlyBdShimPath(cityPath)
 	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
-		return 0, false
+		return 0, false, nil
 	}
-	return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true
+	return runEarlyBdExperiment(shimPath, bdArgs, stdin, stdout, stderr, mainStarted)
 }
 
 // tryEarlyBdShimRead routes controller-only reads directly to bdshim only when
@@ -126,25 +143,145 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 // controller behavior; a terminal whose normal gc bd resolves the real bd
 // retains the full path and its rig-local/raw-bd contract.
 func tryEarlyBdShimRead(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int, handled bool) {
+	return tryEarlyBdShimReadAt(args, stdin, stdout, stderr, time.Now())
+}
+
+func tryEarlyBdShimReadAt(args []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (code int, handled bool) {
+	code, handled, _ = tryEarlyBdShimReadOutcome(args, stdin, stdout, stderr, mainStarted)
+	return code, handled
+}
+
+func tryEarlyBdShimReadOutcome(args []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (code int, handled bool, legacy *earlyBdLegacyObservation) {
 	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
-		return 0, false
+		return 0, false, nil
 	}
 	if hasExplicitBdScopeFlag(args) || hasAmbientDoltOverride() {
-		return 0, false
+		return 0, false, nil
 	}
 	cityPath := managedCityPath()
 	if cityPath == "" {
-		return 0, false
+		return 0, false, nil
 	}
 	bdArgs, ok := earlyBdShimReadArgs(args)
 	if !ok {
-		return 0, false
+		return 0, false, nil
 	}
 	shimPath, err := earlyBdShimPath(cityPath)
 	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
-		return 0, false
+		return 0, false, nil
 	}
-	return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true
+	return runEarlyBdExperiment(shimPath, bdArgs, stdin, stdout, stderr, mainStarted)
+}
+
+type earlyBdLegacyObservation struct {
+	config bdexperiment.Config
+	verb   string
+	shape  bdexperiment.Shape
+}
+
+func runEarlyBdExperiment(shimPath string, bdArgs []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (int, bool, *earlyBdLegacyObservation) {
+	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
+	shape, approved := earlyBdExperimentShape(verb, verbArgs)
+	if !approved {
+		return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true, nil
+	}
+	config := bdexperiment.Parse(os.Getenv)
+	switch bdexperiment.SelectForShape(config, shape, earlyBdExperimentNext) {
+	case bdexperiment.ArmLegacy:
+		return 0, false, &earlyBdLegacyObservation{config: config, verb: verb, shape: shape}
+	case bdexperiment.ArmDirect:
+		target, ok := bdroute.Resolve("", os.Getenv, nil)
+		if !ok {
+			return 0, false, nil
+		}
+		return observeEarlyBdExperiment(config, bdexperiment.ArmDirect, verb, shape, stdout, mainStarted, func(observed io.Writer) int {
+			return runEarlyBdDirect(target.BaseURL, target.City, verb, verbArgs, observed, stderr)
+		}), true, nil
+	default:
+		return observeEarlyBdExperiment(config, bdexperiment.ArmShim, verb, shape, stdout, mainStarted, func(observed io.Writer) int {
+			return runEarlyBdShim(shimPath, bdArgs, stdin, observed, stderr)
+		}), true, nil
+	}
+}
+
+func observeEarlyBdExperiment(config bdexperiment.Config, arm bdexperiment.Arm, verb string, shape bdexperiment.Shape, stdout io.Writer, mainStarted time.Time, run func(io.Writer) int) int {
+	dispatcherStarted := time.Now()
+	observed := &countingWriter{target: stdout}
+	code := run(observed)
+	generation := config.Generation
+	if generation == "" {
+		generation = "0"
+	}
+	_ = bdexperiment.Append(earlyBdExperimentLogPath(), bdexperiment.Record{
+		Schema:           bdexperiment.SchemaVersion,
+		Build:            version,
+		Arm:              arm,
+		Verb:             verb,
+		Shape:            shape,
+		Disposition:      "controller",
+		Exit:             code,
+		StdoutBytes:      observed.BytesWritten(),
+		ConfigGeneration: generation,
+		MainMS:           time.Since(mainStarted).Milliseconds(),
+		DispatcherMS:     time.Since(dispatcherStarted).Milliseconds(),
+	})
+	return code
+}
+
+func observeLegacyBdExperiment(observation earlyBdLegacyObservation, stdoutBytes int64, mainStarted time.Time, exit int) {
+	generation := observation.config.Generation
+	if generation == "" {
+		generation = "0"
+	}
+	_ = bdexperiment.Append(earlyBdExperimentLogPath(), bdexperiment.Record{
+		Schema:           bdexperiment.SchemaVersion,
+		Build:            version,
+		Arm:              bdexperiment.ArmLegacy,
+		Verb:             observation.verb,
+		Shape:            observation.shape,
+		Disposition:      "legacy",
+		Exit:             exit,
+		StdoutBytes:      stdoutBytes,
+		ConfigGeneration: generation,
+		MainMS:           time.Since(mainStarted).Milliseconds(),
+		DispatcherMS:     0,
+	})
+}
+
+func earlyBdExperimentLogPath() string {
+	if path := strings.TrimSpace(os.Getenv("GC_BD_EXPERIMENT_LOG")); path != "" {
+		return path
+	}
+	if city := managedCityPath(); city != "" {
+		return filepath.Join(city, ".gc", "bd-experiment.jsonl")
+	}
+	return ""
+}
+
+func earlyBdExperimentShape(verb string, args []string) (bdexperiment.Shape, bool) {
+	switch verb {
+	case "show":
+		if len(args) == 2 && args[1] == "--json" {
+			return bdexperiment.ShapeShowJSON, true
+		}
+	case "list":
+		if bdshim.ListRoutable(args) && !bdshim.ListHasMetadataPredicate(args) {
+			return bdexperiment.ShapeListJSON, true
+		}
+	case "query":
+		if bdshim.QueryRoutable(args) {
+			return bdexperiment.ShapeQueryEphemeral, true
+		}
+	case "mol":
+		sub, _, _, ok := bdshim.MolRoutable(args)
+		if ok && sub == "current" {
+			return bdexperiment.ShapeMolCurrent, true
+		}
+		if ok && sub == "progress" {
+			return bdexperiment.ShapeMolProgress, true
+		}
+	}
+	return "", false
 }
 
 // hasExplicitBdScopeFlag keeps explicit city and rig requests on doBd, which
@@ -202,6 +339,12 @@ func runEarlyBdShim(shimPath string, bdArgs []string, stdin io.Reader, stdout, s
 		return 1
 	}
 	return 0
+}
+
+// runEarlyBdDirect serves an approved controller read in this gc process. It
+// intentionally uses the same dispatcher as bdshim and has no raw-bd fallback.
+func runEarlyBdDirect(baseURL, city, verb string, args []string, stdout, stderr io.Writer) int {
+	return bddispatch.DispatchViaAPI(beadclient.NewCityScopedClient(baseURL, city), verb, args, stdout, stderr)
 }
 
 // earlyBdShimReadArgs accepts only read forms the shim's classifier serves
