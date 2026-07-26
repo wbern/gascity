@@ -189,6 +189,10 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		endEarlyShimProbe()
 		return code
 	}
+	if code, handled := tryEarlyBdShimRead(args, os.Stdin, stdout, stderr); handled {
+		endEarlyShimProbe()
+		return code
+	}
 	endEarlyShimProbe()
 
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).

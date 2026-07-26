@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/gastownhall/gascity/internal/bdshim"
 )
 
 // earlyBdShimPath resolves the city-managed bd entry only after proving that
@@ -23,6 +25,8 @@ var earlyBdShimPath = func(cityPath string) (string, error) {
 	}
 	return "", exec.ErrNotFound
 }
+
+var earlyBdLookPath = exec.LookPath
 
 // earlyBdShimBesideGC finds an executable bdshim beside the supplied gc path
 // or the target when gc is a symlink. Keeping this lookup separate makes the
@@ -110,7 +114,74 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 	if err != nil || shimPath == "" {
 		return 0, false
 	}
+	return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true
+}
 
+// tryEarlyBdShimRead routes list/ready directly to bdshim only when ordinary
+// gc bd would execute that exact managed shim from PATH. That condition makes
+// this a startup optimization of the already-selected controller behavior; a
+// terminal whose normal gc bd resolves the real bd retains the full path and
+// its rig-local/raw-bd contract.
+func tryEarlyBdShimRead(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int, handled bool) {
+	if !bdFastpathEnabled(os.Getenv("GC_BD_FASTPATH")) {
+		return 0, false
+	}
+	if hasExplicitBdScopeFlag(args) || hasAmbientDoltOverride() {
+		return 0, false
+	}
+	cityPath := managedCityPath()
+	if cityPath == "" {
+		return 0, false
+	}
+	bdArgs, ok := earlyBdShimReadArgs(args)
+	if !ok {
+		return 0, false
+	}
+	shimPath, err := earlyBdShimPath(cityPath)
+	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
+		return 0, false
+	}
+	return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true
+}
+
+// hasExplicitBdScopeFlag keeps explicit city and rig requests on doBd, which
+// validates the requested scope before preparing a child command. bdshim can
+// represent the route itself but does not own that gc-specific validation.
+func hasExplicitBdScopeFlag(args []string) bool {
+	for _, arg := range args[1:] {
+		if arg == "--city" || arg == "--rig" || strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig=") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAmbientDoltOverride keeps diagnostic and external-target resolution in
+// doBd, which may warn when an inherited endpoint disagrees with the canonical
+// configured target. The normal local managed path has neither variable set.
+func hasAmbientDoltOverride() bool {
+	return strings.TrimSpace(os.Getenv("GC_DOLT_HOST")) != "" || strings.TrimSpace(os.Getenv("GC_DOLT_PORT")) != ""
+}
+
+// earlyBdShimIsOnPath reports whether a normal gc bd child would resolve to
+// the same trusted managed shim selected for the early path. Comparing resolved
+// executables rather than text paths makes symlinked gc and city installs safe.
+func earlyBdShimIsOnPath(shimPath string) bool {
+	pathBD, err := earlyBdLookPath("bd")
+	if err != nil {
+		return false
+	}
+	shimResolved, ok := resolvedExecutablePath(shimPath)
+	if !ok {
+		return false
+	}
+	pathResolved, ok := resolvedExecutablePath(pathBD)
+	return ok && pathResolved == shimResolved
+}
+
+// runEarlyBdShim preserves the managed shim's argv[0], standard streams, and
+// non-zero exit contract for every early shim route.
+func runEarlyBdShim(shimPath string, bdArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cmd := exec.Command(shimPath, bdArgs...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
@@ -119,15 +190,32 @@ func tryEarlyBdShim(args []string, stdin io.Reader, stdout, stderr io.Writer) (c
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitCode := exitErr.ExitCode(); exitCode > 0 {
-				return exitCode, true
+				return exitCode
 			}
 		}
 		// The shim was selected successfully. Do not fall through to raw bd on
 		// a launch error: a routed controller read must fail loudly rather than
 		// risk reading the caller's unrelated cwd store.
-		return 1, true
+		return 1
 	}
-	return 0, true
+	return 0
+}
+
+// earlyBdShimReadArgs accepts only list/ready forms the shim's classifier
+// serves through the controller. Shapes which might make the shim pass through
+// to raw bd keep the normal gc bd path, because that path supplies its resolved
+// scope and managed child environment.
+func earlyBdShimReadArgs(args []string) ([]string, bool) {
+	if len(args) < 2 || args[0] != "bd" {
+		return nil, false
+	}
+	bdArgs := args[1:]
+	_, _, unscoped := extractBdScopeFlags(bdArgs)
+	verb, verbArgs := bdshim.SplitGlobalFlags(unscoped)
+	if (verb != "list" && verb != "ready") || bdshim.ClassifyVerb(verb, verbArgs, false) != bdshim.Route {
+		return nil, false
+	}
+	return bdArgs, true
 }
 
 // hasManagedCityContext matches the standalone bdshim's city-resolution

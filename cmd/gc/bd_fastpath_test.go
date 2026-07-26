@@ -49,6 +49,131 @@ func TestTryEarlyBdShimRoutesOptInJSONShow(t *testing.T) {
 	}
 }
 
+func TestTryEarlyBdShimReadRoutesOnlyThroughTheManagedShimAlreadyOnPath(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	shim := writeEarlyBdShim(t, "printf 'shim:%s\\n' \"$*\"\n")
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+	previousLookPath := earlyBdLookPath
+	earlyBdLookPath = func(name string) (string, error) {
+		if name != "bd" {
+			t.Fatalf("LookPath(%q), want bd", name)
+		}
+		return shim, nil
+	}
+	t.Cleanup(func() { earlyBdLookPath = previousLookPath })
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "list preserves bd flags",
+			args: []string{"bd", "list", "--status", "open", "--json"},
+			want: "shim:list --status open --json\n",
+		},
+		{
+			name: "ready preserves bd global flags",
+			args: []string{"bd", "--readonly", "ready", "--json"},
+			want: "shim:--readonly ready --json\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := tryEarlyBdShimRead(tc.args, strings.NewReader(""), &stdout, &stderr)
+			if !handled || code != 0 {
+				t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, true); stderr=%q", code, handled, stderr.String())
+			}
+			if got := stdout.String(); got != tc.want {
+				t.Fatalf("stdout = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTryEarlyBdShimReadFailsClosedWhenManagedShimIsNotOnPath(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	shim := writeEarlyBdShim(t, "exit 0\n")
+	foreign := writeEarlyBdShim(t, "exit 0\n")
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+	previousLookPath := earlyBdLookPath
+	earlyBdLookPath = func(string) (string, error) { return foreign, nil }
+	t.Cleanup(func() { earlyBdLookPath = previousLookPath })
+
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "list", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, false)", code, handled)
+	}
+}
+
+func TestTryEarlyBdShimReadFailsClosedForShimPassthroughShapes(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) {
+		t.Fatal("shim path must not be resolved for a passthrough shape")
+		return "", nil
+	}
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+
+	for _, args := range [][]string{
+		{"bd", "list"},
+		{"bd", "list", "--json", "--offset", "10"},
+		{"bd", "ready", "--label", "blocked"},
+		{"bd", "--city", "/city", "list", "--json"},
+		{"bd", "--rig", "rig", "ready", "--json"},
+	} {
+		if code, handled := tryEarlyBdShimRead(args, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+			t.Fatalf("tryEarlyBdShimRead(%v) = (%d, %t), want (0, false)", args, code, handled)
+		}
+	}
+}
+
+func TestTryEarlyBdShimReadFailsClosedForAmbientDoltOverride(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_DOLT_HOST", "db.example.test")
+
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) {
+		t.Fatal("shim path must not be resolved with an ambient Dolt override")
+		return "", nil
+	}
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, false)", code, handled)
+	}
+}
+
+func TestRunUsesEarlyBdShimReadBeforeNormalBdPath(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	shim := writeEarlyBdShim(t, "printf 'shim-list\\n'\n")
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+	previousLookPath := earlyBdLookPath
+	earlyBdLookPath = func(string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdLookPath = previousLookPath })
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"bd", "list", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "shim-list\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
 func TestTryEarlyBdShimHonorsExplicitOptOut(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "0")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
