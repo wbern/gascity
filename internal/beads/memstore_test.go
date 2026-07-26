@@ -247,7 +247,7 @@ func TestMemStoreClaimAs(t *testing.T) {
 	})
 }
 
-func TestMemStoreIsActorClaimer(t *testing.T) {
+func TestMemStoreIsActorClaimer(_ *testing.T) {
 	var _ beads.ActorClaimer = beads.NewMemStore()
 }
 

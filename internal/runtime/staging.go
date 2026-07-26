@@ -127,7 +127,7 @@ func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers [
 	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings)
 }
 
-func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip overlay.SkipFunc, warnings io.Writer) error {
+func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip func(relPath string, isDir bool) bool, warnings io.Writer) error {
 	var stderr bytes.Buffer
 	if err := overlay.CopyDirForProvidersWithSkip(srcDir, dstDir, providers, skip, &stderr); err != nil {
 		return err

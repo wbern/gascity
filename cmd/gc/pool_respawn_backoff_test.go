@@ -30,7 +30,7 @@ func TestPoolRespawnBackoff_DisabledWhenBaseZero(t *testing.T) {
 	tr.observeNoClaimDrain("crm/reviewer", "s-1", now)
 	tr.observeNoClaimDrain("crm/reviewer", "s-2", now)
 
-	if armed(tr,"crm/reviewer", now) {
+	if armed(tr, "crm/reviewer", now) {
 		t.Fatalf("base==0 must fully disable backoff, but template reported backed off")
 	}
 	if got := tr.activeTemplates(now); len(got) != 0 {
@@ -45,19 +45,19 @@ func TestPoolRespawnBackoff_FirstDrainArmsBaseWindow(t *testing.T) {
 	tr.observeNoClaimDrain("crm/reviewer", "s-1", now)
 
 	// Backed off immediately after the first no-claim drain.
-	if !armed(tr,"crm/reviewer", now) {
+	if !armed(tr, "crm/reviewer", now) {
 		t.Fatalf("first no-claim drain must arm the backoff window")
 	}
 	// A different template is unaffected — de-correlation, not global.
-	if armed(tr,"crm/other", now) {
+	if armed(tr, "crm/other", now) {
 		t.Fatalf("untouched template must not be backed off")
 	}
 	// The window is at least the base and released once it elapses.
-	if !armed(tr,"crm/reviewer", now.Add(4*time.Second)) {
+	if !armed(tr, "crm/reviewer", now.Add(4*time.Second)) {
 		t.Fatalf("window must still be active within the base duration")
 	}
 	// Well past the max cap the window has certainly elapsed.
-	if armed(tr,"crm/reviewer", now.Add(10*time.Minute)) {
+	if armed(tr, "crm/reviewer", now.Add(10*time.Minute)) {
 		t.Fatalf("window must release after it elapses")
 	}
 }
@@ -101,10 +101,10 @@ func TestPoolRespawnBackoff_ExponentialGrowthAcrossDistinctDrains(t *testing.T) 
 	// Strictly increasing (within jitter slack) until the cap, then bounded.
 	// Effective window is [w, 2w) with full-window jitter, so the cap-level
 	// window never reaches 2*cap.
-	cap := testRespawnBackoffConfig().max
+	maxWindow := testRespawnBackoffConfig().max
 	for i, w := range windows {
-		if w >= 2*cap {
-			t.Fatalf("window %d = %s reaches 2*cap %s (jitter must stay under a full window)", i, w, cap)
+		if w >= 2*maxWindow {
+			t.Fatalf("window %d = %s reaches 2*cap %s (jitter must stay under a full window)", i, w, maxWindow)
 		}
 	}
 	// The later windows must be materially larger than the first (exponential).

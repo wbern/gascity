@@ -29,8 +29,10 @@ type MemStore struct {
 	DisableConditionalWrites bool
 }
 
-var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
-var _ ActorClaimer = (*MemStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*MemStore)(nil)
+	_ ActorClaimer                  = (*MemStore)(nil)
+)
 
 // NewMemStore returns a new empty MemStore.
 func NewMemStore() *MemStore {

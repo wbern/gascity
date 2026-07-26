@@ -15,10 +15,10 @@ func TestShimbinDir(t *testing.T) {
 	}
 }
 
-// writeExecutable creates an executable file at dir/name for PATH-resolution tests.
-func writeExecutable(t *testing.T, dir, name string) string {
+// writeExecutable creates an executable bd file in dir for PATH-resolution tests.
+func writeExecutable(t *testing.T, dir string) string {
 	t.Helper()
-	path := filepath.Join(dir, name)
+	path := filepath.Join(dir, "bd")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("writing %q: %v", path, err)
 	}
@@ -32,8 +32,8 @@ func TestResolveRealBdExcludingDir_SkipsShimDir(t *testing.T) {
 	shimDir := t.TempDir()
 	realDir := t.TempDir()
 	// A `bd` exists in BOTH the shim dir (first on PATH) and the real dir.
-	writeExecutable(t, shimDir, "bd")
-	realBd := writeExecutable(t, realDir, "bd")
+	writeExecutable(t, shimDir)
+	realBd := writeExecutable(t, realDir)
 
 	// Shim dir is fronted first, exactly as a shimmed session/controller PATH.
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+realDir)
@@ -52,7 +52,7 @@ func TestResolveRealBdExcludingDir_NoRealBd(t *testing.T) {
 		t.Skip("exec-bit semantics differ on windows")
 	}
 	shimDir := t.TempDir()
-	writeExecutable(t, shimDir, "bd") // only the shim's bd exists
+	writeExecutable(t, shimDir) // only the shim's bd exists
 	t.Setenv("PATH", shimDir)
 
 	if _, err := ResolveRealBdExcludingDir(shimDir); err == nil {
@@ -70,8 +70,8 @@ func TestResolveRealBd_ComposesShimbinDir(t *testing.T) {
 		t.Fatalf("mkdir shim dir: %v", err)
 	}
 	realDir := t.TempDir()
-	writeExecutable(t, shimDir, "bd")
-	realBd := writeExecutable(t, realDir, "bd")
+	writeExecutable(t, shimDir)
+	realBd := writeExecutable(t, realDir)
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+realDir)
 
 	got, err := ResolveRealBd(city)

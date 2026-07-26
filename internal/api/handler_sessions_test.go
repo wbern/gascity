@@ -3397,8 +3397,8 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	if resp.Alias != "sky" {
 		t.Fatalf("Alias = %q, want sky", resp.Alias)
 	}
-	if resp.SessionName == "sky" {
-		t.Fatalf("SessionName = %q, want bead-derived runtime name", resp.SessionName)
+	if resp.SessionName != "sky" {
+		t.Fatalf("SessionName = %q, want alias-derived runtime name sky", resp.SessionName)
 	}
 }
 
