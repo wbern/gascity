@@ -178,6 +178,14 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		contextFlag, cityURLFlag, cityNameFlag = prevContextFlag, prevCityURLFlag, prevCityNameFlag
 	}()
 
+	// The read fast path runs before telemetry initialization and command-tree
+	// construction because those dominate the cost of the point lookup it
+	// serves. It declines every invocation it cannot answer identically to the
+	// ordinary path below.
+	if code, handled := tryEarlyBdRead(args, stdout, stderr); handled {
+		return code
+	}
+
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := initializeCLITelemetry(context.Background(), "gascity", version)
 	if err != nil {

@@ -1312,6 +1312,8 @@ dolt.user: canonical-user
 }
 
 func TestSessionDoltEnvFallsBackToCompatCityRegistrationWhenCityConfigLacksEndpointAuthority(t *testing.T) {
+	t.Setenv(canonicalDoltHostEnv, "stale-host")
+	t.Setenv(canonicalDoltPortEnv, "9999")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1330,6 +1332,12 @@ dolt.auto-start: false
 	}
 	if got := env["GC_DOLT_PORT"]; got != "4406" {
 		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got)
+	}
+	if got := env[canonicalDoltHostEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for compat projection", canonicalDoltHostEnv, got)
+	}
+	if got := env[canonicalDoltPortEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for compat projection", canonicalDoltPortEnv, got)
 	}
 }
 
@@ -1442,6 +1450,12 @@ dolt.user: canonical-user
 	if got := env["GC_DOLT_PORT"]; got != "3307" {
 		t.Fatalf("GC_DOLT_PORT = %q, want canonical port", got)
 	}
+	if got := env[canonicalDoltHostEnv]; got != "canonical-db.example.com" {
+		t.Fatalf("%s = %q, want canonical host", canonicalDoltHostEnv, got)
+	}
+	if got := env[canonicalDoltPortEnv]; got != "3307" {
+		t.Fatalf("%s = %q, want canonical port", canonicalDoltPortEnv, got)
+	}
 	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
 		t.Fatalf("GC_DOLT_USER = %q, want canonical user", got)
 	}
@@ -1527,6 +1541,16 @@ dolt.user: stale-user
 	}
 	if got := env["GC_DOLT_PORT"]; got != "3307" {
 		t.Fatalf("GC_DOLT_PORT = %q, want inherited canonical port", got)
+	}
+	// A rig scope that inherits its endpoint is not itself authoritative, so it
+	// carries no provenance stamp and consumers of the stamp stay on their
+	// ordinary path. Stamping an inherited projection would claim an authority
+	// the scope config does not establish.
+	if got := env[canonicalDoltHostEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for an inherited rig projection", canonicalDoltHostEnv, got)
+	}
+	if got := env[canonicalDoltPortEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for an inherited rig projection", canonicalDoltPortEnv, got)
 	}
 	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
 		t.Fatalf("GC_DOLT_USER = %q, want inherited canonical user", got)
@@ -1647,6 +1671,8 @@ dolt.user: canonical-user
 		"GC_DOLT_PORT":           "3307",
 		"GC_DOLT_USER":           "canonical-user",
 		"GC_DOLT_PASSWORD":       "city-pass",
+		canonicalDoltHostEnv:     "city-db.example.com",
+		canonicalDoltPortEnv:     "3307",
 		"BEADS_DOLT_SERVER_HOST": "city-db.example.com",
 		"BEADS_DOLT_SERVER_PORT": "3307",
 		"BEADS_DOLT_SERVER_USER": "canonical-user",
@@ -1701,7 +1727,13 @@ func TestCityRuntimeProcessEnvFallsBackToCompatRegistrationWhenCityConfigLacksEn
 	_ = os.Unsetenv("GC_DOLT_PORT")
 	t.Setenv("GC_DOLT_USER", "")
 	_ = os.Unsetenv("GC_DOLT_USER")
-	t.Setenv("GC_DOLT_PASSWORD", "")
+	for key, value := range map[string]string{
+		"GC_DOLT_PASSWORD":   "",
+		canonicalDoltHostEnv: "stale-host",
+		canonicalDoltPortEnv: "9999",
+	} {
+		t.Setenv(key, value)
+	}
 	_ = os.Unsetenv("GC_DOLT_PASSWORD")
 
 	cityPath := t.TempDir()
@@ -1729,6 +1761,9 @@ dolt.auto-start: false
 	}
 	if got["GC_DOLT_PORT"] != "4406" {
 		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got["GC_DOLT_PORT"])
+	}
+	if got[canonicalDoltHostEnv] != "" || got[canonicalDoltPortEnv] != "" {
+		t.Fatalf("compat projection must clear fast-path provenance, got host=%q port=%q", got[canonicalDoltHostEnv], got[canonicalDoltPortEnv])
 	}
 }
 

@@ -301,6 +301,25 @@ func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
 	return resolved.Kind == contract.ScopeConfigAuthoritative
 }
 
+// setCanonicalDoltProjectionProvenance records which Dolt endpoint gc itself
+// projected into env for the city scope. Consumers inherit
+// GC_DOLT_HOST/GC_DOLT_PORT with no way to tell a gc projection apart from an
+// operator override that points at another store; the stamp closes that gap. It
+// is always written — empty when the city scope is not authoritative — so a
+// stale stamp cannot outlive its projection.
+func setCanonicalDoltProjectionProvenance(env map[string]string, cityPath string) {
+	if env == nil {
+		return
+	}
+	env[canonicalDoltHostEnv] = ""
+	env[canonicalDoltPortEnv] = ""
+	if !canonicalScopeDoltProjectionAuthoritative(cityPath) {
+		return
+	}
+	env[canonicalDoltHostEnv] = strings.TrimSpace(env["GC_DOLT_HOST"])
+	env[canonicalDoltPortEnv] = strings.TrimSpace(env["GC_DOLT_PORT"])
+}
+
 func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
 	if env == nil {
 		return
@@ -1465,6 +1484,8 @@ func cityIdentityAnchorsForCity(cityPath string) map[string]string {
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	overrides[canonicalDoltHostEnv] = ""
+	overrides[canonicalDoltPortEnv] = ""
 	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
@@ -1488,6 +1509,10 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 				clearProjectedDoltEnv(source)
 				mirrorBeadsDoltEnv(source)
 			}
+		}
+		if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+			overrides[canonicalDoltHostEnv] = strings.TrimSpace(source["GC_DOLT_HOST"])
+			overrides[canonicalDoltPortEnv] = strings.TrimSpace(source["GC_DOLT_PORT"])
 		}
 		keys := execProjectedBackendCopyKeys()
 		// BEADS_DOLT_AUTO_START and BEADS_DOLT_SERVER_TLS are carried explicitly:
