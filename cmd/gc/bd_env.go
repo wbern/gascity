@@ -291,14 +291,31 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 // from the resolution input without breaking the strict no-op
 // pass-through for non-authoritative scopes.
 func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
-	if scopeBackendIsPostgres(cityPath, cityPath) {
+	return canonicalScopeDoltProjectionAuthoritativeForScope(cityPath, cityPath)
+}
+
+func canonicalScopeDoltProjectionAuthoritativeForScope(cityPath, scopeRoot string) bool {
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
 		return false
 	}
-	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return false
 	}
 	return resolved.Kind == contract.ScopeConfigAuthoritative
+}
+
+func setCanonicalDoltProjectionProvenance(env map[string]string, cityPath, scopeRoot string) {
+	if env == nil {
+		return
+	}
+	env[canonicalDoltHostEnv] = ""
+	env[canonicalDoltPortEnv] = ""
+	if !canonicalScopeDoltProjectionAuthoritativeForScope(cityPath, scopeRoot) {
+		return
+	}
+	env[canonicalDoltHostEnv] = strings.TrimSpace(env["GC_DOLT_HOST"])
+	env[canonicalDoltPortEnv] = strings.TrimSpace(env["GC_DOLT_PORT"])
 }
 
 func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
