@@ -42,6 +42,8 @@ var liveTestEnvVars = []string{
 	"GC_BEADS_PREFIX",
 	"GC_CITY_RUNTIME_DIR",
 	"GC_CONTROL_DISPATCHER_TRACE_DEFAULT",
+	canonicalDoltHostEnv,
+	canonicalDoltPortEnv,
 	"GC_DOLT",
 	"GC_DOLT_HOST",
 	"GC_DOLT_PASSWORD",
