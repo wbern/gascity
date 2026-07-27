@@ -1647,6 +1647,8 @@ dolt.user: canonical-user
 		"GC_DOLT_PORT":           "3307",
 		"GC_DOLT_USER":           "canonical-user",
 		"GC_DOLT_PASSWORD":       "city-pass",
+		canonicalDoltHostEnv:     "city-db.example.com",
+		canonicalDoltPortEnv:     "3307",
 		"BEADS_DOLT_SERVER_HOST": "city-db.example.com",
 		"BEADS_DOLT_SERVER_PORT": "3307",
 		"BEADS_DOLT_SERVER_USER": "canonical-user",
@@ -1701,7 +1703,13 @@ func TestCityRuntimeProcessEnvFallsBackToCompatRegistrationWhenCityConfigLacksEn
 	_ = os.Unsetenv("GC_DOLT_PORT")
 	t.Setenv("GC_DOLT_USER", "")
 	_ = os.Unsetenv("GC_DOLT_USER")
-	t.Setenv("GC_DOLT_PASSWORD", "")
+	for key, value := range map[string]string{
+		"GC_DOLT_PASSWORD":   "",
+		canonicalDoltHostEnv: "stale-host",
+		canonicalDoltPortEnv: "9999",
+	} {
+		t.Setenv(key, value)
+	}
 	_ = os.Unsetenv("GC_DOLT_PASSWORD")
 
 	cityPath := t.TempDir()
@@ -1729,6 +1737,9 @@ dolt.auto-start: false
 	}
 	if got["GC_DOLT_PORT"] != "4406" {
 		t.Fatalf("GC_DOLT_PORT = %q, want compat port", got["GC_DOLT_PORT"])
+	}
+	if got[canonicalDoltHostEnv] != "" || got[canonicalDoltPortEnv] != "" {
+		t.Fatalf("compat projection must clear fast-path provenance, got host=%q port=%q", got[canonicalDoltHostEnv], got[canonicalDoltPortEnv])
 	}
 }
 

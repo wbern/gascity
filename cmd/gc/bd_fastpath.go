@@ -296,11 +296,23 @@ func hasExplicitBdScopeFlag(args []string) bool {
 	return false
 }
 
+const (
+	canonicalDoltHostEnv = "GC_BD_FASTPATH_CANONICAL_DOLT_HOST"
+	canonicalDoltPortEnv = "GC_BD_FASTPATH_CANONICAL_DOLT_PORT"
+)
+
 // hasAmbientDoltOverride keeps diagnostic and external-target resolution in
 // doBd, which may warn when an inherited endpoint disagrees with the canonical
-// configured target. The normal local managed path has neither variable set.
+// configured target. A runtime-projected endpoint may use the early path only
+// when its exact host and port match the provenance values supplied by gc.
 func hasAmbientDoltOverride() bool {
-	return strings.TrimSpace(os.Getenv("GC_DOLT_HOST")) != "" || strings.TrimSpace(os.Getenv("GC_DOLT_PORT")) != ""
+	host := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
+	port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+	if host == "" && port == "" {
+		return false
+	}
+	return host != strings.TrimSpace(os.Getenv(canonicalDoltHostEnv)) ||
+		port != strings.TrimSpace(os.Getenv(canonicalDoltPortEnv))
 }
 
 // earlyBdShimIsOnPath reports whether a normal gc bd child would resolve to

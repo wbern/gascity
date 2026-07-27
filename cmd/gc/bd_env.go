@@ -1466,6 +1466,8 @@ func cityIdentityAnchorsForCity(cityPath string) map[string]string {
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	overrides[canonicalDoltHostEnv] = ""
+	overrides[canonicalDoltPortEnv] = ""
 	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
@@ -1489,6 +1491,10 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 				clearProjectedDoltEnv(source)
 				mirrorBeadsDoltEnv(source)
 			}
+		}
+		if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+			overrides[canonicalDoltHostEnv] = strings.TrimSpace(source["GC_DOLT_HOST"])
+			overrides[canonicalDoltPortEnv] = strings.TrimSpace(source["GC_DOLT_PORT"])
 		}
 		keys := execProjectedBackendCopyKeys()
 		// BEADS_DOLT_AUTO_START and BEADS_DOLT_SERVER_TLS are carried explicitly:

@@ -309,20 +309,53 @@ func TestTryEarlyBdShimReadNeverBypassesMutationGuards(t *testing.T) {
 	}
 }
 
-func TestTryEarlyBdShimReadFailsClosedForAmbientDoltOverride(t *testing.T) {
+func TestTryEarlyBdShimReadPreservesExternalDoltOverrideAndAllowsCanonicalProjection(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
-	t.Setenv("GC_DOLT_HOST", "db.example.test")
 
+	shim := writeEarlyBdShim(t, "printf 'shim:%s\\n' \"$*\"\n")
 	previousShimPath := earlyBdShimPath
-	earlyBdShimPath = func(_ string) (string, error) {
-		t.Fatal("shim path must not be resolved with an ambient Dolt override")
-		return "", nil
-	}
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+	setEarlyBDLookPath(t, shim)
 
-	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
-		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, false)", code, handled)
+	for _, tc := range []struct {
+		name        string
+		env         map[string]string
+		wantHandled bool
+	}{
+		{
+			name:        "external override stays on the full path",
+			env:         map[string]string{"GC_DOLT_HOST": "db.example.test"},
+			wantHandled: false,
+		},
+		{
+			name: "canonical projected port uses the managed shim",
+			env: map[string]string{
+				"GC_DOLT_PORT":                       "49813",
+				"GC_BD_FASTPATH_CANONICAL_DOLT_PORT": "49813",
+			},
+			wantHandled: true,
+		},
+		{
+			name: "stale canonical projection stays on the full path",
+			env: map[string]string{
+				"GC_DOLT_PORT":                       "49813",
+				"GC_BD_FASTPATH_CANONICAL_DOLT_PORT": "49812",
+			},
+			wantHandled: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+
+			code, handled := tryEarlyBdShimRead([]string{"bd", "list", "--json"}, strings.NewReader(""), io.Discard, io.Discard)
+			if handled != tc.wantHandled || code != 0 {
+				t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, %t)", code, handled, tc.wantHandled)
+			}
+		})
 	}
 }
 
