@@ -71,6 +71,7 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 			// store-connection env: the load-bearing gap — without these the
 			// codex session's bd cannot reach the managed Dolt server -> no_work.
 			"GC_DOLT_PORT":           "49813",
+			canonicalDoltPortEnv:     "49813",
 			"GC_DOLT_USER":           "root",
 			"BEADS_DOLT_SERVER_PORT": "49813",
 			"GC_BEADS_SCOPE_ROOT":    "/tmp/city",
@@ -97,7 +98,7 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 	// resolves the wrong binary AND/OR cannot reach the managed Dolt store.
 	for _, k := range []string{
 		"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS",
-		"GC_DOLT_PORT", "GC_DOLT_USER", "BEADS_DOLT_SERVER_PORT",
+		"GC_DOLT_PORT", canonicalDoltPortEnv, "GC_DOLT_USER", "BEADS_DOLT_SERVER_PORT",
 		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR", "GC_SESSION_ID",
 	} {
 		if got, _ := gcEnv[k].(string); got != tp.Env[k] {

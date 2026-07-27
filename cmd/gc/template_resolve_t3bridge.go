@@ -68,6 +68,7 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 	// server coordinates + the bead scope/actor/session identity.
 	storeEnvKeys := append([]string{}, projectedDoltEnvKeys...)
 	storeEnvKeys = append(storeEnvKeys,
+		canonicalDoltHostEnv, canonicalDoltPortEnv,
 		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR",
 		"GC_SESSION_ID", "GC_BEADS_BACKEND", "BEADS_BACKEND", "GC_CITY",
 	)
