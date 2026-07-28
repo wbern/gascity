@@ -114,6 +114,20 @@ func getStatus(t *testing.T, state *fakeState) statusResponse {
 
 // getStatusFrom fetches /status through an existing handler so tests can
 // issue multiple requests against one handler's response cache.
+// getStatusWithPrimedStoreHealth measures store health before issuing the
+// request, so the response reflects only the behaviour under test. A cold
+// status deliberately does not wait for the store-health walk (it reports a
+// "measurement pending" partial and refreshes in the background), which would
+// otherwise make every strict Partial assertion depend on that unrelated block.
+func getStatusWithPrimedStoreHealth(t *testing.T, state *fakeState) statusResponse {
+	t.Helper()
+	srv := newServer(state, false)
+	if _, err := srv.cachedStoreHealth(context.Background(), time.Now()); err != nil {
+		t.Fatalf("priming store health: %v", err)
+	}
+	return getStatusFrom(t, newTestCityHandlerWith(t, state, srv), state)
+}
+
 func getStatusFrom(t *testing.T, h http.Handler, state *fakeState) statusResponse {
 	t.Helper()
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)
@@ -169,7 +183,7 @@ func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 	state.stores["myrig"] = counter
 	state.cityBeadStore = store
 
-	resp := getStatus(t, state)
+	resp := getStatusWithPrimedStoreHealth(t, state)
 
 	if resp.Work.Open != 2 || resp.Work.InProgress != 1 || resp.Work.Ready != 1 {
 		t.Fatalf("Work = %+v, want open=2 in_progress=1 ready=1", resp.Work)
@@ -198,7 +212,7 @@ func TestHandleStatusCounterUnsupportedFallsBackToList(t *testing.T) {
 	}
 	state.cityBeadStore = mem
 
-	resp := getStatus(t, state)
+	resp := getStatusWithPrimedStoreHealth(t, state)
 
 	if resp.Work.Open != 1 || resp.Work.Ready != 1 {
 		t.Fatalf("Work = %+v, want open=1 ready=1 from List and canonical Ready fallbacks", resp.Work)

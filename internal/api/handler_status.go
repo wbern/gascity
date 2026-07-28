@@ -299,7 +299,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var storeHealth *StatusStoreHealth
 	if !lite {
 		var err error
-		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
+		storeHealth, err = s.statusStoreHealth(time.Now())
 		if err != nil {
 			partialErrors = append(partialErrors, fmt.Sprintf("store health: %v", err))
 		}
