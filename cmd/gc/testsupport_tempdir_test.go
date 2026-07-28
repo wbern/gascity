@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+// resolvedPath returns p with symlinks resolved. Use it when a fixture root
+// comes from a shared helper that other tests depend on keeping UNRESOLVED —
+// resolving at the single call site is safer than changing the helper, which
+// can flip a sibling test that deliberately asserts on an unresolved path.
+func resolvedPath(t *testing.T, p string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", p, err)
+	}
+	return resolved
+}
+
 // trueBinaryPath returns an absolute path to a no-op "true" executable that
 // exits 0 without reading stdin.
 //

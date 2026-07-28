@@ -83,7 +83,7 @@ func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	// City A — CLI path.
-	cityA := t.TempDir()
+	cityA := resolvedTempDir(t)
 	writeSchema2RigCity(t, cityA, "parity-city", cityToml, "")
 	rigA := filepath.Join(cityA, "repo")
 	if err := os.MkdirAll(rigA, 0o755); err != nil {
@@ -97,7 +97,7 @@ func assertRigAddArtifactsIdentical(t *testing.T, cityToml string, wantPacksLock
 	}
 
 	// City B — API path.
-	cityB := t.TempDir()
+	cityB := resolvedTempDir(t)
 	writeSchema2RigCity(t, cityB, "parity-city", cityToml, "")
 	rigB := filepath.Join(cityB, "repo")
 	if err := os.MkdirAll(rigB, 0o755); err != nil {

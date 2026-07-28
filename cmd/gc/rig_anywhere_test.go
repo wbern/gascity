@@ -1803,7 +1803,7 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)
 
-		cityPath := setupCity(t, "local-gc-dir-city")
+		cityPath := resolvedPath(t, setupCity(t, "local-gc-dir-city"))
 		rigDir := filepath.Join(cityPath, "rigs", "local-gc-dir-rig")
 		nestedDir := filepath.Join(rigDir, "nested")
 		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
