@@ -2799,7 +2799,7 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 }
 
 func TestBuildDesiredState_MaterializesHookOverlaysBeforeFingerprinting(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	packOverlay := filepath.Join(cityPath, "packs", "core", "overlay")
 	overlayHook := filepath.Join(packOverlay, "per-provider", "gemini", ".gemini", "settings.json")
 	workHook := filepath.Join(cityPath, "worker", ".gemini", "settings.json")

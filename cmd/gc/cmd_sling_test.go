@@ -1848,7 +1848,7 @@ dir = "frontend"
 // #200 regression guards for the bd provider.
 func setupRigScopedBdCity(t *testing.T) (cityDir, rigDir string) {
 	t.Helper()
-	cityDir = t.TempDir()
+	cityDir = resolvedTempDir(t)
 	rigDir = filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)

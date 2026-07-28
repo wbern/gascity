@@ -322,7 +322,7 @@ func TestConvergeStorePathForContext_RigErrors(t *testing.T) {
 }
 
 func TestConvergeTestGateUsesRigStorePath(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
@@ -349,8 +349,8 @@ func TestConvergeTestGateUsesRigStorePath(t *testing.T) {
 		t.Fatalf("creating convergence bead: %v", err)
 	}
 
-	outputPath := filepath.Join(t.TempDir(), "beads-dir.txt")
-	scriptPath := filepath.Join(t.TempDir(), "gate.sh")
+	outputPath := filepath.Join(resolvedTempDir(t), "beads-dir.txt")
+	scriptPath := filepath.Join(resolvedTempDir(t), "gate.sh")
 	script := "#!/bin/sh\nprintf '%s' \"$BEADS_DIR\" > " + strconv.Quote(outputPath) + "\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing gate script: %v", err)

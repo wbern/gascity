@@ -1507,8 +1507,8 @@ dolt.user: canonical-user
 }
 
 func TestSessionDoltEnvPrefersInheritedCanonicalRigConfigOverCompatRigOverride(t *testing.T) {
-	cityPath := t.TempDir()
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	cityPath := resolvedTempDir(t)
+	rigDir := filepath.Join(resolvedTempDir(t), "repo")
 	for _, dir := range []string{cityPath, rigDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -2275,7 +2275,7 @@ dolt.auto-start: false
 func TestOpenStoreAtForCityUsesRigScopedDoltConfigWithoutProcessEnvSync(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2288,7 +2288,7 @@ dolt.port: 3307
 		t.Fatal(err)
 	}
 
-	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	rigDir := filepath.Join(resolvedTempDir(t), "my-rig")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2301,8 +2301,8 @@ dolt.port: 3307
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	capture := filepath.Join(t.TempDir(), "bd-env.txt")
+	binDir := resolvedTempDir(t)
+	capture := filepath.Join(resolvedTempDir(t), "bd-env.txt")
 	script := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 set -eu
@@ -2368,7 +2368,7 @@ exit 0
 }
 
 func TestNativeDoltOpenEnvForScopeUsesRigScopedDoltConfig(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -2381,7 +2381,7 @@ dolt.port: 3307
 		t.Fatal(err)
 	}
 
-	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	rigDir := filepath.Join(resolvedTempDir(t), "my-rig")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -3000,7 +3000,7 @@ func TestCityForStoreDirHonoursGCCityOverDiscoveredCity(t *testing.T) {
 }
 
 func TestOpenCityStoreAtUsesExplicitCityOverGCCity(t *testing.T) {
-	homeDir := t.TempDir()
+	homeDir := resolvedTempDir(t)
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	t.Setenv("GC_BEADS", "bd")

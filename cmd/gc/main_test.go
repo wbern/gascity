@@ -418,7 +418,7 @@ func TestConfigureTestscriptEnvDefaultsPreservesOverrides(t *testing.T) {
 
 func TestFindCity(t *testing.T) {
 	t.Run("canonical", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := resolvedTempDir(t)
 		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -433,7 +433,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("found", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := resolvedTempDir(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -448,7 +448,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("nested", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := resolvedTempDir(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -467,7 +467,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("parent_canonical_outranks_child_legacy", func(t *testing.T) {
-		parent := t.TempDir()
+		parent := resolvedTempDir(t)
 		if err := os.WriteFile(filepath.Join(parent, "city.toml"), []byte("[workspace]\nname = \"parent\"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -494,7 +494,7 @@ func TestFindCity(t *testing.T) {
 		// The walk checks dir (no city/runtime found) then stops at the ceiling
 		// without climbing into /tmp or $HOME, which may have a live .gc/ on
 		// the host (e.g. a running city at /tmp/.gc or $HOME/.gc).
-		dir := t.TempDir()
+		dir := resolvedTempDir(t)
 		t.Setenv("HOME", dir)
 
 		_, err := findCity(dir)
@@ -507,7 +507,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("checks_home_ceiling_dir_last", func(t *testing.T) {
-		homeDir := t.TempDir()
+		homeDir := resolvedTempDir(t)
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
@@ -529,7 +529,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("not_found_ignores_supervisor_home_runtime_root", func(t *testing.T) {
-		homeDir := t.TempDir()
+		homeDir := resolvedTempDir(t)
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
@@ -551,7 +551,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("nested_city_below_home_boundary_still_found", func(t *testing.T) {
-		homeDir := t.TempDir()
+		homeDir := resolvedTempDir(t)
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
@@ -582,7 +582,7 @@ func TestFindCity(t *testing.T) {
 		// as "not in a city directory" because the discovery ceiling
 		// fired before the starting dir was checked. The ceiling should
 		// only bound upward traversal, not the dir the user is in.
-		homeDir := t.TempDir()
+		homeDir := resolvedTempDir(t)
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
@@ -600,7 +600,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("start_at_home_ceiling_does_not_search_above", func(t *testing.T) {
-		root := t.TempDir()
+		root := resolvedTempDir(t)
 		homeDir := filepath.Join(root, "home")
 		if err := os.MkdirAll(homeDir, 0o755); err != nil {
 			t.Fatal(err)
@@ -624,7 +624,7 @@ func TestFindCity(t *testing.T) {
 	t.Run("city_at_explicit_ceiling_dir_is_found", func(t *testing.T) {
 		// Same idea as city_at_home, but for an explicit
 		// GC_CEILING_DIRECTORIES entry.
-		root := t.TempDir()
+		root := resolvedTempDir(t)
 		ceiling := filepath.Join(root, "ceiling")
 		if err := os.MkdirAll(ceiling, 0o755); err != nil {
 			t.Fatal(err)
@@ -644,7 +644,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("start_at_explicit_ceiling_dir_does_not_search_above", func(t *testing.T) {
-		root := t.TempDir()
+		root := resolvedTempDir(t)
 		ceiling := filepath.Join(root, "ceiling")
 		if err := os.MkdirAll(ceiling, 0o755); err != nil {
 			t.Fatal(err)
@@ -664,7 +664,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("checks_explicit_ceiling_dir_last", func(t *testing.T) {
-		root := t.TempDir()
+		root := resolvedTempDir(t)
 		parent := filepath.Join(root, "parent")
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			t.Fatal(err)
@@ -688,7 +688,7 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("does_not_search_above_explicit_ceiling_dir", func(t *testing.T) {
-		root := t.TempDir()
+		root := resolvedTempDir(t)
 		ceiling := filepath.Join(root, "ceiling")
 		if err := os.MkdirAll(ceiling, 0o755); err != nil {
 			t.Fatal(err)

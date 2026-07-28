@@ -18,6 +18,7 @@ deprecated-attachment-fields
 dolt-topology
 dolt-drift
 config-valid
+sling-default-targets
 legacy-suspended-field
 rollout:beads.conditional_writes
 rollout:daemon.formula_v2
@@ -75,5 +76,6 @@ bd-backup-state
 bd-backup-freshness
 worktree-disk-size
 nested-worktree-prune
+bd-shim
 custom-types:city
 worktrees

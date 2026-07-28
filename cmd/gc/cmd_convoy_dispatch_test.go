@@ -3955,7 +3955,7 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	staleRigDir := filepath.Join(cityDir, "rigs", "removed")
 	if err := os.MkdirAll(filepath.Join(staleRigDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)

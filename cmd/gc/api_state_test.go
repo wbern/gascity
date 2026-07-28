@@ -895,7 +895,7 @@ func TestControllerStateCreateRigRejectsDuplicateName(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -942,7 +942,7 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -994,7 +994,7 @@ func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -1005,7 +1005,7 @@ func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.
 	gitCmd(t, cityRigDir, "init")
 	gitCmd(t, cityRigDir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
 
-	otherRoot := t.TempDir()
+	otherRoot := resolvedTempDir(t)
 	otherRigDir := filepath.Join(otherRoot, "rig")
 	if err := os.MkdirAll(otherRigDir, 0o755); err != nil {
 		t.Fatalf("mkdir other rig: %v", err)
@@ -1036,7 +1036,7 @@ func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) 
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -2807,7 +2807,7 @@ func TestControllerStateBuildStoresRoutesBdRigThroughStoreFactory(t *testing.T) 
 	prevOpen := controllerStateOpenRigStoreAtForCity
 	t.Cleanup(func() { controllerStateOpenRigStoreAtForCity = prevOpen })
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -3799,8 +3799,8 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 // last rig's prefix won, causing a create→orphan loop in K8s multi-prefix
 // deployments.
 func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
-	cityDir := t.TempDir()
-	envDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
+	envDir := resolvedTempDir(t)
 
 	// Script that captures identity env vars to a per-rig file on list calls.
 	scriptContent := "#!/bin/sh\n" +
@@ -3813,15 +3813,15 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 		"    ;;\n" +
 		"  *) exit 2 ;;\n" +
 		"esac\n"
-	scriptPath := filepath.Join(t.TempDir(), "beads-provider.sh")
+	scriptPath := filepath.Join(resolvedTempDir(t), "beads-provider.sh")
 	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o755); err != nil {
 		t.Fatalf("writing provider script: %v", err)
 	}
 
 	t.Setenv("GC_BEADS", "exec:"+scriptPath)
 
-	rig1Path := filepath.Join(t.TempDir(), "rig-alpha")
-	rig2Path := filepath.Join(t.TempDir(), "rig-bravo")
+	rig1Path := filepath.Join(resolvedTempDir(t), "rig-alpha")
+	rig2Path := filepath.Join(resolvedTempDir(t), "rig-bravo")
 	if err := os.MkdirAll(rig1Path, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3922,14 +3922,14 @@ func TestBuildStores_ExecProviderSetsPerRigEnv(t *testing.T) {
 }
 
 func TestBuildStoresBdProviderUsesPassedConfigForRigEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "alpha")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	capturePath := filepath.Join(t.TempDir(), "bd.env")
-	binDir := t.TempDir()
+	capturePath := filepath.Join(resolvedTempDir(t), "bd.env")
+	binDir := resolvedTempDir(t)
 	fakeBD := filepath.Join(binDir, "bd")
 	script := "#!/bin/sh\n" +
 		"printf 'GC_RIG=%s\\nGC_RIG_ROOT=%s\\nBEADS_DIR=%s\\n' \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"${BEADS_DIR:-}\" > \"$BD_ENV_CAPTURE\"\n" +

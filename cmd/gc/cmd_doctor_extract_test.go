@@ -11,7 +11,7 @@ import (
 )
 
 func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}

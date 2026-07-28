@@ -3800,7 +3800,7 @@ esac
 }
 
 func TestInitBeadsForDir_execGcBeadsK8sUsesScopedLifecycleEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -3823,8 +3823,8 @@ dolt_port = "4407"
 		t.Fatal(err)
 	}
 
-	logFile := filepath.Join(t.TempDir(), "env.log")
-	script := filepath.Join(t.TempDir(), "gc-beads-k8s")
+	logFile := filepath.Join(resolvedTempDir(t), "env.log")
+	script := filepath.Join(resolvedTempDir(t), "gc-beads-k8s")
 	content := fmt.Sprintf(`#!/bin/sh
 printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s\n' "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" "${GC_PROVIDER:-}" > %q
 exit 0
@@ -5640,7 +5640,7 @@ exec %q "$@"
 }
 
 func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5650,12 +5650,12 @@ func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
 
 	materializeBuiltinPacksForTest(t, cityPath)
 
-	binDir := filepath.Join(t.TempDir(), "bin")
+	binDir := filepath.Join(resolvedTempDir(t), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	captureDir := t.TempDir()
+	captureDir := resolvedTempDir(t)
 	fakeBd := filepath.Join(binDir, "bd")
 	fakeBdScript := `#!/bin/sh
 set -eu
@@ -5701,7 +5701,7 @@ esac
 		t.Fatal(err)
 	}
 
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	rigDir := filepath.Join(resolvedTempDir(t), "repo")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

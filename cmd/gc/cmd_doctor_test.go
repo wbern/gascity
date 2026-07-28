@@ -815,12 +815,12 @@ func TestCollectPackDirsMixed(t *testing.T) {
 }
 
 func TestDoctorStoreFactoryUsesExplicitCityForRigOutsideCityTree(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(t.TempDir(), "frontend")
+	cityDir := resolvedTempDir(t)
+	rigDir := filepath.Join(resolvedTempDir(t), "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	captureDir := t.TempDir()
+	captureDir := resolvedTempDir(t)
 	script := writeExecCaptureScript(t, captureDir)
 	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
 		Name:   "frontend",
