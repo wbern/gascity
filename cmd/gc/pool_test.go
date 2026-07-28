@@ -848,6 +848,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		WorkQuery:                    "bd ready",
 		SlingQuery:                   "bd update {}",
 		IdleTimeout:                  "15m",
+		ClaimHolderStallTimeout:      "8h",
 		MaxSessionAge:                "5h",
 		MaxSessionAgeJitter:          "15m",
 		SleepAfterIdle:               "30s",
