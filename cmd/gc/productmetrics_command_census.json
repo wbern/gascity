@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 196,
+  "next_id": 198,
   "permanent_ids": [
     {
       "name": "help",
@@ -2401,6 +2401,21 @@
       "id": 90
     },
     {
+      "path": "gc mcp validate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "mcp-validate",
+      "owner": "immediate",
+      "id": 197
+    },
+    {
       "path": "gc metrics",
       "aliases": [],
       "conditional_modes": [],
@@ -4410,6 +4425,37 @@
       "owner": "immediate",
       "id": 41,
       "canonical_target": "gc convoy reopen-source"
+    },
+    {
+      "path": "gc worktree",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "immediate",
+      "id": 1
+    },
+    {
+      "path": "gc worktree scan",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-scan",
+      "owner": "immediate",
+      "id": 196
     }
   ],
   "synthetic": [
