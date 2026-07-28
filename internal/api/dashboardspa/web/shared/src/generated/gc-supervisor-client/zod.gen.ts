@@ -1034,6 +1034,7 @@ export const zAgentPatch = z.object({
     AppendFragments: z.array(z.string()).nullable(),
     Args: z.array(z.string()).nullable(),
     Attach: z.boolean().nullable(),
+    ClaimHolderStallTimeout: z.string().nullable(),
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
     Dir: z.string(),
@@ -6845,7 +6846,7 @@ export const zGetV0CityByCityNameBeadsEphemeralPath = z.object({
 
 export const zGetV0CityByCityNameBeadsEphemeralQuery = z.object({
     cursor: z.string().optional(),
-    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(1000)).optional().default(BigInt(100)),
     status: z.string().optional(),
     type: z.string().optional(),
     label: z.string().optional(),

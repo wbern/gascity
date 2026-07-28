@@ -174,6 +174,12 @@
               "null"
             ]
           },
+          "ClaimHolderStallTimeout": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "DefaultSlingFormula": {
             "type": [
               "string",
@@ -518,6 +524,7 @@
           "Lifecycle",
           "Nudge",
           "IdleTimeout",
+          "ClaimHolderStallTimeout",
           "MaxSessionAge",
           "MaxSessionAgeJitter",
           "SleepAfterIdle",
@@ -26749,23 +26756,25 @@
             }
           },
           {
-            "description": "Pagination cursor from a previous response's next_cursor field.",
+            "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
             "explode": false,
             "in": "query",
             "name": "cursor",
             "schema": {
-              "description": "Pagination cursor from a previous response's next_cursor field.",
+              "description": "Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.",
               "type": "string"
             }
           },
           {
-            "description": "Maximum number of results to return. 0 = server default.",
+            "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
             "explode": false,
             "in": "query",
             "name": "limit",
             "schema": {
-              "description": "Maximum number of results to return. 0 = server default.",
+              "default": 100,
+              "description": "Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.",
               "format": "int64",
+              "maximum": 1000,
               "minimum": 0,
               "type": "integer"
             }

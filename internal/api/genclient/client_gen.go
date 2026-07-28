@@ -947,6 +947,7 @@ type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
 	Args                    *[]string         `json:"Args"`
 	Attach                  *bool             `json:"Attach"`
+	ClaimHolderStallTimeout *string           `json:"ClaimHolderStallTimeout"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
 	Dir                     string            `json:"Dir"`
@@ -8327,10 +8328,10 @@ type CreateBeadParams struct {
 
 // GetV0CityByCityNameBeadsEphemeralParams defines parameters for GetV0CityByCityNameBeadsEphemeral.
 type GetV0CityByCityNameBeadsEphemeralParams struct {
-	// Cursor Pagination cursor from a previous response's next_cursor field.
+	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
-	// Limit Maximum number of results to return. 0 = server default.
+	// Limit Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Status Filter by bead status.
