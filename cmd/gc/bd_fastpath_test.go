@@ -13,6 +13,39 @@ import (
 	"time"
 )
 
+// TestHasExplicitBdScopeFlagHandlesEmptyArgs is the regression guard for a live
+// crash: bare `gc` with no arguments panicked with "slice bounds out of range
+// [1:0]".
+//
+// hasExplicitBdScopeFlag skips args[0] (the subcommand) by slicing args[1:],
+// which panics rather than yielding an empty slice when args itself is empty.
+// It is the FIRST call in tryEarlyBdShimReadOutcome after the enable check, and
+// the fastpath is on by default, so every no-argument invocation reached it.
+// A user typing `gc` to see the help got a panic and a stack trace.
+func TestHasExplicitBdScopeFlagHandlesEmptyArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"nil args", nil, false},
+		{"empty args", []string{}, false},
+		{"subcommand only", []string{"bd"}, false},
+		{"subcommand alone is never scanned as a flag", []string{"--city"}, false},
+		{"explicit city flag", []string{"bd", "--city"}, true},
+		{"explicit rig flag", []string{"bd", "--rig"}, true},
+		{"explicit city assignment", []string{"bd", "--city=demo"}, true},
+		{"explicit rig assignment", []string{"bd", "--rig=frontend"}, true},
+		{"unrelated flags", []string{"bd", "list", "--json"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasExplicitBdScopeFlag(tc.args); got != tc.want {
+				t.Errorf("hasExplicitBdScopeFlag(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBdFastpathEnabledDefaultsOnWithExplicitOptOut(t *testing.T) {
 	for _, tc := range []struct {
 		name string

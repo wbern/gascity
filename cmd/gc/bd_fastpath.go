@@ -287,6 +287,13 @@ func earlyBdExperimentShape(verb string, args []string) (bdexperiment.Shape, boo
 // validates the requested scope before preparing a child command. bdshim can
 // represent the route itself but does not own that gc-specific validation.
 func hasExplicitBdScopeFlag(args []string) bool {
+	// args[0] is the subcommand and is never a scope flag, but slicing it off an
+	// empty args panics instead of yielding an empty slice. This runs on every
+	// invocation (it is the first check in tryEarlyBdShimReadOutcome and the
+	// fastpath is on by default), so an unguarded slice crashed bare `gc`.
+	if len(args) == 0 {
+		return false
+	}
 	for _, arg := range args[1:] {
 		if arg == "--city" || arg == "--rig" || strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig=") {
 			return true
