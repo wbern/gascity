@@ -443,10 +443,13 @@ func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 
 // isStrictlyUnderDir reports whether path is strictly contained within dir
 // (i.e., it is not dir itself and has dir as a prefix component).
+//
+// Both sides are normalized through pathutil before comparison. A raw
+// filepath.Rel is not sufficient: git reports worktree paths fully resolved,
+// so on macOS a city under /var/folders/... is reported as
+// /private/var/folders/..., and Rel between the two spellings yields a "../"
+// path. That made this defense-in-depth check reject every real candidate and
+// silently disabled the whole reaper on Darwin.
 func isStrictlyUnderDir(dir, path string) bool {
-	rel, err := filepath.Rel(dir, path)
-	if err != nil {
-		return false
-	}
-	return rel != "." && !strings.HasPrefix(rel, "..")
+	return pathutil.PathWithin(dir, path) && !pathutil.SamePath(dir, path)
 }
