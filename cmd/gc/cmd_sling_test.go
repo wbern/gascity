@@ -4902,7 +4902,11 @@ func TestResolveSlingStoreRootUsesCityRootForHQPrefix(t *testing.T) {
 // downstream sling step actually talks to -- it must be "bd", not the
 // configured file default, or the bead is silently unroutable.
 func TestResolveSlingStoreRootHQPrefixUsesBdProviderFromCityRootMetadata(t *testing.T) {
-	cityPath := t.TempDir()
+	// resolveSlingStoreRoot canonicalizes the root it returns, so the fixture
+	// must be seeded from the resolved path or the comparison below fails on
+	// macOS, where t.TempDir() hands back the /var symlink spelling of
+	// /private/var. The assertion still compares full absolute paths.
+	cityPath := resolvedTempDir(t)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4950,7 +4954,10 @@ provider = "file"
 func TestSlingSourceWorkflowStoreCandidatesUseAuthoritativeProviders(t *testing.T) {
 	setScopedBeadsProviderForTest(t, "", "file")
 
-	cityPath := t.TempDir()
+	// The rig candidate is resolved through resolveStoreScopeRoot, which
+	// canonicalizes, so the fixture paths used as map keys below must be
+	// resolved too — otherwise the rig lookup misses on macOS.
+	cityPath := resolvedTempDir(t)
 	rigPath := filepath.Join(cityPath, "rigs", "local")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
