@@ -4535,8 +4535,8 @@ func TestDoStartRejectsStandaloneOnlyFlagsUnderSupervisor(t *testing.T) {
 }
 
 func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
-	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
+	cityPath := resolvedTempDir(t)
+	logFile := filepath.Join(resolvedTempDir(t), "ops.log")
 	script := writeSpyScript(t, logFile)
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)

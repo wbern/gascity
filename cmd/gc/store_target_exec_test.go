@@ -259,7 +259,7 @@ func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T)
 }
 
 func TestResolveConfiguredExecStoreTargetCity(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	writeExecStoreCityConfig(t, cityDir, "prefix-city", "ct", nil)
 
 	target, err := resolveConfiguredExecStoreTarget(cityDir, cityDir)
@@ -281,7 +281,7 @@ func TestResolveConfiguredExecStoreTargetCity(t *testing.T) {
 }
 
 func TestResolveConfiguredExecStoreTargetRig(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "rig-a")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -381,7 +381,7 @@ func TestGcExecStoreEnvProjectsCityAndRigTargets(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -391,7 +391,7 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 		Path:   "rigs/frontend",
 		Prefix: "fe",
 	}})
-	captureDir := t.TempDir()
+	captureDir := resolvedTempDir(t)
 	script := writeExecCaptureScript(t, captureDir)
 	provider := "exec:" + script
 
@@ -474,7 +474,7 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -511,7 +511,7 @@ func TestOpenStoreAtForCityExecBeadsBdProjectsScopedExternalDoltEnv(t *testing.T
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(rigCfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	captureDir := t.TempDir()
+	captureDir := resolvedTempDir(t)
 	script := writeNamedExecCaptureScript(t, captureDir, "gc-beads-bd")
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -623,9 +623,9 @@ dolt.auto-start: false
 }
 
 func TestControllerStateOpenRigStoreExecProjectsRigTarget(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := t.TempDir()
-	captureDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
+	rigDir := resolvedTempDir(t)
+	captureDir := resolvedTempDir(t)
 	script := writeExecCaptureScript(t, captureDir)
 	provider := "exec:" + script
 
@@ -749,7 +749,7 @@ dolt.auto-start: false
 }
 
 func TestOpenStoreAtForCityExecUsesUniversalStoreTargetEnv(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -759,7 +759,7 @@ func TestOpenStoreAtForCityExecUsesUniversalStoreTargetEnv(t *testing.T) {
 		Path:   "rigs/frontend",
 		Prefix: "fe",
 	}})
-	captureDir := t.TempDir()
+	captureDir := resolvedTempDir(t)
 	script := writeExecCaptureScript(t, captureDir)
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
