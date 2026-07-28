@@ -240,19 +240,15 @@ func inferSling1ArgTarget(cfg *config.City, cityPath, beadOrFormula string, isFo
 	if !found {
 		return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: no rig with prefix %q for bead %s", bp, beadOrFormula)
 	}
-	switch {
-	case len(rig.DefaultSlingTargets) > 0:
-		for _, t := range rig.DefaultSlingTargets {
-			if t == "" {
-				return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: rig %q has an empty entry in default_sling_targets", rig.Name)
-			}
-		}
-		return rig.DefaultSlingTargets[slingTargetIndex(len(rig.DefaultSlingTargets))], sourceBead, "", ""
-	case rig.DefaultSlingTarget != "":
-		return rig.DefaultSlingTarget, sourceBead, "", ""
-	default:
-		return "", sourceBead, "target_resolve_failed", fmt.Sprintf("gc sling: rig %q has no default_sling_target or default_sling_targets", rig.Name)
+	// Target selection lives in selectDefaultSlingTarget (sling_cursor.go) so the
+	// rig's default_sling_strategy is honored: "random" (the default, through the
+	// slingTargetIndex seam) or "round_robin" (a durable per-rig cursor). Error
+	// strings are unchanged.
+	selected, err := selectDefaultSlingTarget(rig, cityPath)
+	if err != nil {
+		return "", sourceBead, "target_resolve_failed", "gc sling: " + err.Error()
 	}
+	return selected, sourceBead, "", ""
 }
 
 // readSlingStdinBead reads --stdin bead text (first line = title, rest =

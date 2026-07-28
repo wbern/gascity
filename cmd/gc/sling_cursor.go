@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,7 +25,10 @@ func selectDefaultSlingTarget(rig config.Rig, cityPath string) (string, error) {
 		}
 		switch strings.TrimSpace(rig.DefaultSlingStrategy) {
 		case "", "random":
-			return rig.DefaultSlingTargets[rand.Intn(len(rig.DefaultSlingTargets))], nil //nolint:gosec // load-balancing, not security-critical
+			// Routed through upstream's slingTargetIndex seam (default
+			// math/rand) so SetSlingTargetIndexForTest still makes random
+			// selection deterministic.
+			return rig.DefaultSlingTargets[slingTargetIndex(len(rig.DefaultSlingTargets))], nil
 		case "round_robin":
 			idx, err := advanceSlingCursor(cityPath, rig.Name, len(rig.DefaultSlingTargets))
 			if err != nil {
