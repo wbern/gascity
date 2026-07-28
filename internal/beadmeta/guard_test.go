@@ -129,6 +129,9 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 			if _, ok := allowedNonMetadata[val]; ok {
 				return true
 			}
+			if _, ok := allowedMetadataMirrors[val]; ok {
+				return true
+			}
 			line := fset.Position(lit.Pos()).Line
 			if _, ok := declared[val]; ok {
 				violations = append(violations, fmt.Sprintf("  %s:%d  %q is declared — reference the beadmeta constant instead of the raw literal", relSlash, line, val))
