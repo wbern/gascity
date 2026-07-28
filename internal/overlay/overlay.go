@@ -50,6 +50,22 @@ func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 
 type preserveExistingFunc func(relPath string) bool
 
+// skipRuntimeMirror reports whether relPath is the runtime `.gc` mirror (the
+// entry itself or anything beneath it) at the root of a copy operation, so it is
+// never staged into an overlay destination. It is intentionally placed in both
+// shared recursive walks — copyDirRecursive and copyDirWithSkipRecursive — so it
+// applies to every public entry point: CopyDir, StageDir, stageDirStrict,
+// CopyFileOrDir, CopyDirWithSkip, and the provider-aware CopyDirForProvider(s)
+// (WithSkip). That is correct for today's callers, which are all
+// overlay-to-workdir staging paths where a top-level `.gc/` mirror must never be
+// copied; a future caller that legitimately needs to copy a tree containing a
+// top-level `.gc/` would need a variant that does not carry this guard. Names
+// merely prefixed with ".gc" (e.g. ".gcignore") are not matched.
+func skipRuntimeMirror(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
+}
+
 func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
@@ -82,6 +98,10 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		entryRel := entry.Name()
 		if rel != "" {
 			entryRel = filepath.Join(rel, entry.Name())
+		}
+
+		if skipRuntimeMirror(entryRel) {
+			continue
 		}
 
 		if skip != nil && skip(entryRel, entry.IsDir()) {
@@ -159,6 +179,10 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 		entryRel := entry.Name()
 		if rel != "" {
 			entryRel = filepath.Join(rel, entry.Name())
+		}
+
+		if skipRuntimeMirror(entryRel) {
+			continue
 		}
 
 		if skip != nil && skip(entryRel, entry.IsDir()) {

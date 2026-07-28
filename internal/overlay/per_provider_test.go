@@ -127,6 +127,35 @@ func TestCopyDirForProviders_SkipsRuntimeMirrors(t *testing.T) {
 	}
 }
 
+// TestCopyDirForProviders_RuntimeMirrorSkipIsRootAndExactOnly pins the two
+// boundaries skipRuntimeMirror documents: a name merely prefixed with ".gc"
+// (".gcignore") is not the mirror, and only the mirror at the root of the copy
+// is skipped — a nested "sub/.gc" is ordinary content and must be copied.
+func TestCopyDirForProviders_RuntimeMirrorSkipIsRootAndExactOnly(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(src, ".gcignore"), []byte("ignored\n"), 0o644)
+	mustMkdirAll(t, filepath.Join(src, "sub", ".gc"))
+	mustWriteFile(t, filepath.Join(src, "sub", ".gc", "note.txt"), []byte("nested"), 0o644)
+	mustMkdirAll(t, filepath.Join(src, ".gc"))
+	mustWriteFile(t, filepath.Join(src, ".gc", "settings.json"), []byte(`{}`), 0o644)
+
+	if err := CopyDirForProviders(src, dst, []string{"codex"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, ".gcignore")); err != nil {
+		t.Errorf(".gcignore is not the runtime mirror and must be copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "sub", ".gc", "note.txt")); err != nil {
+		t.Errorf("nested sub/.gc is ordinary content and must be copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".gc")); !os.IsNotExist(err) {
+		t.Errorf("root runtime .gc mirror must be skipped, stat err = %v", err)
+	}
+}
+
 func TestCopyDirForProviders_KiroPreservesExistingWorkspaceInstructions(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
