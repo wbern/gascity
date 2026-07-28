@@ -150,7 +150,7 @@ func TestProgressStall_MinFloorIdleWorker_NotRecycled(t *testing.T) {
 // and which no other mechanism reaps. It keys on the same poke-discounted
 // progress signal but must be gated on its own, more conservative threshold since
 // recycling a claim-holder discards in-progress work.
-func TestSessionClaimHolderStalled(t *testing.T) {
+func TestSessionClaimHolderStalledUpstreamCases(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-time.Hour)    // well past any sane threshold
 	recent := now.Add(-time.Second) // within threshold
