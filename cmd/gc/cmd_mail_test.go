@@ -4400,7 +4400,7 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeMailCheck("", []string{"mayor"}, false, "", c, tc.nilReason, &stdout, &stderr)
+			code := routeMailCheck("", []string{"mayor"}, false, "", c, tc.nilReason, &stdout, &stderr, nil)
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
 			}
@@ -4465,7 +4465,7 @@ func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr, nil)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4486,7 +4486,7 @@ func TestRouteMailCheckPartialStoreSlowInjectEmitsDegradedNotice(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr, nil)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4504,7 +4504,7 @@ func TestRouteMailCheckPartialStoreSlowNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr, nil)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4525,7 +4525,7 @@ func TestRouteMailCheckPartialProviderErrorInjectEmitsDegradedNotice(t *testing.
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr, nil)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4546,7 +4546,7 @@ func TestRouteMailCheckPartialProviderErrorNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr, nil)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4567,7 +4567,7 @@ func TestRouteMailCheckStoreSlowNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr, nil)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4804,7 +4804,7 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {
@@ -4858,7 +4858,7 @@ name = "mayor"
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck("", nil, true, "", c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck("", nil, true, "", c, "", &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	assertMailRouteLog(t, stderr.String(), "fallback", "inject-local-side-effects")

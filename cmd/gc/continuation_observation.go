@@ -3,10 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 const (
@@ -67,6 +69,86 @@ type continuationObservation struct {
 	BodyBytes         *int
 	Route             string
 	ErrorCode         string
+}
+
+// mailInjectionObservation accumulates the outcome of one `gc mail check
+// --inject` pass so the mail-injection continuation boundary can be recorded
+// once, on exit, from whichever path the check took. It lives here rather than
+// in cmd_mail.go to keep this fork-owned diagnostic out of an upstream-owned
+// file; cmd_mail.go carries only a nil-able parameter and the field writes.
+//
+// A nil *mailInjectionObservation is the non-injecting case and every method is
+// a no-op on it, so non-hook callers stay on exactly the upstream code path.
+type mailInjectionObservation struct {
+	outcome      string
+	route        string
+	errorCode    string
+	mailIDs      []string
+	messageCount int
+	bodyBytes    int
+}
+
+// fail marks the pass as failed with code, leaving any route already recorded
+// by the caller intact.
+func (o *mailInjectionObservation) fail(code string) {
+	if o == nil {
+		return
+	}
+	o.outcome = continuationOutcomeFailed
+	o.errorCode = code
+}
+
+// injected records the message set actually written into the hook output and
+// marks the pass as injected. The caller reports failure afterwards if the
+// write itself fails, which overwrites this outcome.
+func (o *mailInjectionObservation) injected(messages []mail.Message, text string) {
+	if o == nil {
+		return
+	}
+	o.mailIDs = make([]string, 0, len(messages))
+	for _, message := range messages {
+		o.mailIDs = append(o.mailIDs, message.ID)
+	}
+	o.messageCount = len(messages)
+	o.bodyBytes = len(text)
+	o.outcome = continuationOutcomeInjected
+}
+
+// skip marks the pass as deliberately not injecting (for example a suspended
+// city), recording why as the route.
+func (o *mailInjectionObservation) skip(route string) {
+	if o == nil {
+		return
+	}
+	o.outcome = continuationOutcomeSkipped
+	o.route = route
+}
+
+// record emits the accumulated observation. Like recordContinuationObservation
+// it has no return value: mail injection must not depend on whether the
+// diagnostic was written.
+func (o *mailInjectionObservation) record(rec events.Recorder) {
+	if o == nil {
+		return
+	}
+	recordContinuationObservation(rec, continuationObservation{
+		Boundary:          continuationBoundaryMailInjection,
+		Source:            continuationSourceUserPromptSubmit,
+		Outcome:           o.outcome,
+		SessionID:         os.Getenv("GC_SESSION_ID"),
+		SessionName:       os.Getenv("GC_SESSION_NAME"),
+		Template:          os.Getenv("GC_TEMPLATE"),
+		Generation:        os.Getenv("GC_RUNTIME_EPOCH"),
+		ContinuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
+		InstanceToken:     os.Getenv("GC_INSTANCE_TOKEN"),
+		HookEvent:         "UserPromptSubmit",
+		HookSource:        os.Getenv("GC_HOOK_SOURCE"),
+		MailIDs:           o.mailIDs,
+		MessageCount:      continuationInt(o.messageCount),
+		BodyBytes:         continuationInt(o.bodyBytes),
+		Route:             o.route,
+		ErrorCode:         o.errorCode,
+	})
 }
 
 // recordContinuationObservation emits a best-effort diagnostic event. It has
