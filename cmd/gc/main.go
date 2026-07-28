@@ -1373,7 +1373,15 @@ func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, erro
 }
 
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
-	result, err := openStoreResultAtForCity(storePath, cityPath)
+	return openStoreAtForCityWithAuthority(storePath, cityPath, false)
+}
+
+func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
+	return openStoreAtForCityWithAuthority(storePath, cityPath, true)
+}
+
+func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
+	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative)
 	if err != nil {
 		return nil, err
 	}
@@ -1391,6 +1399,10 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 // store's write discipline mid-process while rig stores keep the boot mode —
 // exactly the mixed-writer state the process latch exists to prevent.
 func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false)
+}
+
+func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1398,6 +1410,9 @@ func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride g
 	cfg, _ := loadCityConfig(runtimeCityPath, io.Discard)
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	if authoritative {
+		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	}
 	switch strings.TrimSpace(provider) {
 	case "sqlite", "sqlite-cgo", "coordstore":
 		return beads.StoreOpenResult{}, fmt.Errorf(
@@ -1516,6 +1531,11 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
 	scopeRoot = filepath.Clean(scopeRoot)
+	// Resolve symlinks so a city reached through a linked path (e.g. ~/gc ->
+	// /real/city) yields the same scope root as the real path. Without this the
+	// native-store identity gate sees an unregistered scope and rejects it
+	// ("database project_id could not be confirmed"), silently degrading to the
+	// bd-subprocess fallback.
 	if resolved, err := filepath.EvalSymlinks(scopeRoot); err == nil {
 		scopeRoot = resolved
 	}

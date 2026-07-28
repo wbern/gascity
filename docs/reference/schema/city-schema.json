@@ -1049,6 +1049,15 @@
           ],
           "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
         },
+        "guarded_release": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1368,6 +1377,16 @@
           "type": "boolean",
           "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
           "default": false
+        },
+        "auto_reap_closed_bead_worktrees_dry_run": {
+          "type": "boolean",
+          "description": "AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the\nfull worktree-reap classification each tick — discovery, closed-bead\nmatch, liveness gate, and git-safety probes — but emit\nbead.worktree.reap_skipped events describing what it WOULD reap and\nwhat it protected, without removing anything. This is the safe\nstaged-rollout surface: an operator enables dry-run first, confirms via\n`gc events` that no live worktree appears in the would-reap set, then\nenables AutoReapClosedBeadWorktrees for real removal. Dry-run has no\neffect when AutoReapClosedBeadWorktrees is already true (real removal\nsupersedes it). Defaults to false.",
+          "default": false
+        },
+        "auto_reap_closed_bead_worktrees_min_age_minutes": {
+          "type": "integer",
+          "description": "AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,\nin minutes, before a closed-bead worktree becomes eligible for reap\nclassification at all (borrow-veto scan and beyond). This quarantines\na worktree against the race between its creation and its owning\nbead's gc.work_dir/work_dir metadata being stamped by the next\nreconcile pass — without it, a just-created worktree could look\nunclaimed to the borrow-veto scan before the metadata that would\nprotect it has been written. Nil (unset) defaults to\nDefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the\nquarantine entirely (every closed-bead worktree is immediately\neligible for the rest of the gate chain, regardless of age).",
+          "default": 10
         },
         "start_ready_timeout": {
           "type": "string",
@@ -2044,6 +2063,10 @@
           "type": "string",
           "description": "Timeout overrides the per-order timeout. Go duration string."
         },
+        "check_timeout": {
+          "type": "string",
+          "description": "CheckTimeout overrides the condition trigger's check-command deadline.\nGo duration string. Lets a deployment tune check_timeout for a scanned\nshared-pack order (e.g. a slow-store queue check) without editing the\npack source."
+        },
         "idempotent": {
           "type": "boolean",
           "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
@@ -2074,7 +2097,7 @@
         },
         "max_timeout": {
           "type": "string",
-          "description": "MaxTimeout is an operator hard cap on per-order timeouts.\nNo order gets more than this duration. Go duration string (e.g., \"60s\").\nEmpty means uncapped (no override)."
+          "description": "MaxTimeout is an operator hard cap on the per-order dispatch timeout: no\norder's dispatched exec/formula runs longer than this. Go duration string\n(e.g., \"60s\"). Empty means uncapped (no override). This bounds the dispatch\ntimeout only; a condition trigger's check_timeout is a separate probe\ndeadline and is not capped here."
         },
         "overrides": {
           "items": {
@@ -2750,6 +2773,10 @@
           "description": "SetupTimeout is the per-command/script timeout for session setup and\npre_start commands. Duration string (e.g., \"10s\", \"30s\"). Defaults to \"10s\".",
           "default": "10s"
         },
+        "setup_max_timeout": {
+          "type": "string",
+          "description": "SetupMaxTimeout enables an activity-aware budget for session setup and\npre_start commands. When set (e.g. \"10m\"), a setup command is no longer\nkilled after setup_timeout of wall clock; instead setup_timeout bounds\nhow long it may run without producing output (idle budget) and\nsetup_max_timeout bounds its total runtime regardless of output (the\nrunaway ceiling). A slow but healthy command — a large worktree checkout\nstreaming progress — survives, while a hung one still dies after\nsetup_timeout of silence. Duration string. Empty (the default) keeps\nthe fixed setup_timeout deadline."
+        },
         "nudge_ready_timeout": {
           "type": "string",
           "description": "NudgeReadyTimeout is how long to wait for the agent to be ready before\nsending nudge text. Duration string. Defaults to \"10s\".",
@@ -2759,6 +2786,11 @@
           "type": "string",
           "description": "NudgeRetryInterval is the retry interval between nudge readiness polls.\nDuration string. Defaults to \"500ms\".",
           "default": "500ms"
+        },
+        "nudge_poll_interval": {
+          "type": "string",
+          "description": "NudgePollInterval is the cycle interval for the per-session nudge\npoller sidecar (`gc nudge poll`). Each cycle observes the session and\nchecks the queued-nudge state, so on hosts running many sessions a\nlonger interval trades nudge-delivery latency for less standing load.\nDuration string. Unset means the poller's built-in default (2s).",
+          "default": "2s"
         },
         "nudge_lock_timeout": {
           "type": "string",
@@ -2786,29 +2818,7 @@
         },
         "claim_holder_stall_timeout": {
           "type": "string",
-          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that HOLDS an in-progress claim but has stopped\nprogressing — the case ProgressStallTimeout deliberately exempts. Such a\nsession has wedged mid-work on a provider condition it will not self-clear\n(e.g. a codex \"Selected model is at capacity\" banner) and is invisible to\nevery other liveness surface (#4012). Because recycling a claim-holder\ndiscards in-progress work, set this above the longest legitimate quiet\nperiod a working claim-holder can exhibit — well above ProgressStallTimeout.\nValues below 5m are clamped to 5m. Duration string (e.g. \"20m\"). Unset/zero\ndisables it."
-        },
-        "bd_shim": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
-          "description": "BdShim selects how a managed worker's `bd` is routed. \"auto\" (default):\nroute through the bd-shim thin client (bdshim) when it is installed beside\ngc, else use the real bd directly — the current behavior, and an\nupstream-safe no-op when no thin client is present. \"on\": always install\nthe redirect (doctor warns if the thin client binary is missing). \"off\":\nnever install the redirect — workers use the real bd directly, the clean\nbaseline for benchmarking or opting out. The GC_BDSHIM environment variable\noverrides this at the shim-install site. See gcw-b8yk.",
-          "default": "auto"
-        },
-        "pool_respawn_backoff_base": {
-          "type": "string",
-          "description": "PoolRespawnBackoffBase, when set, enables jittered exponential backoff on\npool respawns (upstream gastownhall/gascity#3279). When a freshly-spawned\ngeneric pool session drains with reason \"no-wake-reason\" — it started but\ncould not claim its routed trigger work (e.g. the bead store's circuit\nbreaker is tripped) — the reconciler otherwise recreates it immediately on\nthe next tick, each respawn paying a full worktree checkout. Under a store\nblip that self-amplifies into a respawn storm. This is the FIRST backoff\nwindow applied after one no-claim drain; it doubles per consecutive drain\nup to PoolRespawnBackoffMax, with deterministic per-template jitter to\nde-correlate pools. Duration string (e.g. \"5s\"). Unset/zero disables it\n(the default), so the mechanism lands dormant until a city opts in."
-        },
-        "pool_respawn_backoff_max": {
-          "type": "string",
-          "description": "PoolRespawnBackoffMax caps the exponential window from\nPoolRespawnBackoffBase. Ignored when the base is unset. Duration string\n(e.g. \"5m\"). Defaults to 5m when the base is set but the max is not.\nSet this ABOVE the pool's worktree-checkout time: the exponent only decays\nback to base after 2*max of quiet, and a throttled storm's respawns are\nspaced by roughly (window + checkout time), so a max below checkout time\nlets the decay fire mid-storm and the ramp sawtooths instead of holding at\nthe cap (the storm stays bounded either way)."
-        },
-        "pool_respawn_backoff_reset_quiet": {
-          "type": "string",
-          "description": "PoolRespawnBackoffResetQuiet is the no-new-drain gap after which a\ntemplate's backoff exponent decays back to the base window (the storm is\ntreated as over). Ignored when the base is unset. Defaults to 2*max. Tune\nit ABOVE a throttled storm's respawn interval — roughly (max + worktree\ncheckout time) — so an ongoing storm never decays; only genuine recovery\ndoes. Exposed because the right value couples to your checkout time, which\nthe default (2*max) only covers when max already exceeds checkout time.\nDuration string (e.g. \"10m\")."
+          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it."
         },
         "socket": {
           "type": "string",

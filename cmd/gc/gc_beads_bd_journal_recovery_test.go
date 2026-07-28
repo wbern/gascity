@@ -217,7 +217,9 @@ printf 'result=%s\n' "$result"
 	_ = commandGateR.Close()
 
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		done <- cmd.Wait()
+	}()
 	controlsReleased := false
 	releaseControls := func() {
 		if controlsReleased {
@@ -279,9 +281,12 @@ printf 'result=%s\n' "$result"
 		t.Fatal(err)
 	}
 	blockedByWatchdogPipe := !completedBeforeRelease
-	if blockedByWatchdogPipe && !waitCommand() {
-		t.Fatal("run_with_timeout harness did not finish after releasing the watchdog sleep")
+	if blockedByWatchdogPipe {
+		if !waitCommand() {
+			t.Fatal("run_with_timeout harness did not finish after releasing the watchdog sleep")
+		}
 	}
+
 	if runErr != nil {
 		t.Errorf("run_with_timeout harness failed: %v\nstderr: %s", runErr, stderr.String())
 	}

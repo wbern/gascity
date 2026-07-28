@@ -178,6 +178,7 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	t.Setenv("GC_CITY_PATH", cityPath)
 
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
@@ -204,6 +205,12 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 			name:        "injected metrics suppresses ordinary ambient discovery",
 			ambientArgs: []string{"version"},
 			injected:    []string{"metrics", "status"},
+			wantPack:    false,
+		},
+		{
+			name:        "injected bd suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"bd", "list"},
 			wantPack:    false,
 		},
 		{
@@ -241,6 +248,7 @@ func TestNewRootCmdCompatibilityWrapperNeverConsultsAmbientArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	t.Setenv("GC_CITY_PATH", cityPath)
 
 	oldArgs := os.Args
 	os.Args = []string{oldArgs[0], "git-credential", "get"}

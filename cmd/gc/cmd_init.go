@@ -333,14 +333,16 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
-		Long: `Create a new Gas City workspace in the given directory (or cwd).
+		Long: `Create a new Gas City workspace in the given directory. With no path, the
+current directory is used only when stdin is an interactive terminal;
+otherwise pass an explicit path ("." for the current directory).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
 the standard top-level directories, and .template.md prompt templates, and
 pins the builtin pack imports (resolved from the user-global pack cache).
-Use --template with --default-provider to create a city non-interactively,
-or --file to initialize from an existing TOML config file.
+Use --template with --default-provider and an explicit path to create a city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -382,7 +384,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				Database:  doltDatabaseFlag,
 				ProjectID: doltProjectIDFlag,
 			}, os.Getenv)
-			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted)
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted, skipProviderReadiness)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
@@ -473,7 +475,7 @@ func initTargetPath(args []string) (string, error) {
 	if len(args) > 0 {
 		return filepath.Abs(args[0])
 	}
-	return os.Getwd()
+	return resolveImplicitCWD()
 }
 
 // cmdInit initializes a new city at the given path (or cwd if no path given).
@@ -481,11 +483,11 @@ func initTargetPath(args []string) (string, error) {
 // Creates the runtime scaffold and city.toml. If the bead provider is "bd", also
 // runs bd init.
 func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer) int {
-	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, false, false)
+	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, stdout, stderr, false)
 }
 
-func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, skipProviderReadiness, false, false)
 }
 
 func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
@@ -493,7 +495,7 @@ func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFla
 	preparedSet := false
 	if providerFlag != "" || bootstrapProfileFlag != "" {
 		var err error
-		prepared, err = initWizardConfig(providerFlag, bootstrapProfileFlag)
+		prepared, err = initWizardConfig(providerFlag, bootstrapProfileFlag, skipProviderReadiness)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -518,7 +520,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -573,8 +575,8 @@ func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, s
 	})
 }
 
-func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, error) {
-	defaultProvider, err := normalizeInitProvider(providerFlag)
+func initWizardConfig(providerFlag, bootstrapProfileFlag string, skipProviderReadiness bool) (wizardConfig, error) {
+	defaultProvider, err := normalizeInitProvider(providerFlag, skipProviderReadiness)
 	if err != nil {
 		return wizardConfig{}, err
 	}
@@ -595,7 +597,7 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string) (wizardConfig, 
 	}, nil
 }
 
-func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions) (wizardConfig, string, error) {
+func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions, skipProviderReadiness bool) (wizardConfig, string, error) {
 	legacyChanged := cmd.Flags().Changed("provider")
 	defaultChanged := cmd.Flags().Changed("default-provider")
 	providersChanged := cmd.Flags().Changed("providers")
@@ -623,11 +625,11 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	if err != nil {
 		return wizardConfig{}, "", err
 	}
-	defaultProvider, err := normalizeInitProvider(defaultProviderFlag)
+	defaultProvider, err := normalizeInitProvider(defaultProviderFlag, skipProviderReadiness)
 	if err != nil {
 		return wizardConfig{}, "", err
 	}
-	providers, err := normalizeInitProviders(providersFlag)
+	providers, err := normalizeInitProviders(providersFlag, skipProviderReadiness)
 	if err != nil {
 		return wizardConfig{}, "", err
 	}
@@ -665,27 +667,37 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	}, mode, nil
 }
 
-func normalizeInitProvider(provider string) (string, error) {
+// normalizeInitProvider validates and returns the canonical provider name.
+// By default it only accepts readiness-aware providers (those with an
+// onboarding probe), since the wizard needs to probe them. When
+// skipProviderReadiness is set, the caller has explicitly opted out of
+// readiness checks, so any builtin provider is valid — not just the
+// probe-bearing subset (#4392).
+func normalizeInitProvider(provider string, skipProviderReadiness bool) (string, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return "", nil
 	}
-	for _, name := range api.ProviderReadinessNames() {
+	names := api.ProviderReadinessNames()
+	if skipProviderReadiness {
+		names = config.BuiltinProviderOrder()
+	}
+	for _, name := range names {
 		if provider == name {
 			return provider, nil
 		}
 	}
-	return "", fmt.Errorf("unknown provider %q (expected one of: %s)", provider, strings.Join(api.ProviderReadinessNames(), ", "))
+	return "", fmt.Errorf("unknown provider %q (expected one of: %s)", provider, strings.Join(names, ", "))
 }
 
-func normalizeInitProviders(values []string) ([]string, error) {
+func normalizeInitProviders(values []string, skipProviderReadiness bool) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
 	seen := map[string]bool{}
 	for _, value := range values {
 		for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' }) {
-			name, err := normalizeInitProvider(part)
+			name, err := normalizeInitProvider(part, skipProviderReadiness)
 			if err != nil {
 				return nil, err
 			}
@@ -695,8 +707,12 @@ func normalizeInitProviders(values []string) ([]string, error) {
 	if len(seen) == 0 {
 		return nil, fmt.Errorf("--providers requires at least one provider")
 	}
+	names := api.ProviderReadinessNames()
+	if skipProviderReadiness {
+		names = config.BuiltinProviderOrder()
+	}
 	var out []string
-	for _, name := range api.ProviderReadinessNames() {
+	for _, name := range names {
 		if seen[name] {
 			out = append(out, name)
 		}
@@ -1090,7 +1106,7 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1722,7 +1738,7 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		}
 	} else {
 		var err error
-		cityPath, err = os.Getwd()
+		cityPath, err = resolveImplicitCWD()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

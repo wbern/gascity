@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
@@ -69,6 +68,10 @@ type Server struct {
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
+	// structuredPeekPoll overrides the structured fallback stream's periodic
+	// history check in tests. Nil uses outputStreamPollInterval.
+	structuredPeekPoll <-chan time.Time
+
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
@@ -97,14 +100,11 @@ type Server struct {
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
 	// don't re-walk a fresh city between maintenance runs.
-	storeHealthMu         sync.Mutex
-	storeHealthEntry      *StatusStoreHealth
-	storeHealthExpires    time.Time
-	storeHealthComputer   func(ctx context.Context) (*StatusStoreHealth, error)
-	storeHealthFlight     singleflight.Group
-	storeHealthRefreshing bool
-	storeHealthLastErr    error
-	storeHealthRetryAfter time.Time
+	storeHealthMu       sync.Mutex
+	storeHealthEntry    *StatusStoreHealth
+	storeHealthExpires  time.Time
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
@@ -282,13 +282,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
-	if formula.IsFormulaV2Enabled() != enabled {
-		formula.SetFormulaV2Enabled(enabled)
-	}
-	if molecule.IsGraphApplyEnabled() != enabled {
-		molecule.SetGraphApplyEnabled(enabled)
-	}
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
 type singleStateResolver struct {

@@ -20,12 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/warmup"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -571,6 +573,14 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	return 0
 }
 
+// resolveStartDir resolves the city directory for start/restart. The
+// no-argument case deliberately keeps the plain cwd fallback rather than
+// routing through resolveImplicitCWD: start and restart cannot bootstrap
+// anything. Every caller feeds this into requireBootstrappedCity, which walks
+// up for an existing city.toml/.gc and errors before any side effect when
+// there is none, so an unattended no-path invocation in an arbitrary checkout
+// fails loudly instead of leaving state behind. The implicit-cwd guard is for
+// the entry points that create state — see resolveImplicitCWD.
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
@@ -740,11 +750,24 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
-	warmupOpts := WarmupOpts{
+	warmupCityPath := cityPath
+	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
+		warmupCityPath = absCityPath
+	}
+	skipRigDoltChecks := gcDoltSkip()
+	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
+		Stderr:               io.Discard,
+		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
+	})
+	warmupOpts := warmup.WarmupOpts{
+		Checks: warmupChecks,
 		Mailer: defaultMailProvider(cityPath),
 		Stderr: stderr,
 	}
-	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
+	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
 
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.
@@ -974,6 +997,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
+		dsResult.NamedSessionRoutedDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,

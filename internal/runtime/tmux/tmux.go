@@ -51,7 +51,12 @@ var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {
-	SetupTimeout       time.Duration
+	SetupTimeout time.Duration
+	// SetupMaxTimeout, when > 0, switches setup/pre_start commands from the
+	// fixed SetupTimeout wall-clock deadline to an activity-aware budget:
+	// SetupTimeout bounds output silence (idle), SetupMaxTimeout bounds total
+	// runtime (runaway ceiling). Zero (the default) keeps the fixed deadline.
+	SetupMaxTimeout    time.Duration
 	NudgeReadyTimeout  time.Duration
 	NudgeRetryInterval time.Duration
 	NudgeLockTimeout   time.Duration
@@ -225,7 +230,6 @@ type Tmux struct {
 	exec                 executor
 	interactionDedup     *approvalDedup
 	interactionDedupOnce sync.Once
-	configureOnce        sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
 	hiddenAttachSeq      atomic.Uint64
@@ -976,13 +980,10 @@ func (t *Tmux) KillServer() error {
 }
 
 // ConfigureServer sets tmux server options required for Gas City lifecycle
-// ownership. It is idempotent per Tmux instance.
+// ownership. It is safe to call repeatedly because the wrapper may outlive the
+// server bound to its socket.
 func (t *Tmux) ConfigureServer() error {
-	var err error
-	t.configureOnce.Do(func() {
-		err = t.SetExitEmpty(false)
-	})
-	return err
+	return t.SetExitEmpty(false)
 }
 
 // TeardownServer terminates the tmux server after all sessions are drained.

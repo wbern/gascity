@@ -205,8 +205,7 @@
               "login",
               "logout",
               "whoami",
-              "mcp-validate",
-              "worktree-scan"
+              "runtime-heartbeat"
             ]
           },
           "event_id": {

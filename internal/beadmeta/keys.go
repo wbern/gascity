@@ -39,6 +39,12 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
+	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
+	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
+	// stamped at the claim hook and read at the usage record site to populate
+	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
+	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
+	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	AttemptLogMetadataKey                = "gc.attempt_log"
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
@@ -63,12 +69,6 @@ const (
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
 	CurrentRunIDMetadataKey              = "gc.current_run_id"
 	CwdMetadataKey                       = "gc.cwd"
-	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
-	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
-	// stamped at the claim hook and read at the usage record site to populate
-	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
-	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
-	ActiveWorkBeadMetadataKey = "gc.active_work_bead"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -292,6 +292,7 @@ const OptionMetadataPrefix = "opt_"
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
 var KnownMetadataKeys = []string{
+	ActiveWorkBeadMetadataKey,
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
 	BondMetadataKey,
@@ -314,7 +315,6 @@ var KnownMetadataKeys = []string{
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
 	CurrentRunIDMetadataKey,
-	ActiveWorkBeadMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,
 	DeferredAssigneeMetadataKey,

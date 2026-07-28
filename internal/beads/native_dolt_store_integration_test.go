@@ -4,10 +4,18 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -225,72 +233,112 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreClaimAsRealBackend exercises ClaimAs against a real Dolt
-// backend, proving the atomic check-and-set and the in-transaction re-read
-// (read-your-writes within RunInTransaction) that the fake-storage unit test
-// cannot guarantee. This is the warm-controller claim path the reviewer pool
-// relies on.
-func TestNativeDoltStoreClaimAsRealBackend(t *testing.T) {
-	ctx := context.Background()
-	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+// startTestDoltServer launches a throwaway dolt sql-server in a temp data dir
+// and returns a *sql.DB connected to a fresh database on it. Skips the test
+// when the dolt binary is unavailable.
+func startTestDoltServer(t *testing.T) *sql.DB {
+	t.Helper()
+	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
-		t.Skipf("upstream native beads storage unavailable: %v", err)
+		t.Skip("dolt binary not in PATH")
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick free port: %v", err)
+	}
+	port := lis.Addr().(*net.TCPAddr).Port
+	_ = lis.Close()
+
+	dataDir := t.TempDir()
+	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
+	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dolt sql-server: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := storage.Close(); err != nil {
-			t.Fatalf("close upstream storage: %v", err)
-		}
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
 	})
-	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
-		t.Fatalf("set issue prefix: %v", err)
-	}
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-integration", "gc")
 
-	bead, err := store.Create(Bead{Title: "review work"})
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("open dolt connection: %v", err)
 	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := db.Ping(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dolt sql-server did not become ready on port %d", port)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err := db.Exec("CREATE DATABASE repairtest"); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	_ = db.Close()
 
-	// Claim an open bead: the returned bead must reflect the in-tx write.
-	claimed, won, err := store.ClaimAs(bead.ID, "reviewer-1")
+	db, err = sql.Open("mysql", dsn+"repairtest")
 	if err != nil {
-		t.Fatalf("ClaimAs: %v", err)
+		t.Fatalf("open test database: %v", err)
 	}
-	if !won {
-		t.Fatal("ClaimAs did not win an open bead")
-	}
-	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
-		t.Fatalf("claimed bead = %+v, want in_progress and reviewer-1 (in-tx re-read)", claimed)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestRepairIDDefaultAgainstDoltServer exercises the SHOW COLUMNS-based probe
+// end-to-end against a real dolt sql-server (the same wire protocol the live
+// fleet uses): a stripped DEFAULT is detected and repaired, an intact DEFAULT
+// is left alone, and an absent table is not an error. This covers the probe
+// rewrite that replaced the per-open INFORMATION_SCHEMA.COLUMNS catalog scan.
+func TestRepairIDDefaultAgainstDoltServer(t *testing.T) {
+	db := startTestDoltServer(t)
+
+	showIDDefault := func(table string) any {
+		var field, colType, null, key, extra string
+		var def any
+		row := db.QueryRow(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE 'id'", table))
+		if err := row.Scan(&field, &colType, &null, &key, &def, &extra); err != nil {
+			t.Fatalf("SHOW COLUMNS FROM %s: %v", table, err)
+		}
+		return def
 	}
 
-	// Persisted state matches.
-	got, err := store.Get(bead.ID)
-	if err != nil {
-		t.Fatalf("Get after claim: %v", err)
+	// Stripped default: probe detects it and the ALTER restores it.
+	if _, err := db.Exec("CREATE TABLE events (id char(36) NOT NULL, note text)"); err != nil {
+		t.Fatalf("create events: %v", err)
 	}
-	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
-		t.Fatalf("persisted bead = %+v, want in_progress and reviewer-1", got)
+	if err := repairIDDefault(db, "events"); err != nil {
+		t.Fatalf("repairIDDefault(events): %v", err)
 	}
-
-	// Idempotent self re-claim.
-	if _, won, err := store.ClaimAs(bead.ID, "reviewer-1"); err != nil || !won {
-		t.Fatalf("self re-claim won=%v err=%v, want true/nil", won, err)
+	if def := showIDDefault("events"); def == nil {
+		t.Fatal("events.id Default still NULL after repair, want (uuid())")
 	}
 
-	// A second actor loses the race and leaves the bead untouched.
-	current, won, err := store.ClaimAs(bead.ID, "reviewer-2")
-	if err != nil {
-		t.Fatalf("ClaimAs conflict: %v", err)
+	// Intact default: repair is a no-op and must not error.
+	if _, err := db.Exec("CREATE TABLE dependencies (id char(36) NOT NULL DEFAULT (uuid()), note text)"); err != nil {
+		t.Fatalf("create dependencies: %v", err)
 	}
-	if won {
-		t.Fatal("ClaimAs stole a bead held by another actor")
+	if err := repairIDDefault(db, "dependencies"); err != nil {
+		t.Fatalf("repairIDDefault(dependencies) with intact default: %v", err)
 	}
-	if current.Assignee != "reviewer-1" {
-		t.Fatalf("conflict bead = %+v, want current holder reviewer-1", current)
+	if def := showIDDefault("dependencies"); def == nil {
+		t.Fatal("dependencies.id Default = NULL after no-op repair, want (uuid())")
 	}
 
-	// Missing bead surfaces ErrNotFound.
-	if _, won, err := store.ClaimAs("gc-missing", "reviewer-1"); !errors.Is(err, ErrNotFound) || won {
-		t.Fatalf("ClaimAs(missing) = won %v err %v, want false/ErrNotFound", won, err)
+	// Absent table (e.g. wisp_events on an older schema): tolerated, not an error.
+	if err := repairIDDefault(db, "wisp_events"); err != nil {
+		t.Fatalf("repairIDDefault(wisp_events) on absent table: %v", err)
+	}
+
+	// Table without an id column: nothing to repair, no error.
+	if _, err := db.Exec("CREATE TABLE noid (pk int PRIMARY KEY)"); err != nil {
+		t.Fatalf("create noid: %v", err)
+	}
+	if err := repairIDDefault(db, "noid"); err != nil {
+		t.Fatalf("repairIDDefault(noid) without id column: %v", err)
 	}
 }

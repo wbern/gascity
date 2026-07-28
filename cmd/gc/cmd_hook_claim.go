@@ -940,3 +940,33 @@ func hookLegacyWorkflowControlName(value string) string {
 	}
 	return strings.TrimSuffix(value, suffix) + "workflow-control"
 }
+// writeHookClaimStaleSessionDrain reports a refused stale-session claim as a
+// drain, mirroring writeHookClaimNoWork's contract: acknowledge the drain when
+// asked, emit the JSON envelope when asked, and exit non-zero unless the drain
+// was acknowledged.
+func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	result := hookClaimJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Command:       hookClaimCommandName,
+		Action:        "drain",
+		Reason:        "stale_session",
+	}
+	if opts.DrainAck {
+		if err := hookRuntimeDrainAck(stderr); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: drain-ack failed: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		result.DrainAcknowledged = true
+	}
+	if opts.JSON {
+		if err := writeCLIJSONLine(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+	if opts.DrainAck {
+		return 0
+	}
+	return 1
+}

@@ -217,7 +217,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
   `docs/reference/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `internal/api/dashboardspa/web/shared/src/generated/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -268,9 +268,12 @@ the canonical route, not the legacy route.
   `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
   `cmd/gc`. The remaining manager-construction/direct-create bypasses
   are split by category: `internal/api/session_manager.go` constructs
-  `session.Manager` values for API handlers, and
-  `internal/api/session_resolution.go` still calls
-  `mgr.CreateSession(...)` directly. Session creation goes through the
+  `session.Manager` values for API handlers.
+  (`internal/api/session_resolution.go`'s named-session create was
+  converted to the worker boundary — it now routes through
+  `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
+  `newResolvedWorkerSessionHandle`, no longer calling
+  `mgr.CreateSession(...)` directly.) Session creation goes through the
   single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
   point (`NewManagerWithOptions` is the sole Manager constructor). This
   list is not a sessionlog read-site inventory; stream and transcript
@@ -442,12 +445,12 @@ Before considering any task complete:
 - `go vet ./...` clean
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
-- `make dashboard-check` passes for any change touching `internal/api/`,
+- `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-ci`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
@@ -499,6 +502,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 - For controller or session reconciler incidents, use `gc trace` and follow `engdocs/contributors/reconciler-debugging.md` for the artifact collection workflow.
+- When a bead needs to pause on a specific actor or condition, only `hold:mayor` and `hold:external` are canonical (set via `bd set-state <id> hold=mayor|external --reason "..."`) — never invent a new ad hoc hold/blocked label. See `engdocs/contributors/hold-label-conventions.md`.
 
 ## Session Completion
 

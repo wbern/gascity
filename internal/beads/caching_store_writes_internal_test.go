@@ -65,6 +65,25 @@ type releaseRefreshFailOnceStore struct {
 	failNextGet bool
 }
 
+type ambiguousMetadataBatchStore struct {
+	Store
+	err        error
+	commitKeys []string
+}
+
+func (s *ambiguousMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	committed := make(map[string]string, len(s.commitKeys))
+	for _, key := range s.commitKeys {
+		committed[key] = kvs[key]
+	}
+	if len(committed) > 0 {
+		if err := s.Store.SetMetadataBatch(id, committed); err != nil {
+			return err
+		}
+	}
+	return s.err
+}
+
 func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
 	if s.failNextGet {
 		s.failNextGet = false
@@ -331,103 +350,77 @@ func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
 	}
 }
 
-func TestCachingStoreClaimAsDelegatesAndRefreshesCache(t *testing.T) {
-	t.Parallel()
+func TestCachingStoreSetMetadataBatchErrorFencesStaleRow(t *testing.T) {
+	patch := map[string]string{"state": "asleep", "reason": "healed"}
+	for _, tc := range []struct {
+		name       string
+		commitKeys []string
+		wantState  string
+		wantReason string
+	}{
+		{name: "rejected", wantState: "active", wantReason: "old"},
+		{name: "partially committed", commitKeys: []string{"state"}, wantState: "asleep", wantReason: "old"},
+		{name: "fully committed", commitKeys: []string{"state", "reason"}, wantState: "asleep", wantReason: "healed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := NewMemStore()
+			bead, err := mem.Create(Bead{
+				Title:    "worker",
+				Type:     "session",
+				Metadata: map[string]string{"state": "active", "reason": "old"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeErr := errors.New("ambiguous metadata batch")
+			backing := &ambiguousMetadataBatchStore{
+				Store:      mem,
+				err:        writeErr,
+				commitKeys: tc.commitKeys,
+			}
+			notifications := 0
+			cache := NewCachingStoreForTest(backing, func(string, string, json.RawMessage) {
+				notifications++
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			cache.mu.RLock()
+			startSeq := cache.mutationSeq
+			cache.mu.RUnlock()
 
-	backing := NewMemStore()
-	bead, err := backing.Create(Bead{Title: "review task"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+			if err := cache.SetMetadataBatch(bead.ID, patch); !errors.Is(err, writeErr) {
+				t.Fatalf("SetMetadataBatch error = %v, want %v", err, writeErr)
+			}
 
-	var events []string
-	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
-		events = append(events, eventType+":"+beadID)
-	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	events = nil
+			cache.mu.RLock()
+			fence := cache.beadSeq[bead.ID]
+			_, dirty := cache.dirty[bead.ID]
+			_, local := cache.localBeadAt[bead.ID]
+			cache.mu.RUnlock()
+			if fence <= startSeq || !dirty || local {
+				t.Fatalf("ambiguity fence = seq:%d start:%d dirty:%v local:%v", fence, startSeq, dirty, local)
+			}
+			if notifications != 0 {
+				t.Fatalf("notifications = %d, want 0 for an unconfirmed write", notifications)
+			}
+			query := ListQuery{Type: "session"}
+			if _, ok := cache.CachedList(query); ok {
+				t.Fatal("CachedList served a row whose backing write outcome is unknown")
+			}
 
-	claimed, won, err := cache.ClaimAs(bead.ID, "reviewer-1")
-	if err != nil {
-		t.Fatalf("ClaimAs: %v", err)
-	}
-	if !won {
-		t.Fatal("ClaimAs won = false, want true")
-	}
-	if claimed.Status != "in_progress" || claimed.Assignee != "reviewer-1" {
-		t.Fatalf("claimed bead = %+v, want in_progress and reviewer-1", claimed)
-	}
-	got, err := cache.Get(bead.ID)
-	if err != nil {
-		t.Fatalf("cache Get: %v", err)
-	}
-	if got.Status != "in_progress" || got.Assignee != "reviewer-1" {
-		t.Fatalf("cached bead = %+v, want in_progress and reviewer-1", got)
-	}
-	if !stringSliceContains(events, "bead.updated:"+bead.ID) {
-		t.Fatalf("events = %v, want bead.updated for claimed bead", events)
-	}
-}
-
-func TestCachingStoreClaimAsLostRaceDoesNotNotify(t *testing.T) {
-	t.Parallel()
-
-	backing := NewMemStore()
-	bead, err := backing.Create(Bead{Title: "review task"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if _, _, err := backing.ClaimAs(bead.ID, "reviewer-1"); err != nil {
-		t.Fatalf("seed claim: %v", err)
-	}
-
-	var events []string
-	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
-		events = append(events, eventType+":"+beadID)
-	})
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	events = nil
-
-	current, won, err := cache.ClaimAs(bead.ID, "reviewer-2")
-	if err != nil {
-		t.Fatalf("ClaimAs: %v", err)
-	}
-	if won {
-		t.Fatal("ClaimAs won a bead already held by another actor")
-	}
-	if current.Assignee != "reviewer-1" {
-		t.Fatalf("conflict bead = %+v, want current holder reviewer-1", current)
-	}
-	if len(events) != 0 {
-		t.Fatalf("events = %v, want none on a lost race", events)
-	}
-}
-
-func TestCachingStoreClaimAsUnsupportedBacking(t *testing.T) {
-	t.Parallel()
-
-	// countingBackingStore embeds Store as an interface, so MemStore.ClaimAs is
-	// not promoted — the backing is deliberately not an ActorClaimer.
-	backing := &countingBackingStore{Store: NewMemStore()}
-	bead, err := backing.Create(Bead{Title: "review task"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-
-	_, won, err := cache.ClaimAs(bead.ID, "reviewer-1")
-	if !errors.Is(err, ErrActorClaimUnsupported) {
-		t.Fatalf("ClaimAs err = %v, want ErrActorClaimUnsupported", err)
-	}
-	if won {
-		t.Fatal("ClaimAs won against an unsupported backing")
+			rows, err := cache.List(query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("List metadata = %#v, want state=%q reason=%q", rows, tc.wantState, tc.wantReason)
+			}
+			if rows, ok := cache.CachedList(query); !ok || len(rows) != 1 ||
+				rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("CachedList after reread = %#v, ok=%v", rows, ok)
+			}
+		})
 	}
 }
 

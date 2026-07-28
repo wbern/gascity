@@ -19,6 +19,8 @@ func writeSiteBindingForTest(t *testing.T, cityPath, contents string) {
 	}
 }
 
+// A city.toml with no declared prefix must not clear the bound one; the city
+// would fall through to a derived prefix and mint beads under a new namespace.
 func TestPersistInitWorkspaceIdentityKeepsBoundPrefixWhenCityTomlHasNone(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSiteBindingForTest(t, cityPath, "workspace_name = \"site-city\"\nworkspace_prefix = \"sc\"\n")

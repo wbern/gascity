@@ -337,6 +337,9 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		"GC_PACK_NAME="+entry.PackName,
 		"GC_CITY_NAME="+cityName,
 	)
+	// Pack commands are extensions of this exact gc process. Pin recursive
+	// calls to the invoking executable instead of inheriting an ambient GC_BIN
+	// (or falling back to a different `gc` on PATH).
 	exe, err := resolveInvokingExecutable()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc %s %s: resolving invoking gc executable: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 197,
+  "next_id": 196,
   "permanent_ids": [
     {
       "name": "help",
@@ -292,7 +292,7 @@
       ],
       "hidden": false,
       "effective_hidden": false,
-      "disable_flag_parsing": true,
+      "disable_flag_parsing": false,
       "shape": "runnable",
       "recording_policy": "recordable",
       "mode": "standard",
@@ -309,7 +309,7 @@
       ],
       "hidden": false,
       "effective_hidden": false,
-      "disable_flag_parsing": true,
+      "disable_flag_parsing": false,
       "shape": "runnable",
       "recording_policy": "recordable",
       "mode": "standard",
@@ -1082,6 +1082,21 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc dolt-config doltlite-reindex",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
       "classification": "excluded",
       "notice_policy": "ineligible",
       "recording_policy": "excluded",
@@ -2386,21 +2401,6 @@
       "id": 90
     },
     {
-      "path": "gc mcp validate",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "mcp-validate",
-      "owner": "immediate",
-      "id": 195
-    },
-    {
       "path": "gc metrics",
       "aliases": [],
       "conditional_modes": [],
@@ -3351,6 +3351,21 @@
       "classification": "runtime-drain-check",
       "owner": "immediate",
       "id": 134
+    },
+    {
+      "path": "gc runtime heartbeat",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-heartbeat",
+      "owner": "immediate",
+      "id": 195
     },
     {
       "path": "gc runtime request-restart",
@@ -4395,37 +4410,6 @@
       "owner": "immediate",
       "id": 41,
       "canonical_target": "gc convoy reopen-source"
-    },
-    {
-      "path": "gc worktree",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable-group",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "help",
-      "canonical_target": "@help",
-      "owner": "immediate",
-      "id": 1
-    },
-    {
-      "path": "gc worktree scan",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "worktree-scan",
-      "owner": "immediate",
-      "id": 196
     }
   ],
   "synthetic": [

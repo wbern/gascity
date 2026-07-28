@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestNudgePokeRealTmux dogfoods the gcw-sr44 fix (residual of #3049) against a
+// TestNudgePokeRealTmux dogfoods the nudge-path poke fix (residual of #3049) against a
 // REAL, isolated tmux server (its own -L socket, killed on cleanup — it never
 // touches the gc tmux server or any live agent session). It proves what the
 // pure discountPokeActivity unit tests cannot: that NudgeSession/NudgePane
@@ -25,7 +25,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	}
 
 	t.Run("never-busy claude nudge burns full submitEnterAndConfirm budget, still stamps at completion", func(t *testing.T) {
-		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodsr44a", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
+		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudgea", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
 		const sess = "dogfood-neverbusy"
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
@@ -88,7 +88,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	})
 
 	t.Run("non-claude fallback success path records a poke", func(t *testing.T) {
-		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodsr44b", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
+		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudgeb", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
 		const sess = "dogfood-plain"
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
@@ -113,7 +113,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	})
 
 	t.Run("genuine post-nudge turn is not discounted", func(t *testing.T) {
-		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodsr44c", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
+		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudgec", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
 		const sess = "dogfood-turn"
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
@@ -154,7 +154,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	})
 
 	t.Run("error, lock-timeout, and failed-send paths record no poke", func(t *testing.T) {
-		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodsr44d", NudgeReadyTimeout: 300 * time.Millisecond, NudgeLockTimeout: 300 * time.Millisecond})
+		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudged", NudgeReadyTimeout: 300 * time.Millisecond, NudgeLockTimeout: 300 * time.Millisecond})
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
 		if _, err := tm.run("new-session", "-d", "-s", "dogfood-anchor", "-x", "80", "-y", "24"); err != nil {
@@ -195,7 +195,7 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	})
 
 	t.Run("NudgePane success path records a poke", func(t *testing.T) {
-		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodsr44e", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
+		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudgee", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
 		const sess = "dogfood-pane"
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })

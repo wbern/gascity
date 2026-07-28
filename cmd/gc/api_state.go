@@ -906,7 +906,14 @@ func (cs *controllerState) noteRolloutDrift(next *config.City) {
 		sig     string // drift signature; "" means in sync
 		logLine string
 	)
-	if nextFlags, err := rollout.Resolve(next, rollout.ResolveOptions{}); err != nil {
+	// Resolve ONLY the conditional_writes gate. next carries every [beads] key,
+	// so an invalid SIBLING gate (e.g. a guarded_release typo) would fail
+	// rollout.Resolve(next) and be misattributed here as a conditional_writes
+	// failure — falsely flagging a valid conditional_writes as invalid on
+	// reload. A CW-scoped view isolates this notice to its own gate; the CW env
+	// override still applies (Resolve reads it regardless of config).
+	cwOnly := &config.City{Beads: config.BeadsConfig{ConditionalWrites: next.Beads.ConditionalWrites}}
+	if nextFlags, err := rollout.Resolve(cwOnly, rollout.ResolveOptions{}); err != nil {
 		sig = "invalid:" + err.Error()
 		notice = &rollout.Notice{
 			Kind:        rollout.NoticePendingRestart,
@@ -1808,7 +1815,7 @@ func (cs *controllerState) CreateRig(r config.Rig) error {
 // The config.Rig result is consumed across the StateMutator boundary by
 // spawnRigProvision; unparam only sees cmd/gc's error-path test call sites,
 // which discard it, hence the directive.
-func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(api.RigProvisionManifest)) (config.Rig, error) { //nolint:unparam
+func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig, gitURL string, onStep func(step, detail string, warn bool), onManifest func(api.RigProvisionManifest) error) (config.Rig, error) { //nolint:unparam
 	gitURL = strings.TrimSpace(gitURL)
 	if gitURL == "" {
 		return config.Rig{}, fmt.Errorf("%w: git_url is required", configedit.ErrValidation)
@@ -1860,9 +1867,16 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 
 	// Record-then-create (C4c §2.2): manifest the dir we are about to create
 	// BEFORE the clone, so a crash mid-clone still leaves the debris findable by
-	// the boot sweep and a runtime failure tears down the partial clone.
+	// the boot sweep and a runtime failure tears down the partial clone. This
+	// persist is fail-closed: if the durable write does not land we must NOT
+	// clone, or the created directory would be un-manifested and neither the
+	// boot sweep nor a re-clone pre-drop could discover it — wedging the
+	// request_id/name on every retry. No resource has been created yet, so
+	// aborting here leaves clean ground.
 	if onManifest != nil {
-		onManifest(api.RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path})
+		if err := onManifest(api.RigProvisionManifest{RigName: r.Name, CreatedDir: r.Path}); err != nil {
+			return config.Rig{}, fmt.Errorf("recording rig-provision manifest before clone: %w", err)
+		}
 	}
 
 	if onStep != nil {
@@ -1890,13 +1904,21 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 	}
 
 	// Provision succeeded: extend the manifest with the managed Dolt database
-	// this add minted (if any), so the rollback path can drop it.
+	// this add minted (if any), so the rollback path can drop it. Unlike the
+	// pre-clone checkpoint, a persist failure here is NOT fatal: the rig is now
+	// fully provisioned, so if the process crashes before the durable succeeded
+	// write the boot sweep's completeness probe reconciles it FORWARD (never
+	// tears it down), and the runtime rollback path uses the in-memory manifest.
+	// Failing a healthy provision on a transient metadata write would destroy a
+	// good rig, so log and continue.
 	if onManifest != nil {
-		onManifest(api.RigProvisionManifest{
+		if err := onManifest(api.RigProvisionManifest{
 			RigName:    r.Name,
 			CreatedDir: r.Path,
 			DoltDB:     cs.provisionedManagedDoltDatabase(r.Path),
-		})
+		}); err != nil {
+			log.Printf("api: rig %q provisioned but persisting the post-init manifest failed (non-fatal; forward-reconciled on retry/sweep): %v", r.Name, err)
+		}
 	}
 	return provisioned, nil
 }
@@ -2236,7 +2258,8 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch:         func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ResolveRegistryPack: cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
