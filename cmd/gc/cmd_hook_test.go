@@ -1663,6 +1663,12 @@ func TestCmdHookClaimTargetsTriggerBeadEndToEnd(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "bd.log")
 	readyMarker := filepath.Join(t.TempDir(), "generic-ready")
 	unrelatedMarker := filepath.Join(t.TempDir(), "unrelated-claim")
+	// The claim path reads the trigger bead twice: once to resolve it (must be
+	// open and unassigned to be claimable) and once after a successful claim to
+	// reload the canonical row (must be owned by the claimant). Real bd is
+	// stateful across those two reads, so the fake records the claim in a marker
+	// and serves the pre- or post-claim row accordingly.
+	triggerClaimedMarker := filepath.Join(t.TempDir(), "trigger-claimed")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1689,8 +1695,13 @@ dir = "crm"
 printf 'actor=%%s pwd=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$(pwd)" "$*" >> %q
 case "$*" in
   *"show --json crm-1g4vjm.4"*)
-    printf '[{"id":"crm-1g4vjm.4","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' ;;
+    if [ -f %q ]; then
+      printf '[{"id":"crm-1g4vjm.4","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' "${BEADS_ACTOR:-}"
+    else
+      printf '[{"id":"crm-1g4vjm.4","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]'
+    fi ;;
   *"update crm-1g4vjm.4 --claim --json"*)
+    : > %q
     printf '[{"id":"crm-1g4vjm.4","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]' "${BEADS_ACTOR:-}" ;;
   *"update gc2-z7j83 --claim --json"*)
     : > %q
@@ -1701,7 +1712,7 @@ case "$*" in
   *)
     printf '[]' ;;
 esac
-`, logPath, unrelatedMarker, readyMarker)
+`, logPath, triggerClaimedMarker, triggerClaimedMarker, unrelatedMarker, readyMarker)
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1869,6 +1880,10 @@ func TestCmdHookClaimExplicitTargetIgnoresCallerTrigger(t *testing.T) {
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 	triggerMarker := filepath.Join(t.TempDir(), "trigger-show")
+	// The trigger claim reads the bead twice — resolve (must be open) then a
+	// post-claim canonical reload (must be owned by the claimant) — so the fake
+	// records the claim and serves the matching row, as stateful bd would.
+	callerClaimedMarker := filepath.Join(t.TempDir(), "caller-trigger-claimed")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1889,17 +1904,24 @@ name = "worker"
 case "$*" in
   *"show --json caller-trigger"*)
     : > %q
-    printf '[{"id":"caller-trigger","status":"open","metadata":{"gc.routed_to":"caller"}}]' ;;
+    if [ -f %q ]; then
+      printf '[{"id":"caller-trigger","status":"in_progress","assignee":"caller-session","metadata":{"gc.routed_to":"caller"}}]'
+    else
+      printf '[{"id":"caller-trigger","status":"open","metadata":{"gc.routed_to":"caller"}}]'
+    fi ;;
   *"update caller-trigger --claim --json"*)
+    : > %q
     printf '[{"id":"caller-trigger","status":"in_progress","assignee":"caller-session","metadata":{"gc.routed_to":"caller"}}]' ;;
   *"update worker-work --claim --json"*)
+    printf '[{"id":"worker-work","status":"in_progress","assignee":"worker","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *"show --json worker-work"*)
     printf '[{"id":"worker-work","status":"in_progress","assignee":"worker","metadata":{"gc.routed_to":"worker"}}]' ;;
   *"--metadata-field gc.routed_to=worker"*)
     printf '[{"id":"worker-work","status":"open","metadata":{"gc.routed_to":"worker"}}]' ;;
   *)
     printf '[]' ;;
 esac
-`, triggerMarker)
+`, triggerMarker, callerClaimedMarker, callerClaimedMarker)
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
