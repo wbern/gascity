@@ -2750,6 +2750,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		Lifecycle:               ov.Lifecycle,
 		Nudge:                   ov.Nudge,
 		IdleTimeout:             ov.IdleTimeout,
+		ClaimHolderStallTimeout: ov.ClaimHolderStallTimeout,
 		MaxSessionAge:           ov.MaxSessionAge,
 		MaxSessionAgeJitter:     ov.MaxSessionAgeJitter,
 		SleepAfterIdle:          ov.SleepAfterIdle,

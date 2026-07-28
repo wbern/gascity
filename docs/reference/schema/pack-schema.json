@@ -174,6 +174,10 @@
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
         },
+        "claim_holder_stall_timeout": {
+          "type": "string",
+          "description": "ClaimHolderStallTimeout overrides [session] claim_holder_stall_timeout for\nthis agent's sessions. Duration string (e.g., \"8h\"); \"0\" disables the\nclaim-holder recycler for this agent; empty (default) inherits the\ncity-wide value.\n\nThe city-wide threshold must be set above the longest legitimate quiet\nperiod a working claim-holder can exhibit, but that period is not uniform\nacross a city: a fungible pool worker goes quiet for minutes, while a\nlong-lived human-driven overseer holding a multi-day claim is quiet for as\nlong as it waits for its human. A single threshold tuned for the former\nrecycles the latter every cycle, and since a restart cannot supply the\nmissing human input the condition reproduces immediately and the recycle\nrepeats indefinitely. This override is how a city states the difference."
+        },
         "max_session_age": {
           "type": "string",
           "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
@@ -452,6 +456,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "claim_holder_stall_timeout": {
+          "type": "string",
+          "description": "ClaimHolderStallTimeout overrides the agent's claim-holder stall timeout.\nDuration string (e.g., \"8h\"); \"0\" disables the claim-holder recycler for\nthis agent; empty inherits the city-wide value."
         },
         "max_session_age": {
           "type": "string",

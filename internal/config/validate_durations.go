@@ -123,6 +123,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	for _, a := range cfg.Agents {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
 		check(ctx, "idle_timeout", a.IdleTimeout)
+		check(ctx, "claim_holder_stall_timeout", a.ClaimHolderStallTimeout)
 		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
 		check(ctx, "drain_timeout", a.DrainTimeout)
 	}

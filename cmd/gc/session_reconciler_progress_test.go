@@ -649,6 +649,90 @@ func TestReconcileSessionBeads_ClaimHolderStallDoesNotRecycleProtectedHolder(t *
 	}
 }
 
+// TestReconcileSessionBeads_ClaimHolderStallHonorsAgentThresholdOverride drives
+// the per-agent claim_holder_stall_timeout override end to end.
+//
+// The city-wide threshold has to be set above the longest legitimate quiet
+// period a working claim-holder can exhibit, but that period is not uniform
+// across a city. A fungible pool worker goes quiet for minutes; a long-lived
+// human-driven overseer session holding a multi-day claim stays quiet for as
+// long as it waits for its human. With only one city-wide knob, a threshold
+// tuned for the pool recycles the overseer every cycle — and because a restart
+// cannot supply the missing human input, the session comes back, goes quiet
+// again, and is recycled again on the next cycle, indefinitely. This override is
+// how a city states the difference per agent.
+//
+// The subtests cover both directions (raise and disable) plus enabling the
+// recycler for one agent in a city that leaves it off, and prove the override
+// reaches the GATE as well as the predicate: with the city value unset, nothing
+// opens the stall block unless the agent's own threshold is consulted first.
+func TestReconcileSessionBeads_ClaimHolderStallHonorsAgentThresholdOverride(t *testing.T) {
+	tests := []struct {
+		name          string
+		cityTimeout   string
+		agentTimeout  string
+		wantRecycled  bool
+		wantDiagnosed bool
+	}{
+		{
+			name:         "agent zero opts out of a city-enabled recycler",
+			cityTimeout:  "20m",
+			agentTimeout: "0",
+		},
+		{
+			name:         "agent raises the threshold above the stale age",
+			cityTimeout:  "20m",
+			agentTimeout: "8h",
+		},
+		{
+			name:          "agent inherits the city threshold when unset",
+			cityTimeout:   "20m",
+			agentTimeout:  "",
+			wantRecycled:  true,
+			wantDiagnosed: true,
+		},
+		{
+			name:          "agent enables the recycler where the city leaves it off",
+			cityTimeout:   "",
+			agentTimeout:  "20m",
+			wantRecycled:  true,
+			wantDiagnosed: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName := newProgressStallTestEnv(t)
+			env.cfg.Session.ProgressStallTimeout = "" // isolate the claim-holder recycler
+			env.cfg.Session.ClaimHolderStallTimeout = tc.cityTimeout
+			env.cfg.Agents[0].ClaimHolderStallTimeout = tc.agentTimeout
+			// The env leaves the session stale by an hour: past both a 20m
+			// threshold and the enforced 5m floor, under an 8h override.
+			seedInProgressClaim(t, env, sessionName)
+
+			env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+			if got := !env.sp.IsRunning(sessionName); got != tc.wantRecycled {
+				t.Fatalf("session %q recycled = %v, want %v", sessionName, got, tc.wantRecycled)
+			}
+			stored, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", session.ID, err)
+			}
+			wantReset := ""
+			if tc.wantRecycled {
+				wantReset = "true"
+			}
+			if stored.Metadata["continuation_reset_pending"] != wantReset {
+				t.Fatalf("continuation_reset_pending = %q, want %q", stored.Metadata["continuation_reset_pending"], wantReset)
+			}
+			if got := strings.Contains(env.stderr.String(), "claim-holder-stalled"); got != tc.wantDiagnosed {
+				t.Fatalf("claim-holder-stalled diagnostic = %v, want %v (stderr = %q)", got, tc.wantDiagnosed, env.stderr.String())
+			}
+		})
+	}
+}
+
 // TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker drives the
 // reconciler's pool-counting branch (not just the extracted predicate): a stale,
 // claimless, healthy session whose pool is at its configured floor

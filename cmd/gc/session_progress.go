@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -38,6 +39,22 @@ func openPoolSessionCountForTemplate(infoByID map[string]sessionpkg.Info, cfg *c
 // Inputs are in-memory values available to the caller; no I/O required.
 func isMinFloorIdleWorker(minActiveSessions, openSessionsInPool int) bool {
 	return minActiveSessions > 0 && openSessionsInPool <= minActiveSessions
+}
+
+// anyAgentClaimHolderStallOverride reports whether any configured agent sets its
+// own claim_holder_stall_timeout. The reconciler resolves this once per tick so a
+// city where no agent overrides the city-wide value keeps the stall gate on the
+// plain [session] threshold and pays no per-session agent lookup for it.
+func anyAgentClaimHolderStallOverride(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		if strings.TrimSpace(cfg.Agents[i].ClaimHolderStallTimeout) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // minPositiveDuration returns the smaller of two durations, ignoring

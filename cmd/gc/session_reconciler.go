@@ -1336,6 +1336,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Load provider-health snapshot once per tick (ADR-0013 A1 M3a).
 	// All per-session gate checks in Phase 2 use this snapshot — no I/O per session.
 	phSnap := loadProviderHealthSnapshot(cityPath)
+	// Resolved once per tick, like the health snapshot: in a city where no agent
+	// overrides claim_holder_stall_timeout (the common case) the stall gate below
+	// keeps using the city-wide value directly and pays no per-session agent
+	// lookup.
+	anyClaimHolderStallOverride := anyAgentClaimHolderStallOverride(cfg)
 	reconcileOpts := startExecutionOptions{}
 	for _, apply := range startOptions {
 		if apply != nil {
@@ -2387,7 +2392,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// session. Set the restart_requested marker and let the block below
 		// perform the fresh-restart handoff.
 		claimlessThreshold := cfg.Session.ProgressStallTimeoutDuration()
+		// The configured agent for this session, resolved at most once per session
+		// and reused by the claim-holder threshold and the min-floor exemption
+		// below. A resolved lookup can legitimately yield nil (the template matches
+		// no configured agent), so the resolved flag — not a nil check — is what
+		// prevents a second lookup; every consumer handles a nil agent.
+		var stallAgent *config.Agent
+		stallAgentResolved := false
 		claimHolderThreshold := cfg.Session.ClaimHolderStallTimeoutDuration()
+		if anyClaimHolderStallOverride {
+			// A per-agent claim_holder_stall_timeout must reach the GATE, not just
+			// the predicate: an agent can lower the threshold or enable the recycler
+			// in a city that leaves it off, and a gate computed from the city value
+			// alone would never open for either. Resolving it here also lets an
+			// agent opt out entirely ("0"), which is what a long-lived human-driven
+			// overseer needs — its quiet period between human turns is unbounded, so
+			// a threshold tuned for fungible pool workers recycles it every cycle
+			// and the restart cannot clear the condition.
+			stallAgent = findAgentByTemplate(cfg, tp.TemplateName)
+			stallAgentResolved = true
+			claimHolderThreshold = stallAgent.EffectiveClaimHolderStallTimeout(claimHolderThreshold)
+		}
 		if gateThreshold := minPositiveDuration(claimlessThreshold, claimHolderThreshold); gateThreshold > 0 && alive && sessionActivityReportable(sp, name) {
 			lastActivity, lastActivityErr := sp.GetLastActivity(name)
 			if lastActivityErr != nil {
@@ -2417,7 +2442,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				minFloorIdleCandidate := false
 				minFloor, openInPool := 0, 0
 				if !exempt && cfg != nil {
-					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
+					if !stallAgentResolved {
+						stallAgent = findAgentByTemplate(cfg, tp.TemplateName)
+						stallAgentResolved = true
+					}
+					if cfgAgent := stallAgent; cfgAgent != nil {
 						minFloor = cfgAgent.EffectiveMinActiveSessions()
 						if minFloor > 0 {
 							openInPool = openPoolSessionCountForTemplate(infoByID, cfg, tp.TemplateName)

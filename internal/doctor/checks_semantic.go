@@ -133,14 +133,29 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 			ranges = append(ranges,
 				durationRange{ctx, "drain_timeout", a.DrainTimeout, minTimeout, maxTimeout})
 		}
+		if a.ClaimHolderStallTimeout != "" {
+			ranges = append(ranges,
+				durationRange{ctx, "claim_holder_stall_timeout", a.ClaimHolderStallTimeout, config.ProgressStallTimeoutMinimum, maxWindow})
+		}
 	}
 
 	return ranges
 }
 
+// durationRangeNonPositiveDisables reports whether a non-positive value is a
+// documented way to switch the feature off rather than a suspicious number. For
+// those fields "0" means "disabled", so reporting it as below-minimum would
+// train operators to ignore this check.
+//
+// claim_holder_stall_timeout qualifies in BOTH scopes: at [session] it is the
+// city-wide opt-out, and per agent it is how one agent opts out of a recycler
+// the city enables — the case a long-lived human-driven overseer needs, since
+// its quiet period between human turns is unbounded by design.
 func durationRangeNonPositiveDisables(dr durationRange) bool {
-	if dr.context == "[session]" &&
-		(dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout") {
+	if dr.field == "claim_holder_stall_timeout" {
+		return true
+	}
+	if dr.context == "[session]" && dr.field == "progress_stall_timeout" {
 		return true
 	}
 	return dr.context == "[dolt]" && dr.field == "conn_max_idle_time"

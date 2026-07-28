@@ -65,6 +65,10 @@ type AgentPatch struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// ClaimHolderStallTimeout overrides the agent's claim-holder stall timeout.
+	// Duration string (e.g., "8h"); "0" disables the claim-holder recycler for
+	// this agent; empty inherits the city-wide value.
+	ClaimHolderStallTimeout *string `toml:"claim_holder_stall_timeout,omitempty"`
 	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
 	MaxSessionAge *string `toml:"max_session_age,omitempty"`
 	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
@@ -487,6 +491,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.ClaimHolderStallTimeout != nil {
+		a.ClaimHolderStallTimeout = *p.ClaimHolderStallTimeout
 	}
 	if p.MaxSessionAge != nil {
 		a.MaxSessionAge = *p.MaxSessionAge

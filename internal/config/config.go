@@ -710,6 +710,10 @@ type AgentOverride struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// ClaimHolderStallTimeout overrides the agent's claim-holder stall timeout.
+	// Duration string (e.g., "8h"); "0" disables the claim-holder recycler for
+	// this agent; empty inherits the city-wide value.
+	ClaimHolderStallTimeout *string `toml:"claim_holder_stall_timeout,omitempty"`
 	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
 	// Empty disables preemptive restart.
 	MaxSessionAge *string `toml:"max_session_age,omitempty"`
@@ -1705,10 +1709,21 @@ func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 // in by setting a duration above its agents' longest legitimate quiet period gets
 // the behavior.
 func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
-	if s.ClaimHolderStallTimeout == "" {
+	return claimHolderStallTimeoutDuration(s.ClaimHolderStallTimeout)
+}
+
+// claimHolderStallTimeoutDuration parses one claim-holder stall timeout value
+// with the shared city/agent semantics: unset, zero, negative, and unparseable
+// all disable the recycler (0), and a positive value below
+// ProgressStallTimeoutMinimum is clamped to that floor. Disabling is the safe
+// direction for an unreadable value because the recycler's action is
+// destructive — it restarts a session that holds in-progress work.
+func claimHolderStallTimeoutDuration(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return 0
 	}
-	d, err := time.ParseDuration(s.ClaimHolderStallTimeout)
+	d, err := time.ParseDuration(value)
 	if err != nil {
 		return 0
 	}
@@ -3308,6 +3323,20 @@ type Agent struct {
 	// the controller kills and restarts it. Duration string (e.g., "15m", "1h").
 	// Empty (default) disables idle checking.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// ClaimHolderStallTimeout overrides [session] claim_holder_stall_timeout for
+	// this agent's sessions. Duration string (e.g., "8h"); "0" disables the
+	// claim-holder recycler for this agent; empty (default) inherits the
+	// city-wide value.
+	//
+	// The city-wide threshold must be set above the longest legitimate quiet
+	// period a working claim-holder can exhibit, but that period is not uniform
+	// across a city: a fungible pool worker goes quiet for minutes, while a
+	// long-lived human-driven overseer holding a multi-day claim is quiet for as
+	// long as it waits for its human. A single threshold tuned for the former
+	// recycles the latter every cycle, and since a restart cannot supply the
+	// missing human input the condition reproduces immediately and the recycle
+	// repeats indefinitely. This override is how a city states the difference.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// MaxSessionAge is the maximum wall-clock lifetime of a single runtime
 	// session before the controller preemptively restarts it. Duration string
 	// (e.g., "5h"). Empty (default) disables preemptive restarts. The restart
@@ -3581,6 +3610,25 @@ func (l agentLayout) String() string {
 		return "v2-convention"
 	}
 	return "unknown"
+}
+
+// EffectiveClaimHolderStallTimeout returns the claim-holder stall recycle
+// timeout that applies to this agent's sessions: the agent's own
+// claim_holder_stall_timeout when it sets one, otherwise cityDefault (the
+// already-resolved [session] claim_holder_stall_timeout).
+//
+// An unset or whitespace-only override inherits cityDefault, so an agent that
+// says nothing keeps the city's behavior exactly. A set override is parsed with
+// the same semantics as the city value — zero, negative, and unparseable all
+// disable the recycler for this agent, and a positive value below
+// ProgressStallTimeoutMinimum is clamped to that floor — so an agent can both
+// raise the threshold and opt out entirely. A nil agent (a session whose
+// template resolves to no configured agent) inherits cityDefault.
+func (a *Agent) EffectiveClaimHolderStallTimeout(cityDefault time.Duration) time.Duration {
+	if a == nil || strings.TrimSpace(a.ClaimHolderStallTimeout) == "" {
+		return cityDefault
+	}
+	return claimHolderStallTimeoutDuration(a.ClaimHolderStallTimeout)
 }
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.

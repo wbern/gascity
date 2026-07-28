@@ -60,6 +60,47 @@ func TestValidateDurationsBadAgentIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestValidateDurationsBadAgentClaimHolderStallTimeout keeps the per-agent
+// claim-holder stall override at parity with the city-wide [session] field,
+// which ValidateDurations already covers. A typo in this field is silently
+// destructive in a specific way: an unparseable value resolves to zero, which
+// DISABLES the claim-holder recycler for that agent, so a genuinely wedged
+// claim-holder would never be recovered and nothing would say why.
+func TestValidateDurationsBadAgentClaimHolderStallTimeout(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "mayor", ClaimHolderStallTimeout: "8hrs"},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "mayor") {
+		t.Errorf("warning should mention agent name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "claim_holder_stall_timeout") {
+		t.Errorf("warning should mention field name: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "8hrs") {
+		t.Errorf("warning should mention bad value: %s", warnings[0])
+	}
+}
+
+// TestValidateDurationsAgentClaimHolderStallOptOutIsValid proves the documented
+// opt-out spelling is not flagged: "0" parses cleanly and is how an agent whose
+// legitimate quiet period is unbounded disables the recycler for itself.
+func TestValidateDurationsAgentClaimHolderStallOptOutIsValid(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "architect", ClaimHolderStallTimeout: "0"},
+		},
+	}
+	if warnings := ValidateDurations(cfg, "city.toml"); len(warnings) != 0 {
+		t.Fatalf("expected no warnings for the documented opt-out value, got %v", warnings)
+	}
+}
+
 func TestValidateDurationsBadSessionTimeout(t *testing.T) {
 	cfg := &City{
 		Session: SessionConfig{SetupTimeout: "ten seconds"},

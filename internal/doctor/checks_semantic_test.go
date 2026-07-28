@@ -145,6 +145,50 @@ func TestDurationRangeCheck_ClaimHolderStallTimeoutZeroDisables(t *testing.T) {
 	}
 }
 
+// TestDurationRangeCheck_AgentClaimHolderStallTimeoutTooSmall keeps the
+// per-agent claim-holder stall override at parity with the [session] field: a
+// sub-floor value is silently clamped at runtime, so doctor is the only place
+// that tells the operator their number is not the number in effect.
+func TestDurationRangeCheck_AgentClaimHolderStallTimeoutTooSmall(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", ClaimHolderStallTimeout: "1m"},
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning", r.Status)
+	}
+	found := false
+	for _, d := range r.Details {
+		if strings.Contains(d, "claim_holder_stall_timeout") && strings.Contains(d, "polecat") && strings.Contains(d, "below minimum") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected per-agent claim_holder_stall_timeout below-minimum warning in details: %v", r.Details)
+	}
+}
+
+// TestDurationRangeCheck_AgentClaimHolderStallTimeoutZeroDisables proves the
+// documented per-agent opt-out is not reported as a too-small value. "0" is how
+// an agent whose legitimate quiet period is unbounded — a human-driven overseer
+// waiting between turns — disables the recycler for itself, so warning about it
+// would train operators to ignore this check.
+func TestDurationRangeCheck_AgentClaimHolderStallTimeoutZeroDisables(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "architect", ClaimHolderStallTimeout: "0"},
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; details = %v", r.Status, r.Details)
+	}
+}
+
 func TestDurationRangeCheck_TooLarge(t *testing.T) {
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{
