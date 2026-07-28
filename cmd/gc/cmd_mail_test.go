@@ -3504,7 +3504,7 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 }
 
-func TestBuildMailInjectReminderCapsInjectedMessages(t *testing.T) {
+func TestFormatInjectOutputCapsInjectedMessages(t *testing.T) {
 	messages := []mail.Message{
 		{ID: "gc-1", From: "sender-a", Body: "first"},
 		{ID: "gc-2", From: "sender-b", Body: "second"},
@@ -3512,21 +3512,24 @@ func TestBuildMailInjectReminderCapsInjectedMessages(t *testing.T) {
 		{ID: "gc-4", From: "sender-d", Body: "fourth"},
 	}
 
-	got := buildMailInjectReminder(messages)
+	got := formatInjectOutput(messages)
 
-	if len(got.InjectedMessages) != mailInjectMaxMessages {
-		t.Fatalf("len(InjectedMessages) = %d, want %d", len(got.InjectedMessages), mailInjectMaxMessages)
-	}
-	for i, want := range []string{"gc-1", "gc-2", "gc-3"} {
-		if got.InjectedMessages[i].ID != want {
-			t.Fatalf("InjectedMessages[%d].ID = %q, want %q", i, got.InjectedMessages[i].ID, want)
+	// Equal priority, so sortMailByPriority keeps arrival order: the first
+	// mailInjectMaxMessages render and the rest are held back behind the
+	// truncation notice.
+	for _, want := range []string{"gc-1", "gc-2", "gc-3"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing capped message %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got.Text, "gc-4") || strings.Contains(got.Text, "fourth") {
-		t.Fatalf("Text should not include truncated fourth message:\n%s", got.Text)
+	if strings.Contains(got, "gc-4") || strings.Contains(got, "fourth") {
+		t.Fatalf("output should not include truncated fourth message:\n%s", got)
 	}
-	if !strings.Contains(got.Text, "Showing the first 3 message(s)") {
-		t.Fatalf("Text missing truncation notice:\n%s", got.Text)
+	if !strings.Contains(got, "Showing the first 3 message(s)") {
+		t.Fatalf("output missing truncation notice:\n%s", got)
+	}
+	if !strings.Contains(got, "You have 4 unread message(s)") {
+		t.Fatalf("output should report the full unread count, not the capped one:\n%s", got)
 	}
 }
 
@@ -4397,7 +4400,7 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeMailCheck([]string{"mayor"}, false, c, tc.nilReason, &stdout, &stderr)
+			code := routeMailCheck("", []string{"mayor"}, false, "", c, tc.nilReason, &stdout, &stderr)
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
 			}
@@ -4462,7 +4465,7 @@ func TestRouteMailCheckInjectStoreSlowEmitsDegradedNotice(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4483,7 +4486,7 @@ func TestRouteMailCheckPartialStoreSlowInjectEmitsDegradedNotice(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4501,7 +4504,7 @@ func TestRouteMailCheckPartialStoreSlowNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4522,7 +4525,7 @@ func TestRouteMailCheckPartialProviderErrorInjectEmitsDegradedNotice(t *testing.
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, true, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, true, "", c, "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4543,7 +4546,7 @@ func TestRouteMailCheckPartialProviderErrorNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4564,7 +4567,7 @@ func TestRouteMailCheckStoreSlowNonInjectReturnsError(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr)
+	code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
@@ -4801,7 +4804,7 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck([]string{"mayor"}, false, c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck("", []string{"mayor"}, false, "", c, "", &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {
@@ -4855,7 +4858,7 @@ name = "mayor"
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeMailCheck(nil, true, c, "", &stdout, &stderr); code != 0 {
+	if code := routeMailCheck("", nil, true, "", c, "", &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	assertMailRouteLog(t, stderr.String(), "fallback", "inject-local-side-effects")

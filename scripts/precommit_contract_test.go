@@ -546,3 +546,13 @@ func writeExecutable(t *testing.T, path, content string) {
 		t.Fatalf("write executable %s: %v", path, err)
 	}
 }
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create parent for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}

@@ -14,9 +14,11 @@ type fakeStrayProbe struct {
 	uncommitted bool
 	unpushed    bool
 	stashes     bool
+	branch      string
 }
 
 func (f fakeStrayProbe) IsRepo() bool                            { return f.isRepo }
+func (f fakeStrayProbe) CurrentBranch() (string, error)          { return f.branch, nil }
 func (f fakeStrayProbe) HasUncommittedWork() bool                { return f.uncommitted }
 func (f fakeStrayProbe) HasUnpushedCommitsResult() (bool, error) { return f.unpushed, nil }
 func (f fakeStrayProbe) HasStashesResult() (bool, error)         { return f.stashes, nil }
