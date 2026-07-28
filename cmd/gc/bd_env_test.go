@@ -270,7 +270,7 @@ func TestBdStoreForRigPrefersScopeConfigOverKnownPrefix(t *testing.T) {
 }
 
 func TestBdStoreForRigFallsBackToConfiguredEffectivePrefix(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "rigs", "repo")
 	if err := os.MkdirAll(rigDir, 0o700); err != nil {
 		t.Fatal(err)

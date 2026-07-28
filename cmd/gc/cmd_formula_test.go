@@ -22,7 +22,7 @@ import (
 // TestResolveFormulaScope_RigFlagWins verifies that an explicit --rig flag
 // takes priority over the cwd, and that the rig's FormulaLayers are used.
 func TestResolveFormulaScope_RigFlagWins(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	rigPath := filepath.Join(cityPath, "my-project")
 	otherPath := filepath.Join(cityPath, "other-rig")
 	for _, p := range []string{rigPath, otherPath} {
@@ -67,7 +67,7 @@ func TestResolveFormulaScope_RigFlagWins(t *testing.T) {
 // Asserts searchPaths too — the core bug in #1004 was search paths dropping
 // back to city layers even when storeRoot was rig-correct.
 func TestResolveFormulaScope_CwdInsideRig(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	rigPath := filepath.Join(cityPath, "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)

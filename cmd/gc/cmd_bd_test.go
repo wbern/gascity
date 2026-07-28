@@ -344,7 +344,7 @@ func TestResolveBdScopeTarget(t *testing.T) {
 }
 
 func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecats", "polecat-1")
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
@@ -1371,7 +1371,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	defer func() { bdBeadExists = origProbe }()
 	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
 
-	cityDir := filepath.Join(t.TempDir(), "city")
+	cityDir := filepath.Join(resolvedTempDir(t), "city")
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigDir, "nested"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1404,7 +1404,7 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 		return target.ScopeKind == "city" && beadID == "mc-city1"
 	}
 
-	cityDir := filepath.Join(t.TempDir(), "city")
+	cityDir := filepath.Join(resolvedTempDir(t), "city")
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigDir, "nested"), 0o755); err != nil {
 		t.Fatal(err)

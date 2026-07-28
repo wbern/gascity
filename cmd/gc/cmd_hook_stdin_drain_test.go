@@ -32,10 +32,10 @@ func (t *trackingReader) Read(p []byte) (int, error) {
 //
 // gc hook run must fully consume its stdin so the provider's write always
 // completes, regardless of whether the wrapped command reads it. The wrapped
-// executable here is /bin/true, which exits 0 without reading stdin.
+// executable here is the PATH-resolved "true", which exits 0 without reading stdin.
 func TestHookRunConsumesStdinWhenWrappedCommandIgnoresIt(t *testing.T) {
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return "/bin/true", nil }
+	hookRunExecutable = func() (string, error) { return trueBinaryPath(t), nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	payload := strings.Repeat("x", 8192)
@@ -85,7 +85,7 @@ func (b *blockingReader) Read(p []byte) (int, error) {
 // configured timeout instead of wedging before it spawns the child.
 func TestHookRunReturnsWithinTimeoutWhenStdinNeverEOFs(t *testing.T) {
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return "/bin/true", nil }
+	hookRunExecutable = func() (string, error) { return trueBinaryPath(t), nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	release := make(chan struct{})
@@ -129,7 +129,7 @@ func TestHookRunReturnsWithinTimeoutWhenStdinNeverEOFs(t *testing.T) {
 // A PTY master from /dev/ptmx is the terminal proxy: it is a char-device
 // *os.File whose Read blocks forever with no EOF while no slave writes to it,
 // which is exactly the shape of os.Stdin on a real terminal. The wrapped
-// executable is /bin/true, which exits 0 without reading stdin.
+// executable is the PATH-resolved "true", which exits 0 without reading stdin.
 func TestHookRunSkipsStdinDrainForTerminal(t *testing.T) {
 	tty, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestHookRunSkipsStdinDrainForTerminal(t *testing.T) {
 	}
 
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return "/bin/true", nil }
+	hookRunExecutable = func() (string, error) { return trueBinaryPath(t), nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	var stdout, stderr bytes.Buffer

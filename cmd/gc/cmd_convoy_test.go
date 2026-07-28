@@ -674,7 +674,7 @@ func TestConvoyStoreCandidatesKeepFileProviderCityScoped(t *testing.T) {
 }
 
 func TestConvoyStoreCandidatesIncludeBdRigUnderLegacyFileCity(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "hello-world")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -714,7 +714,7 @@ func TestConvoyStoreCandidatesIncludeMarkedFileRigUnderLegacyFileCity(t *testing
 	t.Setenv("GC_BEADS", "")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
-	cityDir := t.TempDir()
+	cityDir := resolvedTempDir(t)
 	rigDir := filepath.Join(cityDir, "hello-world")
 	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
 		t.Fatal(err)
