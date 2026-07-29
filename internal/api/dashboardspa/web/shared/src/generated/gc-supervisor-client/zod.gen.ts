@@ -1033,6 +1033,7 @@ export const zPoolOverride = z.object({
 export const zAgentPatch = z.object({
     AppendFragments: z.array(z.string()).nullable(),
     Args: z.array(z.string()).nullable(),
+    AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
     ClaimHolderStallTimeout: z.string().nullable(),
     DefaultSlingFormula: z.string().nullable(),

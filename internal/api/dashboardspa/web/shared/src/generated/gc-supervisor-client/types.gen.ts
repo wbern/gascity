@@ -60,6 +60,7 @@ export type AgentOutputResponse = {
 export type AgentPatch = {
     AppendFragments: Array<string> | null;
     Args: Array<string> | null;
+    AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     ClaimHolderStallTimeout: string | null;
     DefaultSlingFormula: string | null;
