@@ -66,7 +66,7 @@ func TestDecideClaimHolderRecycleReplaysTheObservedIncident(t *testing.T) {
 	fired, suppressed := 0, 0
 	for _, raw := range observed {
 		now := parse(t, raw)
-		decision := decideClaimHolderRecycle(state, threshold, "1:held", true, lastActivity, now)
+		decision := decideClaimHolderRecycle(state, threshold, "sc0pe000:1:held", true, lastActivity, now)
 		state = decision.Next
 		if decision.Fire {
 			fired++

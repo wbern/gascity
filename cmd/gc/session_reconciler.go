@@ -2632,39 +2632,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// must not be repeated on every tick forever. Nothing else
 					// stops it — the restart handoff clears last_woke_at, which
 					// is exactly what hides an autonomous recycle from the
-					// stability and churn trackers.
-					claims, claimsErr := sessionInProgressClaimFingerprint(store, rigStores, infoByID[id], cfg)
-					if claimsErr != nil {
-						fmt.Fprintf(stderr, "session reconciler: fingerprinting held claims before claim-holder recycle for %s: %v\n", name, claimsErr) //nolint:errcheck
-					}
-					decision := decideClaimHolderRecycle(
-						claimHolderRecycleStateFromInfo(infoByID[id]),
-						claimHolderThreshold,
-						claims,
-						claimsErr == nil,
-						lastActivity,
-						clk.Now(),
-					)
-					if decision.Fire {
-						// applyStore, not apply: the accounting has to be
-						// DURABLE to outlive the recycle it is counting. A
-						// failed write leaves the snapshot unadvanced and the
-						// next tick simply behaves as it does today.
-						tick.applyStore(id, sessFront, decision.Next.patch())
+					// stability and churn trackers. All of that judgement, and
+					// its durable accounting, lives in the fork-owned
+					// session_claim_holder_damper.go; the two upstream lines it
+					// guards are unchanged.
+					if (claimHolderRecycleDamper{
+						store: store, rigStores: rigStores, cfg: cfg,
+						threshold: claimHolderThreshold, tick: tick, sessFront: sessFront,
+						stderr: stderr, trace: trace, template: tp.TemplateName,
+					}).admitRecycle(id, name, lastActivity, clk.Now()) {
 						tick.apply(id, sessionpkg.MetadataPatch{"restart_requested": "true"})
 						fmt.Fprintf(stderr, "session reconciler: %s claim-holder-stalled (holds a claim but no progress for >%s, provider healthy, last activity %s); requesting fresh restart\n", name, claimHolderThreshold, lastActivity.UTC().Format(time.RFC3339)) //nolint:errcheck
-						if decision.Next.Count > 1 {
-							// Said once here, on the tick that accrues, rather
-							// than on every suppressed tick after it: the stall
-							// predicate stays true for the whole backoff window,
-							// so a per-tick line would be ~2,600 a day.
-							fmt.Fprintf(stderr, "session reconciler: %s claim-holder recycle #%d changed neither its held claims nor its activity; next recycle not before %s\n", name, decision.Next.Count, decision.Next.At.Add(claimHolderRecycleBackoff(claimHolderThreshold, decision.Next.Count)).UTC().Format(time.RFC3339)) //nolint:errcheck
-						}
-					} else if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerClaimHolderRecycle, TraceReasonClaimHolderRecycleIneffective, TraceOutcomeSuppressed, tp.TemplateName, name, traceRecordPayload{
-							"ineffective_recycles": decision.Next.Count,
-							"retry_after":          decision.RetryAfter.UTC().Format(time.RFC3339),
-						})
 					}
 				}
 			}
