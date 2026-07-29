@@ -29,6 +29,10 @@ type reapDecision struct {
 	// Reason explains a protected decision (why the worktree was left in
 	// place). Empty for a reap/would-reap decision.
 	Reason string
+	// Warning records a non-blocking observation about a reaped worktree —
+	// a signal worth an operator's attention that does not endanger the
+	// removal. Empty when there is nothing to note.
+	Warning string
 }
 
 // reapReport is the outcome of one reapClosedBeadWorktrees pass. Reaped holds
@@ -71,7 +75,20 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no unpushed commits, no stashes.
+//  6. Git state: no uncommitted changes and no unpushed commits — the two
+//     forms of work that live inside this worktree and that its removal would
+//     destroy. Either probe failing protects the tree.
+//
+// Stashes are deliberately not a gate. refs/stash lives in the repository's
+// common git dir, so `git stash list` run inside a linked worktree reports
+// every stash in the repository — none of which the worktree owns, and none of
+// which its removal can destroy (internal/git's
+// TestWorktreeRemove_PreservesStashes proves the property). Treating that
+// signal as unsafe state blocked every candidate in any repository that had
+// ever stashed: measured live at 0 reaps out of 61 closed-bead candidates
+// against 58 repo-wide stashes, on a fleet 90% of whose bead worktrees served
+// closed beads. Per-worktree stash detection is not implementable, so a stash
+// is recorded as a warning on the decision instead of blocking it.
 //
 // When dryRun is true the reaper performs all discovery and classification and
 // emits bead.worktree.reap_skipped events describing what it would reap and
@@ -255,18 +272,42 @@ func reapClosedBeadWorktrees(
 				}
 			}
 
-			// Git safety gates, only if not already protected.
+			// Git safety gates, only if not already protected. A worktree is
+			// unsafe to remove when it holds work removal would destroy:
+			// uncommitted changes in its own working files and index, or
+			// commits on its branch that no remote carries. Both fail closed —
+			// an unreadable repository is never assumed clean.
+			//
+			// Stashes are deliberately NOT a gate; they are recorded as a
+			// warning below. See the stash note on this function.
+			wg := newGitProbe(worktreePath)
 			if reason == "" {
-				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
-				hasUnpushed, _ := wg.HasUnpushedCommitsResult()
-				hasStashes, _ := wg.HasStashesResult()
-				if hasUncommitted || hasUnpushed || hasStashes {
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
+				hasUnpushed, unpushedErr := wg.HasUnpushedCommitsResult()
+				switch {
+				case unpushedErr != nil:
+					reason = fmt.Sprintf("unsafe git state: unpushed probe failed: %v", unpushedErr)
+				case hasUncommitted || hasUnpushed:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v", hasUncommitted, hasUnpushed)
 				}
 			}
 
-			branch, _ := git.New(worktreePath).CurrentBranch()
+			// Repo-wide stash observation. Not a gate (removal cannot destroy a
+			// stash), but worth an operator's attention, so it rides along with
+			// the decision and is logged. A failed probe is likewise only a
+			// warning: a signal that could not endanger this worktree even when
+			// readable cannot endanger it when unreadable.
+			warning := ""
+			if reason == "" {
+				switch hasStashes, stashErr := wg.HasStashesResult(); {
+				case stashErr != nil:
+					warning = fmt.Sprintf("repo-wide stash probe failed: %v", stashErr)
+				case hasStashes:
+					warning = "repository holds stashed work (repo-wide; not owned by this worktree and not destroyed by its removal)"
+				}
+			}
+
+			branch, _ := wg.CurrentBranch()
 
 			if reason != "" {
 				fmt.Fprintf(stderr, //nolint:errcheck
@@ -280,6 +321,13 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
+			if warning != "" {
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: %s (bead %s): warning: %s\n",
+					worktreePath, beadID, warning,
+				)
+			}
+
 			if dryRun {
 				const whatIf = "dry-run: would reap (closed bead, clean tree, no live process)"
 				fmt.Fprintf(stderr, //nolint:errcheck
@@ -288,7 +336,7 @@ func reapClosedBeadWorktrees(
 				)
 				recordReapSkipped(rec, beadID, worktreePath, rigName, whatIf)
 				report.Reaped = append(report.Reaped, reapDecision{
-					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
 				})
 				continue
 			}
@@ -318,7 +366,7 @@ func reapClosedBeadWorktrees(
 				})
 			}
 			report.Reaped = append(report.Reaped, reapDecision{
-				BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
+				BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
 			})
 		}
 	}
