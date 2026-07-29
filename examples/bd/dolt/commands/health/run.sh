@@ -278,22 +278,83 @@ if [ "$server_reachable" = true ]; then
 fi
 
 # Check backup freshness.
+#
+# Read where mol-dog-backup ACTUALLY writes (assets/scripts/mol-dog-backup.sh:18),
+# honouring the same GC_BACKUP_ARTIFACT_DIR override the writer honours so that
+# relocating backups cannot silently desync reader from writer again.
+#
+# This used to glob "$GC_CITY_PATH"/migration-backup-*, which is the one-time
+# SQLite->Dolt migration artifact that `gc dolt rollback` restores. Nothing has
+# WRITTEN that path since the migration, so every city reported "none found"
+# regardless of backup health, while gc doctor
+# (internal/doctor/checks_dolt_backup.go) read the correct path all along
+# (gcw-zs2u).
+#
+# backup_state distinguishes three worlds a single empty freshness string used
+# to conflate: no local backups configured at all (legitimate — gc doctor treats
+# an external Dolt endpoint as self-managing its backups, so this must NOT raise
+# an alarm), a configured destination that has never been synced (a real
+# failure), and healthy.
 backup_freshness=""
 backup_stale=false
 backup_age_sec=0
-newest_backup=$(ls -1d "$GC_CITY_PATH"/migration-backup-* 2>/dev/null | sort -r | head -1 || true)
-if [ -n "$newest_backup" ]; then
-  backup_mtime=$(stat -c %Y "$newest_backup" 2>/dev/null || stat -f %m "$newest_backup" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  backup_age_sec=$((now - backup_mtime))
-  if [ "$backup_age_sec" -ge 3600 ]; then
-    backup_freshness="$((backup_age_sec / 3600))h$((backup_age_sec % 3600 / 60))m"
-  elif [ "$backup_age_sec" -ge 60 ]; then
-    backup_freshness="$((backup_age_sec / 60))m$((backup_age_sec % 60))s"
+backup_state="not_configured"
+backup_root="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+if [ -d "$backup_root" ]; then
+  # Report the OLDEST per-database artifact, not the newest. One database that
+  # quietly stopped syncing is precisely the failure this line exists to
+  # surface, and reporting the newest would mask it behind its healthy peers.
+  oldest_mtime=""
+  for db_dir in "$backup_root"/*/; do
+    [ -d "$db_dir" ] || continue
+    # An empty directory is a registered destination that never synced; it must
+    # not be read as a fresh backup just because mkdir -p touched it.
+    # -A so a directory holding only dot-entries is not misread as empty.
+    newest_entry=$(ls -At "$db_dir" 2>/dev/null | head -1 || true)
+    [ -n "$newest_entry" ] || continue
+    db_mtime=$(stat -c %Y "$db_dir" 2>/dev/null || stat -f %m "$db_dir" 2>/dev/null || echo 0)
+    # Directory mtime only moves when entries are added or removed, so a writer
+    # that rewrites a file in place would leave it stale. Take whichever of the
+    # directory and its newest entry is more recent: under-reporting age is the
+    # lying direction, and this bead exists because of a status line that lied.
+    entry_mtime=$(stat -c %Y "$db_dir$newest_entry" 2>/dev/null || stat -f %m "$db_dir$newest_entry" 2>/dev/null || echo 0)
+    # Written as an if, not `[ ... ] && assign`: this script runs under `set -e`
+    # (line 10) with a /bin/sh shebang, and a short-circuited AND-OR list leaves
+    # a nonzero status behind. It survives on bash-as-sh, but a health check is
+    # the wrong place to depend on that subtlety.
+    if [ "$entry_mtime" -gt "$db_mtime" ]; then
+      db_mtime="$entry_mtime"
+    fi
+    if [ -z "$oldest_mtime" ] || [ "$db_mtime" -lt "$oldest_mtime" ]; then
+      oldest_mtime="$db_mtime"
+    fi
+  done
+  if [ -n "$oldest_mtime" ]; then
+    backup_state="ok"
+    now=$(date +%s)
+    backup_age_sec=$((now - oldest_mtime))
+    if [ "$backup_age_sec" -ge 3600 ]; then
+      backup_freshness="$((backup_age_sec / 3600))h$((backup_age_sec % 3600 / 60))m"
+    elif [ "$backup_age_sec" -ge 60 ]; then
+      backup_freshness="$((backup_age_sec / 60))m$((backup_age_sec % 60))s"
+    else
+      backup_freshness="${backup_age_sec}s"
+    fi
+    # The staleness threshold must exceed the BACKUP CADENCE or the line cries
+    # wolf forever. mol-dog-backup runs on a 6h cooldown
+    # (orders/mol-dog-backup.toml:9), so the previous 1800s bound — written when
+    # this block measured a one-time migration artifact, where 30 minutes was
+    # meaningful — would report [STALE] for 5.5 of every 6 hours once the path
+    # was corrected. Default to two missed cycles: one skipped backup is
+    # tolerable, two is a real failure.
+    if [ "$backup_age_sec" -gt "${GC_BACKUP_STALE_AFTER_SECS:-43200}" ]; then
+      backup_stale=true
+      backup_state="stale"
+    fi
   else
-    backup_freshness="${backup_age_sec}s"
+    backup_state="absent"
+    backup_stale=true
   fi
-  [ "$backup_age_sec" -gt 1800 ] && backup_stale=true
 fi
 
 # Find orphan databases.
@@ -576,7 +637,8 @@ JSONEOF
   "backups": {
     "dolt_freshness": "$backup_freshness",
     "dolt_age_sec": $backup_age_sec,
-    "dolt_stale": $backup_stale
+    "dolt_stale": $backup_stale,
+    "dolt_state": "$backup_state"
   },
   "orphans": [
 JSONEOF
@@ -642,15 +704,20 @@ if [ -n "$db_info" ]; then
   done
 fi
 
-if [ -n "$backup_freshness" ]; then
-  stale=""
-  [ "$backup_stale" = true ] && stale=" [STALE]"
-  echo ""
-  echo "Backups: ${backup_freshness} ago${stale}"
-else
-  echo ""
-  echo "Backups: none found"
-fi
+echo ""
+case "$backup_state" in
+  ok|stale)
+    stale=""
+    [ "$backup_stale" = true ] && stale=" [STALE]"
+    echo "Backups: ${backup_freshness} ago${stale} (oldest of $(basename "$backup_root"))"
+    ;;
+  absent)
+    echo "Backups: configured at ${backup_root} but never synced [STALE]"
+    ;;
+  *)
+    echo "Backups: not configured (no ${backup_root})"
+    ;;
+esac
 
 if [ "$quarantine_count" -gt 0 ]; then
   echo ""

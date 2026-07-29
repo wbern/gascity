@@ -2211,3 +2211,211 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 		}
 	})
 }
+
+// backupCityWithArtifacts builds a city whose managed-Dolt backup artifacts
+// live where mol-dog-backup actually writes them: <city>/.dolt-backup/<db>/.
+// Each db dir gets a file, because the writer's `dolt backup sync` populates
+// the directory and an empty dir is the distinct "configured but nothing
+// synced" state.
+func backupCityWithArtifacts(t *testing.T, cityPath string, dbs ...string) {
+	t.Helper()
+	for _, db := range dbs {
+		root := filepath.Join(cityPath, ".dolt-backup")
+		dir := filepath.Join(root, db)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+	}
+}
+
+// TestHealthScriptReadsBackupsFromDoltBackupDir is the regression guard for the
+// defect where `gc dolt health` reported "Backups: none found" on every city
+// (gcw-zs2u). It globbed <city>/migration-backup-*, a dead artifact of the old
+// SQLite->Dolt migration that nothing has written since; mol-dog-backup.sh:18
+// writes ${GC_BACKUP_ARTIFACT_DIR:-<city>/.dolt-backup}. The two paths were
+// never the same, so the "none found" branch was structurally unreachable-past
+// on every install, and gc doctor (internal/doctor/checks_dolt_backup.go) has
+// been reading the correct path the whole time.
+//
+// The block had ZERO test coverage, and the only JSON consumer
+// (commands/health-check/run.sh) reads .server.* exclusively — which is exactly
+// why a permanently false status line survived.
+func TestHealthScriptReadsBackupsFromDoltBackupDir(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	backupCityWithArtifacts(t, cityPath, "hq", "crm")
+
+	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").Output()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Backups struct {
+			Freshness string `json:"dolt_freshness"`
+			AgeSec    int    `json:"dolt_age_sec"`
+			Stale     bool   `json:"dolt_stale"`
+			State     string `json:"dolt_state"`
+		} `json:"backups"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health json: %v\n%s", err, out)
+	}
+	if report.Backups.State != "ok" {
+		t.Errorf("dolt_state = %q, want \"ok\" for a city with fresh backup artifacts", report.Backups.State)
+	}
+	if report.Backups.Freshness == "" {
+		t.Errorf("dolt_freshness is empty for a city with fresh backup artifacts; this is the gcw-zs2u lie")
+	}
+	if report.Backups.Stale {
+		t.Errorf("dolt_stale = true for backups written seconds ago")
+	}
+}
+
+// TestHealthScriptDistinguishesBackupStates pins the second half of gcw-zs2u:
+// a single empty `backup_freshness` conflated three different worlds — never
+// configured, configured but nothing synced, and healthy-but-read-from-the-
+// wrong-path. Only the third was a lie, but a consumer could not tell any of
+// them apart, and the JSON reported dolt_stale:false for a city with no
+// backups at all, so anything gating on that field was blind.
+//
+// "not configured" must NOT report stale: gc doctor
+// (internal/doctor/checks_dolt_backup.go:66-77) treats an external Dolt
+// endpoint as self-managing its own backups, so a city legitimately without a
+// local .dolt-backup must not raise a permanent false alarm — that is the same
+// disease this bead is curing.
+func TestHealthScriptDistinguishesBackupStates(t *testing.T) {
+	root := repoRoot(t)
+
+	t.Run("not configured", func(t *testing.T) {
+		cityPath := t.TempDir() // no .dolt-backup at all
+		out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		assertBackupState(t, out, "not_configured", false)
+
+		human, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, human)
+		}
+		if !strings.Contains(string(human), "Backups: not configured") {
+			t.Errorf("human output should say backups are not configured, got:\n%s", human)
+		}
+	})
+
+	t.Run("configured but nothing synced", func(t *testing.T) {
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, ".dolt-backup"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		// An empty backup root IS a failure — the dog registered a destination
+		// and never synced to it — so it must be loud, unlike "not configured".
+		assertBackupState(t, out, "absent", true)
+	})
+
+	t.Run("honors GC_BACKUP_ARTIFACT_DIR like the writer does", func(t *testing.T) {
+		cityPath := t.TempDir()
+		relocated := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(relocated, "hq"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(relocated, "hq", "manifest"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		env := append(reachableServerEnv(t, root, cityPath), "GC_BACKUP_ARTIFACT_DIR="+relocated)
+		out, err := newHealthScriptCmd(root, env, "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		// mol-dog-backup.sh:18 reads this same variable. If the reader ignores
+		// it, relocating backups silently recreates the original defect.
+		assertBackupState(t, out, "ok", false)
+	})
+}
+
+func assertBackupState(t *testing.T, out []byte, wantState string, wantStale bool) {
+	t.Helper()
+	var report struct {
+		Backups struct {
+			Stale bool   `json:"dolt_stale"`
+			State string `json:"dolt_state"`
+		} `json:"backups"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health json: %v\n%s", err, out)
+	}
+	if report.Backups.State != wantState {
+		t.Errorf("dolt_state = %q, want %q", report.Backups.State, wantState)
+	}
+	if report.Backups.Stale != wantStale {
+		t.Errorf("dolt_stale = %v, want %v", report.Backups.Stale, wantStale)
+	}
+}
+
+// TestHealthScriptBackupStalenessTracksBackupCadence guards the second-order
+// trap in gcw-zs2u: correcting the PATH alone would have replaced a status line
+// that always lied healthy with one that always cried stale. The threshold was
+// 1800s, written when this block measured a one-time SQLite->Dolt migration
+// artifact; mol-dog-backup actually runs on a 6h cooldown
+// (orders/mol-dog-backup.toml:9), so a correctly-read backup would have been
+// [STALE] for 5.5 of every 6 hours. Caught by running the fix against the live
+// city, not by the unit tests — which is why this test now exists.
+func TestHealthScriptBackupStalenessTracksBackupCadence(t *testing.T) {
+	root := repoRoot(t)
+
+	// Age the artifacts by backdating both the entry and its directory, since
+	// the reader takes whichever is newer.
+	age := func(t *testing.T, cityPath string, d time.Duration) {
+		t.Helper()
+		when := time.Now().Add(-d)
+		dir := filepath.Join(cityPath, ".dolt-backup", "hq")
+		if err := os.Chtimes(filepath.Join(dir, "manifest"), when, when); err != nil {
+			t.Fatalf("chtimes entry: %v", err)
+		}
+		if err := os.Chtimes(dir, when, when); err != nil {
+			t.Fatalf("chtimes dir: %v", err)
+		}
+	}
+
+	t.Run("one missed 6h cycle is tolerated", func(t *testing.T) {
+		cityPath := t.TempDir()
+		backupCityWithArtifacts(t, cityPath, "hq")
+		age(t, cityPath, 7*time.Hour)
+		out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		assertBackupState(t, out, "ok", false)
+	})
+
+	t.Run("two missed cycles is a real failure", func(t *testing.T) {
+		cityPath := t.TempDir()
+		backupCityWithArtifacts(t, cityPath, "hq")
+		age(t, cityPath, 13*time.Hour)
+		out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		assertBackupState(t, out, "stale", true)
+	})
+
+	t.Run("threshold is operator-overridable", func(t *testing.T) {
+		cityPath := t.TempDir()
+		backupCityWithArtifacts(t, cityPath, "hq")
+		age(t, cityPath, 2*time.Hour)
+		env := append(reachableServerEnv(t, root, cityPath), "GC_BACKUP_STALE_AFTER_SECS=3600")
+		out, err := newHealthScriptCmd(root, env, "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh failed: %v\n%s", err, out)
+		}
+		assertBackupState(t, out, "stale", true)
+	})
+}
