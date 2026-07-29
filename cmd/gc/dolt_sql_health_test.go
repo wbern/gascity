@@ -417,3 +417,80 @@ func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 		t.Fatalf("dolt args missing configured password flag:\n%s", data)
 	}
 }
+
+// TestManagedDoltProbeTimeoutIsDistinguishableFromFailure is the regression
+// guard for gcw-uuys. The managed probe reported a slow-but-alive server
+// identically to a dead one: the timeout produced a distinguishable STRING but
+// a bare fmt.Errorf with no sentinel and no error type, so every caller
+// collapsed "did not answer in time" into "unreachable".
+//
+// That conflation is not academic. It propagated all the way out to an operator
+// watchdog whose in-code comment asserted a probe failure meant "the store
+// ITSELF failing, not a symptom" — while its own recorded data showed the probe
+// failing when Dolt was LESS busy (dolt_cpu 15.2%) than on ticks where it
+// passed (46.8%). The real trigger was host contention. A detector must not
+// assert a cause it cannot distinguish, and it cannot distinguish one the code
+// never separated.
+func TestManagedDoltProbeTimeoutIsDistinguishableFromFailure(t *testing.T) {
+	t.Run("timeout is a timeout", func(t *testing.T) {
+		binDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		oldTimeout := managedDoltSQLCommandTimeout
+		managedDoltSQLCommandTimeout = 50 * time.Millisecond
+		defer func() { managedDoltSQLCommandTimeout = oldTimeout }()
+
+		_, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1")
+		if err == nil {
+			t.Fatal("expected timeout error")
+		}
+		if !errors.Is(err, errManagedDoltProbeTimeout) {
+			t.Fatalf("timeout error is not identifiable as a timeout: %v", err)
+		}
+		// The human-readable form must survive too — operators read this.
+		if !strings.Contains(err.Error(), "timed out after") {
+			t.Fatalf("error lost its human form: %v", err)
+		}
+	})
+
+	t.Run("a real failure is NOT a timeout", func(t *testing.T) {
+		binDir := t.TempDir()
+		// Exits nonzero immediately: the server answered, and said no.
+		if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte("#!/bin/sh\necho 'connection refused' >&2\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		_, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1")
+		if err == nil {
+			t.Fatal("expected failure")
+		}
+		if errors.Is(err, errManagedDoltProbeTimeout) {
+			t.Fatalf("a refused connection was misreported as a timeout: %v", err)
+		}
+	})
+}
+
+// TestManagedDoltReadOnlyProbeWorstCaseIsPublished pins the aggregate bound of
+// the read-only probe. Half of gcw-uuys is that no such bound was published
+// anywhere, so consumers guessed: an operator watchdog wrapped a command in 25s
+// while a single inner step of it was allowed 30s, and the resulting timeouts
+// were reported as the store failing. A bound a caller cannot read is a bound a
+// caller will get wrong.
+func TestManagedDoltReadOnlyProbeWorstCaseIsPublished(t *testing.T) {
+	want := managedDoltSQLCommandTimeout * time.Duration(managedDoltReadOnlyProbeRoundTrips)
+	if got := managedDoltReadOnlyProbeWorstCase(); got != want {
+		t.Fatalf("worst case = %s, want %s", got, want)
+	}
+	// The probe really does perform this many bounded round trips: Ping, Conn,
+	// SHOW DATABASES, and one per probe statement. If a round trip is added or
+	// removed without updating the count, the published bound becomes a lie —
+	// which is the class of defect this whole bead is about.
+	if stmts := len(managedDoltReadOnlyProbeStatementsFor("somedb")); stmts+3 != managedDoltReadOnlyProbeRoundTrips {
+		t.Fatalf("probe performs %d statements + 3 setup round trips, but the published count is %d",
+			stmts, managedDoltReadOnlyProbeRoundTrips)
+	}
+}

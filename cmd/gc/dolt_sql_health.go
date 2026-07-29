@@ -37,12 +37,29 @@ const managedDoltProbeTable = "__gc_read_only_probe"
 
 var errManagedDoltNoUserDatabase = errors.New("no user database available for managed Dolt read-only probe")
 
+// errManagedDoltProbeTimeout marks a probe that ran out of time rather than one
+// that was refused. A slow-but-alive server and a dead one used to be the same
+// value here: the timeout produced a distinguishable string but a bare
+// fmt.Errorf, so every caller collapsed them and then reasoned wrongly from the
+// result — an operator watchdog concluded "the store ITSELF is failing" when
+// the actual condition was host contention (gcw-uuys). Wrap this so callers can
+// treat "slow" as degraded rather than dead.
+var errManagedDoltProbeTimeout = errors.New("timed out")
+
 var (
 	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
 	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
 	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
 	managedDoltResetProbeDirectFn      = managedDoltResetProbeDirect
 	managedDoltSQLCommandTimeout       = 5 * time.Second
+	// managedDoltReadOnlyProbeRoundTrips is how many bounded round trips
+	// managedDoltReadOnlyStateDirect performs: Ping, Conn, SHOW DATABASES, and
+	// the two probe statements. Its worst case is therefore
+	// managedDoltSQLCommandTimeout * managedDoltReadOnlyProbeRoundTrips.
+	// Published so a caller can size its own budget instead of guessing — a
+	// consumer guessing at an unpublished bound is precisely how a 25s watchdog
+	// came to wrap a command whose single inner step was allowed 30s (gcw-uuys).
+	managedDoltReadOnlyProbeRoundTrips = 5
 )
 
 // managedDoltSystemDatabases lists databases that the read-only probe must not
@@ -311,34 +328,75 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	}
 	defer db.Close() //nolint:errcheck
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		return "unknown", err
+	// One context PER ROUND TRIP, not one shared across all of them. This probe
+	// performs five: Ping, Conn, SHOW DATABASES, and both probe statements. A
+	// single shared budget meant their latencies summed, so a server answering
+	// healthily at ~1.4s per statement blew a 5s budget and was reported dead
+	// (gcw-uuys). Each statement now gets the statement bound, which is what
+	// that bound was always meant to express.
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancelPing()
+	if err := db.PingContext(pingCtx); err != nil {
+		return "unknown", managedDoltClassifyProbeErr(pingCtx, err)
 	}
-	conn, err := db.Conn(ctx)
+	connCtx, cancelConn := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancelConn()
+	conn, err := db.Conn(connCtx)
 	if err != nil {
-		return "unknown", err
+		return "unknown", managedDoltClassifyProbeErr(connCtx, err)
 	}
 	defer conn.Close() //nolint:errcheck
 
-	userDB, err := managedDoltSelectUserDatabaseFromConn(ctx, conn)
+	dbsCtx, cancelDBs := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancelDBs()
+	userDB, err := managedDoltSelectUserDatabaseFromConn(dbsCtx, conn)
 	if err != nil {
-		return "unknown", err
+		return "unknown", managedDoltClassifyProbeErr(dbsCtx, err)
 	}
 	if userDB == "" {
 		return "unknown", errManagedDoltNoUserDatabase
 	}
 	for _, query := range managedDoltReadOnlyProbeStatementsFor(userDB) {
-		if _, err := conn.ExecContext(ctx, query); err != nil {
-			msg := strings.ToLower(err.Error())
+		execCtx, cancelExec := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+		_, execErr := conn.ExecContext(execCtx, query)
+		// Classify BEFORE canceling: cancel() would move a non-deadline
+		// failure's ctx.Err() to context.Canceled and mask the distinction this
+		// fix exists to preserve. (An expired deadline is sticky, so only the
+		// non-timeout direction is at risk — but relying on that asymmetry is
+		// how the original conflation survived.)
+		execErr = managedDoltClassifyProbeErr(execCtx, execErr)
+		cancelExec()
+		if execErr != nil {
+			msg := strings.ToLower(execErr.Error())
 			if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
 				return "true", nil
 			}
-			return "unknown", err
+			return "unknown", execErr
 		}
 	}
 	return "false", nil
+}
+
+// managedDoltReadOnlyProbeWorstCase is the published upper bound on
+// managedDoltReadOnlyStateDirect: every round trip is separately bounded, so
+// the aggregate is the statement bound times the round-trip count. Callers size
+// their own budgets from this instead of guessing.
+func managedDoltReadOnlyProbeWorstCase() time.Duration {
+	return managedDoltSQLCommandTimeout * time.Duration(managedDoltReadOnlyProbeRoundTrips)
+}
+
+// managedDoltClassifyProbeErr tags an error that came from an expired probe
+// context with errManagedDoltProbeTimeout, so a caller can tell a slow server
+// from an unreachable one. Without it context.DeadlineExceeded arrived at the
+// caller as an anonymous error indistinguishable from a refused connection.
+func managedDoltClassifyProbeErr(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%w after %s: %w", errManagedDoltProbeTimeout, managedDoltSQLCommandTimeout, err)
+	}
+	return err
 }
 
 func managedDoltSelectUserDatabaseFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
@@ -475,9 +533,9 @@ func runManagedDoltSQLContext(parent context.Context, host, port, user string, a
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return "", fmt.Errorf("timed out after %s: %s", managedDoltSQLCommandTimeout, msg)
+			return "", fmt.Errorf("%w after %s: %s", errManagedDoltProbeTimeout, managedDoltSQLCommandTimeout, msg)
 		}
-		return "", fmt.Errorf("timed out after %s", managedDoltSQLCommandTimeout)
+		return "", fmt.Errorf("%w after %s", errManagedDoltProbeTimeout, managedDoltSQLCommandTimeout)
 	}
 	if err == nil {
 		return string(out), nil
