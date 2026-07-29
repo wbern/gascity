@@ -396,8 +396,9 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 				return Refuse
 			}
 			// The pure-claim shape routes to the atomic claim endpoint; the
-			// actor gate and fallback live in runBdShim (env-dependent, kept
-			// out of this pure classifier).
+			// actor gate and fallback live in the shim's caller (cmd/bdshim's
+			// BEADS_ACTOR gate — env-dependent, kept out of this pure
+			// classifier).
 			if UpdateClaimShape(args) {
 				return Route
 			}

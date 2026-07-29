@@ -1,21 +1,28 @@
 // Command bdshim is the tiny bd-compatible thin client. Installed as `bd` first
 // on an agent's PATH, it makes a worker's bead calls fast by routing the
 // cache-servable verbs through the already-warm controller HTTP API and execing
-// the real bd (GC_BD_REAL) for everything else — WITHOUT paying the ~200ms
-// cold-start of the 117MB gc binary the fat gc-shim spawns per call.
+// the real bd (GC_BD_REAL) for everything else — WITHOUT paying the cold-start
+// of the ~117MiB gc binary, which it undercuts at ~7MiB by importing only the
+// dependency-light dispatch/classify packages (internal/bdshim,
+// internal/bddispatch → internal/api) and never the SDK's config/session/worker
+// wiring.
 //
-// It is a faithful behavioral clone of cmd/gc's runBdShim (same verb classifier,
-// same route/passthrough/claim dispositions, splitPhase pinned false to match
-// gc's graphStoreSQLiteEnabled), but built as a ~small standalone binary that
-// imports only the dependency-light dispatch/classify packages (internal/bdshim,
-// internal/bddispatch → internal/api), never the SDK's config/session/worker
-// wiring. Routed verbs use the controller's typed contract; compatibility reads
-// whose bd output has no complete controller projection delegate to bd.real with
-// the caller's own env and cwd.
+// Routed verbs use the controller's typed contract; compatibility reads whose bd
+// output has no complete controller projection delegate to bd.real with the
+// caller's own env and cwd.
 //
-// Why this is safe: gc's graphStoreSQLiteEnabled is hardcoded false (identity
-// phase — one backend), so passthrough to the work-only bd is byte-identical to
-// raw bd for every verb. Routing is therefore a pure latency optimization, never
+// This binary does not reimplement the routing decision. It shares one
+// classifier — internal/bdshim.ClassifyVerb — with the in-process fastpath in
+// cmd/gc/bd_fastpath.go, so the two entry points cannot drift on which verbs
+// route, pass through, or refuse.
+//
+// Why passthrough is safe: ClassifyVerb's splitPhase argument is false at every
+// call site, because no split graph store is wired — the city runs a single
+// beads backend, so passthrough to the work-only bd is byte-identical to raw bd
+// for every verb. The split-phase branches exist for the graph_store=sqlite
+// deployment shape, where a distinct graph backend makes a bd fallback able to
+// omit graph-resident beads and the classifier refuses loudly instead. In the
+// current identity phase routing is therefore a pure latency optimization, never
 // a correctness requirement.
 package main
 
@@ -66,9 +73,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	// splitPhase is pinned false to match gc's graphStoreSQLiteEnabled (identity
-	// phase). Route is therefore always a pure latency choice; passthrough is
-	// always byte-identical to raw bd.
+	// splitPhase is pinned false: no split graph store is wired, so the city is
+	// in the identity phase. Route is therefore always a pure latency choice;
+	// passthrough is always byte-identical to raw bd.
 	switch bdshim.ClassifyVerb(verb, verbArgs, false) {
 	case bdshim.Route:
 		city := resolveCityName(cityOverride)

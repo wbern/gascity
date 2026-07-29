@@ -48,7 +48,7 @@ func TestClassifyVerb(t *testing.T) {
 		{"update", []string{"x", "--allow-empty-description", "-d", "replacement body"}, false, Refuse},
 		{"update", []string{"x", "--notes", "done", "--status=closed"}, true, Refuse},
 		// claim: the pure-claim shape (optionally --json) now routes to the warm
-		// controller (POST /bead/{id}/claim); runBdShim gates on BEADS_ACTOR and
+		// controller (POST /bead/{id}/claim); cmd/bdshim gates on BEADS_ACTOR and
 		// falls back to real bd when the actor is unset or the backend can't claim.
 		{"update", []string{"x", "--claim"}, true, Route},
 		{"update", []string{"x", "--claim", "--json"}, true, Route},
