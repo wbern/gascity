@@ -1759,39 +1759,11 @@ func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
-// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle timeout,
-// or 0 when unset, zero, negative, or unparseable. Positive values below
-// ProgressStallTimeoutMinimum are clamped to that floor (a claim-holder recycle
-// must not spin faster than the storm-protection backstops can observe). Zero
-// disables claim-holder recycling (the default): only a city that explicitly opts
-// in by setting a duration above its agents' longest legitimate quiet period gets
-// the behavior.
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
 func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
-	return claimHolderStallTimeoutDuration(s.ClaimHolderStallTimeout)
-}
-
-// claimHolderStallTimeoutDuration parses one claim-holder stall timeout value
-// with the shared city/agent semantics: unset, zero, negative, and unparseable
-// all disable the recycler (0), and a positive value below
-// ProgressStallTimeoutMinimum is clamped to that floor. Disabling is the safe
-// direction for an unreadable value because the recycler's action is
-// destructive — it restarts a session that holds in-progress work.
-func claimHolderStallTimeoutDuration(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil {
-		return 0
-	}
-	if d <= 0 {
-		return 0
-	}
-	if d < ProgressStallTimeoutMinimum {
-		return ProgressStallTimeoutMinimum
-	}
-	return d
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DefaultPoolRespawnBackoffMax is the exponential-window cap applied when
@@ -3754,11 +3726,15 @@ func (l agentLayout) String() string {
 // ProgressStallTimeoutMinimum is clamped to that floor — so an agent can both
 // raise the threshold and opt out entirely. A nil agent (a session whose
 // template resolves to no configured agent) inherits cityDefault.
+//
+// A set override is resolved through SessionConfig.ClaimHolderStallTimeoutDuration
+// so the agent scope cannot drift from the city scope: one knob, one parse, one
+// floor.
 func (a *Agent) EffectiveClaimHolderStallTimeout(cityDefault time.Duration) time.Duration {
 	if a == nil || strings.TrimSpace(a.ClaimHolderStallTimeout) == "" {
 		return cityDefault
 	}
-	return claimHolderStallTimeoutDuration(a.ClaimHolderStallTimeout)
+	return (&SessionConfig{ClaimHolderStallTimeout: a.ClaimHolderStallTimeout}).ClaimHolderStallTimeoutDuration()
 }
 
 // IdleTimeoutDuration returns the idle timeout as a time.Duration.

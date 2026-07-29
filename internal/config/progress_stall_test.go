@@ -38,6 +38,11 @@ func TestClaimHolderStallTimeoutDuration(t *testing.T) {
 		{"too small clamps to safety floor", "1m", ProgressStallTimeoutMinimum},
 		{"unparseable disables (zero)", "not-a-duration", 0},
 		{"negative disables (zero)", "-5m", 0},
+		// A padded value does not parse, so it disables — the same direction
+		// the sibling progress_stall_timeout takes, and the doctor's
+		// ValidateDurations check reports it rather than leaving it silent.
+		{"padded value disables (zero)", "  20m  ", 0},
+		{"whitespace-only disables (zero)", "   ", 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,6 +80,10 @@ func TestAgentEffectiveClaimHolderStallTimeout(t *testing.T) {
 		{"agent unparseable disables for this agent", "not-a-duration", 30 * time.Minute, 0},
 		{"agent value clamps to safety floor", "1m", 30 * time.Minute, ProgressStallTimeoutMinimum},
 		{"agent enables where city disabled", "45m", 0, 45 * time.Minute},
+		// Whitespace-only is "unset" and inherits, but a padded value is a set
+		// override that fails to parse, so it disables for this agent — the
+		// same semantics the city knob applies.
+		{"agent padded value disables for this agent", "  8h  ", 30 * time.Minute, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
