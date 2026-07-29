@@ -147,14 +147,18 @@ func contextWindowTokens(models []string) int {
 }
 
 // classifyWindow maps one model string to its context window. 1M families:
-// Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos, and an explicit [1m] launch
-// suffix; everything else (Haiku, older models, unrecognized) is a
-// conservative 200k. Kept simple/substring rather than a strict table so a
-// dated-suffix variant still matches; pin GC_CONTEXT_WINDOW_TOKENS when a new
-// model's window isn't yet recognized here.
+// Opus 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos, and an
+// explicit [1m] launch suffix; everything else (Haiku, older models,
+// unrecognized) is a conservative 200k. Kept simple/substring rather than a
+// strict table so a dated-suffix variant still matches; pin
+// GC_CONTEXT_WINDOW_TOKENS when a new model's window isn't yet recognized here.
+//
+// The generation suffixes are spelled out ("opus-5", not "opus") so a bare
+// family name can't promote a genuinely-200k model: "opus-4-5" must not match
+// "opus-5", and Haiku 4.5 must stay at 200k.
 func classifyWindow(model string) int {
 	ml := strings.ToLower(model)
-	for _, s := range []string{"[1m]", "fable", "mythos", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6"} {
+	for _, s := range []string{"[1m]", "fable", "mythos", "opus-5", "sonnet-5", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6"} {
 		if strings.Contains(ml, s) {
 			return 1_000_000
 		}

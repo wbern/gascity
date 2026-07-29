@@ -182,3 +182,38 @@ func TestContextInjectSidecarDoesNotShrinkWindow(t *testing.T) {
 		t.Errorf("a 200k-classified newest entry must not shrink the 1M session window: %q", got)
 	}
 }
+
+// TestClassifyWindowRecognizesCurrentModelFamilies pins the model families whose
+// real context window is 1M. An unrecognized family silently falls back to the
+// conservative 200k default, which fires the urgent "recycle now" tier at ~16%
+// of a 1M session's real usage -- the exact failure the contextWindowTokens
+// comment block guards against.
+func TestClassifyWindowRecognizesCurrentModelFamilies(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-5", 1_000_000},
+		{"claude-sonnet-5", 1_000_000},
+		{"claude-fable-5", 1_000_000},
+		{"claude-mythos-5", 1_000_000},
+		{"claude-opus-4-8", 1_000_000},
+		{"claude-opus-4-7", 1_000_000},
+		{"claude-opus-4-6", 1_000_000},
+		{"claude-sonnet-4-6", 1_000_000},
+		// Dated and bracketed variants must still match.
+		{"claude-opus-5-20260401", 1_000_000},
+		{"claude-haiku-4-5-20251001[1m]", 1_000_000},
+		// Haiku 4.5 is the one current model that is genuinely 200k.
+		{"claude-haiku-4-5", 200_000},
+		{"claude-opus-4-5-20251101", 200_000},
+		{"", 200_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := classifyWindow(tt.model); got != tt.want {
+				t.Errorf("classifyWindow(%q) = %d, want %d", tt.model, got, tt.want)
+			}
+		})
+	}
+}

@@ -10,6 +10,17 @@ func TestModelContextWindow(t *testing.T) {
 		{"claude-opus-4-5-20251101", 200_000},
 		{"claude-sonnet-4-5-20251101", 200_000},
 		{"claude-haiku-4-5-20251001", 200_000},
+		// Model families whose window is 1M without needing a "[1m]" suffix.
+		{"claude-opus-5", 1_000_000},
+		{"claude-sonnet-5", 1_000_000},
+		{"claude-opus-4-8", 1_000_000},
+		{"claude-opus-4-7", 1_000_000},
+		{"claude-opus-4-6", 1_000_000},
+		{"claude-sonnet-4-6", 1_000_000},
+		{"claude-fable-5", 1_000_000},
+		{"claude-mythos-5", 1_000_000},
+		// Haiku 4.5 stays at 200k -- it is the one current model that is not 1M.
+		{"claude-haiku-4-5", 200_000},
 		// 1M-window Claude variants carry a "[1m]" suffix on the model ID.
 		{"claude-opus-4-8[1m]", 1_000_000},
 		{"sonnet[1m]", 1_000_000},
