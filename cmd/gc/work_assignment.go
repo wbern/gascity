@@ -107,6 +107,24 @@ func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 	return false
 }
 
+// NonSessionWorkIDs returns the IDs of the non-session WORK beads in items,
+// applying the same session-bead filter as HasNonSessionWork. It is the
+// set-valued form the claim-holder recycle damper needs: the boolean probe
+// short-circuits on the first match, but "is this the same held work as last
+// time?" can only be answered from the whole set.
+func (w workAssignment) NonSessionWorkIDs(items []beads.Bead) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if sessionpkg.IsSessionBeadOrRepairable(item) {
+			continue
+		}
+		if id := strings.TrimSpace(item.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // OpenAssignedToBasic returns the WORK beads assigned to the given identity with
 // the given status, using the no-flags List{Assignee,Status} query (no Live, no
 // TierMode). It is the typed form of the raw probe in

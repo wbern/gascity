@@ -355,6 +355,16 @@ type Info struct {
 	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
 	// (clear/first-increment gates), so the mirror keeps the raw string.
 	ChurnCount string // churn_count (raw)
+	// ClaimHolderRecycleCount, ClaimHolderRecycleAt and ClaimHolderRecycleClaims
+	// are the RAW damper markers for the claim-holder stall recycler: how many
+	// consecutive recycles have changed nothing, when the last one fired, and a
+	// fingerprint of the claims held at that moment. They live on the session
+	// bead precisely because the restart handoff patches that bead in place, so
+	// the accounting outlives the recycle it is counting. Mirrors keep the raw
+	// strings; the cmd/gc damper parses them and fails open on garbage.
+	ClaimHolderRecycleCount  string // claim_holder_recycle_count (raw)
+	ClaimHolderRecycleAt     string // claim_holder_recycle_at (raw)
+	ClaimHolderRecycleClaims string // claim_holder_recycle_claims (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
