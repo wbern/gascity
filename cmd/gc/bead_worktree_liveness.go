@@ -32,10 +32,16 @@ type liveWorktreeState struct {
 	// directories of live processes. Deduplicated.
 	cwds []string
 	// scanned reports whether the process table was enumerated at all. False
-	// means liveness is indeterminate — the host has no /proc, or the
-	// top-level walk failed — and the reaper must fail closed by protecting
-	// every candidate worktree.
+	// means liveness is indeterminate — no enumeration mechanism was available,
+	// or every one of them failed — and the reaper must fail closed by
+	// protecting every candidate worktree.
 	scanned bool
+	// source names the mechanism that produced this scan (liveScanSourceProc,
+	// liveScanSourceLsof), empty when scanned is false. Recorded so the choice
+	// of mechanism is observable rather than inferred from the host: a fallback
+	// that silently substitutes itself is hard to debug when the gate later
+	// behaves unexpectedly.
+	source string
 }
 
 // collectLiveWorktreeStateFn is the seam the reaper calls to gather live
@@ -64,7 +70,7 @@ func collectLiveWorktreeState() liveWorktreeState {
 		// forever, which makes the reaper permanently inert on those hosts
 		// rather than merely cautious. Fall back to a portable process-cwd
 		// enumeration that carries the same signal and the same fail-closed
-		// rules (bead_worktree_liveness_portable.go).
+		// rules (bead_worktree_liveness_fallback.go).
 		return collectLiveWorktreeStateFallback()
 	}
 	seen := make(map[string]struct{})
@@ -99,7 +105,7 @@ func collectLiveWorktreeState() liveWorktreeState {
 		seen[canon] = struct{}{}
 		cwds = append(cwds, canon)
 	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
+	return liveWorktreeState{cwds: cwds, scanned: true, source: liveScanSourceProc}
 }
 
 // worktreeIsLive reports whether any live signal sits at or beneath
