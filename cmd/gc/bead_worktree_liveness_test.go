@@ -78,13 +78,15 @@ func TestWorktreeIsLive_NothingMatches(t *testing.T) {
 	}
 }
 
+// TestCollectLiveWorktreeState_IncludesOwnCWD no longer skips off linux. It used
+// to, on the grounds that "collectLiveWorktreeState relies on /proc; GOOS=%s has
+// none" — which described the defect rather than testing for it, and let the
+// reaper stay inert on every macOS host with a green suite. The portable
+// fallback makes the assertion meaningful on both platforms.
 func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("collectLiveWorktreeState relies on /proc; GOOS=%s has none", runtime.GOOS)
-	}
 	live := collectLiveWorktreeState()
 	if !live.scanned {
-		t.Fatal("collectLiveWorktreeState scanned = false on linux, want true")
+		t.Fatalf("collectLiveWorktreeState scanned = false on %s, want true", runtime.GOOS)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

@@ -59,7 +59,13 @@ var collectLiveWorktreeStateFn = collectLiveWorktreeState
 func collectLiveWorktreeState() liveWorktreeState {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return liveWorktreeState{scanned: false}
+		// No /proc: macOS, and some containers. Reporting the scan
+		// indeterminate here fails closed and protects every candidate
+		// forever, which makes the reaper permanently inert on those hosts
+		// rather than merely cautious. Fall back to a portable process-cwd
+		// enumeration that carries the same signal and the same fail-closed
+		// rules (bead_worktree_liveness_portable.go).
+		return collectLiveWorktreeStateFallback()
 	}
 	seen := make(map[string]struct{})
 	var cwds []string
