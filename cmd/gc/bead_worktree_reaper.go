@@ -30,6 +30,11 @@ type reapDecision struct {
 	// Reason explains a protected decision (why the worktree was left in
 	// place). Empty for a reap/would-reap decision.
 	Reason string
+	// HoldsUnlandedWork marks the one protection whose subject is
+	// irreplaceable: commits whose content is carried by no remote. Every
+	// other reason describes a tree that can be rebuilt from the remote, so
+	// this is the only one whose accumulation silently risks losing work.
+	HoldsUnlandedWork bool
 	// Warning records a non-blocking observation about a reaped worktree —
 	// a signal worth an operator's attention that does not endanger the
 	// removal. Empty when there is nothing to note.
@@ -319,6 +324,7 @@ func reapClosedBeadWorktrees(
 			// Stashes are deliberately NOT a gate; they are recorded as a
 			// warning below. See the stash note on this function.
 			wg := newGitProbe(worktreePath)
+			holdsUnlandedWork := false
 			if reason == "" {
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnlanded, unlandedErr := wg.HasUnlandedCommitsResult()
@@ -327,6 +333,7 @@ func reapClosedBeadWorktrees(
 					reason = fmt.Sprintf("unsafe git state: unlanded probe failed: %v", unlandedErr)
 				case hasUncommitted || hasUnlanded:
 					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unlanded=%v", hasUncommitted, hasUnlanded)
+					holdsUnlandedWork = hasUnlanded
 				}
 			}
 
@@ -354,7 +361,8 @@ func reapClosedBeadWorktrees(
 				)
 				recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
 				report.Protected = append(report.Protected, reapDecision{
-					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason,
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
+					Reason: reason, HoldsUnlandedWork: holdsUnlandedWork,
 				})
 				continue
 			}

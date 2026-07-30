@@ -202,7 +202,27 @@ func renderReapReport(stdout io.Writer, report reapReport) {
 	if report.DryRun {
 		suffix = " (dry-run: nothing was removed)"
 	}
-	fmt.Fprintf(stdout, "%d %s, %d kept%s\n", len(report.Reaped), verb, len(report.Protected), suffix) //nolint:errcheck // best-effort stdout
+	// Call out unlanded work separately. Every other protection describes a
+	// tree that reproduces from the remote, so a bare kept-count reads the
+	// same whether the fleet is merely busy or is sitting on commits that
+	// exist nowhere else — and the latter accumulates silently.
+	stranded := ""
+	if n := countHoldingUnlandedWork(report.Protected); n > 0 {
+		stranded = fmt.Sprintf(", %d holding unlanded work", n)
+	}
+	fmt.Fprintf(stdout, "%d %s, %d kept%s%s\n", len(report.Reaped), verb, len(report.Protected), stranded, suffix) //nolint:errcheck // best-effort stdout
+}
+
+// countHoldingUnlandedWork returns how many protected decisions are held
+// because they carry commits no remote carries.
+func countHoldingUnlandedWork(protected []reapDecision) int {
+	n := 0
+	for _, d := range protected {
+		if d.HoldsUnlandedWork {
+			n++
+		}
+	}
+	return n
 }
 
 func newWorktreeScanCmd(stdout, stderr io.Writer) *cobra.Command {
