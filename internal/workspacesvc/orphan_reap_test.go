@@ -228,7 +228,11 @@ func TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit(t *testing.T) {
 
 	// Sanity: a normal (non-init) sweeper sees the seeded orphan.
 	found := false
-	for _, got := range findOrphanedServiceProcessesFrom(os.Getpid(), id) {
+	seen, err := findOrphanedServiceProcessesFrom(os.Getpid(), id)
+	if err != nil {
+		t.Fatalf("normal sweep could not scan: %v", err)
+	}
+	for _, got := range seen {
 		if got == pid {
 			found = true
 			break
@@ -238,7 +242,11 @@ func TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit(t *testing.T) {
 		t.Fatalf("normal sweep did not find seeded orphan %d", pid)
 	}
 
-	if got := findOrphanedServiceProcessesFrom(1, id); len(got) != 0 {
+	got, err := findOrphanedServiceProcessesFrom(1, id)
+	if err != nil {
+		t.Fatalf("pid-1 sweep could not scan: %v", err)
+	}
+	if len(got) != 0 {
 		t.Fatalf("pid-1 sweep returned %v, want none", got)
 	}
 	if !processAliveForTest(pid) {
@@ -451,4 +459,36 @@ func TestDetectUserSubreaperPID(t *testing.T) {
 			t.Fatalf("detectUserSubreaperPID = %d, want 0", got)
 		}
 	})
+}
+
+// TestFindOrphanedServiceProcessesReportsUnavailableScan pins the distinction the
+// sweep used to collapse: a host where the process-table scan cannot run must
+// return an error, not an empty slice. An empty slice reads as "scanned, nothing
+// orphaned" — so the sweep looked clean while orphans kept sockets bound and the
+// next spawn collided with them, with nothing logged.
+//
+// The identity match needs the target's environment, and there is no portable way
+// to read another process's environ, so this scan cannot be ported to ps the way
+// the pid, argv and start-time probes in internal/pidutil were. Reporting
+// unavailability is the honest answer until the identity signal changes.
+func TestFindOrphanedServiceProcessesReportsUnavailableScan(t *testing.T) {
+	id := orphanIdentity{
+		command:     []string{"/nonexistent/service"},
+		serviceName: "unavailable-scan-test",
+		stateRoot:   t.TempDir(),
+	}
+
+	pids, err := findOrphanedServiceProcessesFrom(os.Getpid(), id)
+	if _, statErr := os.Stat("/proc"); statErr == nil {
+		if err != nil {
+			t.Fatalf("scan reported unavailable on a host WITH /proc: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("scan returned (%v, nil) on a host without /proc; an unavailable scan must not look like a clean result", pids)
+	}
+	if len(pids) != 0 {
+		t.Errorf("pids = %v, want none alongside the error", pids)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -120,14 +121,28 @@ func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
 
 // reapOrphanedServiceProcesses terminates orphaned survivors of previous
 // hard exits that match the service instance's identity. Best-effort: scan
-// or signal failures are logged and never block the spawn; on hosts without
-// /proc the sweep is a no-op.
+// or signal failures are logged and never block the spawn.
+//
+// On a host where the scan cannot run at all the sweep is a no-op, and it says
+// so. It used to return silently, which is materially worse than being
+// unavailable: an operator saw nothing while orphans kept sockets bound and the
+// next spawn collided with them. The equivalent startup sweep in cmd/gc warns
+// with the state roots to clean by hand; this one now matches that, once per
+// invocation.
 func reapOrphanedServiceProcesses(id orphanIdentity) {
 	// The sweeper runs under the same subreaper that adopts this supervisor's
 	// orphans, so detect it from the sweeper's own ancestry. On a plain-init
 	// host this stays 0 and matchesLive keeps the strict ppid==1 rule.
 	id.subreaperPID = detectUserSubreaperPID(os.Getpid())
-	pids := findOrphanedServiceProcesses(id)
+	pids, err := findOrphanedServiceProcesses(id)
+	if err != nil {
+		// Distinguish "scanned and found nothing" from "could not scan".
+		// Collapsing the two lets an unavailable check masquerade as a clean
+		// result — the same reasoning the child-enumeration helper in
+		// internal/pidutil records for its own error return.
+		log.Printf("workspacesvc: orphan sweep unavailable for service %q (%v); after a non-graceful exit, stale processes may keep sockets bound. Stop processes whose environment includes GC_SERVICE_STATE_ROOT=%s, then retry.", id.serviceName, err, id.stateRoot)
+		return
+	}
 	if len(pids) == 0 {
 		return
 	}
@@ -173,9 +188,11 @@ func processComm(pid int) string {
 	return strings.TrimSpace(string(data))
 }
 
-// findOrphanedServiceProcesses scans /proc for processes matching id.
+// findOrphanedServiceProcesses scans the process table for processes matching
+// id. It returns an error when the scan itself could not run, so the caller can
+// tell that apart from a clean result.
 // Processes that exit mid-scan or whose records are unreadable are skipped.
-func findOrphanedServiceProcesses(id orphanIdentity) []int {
+func findOrphanedServiceProcesses(id orphanIdentity) ([]int, error) {
 	return findOrphanedServiceProcessesFrom(os.Getpid(), id)
 }
 
@@ -189,13 +206,18 @@ func findOrphanedServiceProcesses(id orphanIdentity) []int {
 // the pid namespace — so the sweep finds nothing by definition. An identity
 // without a state root is incomplete and matches nothing rather than
 // matching too broadly.
-func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) []int {
+func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) ([]int, error) {
 	if len(id.command) == 0 || id.stateRoot == "" || self == 1 {
-		return nil
+		return nil, nil
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil
+		// The identity match needs the target's environment
+		// (processEnvironMatchesService), and there is no portable way to read
+		// another process's environ, so this scan cannot simply be ported to ps
+		// the way the pid/argv/start-time probes in internal/pidutil were. It
+		// reports unavailability instead of an empty result.
+		return nil, fmt.Errorf("process table scan unavailable on %s: %w", runtime.GOOS, err)
 	}
 	var pids []int
 	for _, entry := range entries {
@@ -208,7 +230,7 @@ func findOrphanedServiceProcessesFrom(self int, id orphanIdentity) []int {
 		}
 		pids = append(pids, pid)
 	}
-	return pids
+	return pids, nil
 }
 
 // terminateOrphanedProcesses sends SIGTERM to each pid (preferring its
