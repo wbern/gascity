@@ -15,6 +15,9 @@ type strayWorktree struct {
 	Path        string
 	Reclaimable bool
 	Reason      string
+	// Warning records a non-blocking observation about a reclaimable checkout:
+	// a signal worth an operator's attention that does not make removal unsafe.
+	Warning string
 }
 
 // scanStrayWorktrees walks each managed root and reports every git checkout
@@ -70,8 +73,18 @@ func scanStrayWorktrees(roots []string, liveWorkerDirs map[string]bool, probeFor
 
 // classifyStrayWorktree applies the same safety gate as
 // pruneAgentHomeWorktreeIfSafe: a checkout is reclaimable only when it is a git
-// repo with no uncommitted changes, no unpushed commits, and no stashes. A
-// failed probe is treated as not-reclaimable — never guess in favor of removal.
+// repo with no uncommitted changes and no unpushed commits — the two forms of
+// work that live inside this checkout and that its removal would destroy. A
+// failed probe on either is treated as not-reclaimable — never guess in favor
+// of removal.
+//
+// Stashes are deliberately NOT a gate. refs/stash lives in the repository's
+// common git dir, so `git stash list` inside any linked worktree reports every
+// stash in the repo, none of which the checkout owns and none of which its
+// removal can destroy (internal/git's TestWorktreeRemove_PreservesStashes).
+// Gating on it marked every stray unreclaimable in any repository that had ever
+// stashed — 58 repo-wide stashes in crm alone — so it is recorded as a warning
+// instead.
 func classifyStrayWorktree(path string, probeFor func(string) gitProbe) strayWorktree {
 	gp := probeFor(path)
 	if !gp.IsRepo() {
@@ -85,10 +98,11 @@ func classifyStrayWorktree(path string, probeFor func(string) gitProbe) strayWor
 	} else if unpushed {
 		return strayWorktree{Path: path, Reason: "unpushed commits"}
 	}
+	warning := ""
 	if stashes, err := gp.HasStashesResult(); err != nil {
-		return strayWorktree{Path: path, Reason: "stash probe failed"}
+		warning = "repo-wide stash probe failed: " + err.Error()
 	} else if stashes {
-		return strayWorktree{Path: path, Reason: "stashed work"}
+		warning = "repository holds stashed work (repo-wide; not owned by this checkout)"
 	}
-	return strayWorktree{Path: path, Reclaimable: true}
+	return strayWorktree{Path: path, Reclaimable: true, Warning: warning}
 }

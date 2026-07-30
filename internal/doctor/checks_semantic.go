@@ -388,6 +388,7 @@ type nestedWorktreeFinding struct {
 	parent   string // agent home that contains it
 	branch   string // branch name (best-effort; empty for detached)
 	reason   string // why it was rejected (empty if safe)
+	warning  string // non-blocking observation about a worktree that IS safe to remove
 	probeErr bool   // rejected because a safety probe failed
 	safeToRm bool
 }
@@ -556,6 +557,12 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, f := range c.findings {
 		line := fmt.Sprintf("%s (branch %q)", f.path, f.branch)
 		if f.safeToRm {
+			// A safe finding can still carry a warning worth reading before the
+			// operator authorizes the fix — a repo-wide stash, for instance,
+			// which does not make removal unsafe but is worth knowing exists.
+			if f.warning != "" {
+				line = fmt.Sprintf("%s — note: %s", line, f.warning)
+			}
 			safe = append(safe, line)
 		} else {
 			if f.probeErr {
@@ -663,15 +670,21 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 		f.reason = "has unpushed commits"
 		return f
 	}
-	hasStashes, err := gw.HasStashesResult()
-	if err != nil {
-		f.reason = fmt.Sprintf("stash probe failed: %v", err)
-		f.probeErr = true
-		return f
-	}
-	if hasStashes {
-		f.reason = "has stashed work"
-		return f
+	// Stashes are deliberately NOT a gate. refs/stash lives in the
+	// repository's common git dir, so `git stash list` inside a linked
+	// worktree reports every stash in the repo — none of which this worktree
+	// owns, and none of which its removal can destroy (internal/git's
+	// TestWorktreeRemove_PreservesStashes proves the property). Rejecting on
+	// it told the operator that every nested worktree was unsafe in any
+	// repository that had ever stashed. It is recorded as a warning instead,
+	// and a failed probe is likewise only a warning: a signal that cannot
+	// endanger this worktree when readable cannot endanger it when
+	// unreadable, so it must not set probeErr and drag the whole scan into
+	// degraded-reporting territory.
+	if hasStashes, err := gw.HasStashesResult(); err != nil {
+		f.warning = fmt.Sprintf("repo-wide stash probe failed: %v", err)
+	} else if hasStashes {
+		f.warning = "repository holds stashed work (repo-wide; not owned by this worktree)"
 	}
 	f.safeToRm = true
 	return f

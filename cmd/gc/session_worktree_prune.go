@@ -69,6 +69,53 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 	return gp, ""
 }
 
+// workerDirGitStateSkip applies the git-state safety gates to a prune candidate
+// and returns a non-empty skip reason when the worktree holds work its removal
+// would destroy: uncommitted changes in its own working files and index, or
+// commits on its branch that no remote carries. Both fail closed. It also
+// logs — but does not return — a non-blocking warning for anything worth an
+// operator's attention that does not make removal unsafe. Neither caller has a
+// report to attach it to, so the log line is the surface.
+//
+// Shared by both entry points so a gate cannot exist in one copy and not the
+// other — the hazard that made this file's duplicated chain worth removing.
+//
+// Stashes are deliberately NOT a gate. refs/stash lives in the repository's
+// common git dir, so `git stash list` inside a linked worktree reports every
+// stash in the repo, none of which this worktree owns and none of which its
+// removal can destroy (internal/git's TestWorktreeRemove_PreservesStashes).
+// Gating on it blocked every prune in any repository that had ever stashed —
+// crm alone holds 58 — and wrote a ".worktree-stale reason=stashed-work" marker
+// that agent_home_worktree_cleanup.go then read as a real signal. Both are gone:
+// the stash is a warning, and no marker is written for it.
+func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (skip string) {
+	if gp.HasUncommittedWork() {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
+		return "has uncommitted changes"
+	}
+	hasUnpushed, err := gp.HasUnpushedCommitsResult()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return "unpushed probe failed"
+	}
+	if hasUnpushed {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
+		return "has unpushed commits"
+	}
+	warning := ""
+	if hasStashes, stashErr := gp.HasStashesResult(); stashErr != nil {
+		warning = fmt.Sprintf("repo-wide stash probe failed: %v", stashErr)
+	} else if hasStashes {
+		warning = "repository holds stashed work (repo-wide; not owned by this worktree and not destroyed by its removal)"
+	}
+	if warning != "" {
+		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: warning: %s\n", workerDir, warning) //nolint:errcheck
+	}
+	return ""
+}
+
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
 // pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
 // can later detect when it's safe to reclaim. Best-effort: write failures are
@@ -101,7 +148,8 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
-//   - the worktree has uncommitted changes, unpushed commits, or stashes
+//   - the worktree has uncommitted changes or unpushed commits (a repo-wide
+//     stash is only a warning — see workerDirGitStateSkip)
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //
 // Every skip but the first reports its reason on stderr. They used to return
@@ -121,29 +169,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %q: %s\n", workerDir, skip) //nolint:errcheck
 		return false
 	}
-	if gp.HasUncommittedWork() {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
-		return false
-	}
-	hasUnpushed, err := gp.HasUnpushedCommitsResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return false
-	}
-	if hasUnpushed {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
-		return false
-	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return false
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
+	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
 		return false
 	}
 
@@ -183,29 +209,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %q: %s\n", workerDir, skip) //nolint:errcheck
 		return
 	}
-	if gp.HasUncommittedWork() {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
-		return
-	}
-	hasUnpushed, err := gp.HasUnpushedCommitsResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasUnpushed {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
-		return
-	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
+	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
 		return
 	}
 

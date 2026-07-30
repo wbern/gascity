@@ -317,13 +317,18 @@ func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true with stashes")
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatalf("prune returned false for a repo-wide stash; got %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stashed work") {
-		t.Errorf("expected stashes-reason log; got %q", stderr.String())
+	if !rigProbe.removeInvoked {
+		t.Error("WorktreeRemove not called despite only a repo-wide stash")
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
+	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), "stash") {
+		t.Errorf("expected a non-blocking stash warning; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
@@ -331,11 +336,13 @@ func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true after stash probe error")
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatalf("prune returned false after a stash probe error; got %q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "stash probe failed") {
-		t.Errorf("expected stash-error log; got %q", stderr.String())
+		t.Errorf("expected the failed stash probe recorded as a warning; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }

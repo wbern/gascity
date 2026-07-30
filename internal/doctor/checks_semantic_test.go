@@ -854,11 +854,15 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 			unsafeCount++
 		}
 	}
-	if safeCount != 1 {
-		t.Errorf("safeCount = %d, want 1", safeCount)
+	// task-stashed counts as SAFE: refs/stash is repo-wide, so its presence says
+	// nothing about this worktree and its removal cannot destroy the stash
+	// (internal/git's TestWorktreeRemove_PreservesStashes). Only task-dirty and
+	// task-unpushed hold work removal would lose.
+	if safeCount != 2 {
+		t.Errorf("safeCount = %d, want 2 (clean + repo-wide-stash-only)", safeCount)
 	}
-	if unsafeCount != 3 {
-		t.Errorf("unsafeCount = %d, want 3", unsafeCount)
+	if unsafeCount != 2 {
+		t.Errorf("unsafeCount = %d, want 2 (dirty + unpushed)", unsafeCount)
 	}
 
 	for _, f := range c.findings {
@@ -867,15 +871,19 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 		}
 	}
 
-	// Fix removes only the safe one.
+	// Fix removes exactly the safe ones, and never the dirty or unpushed ones.
 	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	if len(removes) != 1 {
-		t.Fatalf("removes = %v, want exactly one (the safe entry)", removes)
+	if len(removes) != 2 {
+		t.Fatalf("removes = %v, want the clean and the repo-wide-stash-only entries", removes)
 	}
-	if removes[0] != safe {
-		t.Errorf("removed %q, want %q", removes[0], safe)
+	removed := map[string]bool{removes[0]: true, removes[1]: true}
+	if !removed[safe] || !removed[stashed] {
+		t.Errorf("removes = %v, want %q and %q", removes, safe, stashed)
+	}
+	if removed[dirty] || removed[unpushed] {
+		t.Errorf("removes = %v must not include the dirty (%q) or unpushed (%q) worktree", removes, dirty, unpushed)
 	}
 }
 
@@ -1111,6 +1119,13 @@ func TestNestedWorktreePruneCheck_FixRevalidatesBeforeRemove(t *testing.T) {
 	}
 }
 
+// TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe covers the probes that GATE
+// safety. A failed uncommitted or unpushed probe means doctor cannot tell whether
+// the worktree holds work removal would destroy, so it must stay unsafe. A failed
+// STASH probe is different in kind and is asserted separately
+// (TestClassifyNested_StashProbeFailureIsOnlyAWarning): a repo-wide signal that
+// cannot endanger this worktree when readable cannot endanger it when unreadable,
+// so it neither blocks nor counts as an inspection failure.
 func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "agent-1")
@@ -1147,18 +1162,36 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 		t.Fatalf("findings = %d, want 2", len(c.findings))
 	}
 	for _, f := range c.findings {
-		if f.safeToRm {
-			t.Fatalf("%s should not be safe after probe error", f.path)
-		}
-		if !strings.Contains(f.reason, "probe failed") {
-			t.Errorf("reason for %s = %q, want probe failure", f.path, f.reason)
+		switch f.path {
+		case unpushedErr:
+			if f.safeToRm {
+				t.Errorf("%s should not be safe after an unpushed probe error", f.path)
+			}
+			if !strings.Contains(f.reason, "probe failed") {
+				t.Errorf("reason for %s = %q, want probe failure", f.path, f.reason)
+			}
+			if !f.probeErr {
+				t.Errorf("probeErr = false for %s, want true: a failed safety probe is an inspection failure", f.path)
+			}
+		case stashErr:
+			if !f.safeToRm {
+				t.Errorf("%s should be safe: a failed repo-wide stash probe cannot endanger this worktree (reason %q)", f.path, f.reason)
+			}
+			if f.probeErr {
+				t.Errorf("probeErr = true for %s; a stash probe does not gate safety, so it must not mark the scan degraded", f.path)
+			}
+			if !strings.Contains(f.warning, "stash") {
+				t.Errorf("warning for %s = %q, want the failed stash probe recorded", f.path, f.warning)
+			}
+		default:
+			t.Errorf("unexpected finding path %q", f.path)
 		}
 	}
-	if err := c.Fix(&CheckContext{}); err != nil {
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
 		t.Fatalf("Fix should skip unsafe probe-error findings without error: %v", err)
 	}
-	if len(removes) != 0 {
-		t.Errorf("removes = %v, want none", removes)
+	if len(removes) != 1 || removes[0] != stashErr {
+		t.Errorf("removes = %v, want only the stash-probe-error worktree %q", removes, stashErr)
 	}
 }
 
