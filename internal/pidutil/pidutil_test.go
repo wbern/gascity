@@ -114,10 +114,6 @@ func TestAliveWithStartTimeDeadPID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
 		return false
 	}) {
@@ -126,10 +122,6 @@ func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
 		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
 	}) {
@@ -138,10 +130,6 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 }
 
 func TestCmdlineReturnsOwnArgv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	argv, err := Cmdline(os.Getpid())
 	if err != nil {
 		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)
