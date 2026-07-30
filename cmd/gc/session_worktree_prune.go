@@ -31,6 +31,44 @@ type gitProbe interface {
 // through a package-level var so tests can stub the git invocations.
 var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
 
+// resolveWorkerDirForPrune applies the eligibility gates that precede any git
+// safety probe and returns the probe to continue with. When the worker_dir is
+// not eligible it returns a non-empty reason instead, so no skip is silent:
+// asked why the reconciler prunes nothing, an operator can read the answer
+// rather than infer it from the absence of output.
+//
+// Shared by both entry points below. They differ only in how they read the
+// worker_dir and resolve the rig root; every gate here is identical, and a
+// safety gate that exists in one copy but not the other is precisely the bug
+// this shape prevents.
+//
+// Config-disabled is deliberately not handled here: that is a standing operator
+// choice, not an anomaly, and announcing it on every session close would be
+// noise.
+func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip string) {
+	if workerDir == "" {
+		return nil, "session has no worker_dir metadata"
+	}
+	if !filepath.IsAbs(workerDir) {
+		return nil, "worker_dir is not an absolute path"
+	}
+
+	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
+		return nil, fmt.Sprintf("worker_dir is not nested under the city's worktrees tree %s", wtRoot)
+	}
+
+	if _, err := os.Stat(filepath.Join(workerDir, ".git")); err != nil {
+		return nil, "worker_dir has no .git pointer (already reclaimed, or never a worktree)"
+	}
+
+	gp = newGitProbe(workerDir)
+	if !gp.IsRepo() {
+		return nil, "worker_dir is not a readable git repo"
+	}
+	return gp, ""
+}
+
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
 // pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
 // can later detect when it's safe to reclaim. Best-effort: write failures are
@@ -58,12 +96,17 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // session bead.
 //
 // No-op when:
-//   - cfg.Daemon.AutoPruneWorkerDir is false
+//   - cfg.Daemon.AutoPruneWorkerDir is false (the only silent skip: a standing
+//     operator choice, not an anomaly)
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
 //   - the worktree has uncommitted changes, unpushed commits, or stashes
 //   - the rig that owns the session cannot be resolved to a filesystem path
+//
+// Every skip but the first reports its reason on stderr. They used to return
+// silently, which made "the prune never logs" indistinguishable from "the prune
+// never ran" without reading this source.
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
 // still shows up via `gc doctor` later, which is the operator's existing
@@ -73,25 +116,9 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 	workerDir := strings.TrimSpace(contract.WorkerDirFromMetadata(session.Metadata))
-	if workerDir == "" {
-		return false
-	}
-	if !filepath.IsAbs(workerDir) {
-		return false
-	}
-
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
-	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
-		return false
-	}
-
-	if _, err := os.Stat(filepath.Join(workerDir, ".git")); err != nil {
-		// Already gone, or never a worktree — nothing to do.
-		return false
-	}
-
-	gp := newGitProbe(workerDir)
-	if !gp.IsRepo() {
+	gp, skip := resolveWorkerDirForPrune(workerDir, cityPath)
+	if skip != "" {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %q: %s\n", workerDir, skip) //nolint:errcheck
 		return false
 	}
 	if gp.HasUncommittedWork() {
@@ -142,31 +169,18 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 // session.WorkerDirFromInfo (the canonical→legacy Info fallback equivalent to
 // contract.WorkerDirFromMetadata), the rig-root lookup reads Info.Template via
 // lookupRigRootForSessionInfo, and the log line reads Info.SessionNameMetadata —
-// every safety gate and the removal itself are unchanged. Byte-identical to the
-// raw form, which survives for its test callers.
+// every safety gate and the removal itself are unchanged. The eligibility gates
+// are now literally the same code (resolveWorkerDirForPrune) rather than a
+// duplicated copy; the git-state gates below are still parallel prose in both
+// forms. The raw form survives for its test callers.
 func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return
 	}
 	workerDir := strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info))
-	if workerDir == "" {
-		return
-	}
-	if !filepath.IsAbs(workerDir) {
-		return
-	}
-
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
-	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
-		return
-	}
-
-	if _, err := os.Stat(filepath.Join(workerDir, ".git")); err != nil {
-		return
-	}
-
-	gp := newGitProbe(workerDir)
-	if !gp.IsRepo() {
+	gp, skip := resolveWorkerDirForPrune(workerDir, cityPath)
+	if skip != "" {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %q: %s\n", workerDir, skip) //nolint:errcheck
 		return
 	}
 	if gp.HasUncommittedWork() {
