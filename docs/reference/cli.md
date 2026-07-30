@@ -4744,7 +4744,28 @@ gc worktree
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc worktree reap](#gc-worktree-reap) | Report (or perform) closed-bead worktree reclamation |
 | [gc worktree scan](#gc-worktree-scan) | List stray worktrees under managed roots |
+
+## gc worktree reap
+
+Report what the closed-bead worktree reaper would reclaim.
+
+Runs the controller's own reaper — the same gates, in the same order — and
+prints each decision with its reason. Dry-run is the default; nothing is
+removed unless --execute is passed.
+
+This exists so the reaper is answerable. Its gates otherwise run only inside
+the controller tick behind a config flag, so "what would be reclaimed, and
+why is that tree being kept" had no operator-facing answer.
+
+```
+gc worktree reap [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--execute` | bool |  | Actually remove the worktrees (default is dry-run) |
 
 ## gc worktree scan
 
