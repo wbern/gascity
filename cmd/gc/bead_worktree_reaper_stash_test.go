@@ -138,8 +138,8 @@ func TestReapClosedBeadWorktrees_ProtectsUnpushedCommitsDespiteStashDowngrade(t 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a worktree with unpushed commits", report.Reaped)
 	}
-	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unpushed=true") {
-		t.Fatalf("Protected = %+v, want 1 entry citing unpushed commits", report.Protected)
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unlanded=true") {
+		t.Fatalf("Protected = %+v, want 1 entry citing unlanded commits", report.Protected)
 	}
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree with unpushed commits was removed: %v", err)
@@ -185,13 +185,13 @@ func TestReapClosedBeadWorktrees_ProtectsWhenUnpushedProbeFails(t *testing.T) {
 	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
 
 	if len(report.Reaped) != 0 {
-		t.Fatalf("Reaped = %+v, want 0 when the unpushed probe fails (fail closed)", report.Reaped)
+		t.Fatalf("Reaped = %+v, want 0 when the unlanded probe fails (fail closed)", report.Reaped)
 	}
-	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unpushed") {
-		t.Fatalf("Protected = %+v, want 1 entry citing the failed unpushed probe", report.Protected)
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unlanded") {
+		t.Fatalf("Protected = %+v, want 1 entry citing the failed unlanded probe", report.Protected)
 	}
 	if _, err := os.Stat(wt); err != nil {
-		t.Fatalf("worktree removed despite an indeterminate unpushed probe: %v", err)
+		t.Fatalf("worktree removed despite an indeterminate unlanded probe: %v", err)
 	}
 }
 

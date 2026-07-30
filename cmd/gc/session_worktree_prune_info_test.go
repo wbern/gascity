@@ -149,26 +149,26 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HasUncommitted(t *testing.T) {
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_HasUnpushed(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafeInfo_HasUnlanded(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "unpushed commits") {
-		t.Errorf("expected unpushed-reason log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "unlanded commits") {
+		t.Errorf("expected unlanded-reason log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unpushed-commits")
+	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_UnpushedProbeError(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafeInfo_UnlandedProbeError(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, unpushedErr: errors.New("boom")})
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "unpushed probe failed") {
-		t.Errorf("expected unpushed-error log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "unlanded probe failed") {
+		t.Errorf("expected unlanded-error log; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }

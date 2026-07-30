@@ -82,9 +82,9 @@ func TestClassifyStrayWorktree_StillProtectsRealWork(t *testing.T) {
 			wantReason: "uncommitted",
 		},
 		{
-			name:       "unpushed commits with a repo-wide stash present",
+			name:       "unlanded commits with a repo-wide stash present",
 			probe:      stashProbe{fakeStrayProbe: fakeStrayProbe{isRepo: true, unpushed: true, stashes: true}},
-			wantReason: "unpushed",
+			wantReason: "unlanded",
 		},
 		{
 			name:       "not a git repo",

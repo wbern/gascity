@@ -97,14 +97,14 @@ func TestClassifyNested_StillProtectsRealWork(t *testing.T) {
 			wantReason: "uncommitted",
 		},
 		{
-			name:       "unpushed commits alongside a repo-wide stash",
+			name:       "unlanded commits alongside a repo-wide stash",
 			probe:      &fakeGitWorktree{unpushed: map[string]bool{path: true}, stashed: map[string]bool{path: true}},
-			wantReason: "unpushed",
+			wantReason: "unlanded",
 		},
 		{
-			name:         "unpushed probe failure still fails closed",
+			name:         "unlanded probe failure still fails closed",
 			probe:        &fakeGitWorktree{unpushedErr: map[string]error{path: errors.New("boom")}},
-			wantReason:   "unpushed",
+			wantReason:   "unlanded",
 			wantProbeErr: true,
 		},
 		{

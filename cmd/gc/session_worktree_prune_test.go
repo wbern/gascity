@@ -39,6 +39,13 @@ func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
+
+// HasUnlandedCommitsResult reuses the unpushed fixture fields. These tests
+// exercise the commit gate's wiring, not patch-id equivalence itself, which
+// internal/git covers against real repositories.
+func (f *fakeGitProbe) HasUnlandedCommitsResult() (bool, error) {
+	return f.hasUnpushed, f.unpushedErr
+}
 func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	f.removeInvoked = true
@@ -284,30 +291,30 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_HasUnpushed(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafe_HasUnlanded(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true with unpushed commits")
+		t.Fatal("prune returned true with unlanded commits")
 	}
-	if !strings.Contains(stderr.String(), "unpushed commits") {
-		t.Errorf("expected unpushed-reason log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "unlanded commits") {
+		t.Errorf("expected unlanded-reason log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unpushed-commits")
+	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafe_UnlandedProbeError(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, unpushedErr: errors.New("boom")})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true after unpushed probe error")
+		t.Fatal("prune returned true after unlanded probe error")
 	}
-	if !strings.Contains(stderr.String(), "unpushed probe failed") {
-		t.Errorf("expected unpushed-error log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "unlanded probe failed") {
+		t.Errorf("expected unlanded-error log; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
