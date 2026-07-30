@@ -716,6 +716,13 @@ func (f *fakeGitWorktree) HasUnpushedCommitsResult() (bool, error) {
 	return f.unpushed[f.currentPath], nil
 }
 
+// HasUnlandedCommitsResult reuses the unpushed fixture maps. These tests
+// exercise the commit gate's wiring, not patch-id equivalence itself, which
+// internal/git covers against real repositories.
+func (f *fakeGitWorktree) HasUnlandedCommitsResult() (bool, error) {
+	return f.HasUnpushedCommitsResult()
+}
+
 func (f *fakeGitWorktree) HasStashesResult() (bool, error) {
 	if err := f.stashedErr[f.currentPath]; err != nil {
 		return false, err

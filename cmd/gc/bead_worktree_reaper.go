@@ -308,20 +308,25 @@ func reapClosedBeadWorktrees(
 			// Git safety gates, only if not already protected. A worktree is
 			// unsafe to remove when it holds work removal would destroy:
 			// uncommitted changes in its own working files and index, or
-			// commits on its branch that no remote carries. Both fail closed —
+			// commits whose content is carried nowhere else. Both fail closed —
 			// an unreadable repository is never assumed clean.
+			//
+			// The commit gate is patch-equivalence, not plain reachability:
+			// squash- and rebase-merges rewrite the SHA, so an integrated
+			// commit is unreachable from every remote forever and reachability
+			// alone would hold the worktree permanently.
 			//
 			// Stashes are deliberately NOT a gate; they are recorded as a
 			// warning below. See the stash note on this function.
 			wg := newGitProbe(worktreePath)
 			if reason == "" {
 				hasUncommitted := wg.HasUncommittedWork()
-				hasUnpushed, unpushedErr := wg.HasUnpushedCommitsResult()
+				hasUnlanded, unlandedErr := wg.HasUnlandedCommitsResult()
 				switch {
-				case unpushedErr != nil:
-					reason = fmt.Sprintf("unsafe git state: unpushed probe failed: %v", unpushedErr)
-				case hasUncommitted || hasUnpushed:
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v", hasUncommitted, hasUnpushed)
+				case unlandedErr != nil:
+					reason = fmt.Sprintf("unsafe git state: unlanded probe failed: %v", unlandedErr)
+				case hasUncommitted || hasUnlanded:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unlanded=%v", hasUncommitted, hasUnlanded)
 				}
 			}
 

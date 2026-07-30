@@ -1410,6 +1410,11 @@
           "description": "AutoReapClosedBeadWorktreesPaceMillis is how long the reaper pauses\nafter each removal, so a pass yields the disk between `git worktree\nremove` calls rather than issuing them back to back. Nil (unset)\ndefaults to DefaultAutoReapClosedBeadWorktreesPaceMillis. Zero\ndisables pacing.",
           "default": 150
         },
+        "auto_reap_closed_bead_worktrees_max_load_percent": {
+          "type": "integer",
+          "description": "AutoReapClosedBeadWorktreesMaxLoadPercent skips a whole reap pass while\nthe host's 1-minute load average exceeds this percentage of its CPU\ncount, so reclamation yields to real work. Nil (unset) defaults to\nDefaultAutoReapClosedBeadWorktreesMaxLoadPercent. Zero disables the\nguard.\n\nThe default is 0 — DISABLED — deliberately. A busy build host can sit\nabove 100% of its cores for long stretches (measured: a 10-core\nworkstation at a 1-minute load of 10.9 during an ordinary test run), so\nan enabled-by-default threshold would skip pass after pass and\nre-create the inert-reaper failure mode this feature exists to avoid,\njust for a different reason. Operators who want the throttle can set\nit; nobody gets it by surprise.",
+          "default": 0
+        },
         "start_ready_timeout": {
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",

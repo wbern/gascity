@@ -93,10 +93,10 @@ func classifyStrayWorktree(path string, probeFor func(string) gitProbe) strayWor
 	if gp.HasUncommittedWork() {
 		return strayWorktree{Path: path, Reason: "uncommitted changes"}
 	}
-	if unpushed, err := gp.HasUnpushedCommitsResult(); err != nil {
-		return strayWorktree{Path: path, Reason: "unpushed probe failed"}
-	} else if unpushed {
-		return strayWorktree{Path: path, Reason: "unpushed commits"}
+	if unlanded, err := gp.HasUnlandedCommitsResult(); err != nil {
+		return strayWorktree{Path: path, Reason: "unlanded probe failed"}
+	} else if unlanded {
+		return strayWorktree{Path: path, Reason: "unlanded commits"}
 	}
 	warning := ""
 	if stashes, err := gp.HasStashesResult(); err != nil {

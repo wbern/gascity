@@ -21,6 +21,7 @@ func (f fakeStrayProbe) IsRepo() bool                            { return f.isRe
 func (f fakeStrayProbe) CurrentBranch() (string, error)          { return f.branch, nil }
 func (f fakeStrayProbe) HasUncommittedWork() bool                { return f.uncommitted }
 func (f fakeStrayProbe) HasUnpushedCommitsResult() (bool, error) { return f.unpushed, nil }
+func (f fakeStrayProbe) HasUnlandedCommitsResult() (bool, error) { return f.unpushed, nil }
 func (f fakeStrayProbe) HasStashesResult() (bool, error)         { return f.stashes, nil }
 func (f fakeStrayProbe) WorktreeRemove(string, bool) error       { return nil }
 
@@ -83,7 +84,7 @@ func TestScanStrayWorktrees(t *testing.T) {
 
 	assertStray(t, byPath, orphanClean, true, "")
 	assertStray(t, byPath, orphanDirty, false, "uncommitted changes")
-	assertStray(t, byPath, orphanUnpushed, false, "unpushed commits")
+	assertStray(t, byPath, orphanUnpushed, false, "unlanded commits")
 
 	// Exactly the three orphans, nothing else.
 	if len(got) != 3 {

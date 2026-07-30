@@ -23,6 +23,7 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
+	HasUnlandedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
@@ -94,15 +95,15 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
 		return "has uncommitted changes"
 	}
-	hasUnpushed, err := gp.HasUnpushedCommitsResult()
+	hasUnlanded, err := gp.HasUnlandedCommitsResult()
 	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unpushed probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return "unpushed probe failed"
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unlanded probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return "unlanded probe failed"
 	}
-	if hasUnpushed {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
-		return "has unpushed commits"
+	if hasUnlanded {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unlanded commits\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "unlanded-commits", stderr)
+		return "has unlanded commits"
 	}
 	warning := ""
 	if hasStashes, stashErr := gp.HasStashesResult(); stashErr != nil {

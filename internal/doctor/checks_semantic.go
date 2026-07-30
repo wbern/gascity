@@ -401,6 +401,7 @@ type gitWorktree interface {
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
+	HasUnlandedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
@@ -660,14 +661,14 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 		f.reason = "has uncommitted changes"
 		return f
 	}
-	hasUnpushed, err := gw.HasUnpushedCommitsResult()
+	hasUnlanded, err := gw.HasUnlandedCommitsResult()
 	if err != nil {
-		f.reason = fmt.Sprintf("unpushed commit probe failed: %v", err)
+		f.reason = fmt.Sprintf("unlanded commit probe failed: %v", err)
 		f.probeErr = true
 		return f
 	}
-	if hasUnpushed {
-		f.reason = "has unpushed commits"
+	if hasUnlanded {
+		f.reason = "has unlanded commits"
 		return f
 	}
 	// Stashes are deliberately NOT a gate. refs/stash lives in the
