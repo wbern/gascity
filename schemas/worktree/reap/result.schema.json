@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "dry_run",
+    "summary",
+    "reaped",
+    "protected"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "True when nothing was removed. Reap is dry-run unless --execute is passed."
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "reaped",
+        "kept",
+        "holding_unlanded_work"
+      ],
+      "properties": {
+        "reaped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kept": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "holding_unlanded_work": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Kept worktrees carrying commits no remote carries. The only protection class whose removal could destroy work."
+        }
+      },
+      "additionalProperties": true
+    },
+    "reaped": {
+      "$ref": "#/$defs/decisions"
+    },
+    "protected": {
+      "$ref": "#/$defs/decisions"
+    }
+  },
+  "$defs": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "bead_id",
+          "rig",
+          "path"
+        ],
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why a worktree was kept. Empty for a reaped entry."
+          },
+          "warning": {
+            "type": "string"
+          },
+          "holds_unlanded_work": {
+            "type": "boolean",
+            "description": "The worktree carries commits whose content no remote carries."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

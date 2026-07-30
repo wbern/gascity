@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -56,15 +55,14 @@ worktree roots.`,
 	return cmd
 }
 
-// newWorktreeReapCmd deliberately offers no --json flag. The CLI's JSON
-// contract requires a checked-in schema under schemas/<command path>/ and an
-// {schema_version, ok, ...} envelope; without both, --json aborts with
-// "does not declare JSON support" no matter what the command writes. Advertising
-// the flag before the schema exists would ship exactly the sort of
-// looks-wired-but-inert surface this command was built to expose. Tracked
-// separately, together with the same pre-existing breakage in `worktree scan`.
+// newWorktreeReapCmd offers --json against a checked-in schema at
+// schemas/worktree/reap/. The CLI's JSON contract requires both that schema and
+// an {schema_version, ok, ...} envelope; without either, --json aborts with
+// "does not declare JSON support" no matter what the command writes, which is
+// how `worktree scan` shipped an inert --json flag for its whole life.
 func newWorktreeReapCmd(stdout, stderr io.Writer) *cobra.Command {
 	var execute bool
+	var jsonFlag bool
 	cmd := &cobra.Command{
 		Use:   "reap",
 		Short: "Report (or perform) closed-bead worktree reclamation",
@@ -79,13 +77,14 @@ the controller tick behind a config flag, so "what would be reclaimed, and
 why is that tree being kept" had no operator-facing answer.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doWorktreeReap(args, execute, stdout, stderr) != 0 {
+			if doWorktreeReap(args, execute, jsonFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&execute, "execute", false, "Actually remove the worktrees (default is dry-run)")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format")
 	return cmd
 }
 
@@ -93,7 +92,7 @@ why is that tree being kept" had no operator-facing answer.`,
 // report. Dry-run is the default because the alternative — a missing flag
 // meaning "delete a few hundred worktrees" — is not a safe default for a verb
 // an operator or an order may run by mistake.
-func doWorktreeReap(args []string, execute bool, stdout, stderr io.Writer) int {
+func doWorktreeReap(args []string, execute, jsonFlag bool, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintf(stderr, "gc worktree reap: unexpected arguments: %s\n", strings.Join(args, " ")) //nolint:errcheck // best-effort stderr
 		return 1
@@ -136,6 +135,14 @@ func doWorktreeReap(args []string, execute bool, stdout, stderr io.Writer) int {
 
 	// Reaper diagnostics go to stderr so stdout stays a clean report.
 	report := worktreeReapClosedBeadWorktrees(cityPath, cfg, stores, liveDirs, !execute, events.Discard, stderr)
+
+	if jsonFlag {
+		if err := encodeWorktreeJSON(stdout, newWorktreeReapJSON(report)); err != nil {
+			fmt.Fprintf(stderr, "gc worktree reap: writing json: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 
 	renderReapReport(stdout, report)
 	return 0
@@ -274,9 +281,15 @@ func doWorktreeScan(args []string, jsonFlag bool, stdout, stderr io.Writer) int 
 	sortStrayWorktrees(strays)
 
 	if jsonFlag {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(strays); err != nil {
+		payload := worktreeScanJSON{
+			SchemaVersion: worktreeJSONSchemaVersion,
+			OK:            true,
+			Strays:        make([]worktreeStrayJSON, 0, len(strays)),
+		}
+		for _, s := range strays {
+			payload.Strays = append(payload.Strays, worktreeStrayJSON(s))
+		}
+		if err := encodeWorktreeJSON(stdout, payload); err != nil {
 			fmt.Fprintf(stderr, "gc worktree scan: writing json: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
