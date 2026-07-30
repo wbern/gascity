@@ -2779,6 +2779,20 @@ type DaemonConfig struct {
 	// defaults to DefaultAutoReapClosedBeadWorktreesPaceMillis. Zero
 	// disables pacing.
 	AutoReapClosedBeadWorktreesPaceMillis *int `toml:"auto_reap_closed_bead_worktrees_pace_millis,omitempty" jsonschema:"default=150"`
+	// AutoReapClosedBeadWorktreesMaxLoadPercent skips a whole reap pass while
+	// the host's 1-minute load average exceeds this percentage of its CPU
+	// count, so reclamation yields to real work. Nil (unset) defaults to
+	// DefaultAutoReapClosedBeadWorktreesMaxLoadPercent. Zero disables the
+	// guard.
+	//
+	// The default is 0 — DISABLED — deliberately. A busy build host can sit
+	// above 100% of its cores for long stretches (measured: a 10-core
+	// workstation at a 1-minute load of 10.9 during an ordinary test run), so
+	// an enabled-by-default threshold would skip pass after pass and
+	// re-create the inert-reaper failure mode this feature exists to avoid,
+	// just for a different reason. Operators who want the throttle can set
+	// it; nobody gets it by surprise.
+	AutoReapClosedBeadWorktreesMaxLoadPercentValue *int `toml:"auto_reap_closed_bead_worktrees_max_load_percent,omitempty" jsonschema:"default=0"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2854,6 +2868,10 @@ const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
 // several ticks rather than in a single burst of removals.
 const DefaultAutoReapClosedBeadWorktreesMaxPerPass = 25
 
+// DefaultAutoReapClosedBeadWorktreesMaxLoadPercent leaves the load guard off.
+// See the field comment for why an aggressive default would be a regression.
+const DefaultAutoReapClosedBeadWorktreesMaxLoadPercent = 0
+
 // DefaultAutoReapClosedBeadWorktreesPaceMillis is the pause after each removal
 // when none is configured, matching the shell reaper's long-standing 0.15s.
 const DefaultAutoReapClosedBeadWorktreesPaceMillis = 150
@@ -2879,6 +2897,18 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMaxPerPass() int {
 		return 0
 	}
 	return *d.AutoReapClosedBeadWorktreesMaxPerPassCount
+}
+
+// AutoReapClosedBeadWorktreesMaxLoadPercent reports the load ceiling, as a
+// percentage of CPU count, above which a reap pass is skipped. Zero disables it.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMaxLoadPercent() int {
+	if d.AutoReapClosedBeadWorktreesMaxLoadPercentValue == nil {
+		return DefaultAutoReapClosedBeadWorktreesMaxLoadPercent
+	}
+	if *d.AutoReapClosedBeadWorktreesMaxLoadPercentValue < 0 {
+		return 0
+	}
+	return *d.AutoReapClosedBeadWorktreesMaxLoadPercentValue
 }
 
 // AutoReapClosedBeadWorktreesPace reports how long the reaper pauses after each

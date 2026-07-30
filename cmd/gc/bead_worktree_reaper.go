@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -137,6 +138,25 @@ func reapClosedBeadWorktrees(
 	// Removal throttle, resolved once and applied across all rigs: the cap
 	// bounds a whole pass, not each rig, so a single tick's total git I/O is
 	// what stays bounded.
+	// Load guard: yield the whole pass while the host is busy, so reclamation
+	// never competes with real work. Skipping costs nothing — the next tick
+	// reconsiders every candidate — which is why an UNREADABLE load PROCEEDS
+	// rather than throttling. A load probe that fails closed would disable the
+	// reaper on any host it cannot measure, which is the failure mode this
+	// feature is meant to avoid rather than reproduce.
+	if pct := cfg.Daemon.AutoReapClosedBeadWorktreesMaxLoadPercent(); pct > 0 {
+		if load, err := reapLoadAverageFn(); err == nil {
+			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
+			if load > ceiling {
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: skipping pass, load %.2f exceeds %d%% of %d CPUs (%.2f)\n",
+					load, pct, runtime.NumCPU(), ceiling,
+				)
+				return report
+			}
+		}
+	}
+
 	maxPerPass := cfg.Daemon.AutoReapClosedBeadWorktreesMaxPerPass()
 	pace := cfg.Daemon.AutoReapClosedBeadWorktreesPace()
 	removedThisPass := 0
@@ -409,6 +429,10 @@ func reapClosedBeadWorktrees(
 	}
 	return report
 }
+
+// reapLoadAverageFn is the host load probe the load guard reads, indirected so
+// tests can drive the threshold without loading the machine.
+var reapLoadAverageFn = oneMinuteLoadAverage
 
 // reapPaceFn is the pause taken after each removal, indirected through a var so
 // tests can assert the pacing is wired without spending real time on it.
