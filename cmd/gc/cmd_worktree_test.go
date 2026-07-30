@@ -101,12 +101,18 @@ func TestWorktreeScanJSONOutput(t *testing.T) {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 
-	var got []strayWorktree
+	// The payload is an {schema_version, ok, ...} envelope, not a bare array:
+	// the CLI's JSON contract rejects anything else, which is why this flag
+	// was inert for its entire life despite this test passing.
+	var got worktreeScanJSON
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if len(got) != 1 || got[0].Path != "/tmp/orphan" || !got[0].Reclaimable {
-		t.Fatalf("decoded JSON = %#v, want one reclaimable orphan", got)
+	if got.SchemaVersion != worktreeJSONSchemaVersion || !got.OK {
+		t.Fatalf("envelope = %#v, want schema_version %q and ok true", got, worktreeJSONSchemaVersion)
+	}
+	if len(got.Strays) != 1 || got.Strays[0].Path != "/tmp/orphan" || !got.Strays[0].Reclaimable {
+		t.Fatalf("decoded JSON = %#v, want one reclaimable orphan", got.Strays)
 	}
 }
 

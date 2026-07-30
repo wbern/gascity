@@ -4766,6 +4766,7 @@ gc worktree reap [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--execute` | bool |  | Actually remove the worktrees (default is dry-run) |
+| `--json` | bool |  | Output in JSON format |
 
 ## gc worktree scan
 

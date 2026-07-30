@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "strays"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "strays": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "reclaimable"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reclaimable": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the checkout is not reclaimable. Empty when it is."
+          },
+          "warning": {
+            "type": "string",
+            "description": "Non-blocking observation about a reclaimable checkout."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

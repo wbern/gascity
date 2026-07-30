@@ -86,7 +86,7 @@ func TestDoWorktreeReap_DefaultsToDryRun(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	if got := doWorktreeReap(nil, false, &stdout, &stderr); got != 0 {
+	if got := doWorktreeReap(nil, false, false, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", got, stderr.String())
 	}
 	if h.called != 1 {
@@ -108,7 +108,7 @@ func TestDoWorktreeReap_ExecuteOptsIntoRemoval(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	if got := doWorktreeReap(nil, true, &stdout, &stderr); got != 0 {
+	if got := doWorktreeReap(nil, true, false, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", got, stderr.String())
 	}
 	if h.gotDryRun {
@@ -124,7 +124,7 @@ func TestDoWorktreeReap_RendersReasonsAndWarnings(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	doWorktreeReap(nil, false, &stdout, &stderr)
+	doWorktreeReap(nil, false, false, &stdout, &stderr)
 
 	out := stdout.String()
 	for _, want := range []string{
@@ -148,7 +148,7 @@ func TestDoWorktreeReap_PassesLiveSessionDirs(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	doWorktreeReap(nil, false, &stdout, &stderr)
+	doWorktreeReap(nil, false, false, &stdout, &stderr)
 
 	if len(h.gotLiveDirs) != 1 || h.gotLiveDirs[0] != "/live/one" {
 		t.Errorf("liveSessionDirs = %v, want the live worker-dir set to reach the reaper", h.gotLiveDirs)
@@ -162,7 +162,7 @@ func TestDoWorktreeReap_RejectsUnexpectedArgs(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	if got := doWorktreeReap([]string{"stray-arg"}, false, &stdout, &stderr); got == 0 {
+	if got := doWorktreeReap([]string{"stray-arg"}, false, false, &stdout, &stderr); got == 0 {
 		t.Fatal("exit = 0 for unexpected args, want non-zero")
 	}
 	if h.called != 0 {
@@ -178,7 +178,7 @@ func TestDoWorktreeReap_EmptyReportIsStated(t *testing.T) {
 	installReapCmdHarness(t, h)
 
 	var stdout, stderr bytes.Buffer
-	doWorktreeReap(nil, false, &stdout, &stderr)
+	doWorktreeReap(nil, false, false, &stdout, &stderr)
 
 	if out := stdout.String(); !strings.Contains(out, "0 would reap") && !strings.Contains(out, "No ") {
 		t.Errorf("stdout = %q, want an explicit statement that nothing was found", out)
