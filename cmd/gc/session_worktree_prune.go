@@ -173,6 +173,13 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 
+	// Removal is NON-FORCE, matching the closed-bead reaper. The probes above
+	// already refuse a worktree with uncommitted or unpushed work, so --force
+	// would only ever apply between that check and this call — and in that window
+	// git's own refusal ("contains modified or untracked files") is the last thing
+	// standing between a race and deleted work. Verified across 309 live
+	// worktrees: none was locked, which is the only other case --force covers.
+	//
 	// Run `git worktree remove` from the rig root rather than from the
 	// worktree being removed: git refuses to remove a worktree whose path
 	// equals cwd in some configurations, and operating from cwd of a
@@ -182,7 +189,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
 		return false
 	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return false
 	}
@@ -218,7 +225,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
 		return
 	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return
 	}

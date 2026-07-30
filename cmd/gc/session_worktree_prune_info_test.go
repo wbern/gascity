@@ -61,8 +61,8 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_LegacyWorkDirKey(t *testing.T) {
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, &stderr)
-	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir || !rigProbe.removedForce {
-		t.Fatalf("expected WorktreeRemove(%q, true) on rig root; got invoked=%v path=%q force=%v",
+	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir || rigProbe.removedForce {
+		t.Fatalf("expected WorktreeRemove(%q, false) on rig root; got invoked=%v path=%q force=%v (want false)",
 			fx.workerDir, rigProbe.removeInvoked, rigProbe.removedPath, rigProbe.removedForce)
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
@@ -254,8 +254,8 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HappyPath(t *testing.T) {
 	if rigProbe.removedPath != fx.workerDir {
 		t.Errorf("WorktreeRemove path = %q, want %q", rigProbe.removedPath, fx.workerDir)
 	}
-	if !rigProbe.removedForce {
-		t.Error("WorktreeRemove force flag = false, want true")
+	if rigProbe.removedForce {
+		t.Error("WorktreeRemove used --force; the prune removes non-force so git's own refusal of a dirty tree remains the last backstop against the probe-to-removal race")
 	}
 	if !strings.Contains(stderr.String(), "pruned worker_dir") {
 		t.Errorf("expected success log; got %q", stderr.String())
