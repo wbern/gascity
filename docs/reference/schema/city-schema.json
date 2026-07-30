@@ -1400,6 +1400,16 @@
           "description": "AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,\nin minutes, before a closed-bead worktree becomes eligible for reap\nclassification at all (borrow-veto scan and beyond). This quarantines\na worktree against the race between its creation and its owning\nbead's gc.work_dir/work_dir metadata being stamped by the next\nreconcile pass — without it, a just-created worktree could look\nunclaimed to the borrow-veto scan before the metadata that would\nprotect it has been written. Nil (unset) defaults to\nDefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the\nquarantine entirely (every closed-bead worktree is immediately\neligible for the rest of the gate chain, regardless of age).",
           "default": 10
         },
+        "auto_reap_closed_bead_worktrees_max_per_pass": {
+          "type": "integer",
+          "description": "AutoReapClosedBeadWorktreesMaxPerPass caps how many worktrees a single\nreap pass may remove, bounding the blast radius and the git I/O of any\none controller tick. Candidates beyond the cap are reported as\ndeferred and reconsidered next pass, so a large accumulated backlog\ndrains over several ticks instead of in one burst. Nil (unset)\ndefaults to DefaultAutoReapClosedBeadWorktreesMaxPerPass. Zero\ndisables the cap (every eligible worktree is removed in one pass).\nDry-run classification ignores the cap: it is a pacing control, not a\nreporting limit, and capping the inventory would understate the\nbacklog.",
+          "default": 25
+        },
+        "auto_reap_closed_bead_worktrees_pace_millis": {
+          "type": "integer",
+          "description": "AutoReapClosedBeadWorktreesPaceMillis is how long the reaper pauses\nafter each removal, so a pass yields the disk between `git worktree\nremove` calls rather than issuing them back to back. Nil (unset)\ndefaults to DefaultAutoReapClosedBeadWorktreesPaceMillis. Zero\ndisables pacing.",
+          "default": 150
+        },
         "start_ready_timeout": {
           "type": "string",
           "description": "StartReadyTimeout is how long `gc start` and `gc register` wait for\nthe supervisor to report the city as Running. Cities with many\nregistered or adopted sessions take longer to start because the\nper-tick wake budget (max_wakes_per_tick) throttles startup: wall\ntime to wake N sessions is roughly ceil(N / max_wakes_per_tick) *\npatrol_interval. At the defaults (5 wakes / 30s), ~40 sessions\nneed ~4 minutes. Duration string (e.g., \"5m\", \"10m\"). Defaults to\nDefaultStartReadyTimeout (5m). When set, this value replaces the\ndefault start/register budget; [session].startup_timeout may still\nextend the effective wait for a slow single session.",

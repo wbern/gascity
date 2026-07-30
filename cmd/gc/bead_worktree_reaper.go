@@ -128,6 +128,13 @@ func reapClosedBeadWorktrees(
 	// scan is indeterminate the reaper protects every candidate (fail closed).
 	live := collectLiveWorktreeStateFn()
 
+	// Removal throttle, resolved once and applied across all rigs: the cap
+	// bounds a whole pass, not each rig, so a single tick's total git I/O is
+	// what stays bounded.
+	maxPerPass := cfg.Daemon.AutoReapClosedBeadWorktreesMaxPerPass()
+	pace := cfg.Daemon.AutoReapClosedBeadWorktreesPace()
+	removedThisPass := 0
+
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
 	for rigName, store := range rigBeadStores {
@@ -321,6 +328,26 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
+			// Per-pass cap. Removals are paced and bounded so one tick cannot
+			// issue hundreds of `git worktree remove` calls back to back; the
+			// remainder is reported as deferred and reconsidered next pass
+			// rather than silently dropped, because "kept" must not read as
+			// "unsafe" when it means "not yet". Dry-run is exempt: it removes
+			// nothing, and capping it would understate the backlog an operator
+			// is running the dry-run to size.
+			if !dryRun && maxPerPass > 0 && removedThisPass >= maxPerPass {
+				deferred := fmt.Sprintf("deferred: per-pass reap cap of %d reached", maxPerPass)
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"reapClosedBeadWorktrees: %s, deferring %s (bead %s) to a later pass\n",
+					deferred, worktreePath, beadID,
+				)
+				recordReapSkipped(rec, beadID, worktreePath, rigName, deferred)
+				report.Protected = append(report.Protected, reapDecision{
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: deferred,
+				})
+				continue
+			}
+
 			if warning != "" {
 				fmt.Fprintf(stderr, //nolint:errcheck
 					"reapClosedBeadWorktrees: %s (bead %s): warning: %s\n",
@@ -368,10 +395,18 @@ func reapClosedBeadWorktrees(
 			report.Reaped = append(report.Reaped, reapDecision{
 				BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
 			})
+			removedThisPass++
+			if pace > 0 {
+				reapPaceFn(pace)
+			}
 		}
 	}
 	return report
 }
+
+// reapPaceFn is the pause taken after each removal, indirected through a var so
+// tests can assert the pacing is wired without spending real time on it.
+var reapPaceFn = time.Sleep
 
 // reapCandidate is a worktree that survived the closed-bead check and the
 // freshness quarantine in pass 1, awaiting the batched borrow-veto scan and

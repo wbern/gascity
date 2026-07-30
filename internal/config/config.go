@@ -2762,6 +2762,23 @@ type DaemonConfig struct {
 	// quarantine entirely (every closed-bead worktree is immediately
 	// eligible for the rest of the gate chain, regardless of age).
 	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
+	// AutoReapClosedBeadWorktreesMaxPerPass caps how many worktrees a single
+	// reap pass may remove, bounding the blast radius and the git I/O of any
+	// one controller tick. Candidates beyond the cap are reported as
+	// deferred and reconsidered next pass, so a large accumulated backlog
+	// drains over several ticks instead of in one burst. Nil (unset)
+	// defaults to DefaultAutoReapClosedBeadWorktreesMaxPerPass. Zero
+	// disables the cap (every eligible worktree is removed in one pass).
+	// Dry-run classification ignores the cap: it is a pacing control, not a
+	// reporting limit, and capping the inventory would understate the
+	// backlog.
+	AutoReapClosedBeadWorktreesMaxPerPassCount *int `toml:"auto_reap_closed_bead_worktrees_max_per_pass,omitempty" jsonschema:"default=25"`
+	// AutoReapClosedBeadWorktreesPaceMillis is how long the reaper pauses
+	// after each removal, so a pass yields the disk between `git worktree
+	// remove` calls rather than issuing them back to back. Nil (unset)
+	// defaults to DefaultAutoReapClosedBeadWorktreesPaceMillis. Zero
+	// disables pacing.
+	AutoReapClosedBeadWorktreesPaceMillis *int `toml:"auto_reap_closed_bead_worktrees_pace_millis,omitempty" jsonschema:"default=150"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2832,6 +2849,15 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
 // applied when AutoReapClosedBeadWorktreesMinAgeMinutes is unset.
 const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
 
+// DefaultAutoReapClosedBeadWorktreesMaxPerPass bounds one reap pass when no cap
+// is configured. A backlog that accumulated over weeks should drain over
+// several ticks rather than in a single burst of removals.
+const DefaultAutoReapClosedBeadWorktreesMaxPerPass = 25
+
+// DefaultAutoReapClosedBeadWorktreesPaceMillis is the pause after each removal
+// when none is configured, matching the shell reaper's long-standing 0.15s.
+const DefaultAutoReapClosedBeadWorktreesPaceMillis = 150
+
 // AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
 // closed-bead worktree is eligible for reap classification. Defaults to
 // DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
@@ -2841,6 +2867,31 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 		return time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 	}
 	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+}
+
+// AutoReapClosedBeadWorktreesMaxPerPass reports how many worktrees one reap
+// pass may remove. Zero means unlimited; nil falls back to the default.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMaxPerPass() int {
+	if d.AutoReapClosedBeadWorktreesMaxPerPassCount == nil {
+		return DefaultAutoReapClosedBeadWorktreesMaxPerPass
+	}
+	if *d.AutoReapClosedBeadWorktreesMaxPerPassCount < 0 {
+		return 0
+	}
+	return *d.AutoReapClosedBeadWorktreesMaxPerPassCount
+}
+
+// AutoReapClosedBeadWorktreesPace reports how long the reaper pauses after each
+// removal. Zero disables pacing; nil falls back to the default.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesPace() time.Duration {
+	ms := DefaultAutoReapClosedBeadWorktreesPaceMillis
+	if d.AutoReapClosedBeadWorktreesPaceMillis != nil {
+		ms = *d.AutoReapClosedBeadWorktreesPaceMillis
+	}
+	if ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
