@@ -16,6 +16,10 @@ import (
 
 const psZombieTimeout = 100 * time.Millisecond
 
+// psStartTimeTimeout bounds the portable start-time probe. Callers sit in a
+// post-SIGKILL reap loop, so a hung ps must not stall them.
+const psStartTimeTimeout = time.Second
+
 // psCmdlineTimeout bounds the portable argv probe. Callers run on reconciler
 // ticks, so a hung ps must not stall them; a timeout yields no argv, which the
 // identity check treats as "cannot confirm" and rejects.
@@ -61,7 +65,7 @@ func StartTime(pid int) (string, error) {
 	}
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return "", err
+		return psStartTime(pid)
 	}
 	stat := string(data)
 	rparen := strings.LastIndexByte(stat, ')')
@@ -211,6 +215,35 @@ func NormalizeArgv(argv []string) []string {
 // spaces. Reading argv exactly on darwin needs KERN_PROCARGS2 via cgo, which is
 // not worth it for that gap. A mis-split argv fails the match, and failing the
 // match is the safe direction for every caller.
+// psStartTime reads a PID's start time with ps, for hosts without /proc.
+//
+// The two mechanisms return different formats — /proc gives jiffies since boot,
+// ps gives a wall-clock date — and that is fine, because the identity check only
+// ever compares a value captured earlier against one read later on the SAME
+// host, so the same mechanism produces both. The values are never compared
+// across platforms.
+//
+// One granularity limitation: ps -o lstart= has one-second resolution, so a PID
+// recycled within the same second as its predecessor started would compare equal
+// and the reuse would go undetected. That is strictly narrower than the window
+// the check closes today (where the identity check does not run at all off
+// Linux), and the consequence of a miss is the pre-existing conservative answer
+// rather than a wrong death.
+func psStartTime(pid int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), psStartTimeTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading start time for pid %d via ps: %w", pid, err)
+	}
+	identity := strings.TrimSpace(string(out))
+	if identity == "" {
+		return "", fmt.Errorf("no start time reported for pid %d", pid)
+	}
+	return identity, nil
+}
+
 func psCmdline(pid int) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), psCmdlineTimeout)
 	defer cancel()
