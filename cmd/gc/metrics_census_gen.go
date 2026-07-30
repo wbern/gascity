@@ -196,6 +196,7 @@ const (
 	productMetricsGeneratedCommandID195 productMetricsCommandID = 195
 	productMetricsGeneratedCommandID196 productMetricsCommandID = 196
 	productMetricsGeneratedCommandID197 productMetricsCommandID = 197
+	productMetricsGeneratedCommandID198 productMetricsCommandID = 198
 )
 
 var generatedProductMetricsGlobalConditionalModes = []productMetricsConditionalMode{productMetricsConditionalGenericMachineOutput, productMetricsConditionalManagedContext, productMetricsConditionalProviderHook}
@@ -488,6 +489,7 @@ var generatedProductMetricsCommandCensus = []productMetricsCommandCensusEntry{
 	{Path: "gc workflow poke", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: true, EffectiveHidden: true, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "excluded", Mode: productMetricsModeHiddenPrivate, Notice: productMetricsNoticeIneligible, Recording: productMetricsRecordingExcluded, Owner: productMetricsOwnerExcluded, Exclusion: productMetricsExclusionHiddenPrivate},
 	{Path: "gc workflow reopen-source", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: true, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "convoy-reopen-source", Mode: productMetricsModeWorkflowCompat, Notice: productMetricsNoticeIneligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID41},
 	{Path: "gc worktree", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeRunnableGroup, Classification: "help", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsCommandHelp},
+	{Path: "gc worktree reap", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "worktree-reap", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID198},
 	{Path: "gc worktree scan", Aliases: []string{}, ConditionalModes: []productMetricsConditionalMode{}, Hidden: false, EffectiveHidden: false, DisableFlagParsing: false, Shape: productMetricsShapeRunnable, Classification: "worktree-scan", Mode: productMetricsModeStandard, Notice: productMetricsNoticeEligible, Recording: productMetricsRecordingRecordable, Owner: productMetricsOwnerImmediate, ID: productMetricsGeneratedCommandID196},
 }
 

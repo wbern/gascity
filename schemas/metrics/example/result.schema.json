@@ -207,7 +207,8 @@
               "whoami",
               "runtime-heartbeat",
               "worktree-scan",
-              "mcp-validate"
+              "mcp-validate",
+              "worktree-reap"
             ]
           },
           "event_id": {
