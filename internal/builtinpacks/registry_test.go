@@ -280,8 +280,38 @@ schema = 1
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered content")
 	}
-	if !strings.Contains(err.Error(), "content differs") {
-		t.Fatalf("error = %v, want content differs", err)
+	if !strings.Contains(err.Error(), "pack.toml") {
+		t.Fatalf("error = %v, want the tampered file named", err)
+	}
+}
+
+// TestValidateSyntheticRepoRejectsSameSizeTamper pins the case a size-only
+// check would miss: content rewritten in place to exactly the same length. It
+// must still be rejected, because an in-place rewrite advances the file's
+// modification time past the marker the materialization wrote last.
+func TestValidateSyntheticRepoRejectsSameSizeTamper(t *testing.T) {
+	dst := materializeTestRepo(t)
+	target := filepath.Join(dst, "internal/bootstrap/packs/core/pack.toml")
+	orig, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", target, err)
+	}
+	tampered := make([]byte, len(orig))
+	copy(tampered, orig)
+	tampered[len(tampered)-1] = 'X'
+	if err := os.WriteFile(target, tampered, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", target, err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat(%q): %v", target, err)
+	}
+	if info.Size() != int64(len(orig)) {
+		t.Fatalf("test setup changed the size (%d != %d); this must be a same-size tamper", info.Size(), len(orig))
+	}
+
+	if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+		t.Fatal("ValidateSyntheticRepo accepted a same-size in-place tamper")
 	}
 }
 

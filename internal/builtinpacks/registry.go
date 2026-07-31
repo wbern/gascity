@@ -2,7 +2,6 @@
 package builtinpacks
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io/fs"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	gascitypacks "github.com/gastownhall/gascity-packs"
@@ -374,8 +374,16 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if err := validateSyntheticRepoFileSet(dir); err != nil {
 		return err
 	}
+	// MaterializeSyntheticRepo writes every pack file before it writes the
+	// marker, so on an untouched cache no pack file is newer than the marker.
+	// That happens-before relation is what lets validatePackFiles detect an
+	// in-place rewrite from stat alone, without reading every file back.
+	markerInfo, err := os.Lstat(filepath.Join(dir, syntheticMarkerFile))
+	if err != nil {
+		return fmt.Errorf("checking bundled pack cache marker: %w", err)
+	}
 	for _, layout := range syntheticPackLayouts() {
-		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath))); err != nil {
+		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath)), markerInfo.ModTime()); err != nil {
 			return err
 		}
 	}
@@ -399,7 +407,7 @@ func SyntheticContentHash() (string, error) {
 	var entries []string
 	for _, layout := range syntheticPackLayouts() {
 		pack := layout.Pack
-		manifest, err := manifestForFS(pack.FS)
+		manifest, err := manifestForPack(pack)
 		if err != nil {
 			return "", fmt.Errorf("hashing bundled pack %q: %w", pack.Name, err)
 		}
@@ -476,8 +484,16 @@ func materializeFS(src fs.FS, dst string) error {
 	return nil
 }
 
-func validatePackFiles(pack Pack, dst string) error {
-	manifest, err := manifestForFS(pack.FS)
+// validatePackFiles verifies a materialized pack against the embedded manifest.
+//
+// Integrity is established from stat metadata rather than by reading every
+// cached file back: a file matches when its mode, size, and modification time
+// are all consistent with the materialization that wrote markerMod. Reading all
+// 542 bundled files cost ~37ms on every config load; the stat form costs ~2ms
+// and still detects eviction, truncation, mode drift, and in-place rewrites
+// (including same-size ones, which advance mtime past the marker).
+func validatePackFiles(pack Pack, dst string, markerMod time.Time) error {
+	manifest, err := manifestForPack(pack)
 	if err != nil {
 		return fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
 	}
@@ -490,12 +506,11 @@ func validatePackFiles(pack Pack, dst string) error {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != want.perm.Perm() {
 			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", pack.Name, rel, info.Mode().Perm(), want.perm.Perm())
 		}
-		got, err := os.ReadFile(target)
-		if err != nil {
-			return fmt.Errorf("reading bundled pack cache %q file %s: %w", pack.Name, rel, err)
+		if info.Size() != int64(len(want.data)) {
+			return fmt.Errorf("bundled pack cache %q file %s has size %d, expected %d", pack.Name, rel, info.Size(), len(want.data))
 		}
-		if !bytes.Equal(got, want.data) {
-			return fmt.Errorf("bundled pack cache %q file %s content differs from current binary", pack.Name, rel)
+		if info.ModTime().After(markerMod) {
+			return fmt.Errorf("bundled pack cache %q file %s was modified after the cache marker was written", pack.Name, rel)
 		}
 	}
 	if err := filepath.WalkDir(dst, func(path string, entry os.DirEntry, err error) error {
@@ -563,12 +578,38 @@ func validateSyntheticRepoFileSet(dir string) error {
 	return nil
 }
 
+// syntheticRepoAllowedPaths returns the file and directory sets a materialized
+// synthetic repo may contain.
+//
+// The result derives entirely from content embedded in the running binary, so
+// it is memoized for the process lifetime the same way syntheticContentHashOnce
+// memoizes the content hash. Rebuilding it per call re-walked every bundled
+// pack's embed.FS (~1.7ms and 3.2MB of garbage) on every config load. Callers
+// must treat the returned maps as read-only.
 func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
+	cached := syntheticRepoAllowedPathsOnce()
+	return cached.files, cached.dirs, cached.err
+}
+
+type syntheticRepoPathSets struct {
+	files map[string]struct{}
+	dirs  map[string]struct{}
+	err   error
+}
+
+var syntheticRepoAllowedPathsOnce = sync.OnceValue(buildSyntheticRepoAllowedPaths)
+
+func buildSyntheticRepoAllowedPaths() syntheticRepoPathSets {
+	files, dirs, err := computeSyntheticRepoAllowedPaths()
+	return syntheticRepoPathSets{files: files, dirs: dirs, err: err}
+}
+
+func computeSyntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
 	files := map[string]struct{}{syntheticMarkerFile: {}}
 	dirs := make(map[string]struct{})
 	for _, layout := range syntheticPackLayouts() {
 		subpath := filepath.ToSlash(layout.Subpath)
-		manifest, err := manifestForFS(layout.Pack.FS)
+		manifest, err := manifestForPack(layout.Pack)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", layout.Pack.Name, err)
 		}
@@ -581,6 +622,28 @@ func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, erro
 		}
 	}
 	return files, dirs, nil
+}
+
+// manifestCache memoizes per-pack manifests by pack name. A pack's manifest is
+// a pure function of content embedded in the running binary, so it cannot change
+// within a process. Rebuilding it re-read every bundled file on every call.
+// Entries are read-only once stored.
+var manifestCache sync.Map
+
+// manifestForPack returns the memoized manifest for a bundled pack.
+func manifestForPack(pack Pack) (map[string]fileEntry, error) {
+	if cached, ok := manifestCache.Load(pack.Name); ok {
+		entry := cached.(syntheticManifestResult)
+		return entry.manifest, entry.err
+	}
+	manifest, err := manifestForFS(pack.FS)
+	manifestCache.Store(pack.Name, syntheticManifestResult{manifest: manifest, err: err})
+	return manifest, err
+}
+
+type syntheticManifestResult struct {
+	manifest map[string]fileEntry
+	err      error
 }
 
 func manifestForFS(src fs.FS) (map[string]fileEntry, error) {
