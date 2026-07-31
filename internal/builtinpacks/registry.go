@@ -492,6 +492,12 @@ func materializeFS(src fs.FS, dst string) error {
 // 542 bundled files cost ~37ms on every config load; the stat form costs ~2ms
 // and still detects eviction, truncation, mode drift, and in-place rewrites
 // (including same-size ones, which advance mtime past the marker).
+//
+// It does not walk dst looking for unexpected files. validateSyntheticRepoFileSet
+// already walks the whole cache once against the union of every layout's
+// manifest, and that union check strictly subsumes a per-pack one: a stray file
+// under a pack directory is absent from the union too. Keeping both meant ~9
+// traversals of the same tree per call (one whole-tree plus one per layout).
 func validatePackFiles(pack Pack, dst string, markerMod time.Time) error {
 	manifest, err := manifestForPack(pack)
 	if err != nil {
@@ -512,25 +518,6 @@ func validatePackFiles(pack Pack, dst string, markerMod time.Time) error {
 		if info.ModTime().After(markerMod) {
 			return fmt.Errorf("bundled pack cache %q file %s was modified after the cache marker was written", pack.Name, rel)
 		}
-	}
-	if err := filepath.WalkDir(dst, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(dst, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if _, ok := manifest[rel]; !ok {
-			return fmt.Errorf("bundled pack cache %q contains unexpected file %s", pack.Name, rel)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("validating bundled pack cache %q file set: %w", pack.Name, err)
 	}
 	return nil
 }

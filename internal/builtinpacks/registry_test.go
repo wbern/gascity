@@ -563,3 +563,37 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
 	}
 }
+
+// TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
+// justified removing validatePackFiles' per-pack directory walk. The whole-tree
+// walk in validateSyntheticRepoFileSet checks every path against the union of
+// all layout manifests, which strictly subsumes a per-pack check: a file that is
+// unexpected for its own pack is absent from the union too. Nested layouts
+// (examples/bd contains examples/bd/dolt) are covered explicitly, because that
+// is the case where a per-pack and a union check could conceivably disagree.
+func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rel  string
+	}{
+		{"pack root", "internal/bootstrap/packs/core/STRAY.txt"},
+		{"deep inside a pack", "internal/bootstrap/packs/core/assets/STRAY.txt"},
+		{"inside a nested pack", "examples/bd/dolt/STRAY.txt"},
+		{"in the parent of a nested pack", "examples/bd/STRAY.txt"},
+		{"cache root", "STRAY.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := materializeTestRepo(t)
+			stray := filepath.Join(dst, filepath.FromSlash(tc.rel))
+			if err := os.MkdirAll(filepath.Dir(stray), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+				t.Fatalf("ValidateSyntheticRepo accepted a stray file at %s", tc.rel)
+			}
+		})
+	}
+}
