@@ -274,8 +274,6 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(dst, syntheticMarkerFile), data, 0o644); err != nil {
 		return fmt.Errorf("writing bundled pack cache marker: %w", err)
 	}
-	// Sole writer of this tree: invalidate any memoized verdict for it.
-	syntheticValidationMemo.Delete(dst)
 	return nil
 }
 
@@ -331,38 +329,7 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 // ValidateSyntheticRepo verifies that dir is a synthetic bundled-pack cache
 // created for the current binary content and the source's canonical pin
 // commit (the only commit production callers materialize).
-//
-// A single gc invocation asks this question repeatedly about the same cache:
-// every bundled source resolves to one shared synthetic cache directory, and
-// each readiness check walks all pack layouts regardless of which source
-// asked, so "gc status" performed twelve identical full validations of one
-// directory. The verdict is memoized per directory and rechecked on each hit
-// with the marker-only ValidateSyntheticRepoFast, which still observes a
-// rehydration by another process (MaterializeSyntheticRepo rewrites the
-// marker) and an eviction (it removes it), at ~0.03ms instead of ~13ms.
 func ValidateSyntheticRepo(dir, commit string) error {
-	if cached, ok := syntheticValidationMemo.Load(dir); ok {
-		if memo := cached.(syntheticValidation); memo.commit == commit {
-			if ValidateSyntheticRepoFast(dir, commit) == nil {
-				return memo.err
-			}
-			syntheticValidationMemo.Delete(dir)
-		}
-	}
-	err := validateSyntheticRepoUncached(dir, commit)
-	syntheticValidationMemo.Store(dir, syntheticValidation{commit: commit, err: err})
-	return err
-}
-
-// syntheticValidation records the last full verdict for a cache directory.
-type syntheticValidation struct {
-	commit string
-	err    error
-}
-
-var syntheticValidationMemo sync.Map
-
-func validateSyntheticRepoUncached(dir, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
