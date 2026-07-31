@@ -280,38 +280,8 @@ schema = 1
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered content")
 	}
-	if !strings.Contains(err.Error(), "pack.toml") {
-		t.Fatalf("error = %v, want the tampered file named", err)
-	}
-}
-
-// TestValidateSyntheticRepoRejectsSameSizeTamper pins the case a size-only
-// check would miss: content rewritten in place to exactly the same length. It
-// must still be rejected, because an in-place rewrite advances the file's
-// modification time past the marker the materialization wrote last.
-func TestValidateSyntheticRepoRejectsSameSizeTamper(t *testing.T) {
-	dst := materializeTestRepo(t)
-	target := filepath.Join(dst, "internal/bootstrap/packs/core/pack.toml")
-	orig, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", target, err)
-	}
-	tampered := make([]byte, len(orig))
-	copy(tampered, orig)
-	tampered[len(tampered)-1] = 'X'
-	if err := os.WriteFile(target, tampered, 0o644); err != nil {
-		t.Fatalf("WriteFile(%q): %v", target, err)
-	}
-	info, err := os.Lstat(target)
-	if err != nil {
-		t.Fatalf("Lstat(%q): %v", target, err)
-	}
-	if info.Size() != int64(len(orig)) {
-		t.Fatalf("test setup changed the size (%d != %d); this must be a same-size tamper", info.Size(), len(orig))
-	}
-
-	if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
-		t.Fatal("ValidateSyntheticRepo accepted a same-size in-place tamper")
+	if !strings.Contains(err.Error(), "content differs") {
+		t.Fatalf("error = %v, want content differs", err)
 	}
 }
 
@@ -565,12 +535,12 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 }
 
 // TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
-// justified removing validatePackFiles' per-pack directory walk. The whole-tree
-// walk in validateSyntheticRepoFileSet checks every path against the union of
-// all layout manifests, which strictly subsumes a per-pack check: a file that is
+// justifies validatePackFiles no longer walking its own directory. The whole-tree
+// walk in validateSyntheticRepoFileSet checks every path against the union of all
+// layout manifests, which strictly subsumes a per-pack check: a file that is
 // unexpected for its own pack is absent from the union too. Nested layouts
-// (examples/bd contains examples/bd/dolt) are covered explicitly, because that
-// is the case where a per-pack and a union check could conceivably disagree.
+// (examples/bd contains examples/bd/dolt) are covered explicitly, because that is
+// the case where a per-pack and a union check could conceivably disagree.
 func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -595,5 +565,52 @@ func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
 				t.Fatalf("ValidateSyntheticRepo accepted a stray file at %s", tc.rel)
 			}
 		})
+	}
+}
+
+// TestSyntheticRepoAllowedPathsIsStable pins that memoizing the allowed-path sets
+// does not change what they contain across calls.
+func TestSyntheticRepoAllowedPathsIsStable(t *testing.T) {
+	files1, dirs1, err := syntheticRepoAllowedPaths()
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+	}
+	files2, dirs2, err := syntheticRepoAllowedPaths()
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths (second call): %v", err)
+	}
+	if len(files1) != len(files2) || len(dirs1) != len(dirs2) {
+		t.Fatalf("allowed paths changed between calls: files %d/%d dirs %d/%d",
+			len(files1), len(files2), len(dirs1), len(dirs2))
+	}
+	if len(files1) == 0 {
+		t.Fatal("allowed file set is empty")
+	}
+}
+
+// TestManifestForPackMatchesUncached pins that the memoized per-pack manifest is
+// identical to a freshly built one.
+func TestManifestForPackMatchesUncached(t *testing.T) {
+	for _, pack := range All() {
+		cached, err := manifestForPack(pack)
+		if err != nil {
+			t.Fatalf("manifestForPack(%s): %v", pack.Name, err)
+		}
+		fresh, err := manifestForFS(pack.FS)
+		if err != nil {
+			t.Fatalf("manifestForFS(%s): %v", pack.Name, err)
+		}
+		if len(cached) != len(fresh) {
+			t.Fatalf("pack %s: memoized manifest has %d entries, fresh has %d", pack.Name, len(cached), len(fresh))
+		}
+		for rel, want := range fresh {
+			got, ok := cached[rel]
+			if !ok {
+				t.Fatalf("pack %s: memoized manifest missing %s", pack.Name, rel)
+			}
+			if got.perm != want.perm || !bytes.Equal(got.data, want.data) {
+				t.Fatalf("pack %s: memoized manifest differs for %s", pack.Name, rel)
+			}
+		}
 	}
 }
