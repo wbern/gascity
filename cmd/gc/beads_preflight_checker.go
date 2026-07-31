@@ -26,7 +26,9 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 		// process-stable, so the `bd context --json` spawn runs at most once per
 		// scope. Resolution order is L1 in-process memo -> L2 on-disk TTL cache ->
 		// cold `bd context` spawn; a cold spawn populates both tiers. Errors are
-		// not cached (retry next open).
+		// not cached, except bd's deterministic "not a git repository" failure
+		// (a city root that is not a Git worktree), which would otherwise re-spawn
+		// on every store-open forever.
 		v, err := preflightBDContextCached(cityPath, preflightScopeKey(cityPath, scope), func() (preflightBDContextValue, error) {
 			out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
 			if err != nil {

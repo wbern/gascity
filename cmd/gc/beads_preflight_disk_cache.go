@@ -28,10 +28,31 @@ import (
 // correctness-sensitive Dolt project-id probe is deliberately NOT cached to disk.
 
 // preflightIdentityDiskTTL bounds how long a persisted bd context identity is
-// served before a fresh `bd context` spawn is required. Short by design: long
-// enough to collapse a burst of short-lived processes, short enough that a real
-// config/backend change is picked up promptly.
-const preflightIdentityDiskTTL = 60 * time.Second
+// served before a fresh `bd context` spawn is required.
+//
+// It must outlast the cadence of the periodic callers it exists to serve. Gas
+// City's order fleet runs on cooldowns measured in minutes, so a TTL inside that
+// band can never serve a single order tick — the entry is always stale by the
+// time the next tick arrives, and every periodic caller pays a full bd spawn
+// forever while the cache only ever collapses bursts inside one window. A 60s
+// TTL did exactly that: measured on the live gc2 city on 2026-08-01, `bd
+// context` was 30.8% of all bd traffic at a flat ~1/min floor around the clock
+// (including 02:00-05:00 with nobody working), 54.6% of it failing, against 74
+// orders of which exactly one had a cooldown under 60s.
+//
+// This window is the guarantee; two further invalidations narrow it in practice
+// but are not relied on. The resolved Dolt target is folded into the scope key
+// (preflightScopeKey), so a backend retarget invalidates entries immediately.
+// And entries carry the gc build that wrote them, so a rebuild-bounce — how a
+// new bd or a config change is deployed here — drops them at once; where a build
+// is not distinctly stamped, that simply falls back to the TTL rather than
+// serving anything it should not.
+//
+// What can go stale is only a cross-check. The authoritative identity evidence
+// is gc's own direct project_id probe, which is deliberately never cached to
+// disk, and a preflight verdict is advisory besides: the factory still opens and
+// falls back.
+const preflightIdentityDiskTTL = 15 * time.Minute
 
 // preflightIdentityCacheFile is the cache filename under the city cache root.
 const preflightIdentityCacheFile = "preflight-identity.json"
@@ -45,7 +66,8 @@ var errPreflightBDContextNotGitRepository = errors.New("bd context unavailable: 
 var preflightNow = time.Now
 
 // preflightIdentityDiskEntry is one persisted identity plus the wall-clock time
-// it was cached, so reads can enforce the TTL.
+// it was cached and the gc build that cached it, so reads can enforce the TTL
+// and reject an entry written by a different binary.
 type preflightIdentityDiskEntry struct {
 	Backend                    string `json:"backend"`
 	DoltMode                   string `json:"dolt_mode"`
@@ -53,6 +75,24 @@ type preflightIdentityDiskEntry struct {
 	SchemaVersion              int    `json:"schema_version"`
 	UnavailableBDContextReason string `json:"unavailable_bd_context_reason,omitempty"`
 	CachedAtUnix               int64  `json:"cached_at_unix"`
+	GCBuild                    string `json:"gc_build,omitempty"`
+}
+
+// preflightIdentityEntryFresh reports whether an entry may be served: it must
+// come from the running gc build and still be inside the TTL.
+//
+// The build check is exact string equality on a value gc already holds, not a
+// stat/mtime heuristic — 585cca7e1 removed mtime-based cache validation as
+// unsound because a same-size rewrite inside one filesystem timestamp tick is
+// invisible to stat. An entry written before build stamping existed carries no
+// build and is therefore a miss, which costs one re-probe per scope after an
+// upgrade and never serves an entry whose provenance is unknown.
+func preflightIdentityEntryFresh(entry preflightIdentityDiskEntry) bool {
+	if entry.GCBuild == "" || entry.GCBuild != version {
+		return false
+	}
+	age := preflightNow().Sub(time.Unix(entry.CachedAtUnix, 0))
+	return age >= 0 && age < preflightIdentityDiskTTL
 }
 
 // preflightIdentityCachePath returns the absolute path to the on-disk preflight
@@ -85,8 +125,7 @@ func readPreflightIdentityDisk(cityPath, scopeKey string) (preflightBDContextVal
 	if !ok || entry.UnavailableBDContextReason != "" {
 		return preflightBDContextValue{}, false
 	}
-	age := preflightNow().Sub(time.Unix(entry.CachedAtUnix, 0))
-	if age < 0 || age >= preflightIdentityDiskTTL {
+	if !preflightIdentityEntryFresh(entry) {
 		return preflightBDContextValue{}, false
 	}
 	return preflightBDContextValue{
@@ -106,8 +145,7 @@ func readPreflightBDContextUnavailableDisk(cityPath, scopeKey string) bool {
 	if !ok || entry.UnavailableBDContextReason != preflightBDContextUnavailableNotGitRepository {
 		return false
 	}
-	age := preflightNow().Sub(time.Unix(entry.CachedAtUnix, 0))
-	return age >= 0 && age < preflightIdentityDiskTTL
+	return preflightIdentityEntryFresh(entry)
 }
 
 // writePreflightIdentityDisk persists a SUCCESSFUL identity for scopeKey,
@@ -130,6 +168,7 @@ func writePreflightIdentityDisk(cityPath, scopeKey string, v preflightBDContextV
 		BDVersion:     v.BDVersion,
 		SchemaVersion: v.SchemaVersion,
 		CachedAtUnix:  preflightNow().Unix(),
+		GCBuild:       version,
 	}
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -139,8 +178,8 @@ func writePreflightIdentityDisk(cityPath, scopeKey string, v preflightBDContextV
 }
 
 // writePreflightBDContextUnavailableDisk records a deterministic non-repository
-// result. It shares the identity cache's scope key and short TTL, so a scope
-// that becomes a Git worktree is probed again promptly.
+// result. It shares the identity cache's scope key, TTL, and build stamp, so a
+// scope that becomes a Git worktree is probed again once the entry expires.
 func writePreflightBDContextUnavailableDisk(cityPath, scopeKey string) error {
 	dir := filepath.Dir(preflightIdentityCachePath(cityPath))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -153,6 +192,7 @@ func writePreflightBDContextUnavailableDisk(cityPath, scopeKey string) error {
 	m[scopeKey] = preflightIdentityDiskEntry{
 		UnavailableBDContextReason: preflightBDContextUnavailableNotGitRepository,
 		CachedAtUnix:               preflightNow().Unix(),
+		GCBuild:                    version,
 	}
 	data, err := json.Marshal(m)
 	if err != nil {
@@ -183,8 +223,8 @@ func preflightBDContextUnavailableReason(err error) string {
 // (run) only on a full miss. A cold compute populates BOTH tiers: the memo (via
 // getOrCompute) and the disk cache. Errors are never cached, except bd's exact
 // deterministic "not a git repository" context failure. That outcome retains
-// the same short TTL as a successful identity; all transport, parse, and other
-// command failures retry on the next open.
+// the same TTL and build stamp as a successful identity; all transport, parse,
+// and other command failures retry on the next open.
 func preflightBDContextCached(cityPath, scopeKey string, run func() (preflightBDContextValue, error)) (preflightBDContextValue, error) {
 	if readPreflightBDContextUnavailableDisk(cityPath, scopeKey) {
 		return preflightBDContextValue{}, errPreflightBDContextNotGitRepository

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,6 +37,15 @@ func withFixedPreflightNow(t *testing.T, start time.Time) func(time.Time) {
 	preflightNow = func() time.Time { return cur }
 	t.Cleanup(func() { preflightNow = prev })
 	return func(at time.Time) { cur = at }
+}
+
+// withGCBuildVersion pins the gc build stamped into and compared against cache
+// entries, so a test can simulate the same build or a rebuilt binary.
+func withGCBuildVersion(t *testing.T, build string) {
+	t.Helper()
+	prev := version
+	version = build
+	t.Cleanup(func() { version = prev })
 }
 
 func fakeIdentity() preflightBDContextValue {
@@ -82,7 +92,7 @@ func TestPreflightBDContextCached_WarmDiskHitInFreshProcess(t *testing.T) {
 
 	// Process 2: fresh L1 memo, still within TTL -> disk hit, no spawn.
 	withFreshL1Memo(t)
-	advance(time.Unix(1030, 0)) // 30s < 60s TTL
+	advance(time.Unix(1030, 0)) // well inside preflightIdentityDiskTTL
 	calls := 0
 	got, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
 		calls++
@@ -123,6 +133,192 @@ func TestPreflightBDContextCached_StaleEntryReSpawns(t *testing.T) {
 	}
 }
 
+// The cache's whole purpose is to stop periodic callers from re-spawning
+// `bd context` every tick. Gas City's order fleet runs on cooldowns measured in
+// minutes — on the live gc2 city, 73 of 74 orders sit at 1m or longer and the
+// mass of them is 2m-15m. A TTL at or below that band is therefore never able to
+// serve a single order tick: the entry is always stale by the time the next tick
+// arrives, so the cache only ever collapses bursts inside one window and every
+// periodic caller pays a full bd spawn forever. That is exactly what a 60s TTL
+// did (measured 2026-08-01: `bd context` was 30.8% of all bd traffic at a flat
+// ~1/min floor around the clock, 54.6% of it failing, and a controlled repeat at
+// 70s re-spawned while the same repeat at 10s did not).
+//
+// These cases pin the TTL against the cadences that must survive it. They are
+// deliberately expressed as cache hits at real order cooldowns rather than as an
+// assertion on the constant, so the property survives any future retuning.
+func TestPreflightIdentityDiskServesTheOrderCooldownBand(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		elapsed time.Duration
+	}{
+		{name: "1m order tick", elapsed: time.Minute},
+		{name: "2m order tick", elapsed: 2 * time.Minute},
+		{name: "5m order tick (modal cooldown)", elapsed: 5 * time.Minute},
+		{name: "10m order tick", elapsed: 10 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			city := t.TempDir()
+			withGCBuildVersion(t, "test-build")
+			start := time.Unix(1000, 0)
+			advance := withFixedPreflightNow(t, start)
+			key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
+
+			withFreshL1Memo(t)
+			if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+				return fakeIdentity(), nil
+			}); err != nil {
+				t.Fatalf("cold populate: %v", err)
+			}
+
+			// The next order tick runs in a brand-new short-lived gc process, so it
+			// has no L1 memo and must be served by the on-disk L2 entry.
+			withFreshL1Memo(t)
+			advance(start.Add(test.elapsed))
+			calls := 0
+			got, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+				calls++
+				return fakeIdentity(), nil
+			})
+			if err != nil {
+				t.Fatalf("order tick error: %v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("a %s order tick spawned bd context %d times, want 0 (served from disk)", test.elapsed, calls)
+			}
+			if got != fakeIdentity() {
+				t.Fatalf("got %+v, want %+v from disk", got, fakeIdentity())
+			}
+		})
+	}
+}
+
+// The deterministic non-repository result is the larger half of the wasted
+// spawns (54.6% of live `bd context` calls), because a city root is not a Git
+// worktree and never becomes one. It must ride the same cooldown-surviving TTL.
+func TestPreflightBDContextUnavailableDiskServesTheOrderCooldownBand(t *testing.T) {
+	city := t.TempDir()
+	withGCBuildVersion(t, "test-build")
+	start := time.Unix(1000, 0)
+	advance := withFixedPreflightNow(t, start)
+	key := preflightScopeKeyFor(city, city, "host:3306/db|ext=false")
+	notRepository := errors.New("exit status 1: cannot resolve repo context: cannot determine repository root: not a git repository")
+
+	withFreshL1Memo(t)
+	calls := 0
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return preflightBDContextValue{}, notRepository
+	}); !errors.Is(err, errPreflightBDContextNotGitRepository) {
+		t.Fatalf("cold error = %v, want classified non-repository error", err)
+	}
+
+	withFreshL1Memo(t)
+	advance(start.Add(5 * time.Minute))
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return fakeIdentity(), nil
+	}); !errors.Is(err, errPreflightBDContextNotGitRepository) {
+		t.Fatalf("5m order tick = %v, want the persisted non-repository error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a 5m order tick spawned bd context %d times, want 1 total (the cold probe)", calls)
+	}
+}
+
+// A longer TTL is only safe because a rebuilt gc invalidates every entry. The
+// cached identity's remaining inputs are the bd binary (bd_version,
+// schema_version) and the scope's backend config (backend, dolt_mode) — the
+// resolved Dolt target is already folded into the scope key. Deploying a new bd
+// or a config change on this fleet goes through a gc rebuild-bounce, so keying
+// entries to the build turns "stale until the TTL expires" into "impossible past
+// a rebuild" for the operator-driven changes the short TTL was protecting.
+//
+// This is exact string equality on a value gc already holds, NOT a stat/mtime
+// heuristic: 585cca7e1 removed mtime-based cache validation as unsound because a
+// same-size rewrite inside one filesystem timestamp tick is invisible to stat.
+// No such assumption is made here.
+func TestReadPreflightIdentityDisk_EntryFromAnotherGCBuildIsAMiss(t *testing.T) {
+	city := t.TempDir()
+	withFixedPreflightNow(t, time.Unix(1000, 0))
+	key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
+
+	withGCBuildVersion(t, "build-a")
+	if err := writePreflightIdentityDisk(city, key, fakeIdentity()); err != nil {
+		t.Fatalf("write under build-a: %v", err)
+	}
+	if v, ok := readPreflightIdentityDisk(city, key); !ok || v != fakeIdentity() {
+		t.Fatalf("same build must hit: %+v ok=%v", v, ok)
+	}
+
+	withGCBuildVersion(t, "build-b")
+	if _, ok := readPreflightIdentityDisk(city, key); ok {
+		t.Fatalf("entry written by another gc build must be a miss")
+	}
+
+	// The miss must recompute and re-stamp, not wedge the scope.
+	withFreshL1Memo(t)
+	calls := 0
+	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
+		calls++
+		return fakeIdentity(), nil
+	}); err != nil {
+		t.Fatalf("recompute after build change: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("run ran %d times, want 1 (build change forces one re-probe)", calls)
+	}
+	if _, ok := readPreflightIdentityDisk(city, key); !ok {
+		t.Fatalf("recomputed entry must be readable under the new build")
+	}
+}
+
+func TestReadPreflightBDContextUnavailableDisk_EntryFromAnotherGCBuildIsAMiss(t *testing.T) {
+	city := t.TempDir()
+	withFixedPreflightNow(t, time.Unix(1000, 0))
+	key := preflightScopeKeyFor(city, city, "host:3306/db|ext=false")
+
+	withGCBuildVersion(t, "build-a")
+	if err := writePreflightBDContextUnavailableDisk(city, key); err != nil {
+		t.Fatalf("write under build-a: %v", err)
+	}
+	if !readPreflightBDContextUnavailableDisk(city, key) {
+		t.Fatalf("same build must hit the persisted non-repository result")
+	}
+
+	withGCBuildVersion(t, "build-b")
+	if readPreflightBDContextUnavailableDisk(city, key) {
+		t.Fatalf("non-repository entry written by another gc build must be a miss")
+	}
+}
+
+// An entry persisted by a gc that predates build stamping carries no build, so
+// it must be a miss rather than silently inheriting the running build's trust.
+func TestReadPreflightIdentityDisk_LegacyEntryWithoutBuildIsAMiss(t *testing.T) {
+	city := t.TempDir()
+	withFixedPreflightNow(t, time.Unix(1000, 0))
+	withGCBuildVersion(t, "build-a")
+	key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
+
+	legacy := map[string]preflightIdentityDiskEntry{
+		key: {Backend: "dolt", DoltMode: "managed", BDVersion: "1.2.3", SchemaVersion: 7, CachedAtUnix: 1000},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(preflightIdentityCachePath(city)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(preflightIdentityCachePath(city), data, 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	if _, ok := readPreflightIdentityDisk(city, key); ok {
+		t.Fatalf("legacy entry without a build stamp must be a miss")
+	}
+}
+
 func TestPreflightBDContextCached_CachesOnlyNotGitRepositoryFailure(t *testing.T) {
 	city := t.TempDir()
 	advance := withFixedPreflightNow(t, time.Unix(1000, 0))
@@ -156,7 +352,7 @@ func TestPreflightBDContextCached_CachesOnlyNotGitRepositoryFailure(t *testing.T
 	}
 
 	// Repository membership can change, so the deterministic result must expire
-	// on the same short TTL as a successful identity and then re-probe.
+	// on the same TTL as a successful identity and then re-probe.
 	withFreshL1Memo(t)
 	advance(time.Unix(1000, 0).Add(preflightIdentityDiskTTL + time.Second))
 	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
