@@ -577,5 +577,18 @@ func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 // path. That made this defense-in-depth check reject every real candidate and
 // silently disabled the whole reaper on Darwin.
 func isStrictlyUnderDir(dir, path string) bool {
-	return pathutil.PathWithin(dir, path) && !pathutil.SamePath(dir, path)
+	// Normalize both sides. git worktree list reports canonical paths, while
+	// dir is derived from the configured city path, which may still contain a
+	// symlinked ancestor (on macOS every $TMPDIR path does, via /var ->
+	// private/var). Comparing the two raw forms makes filepath.Rel return a
+	// "../.." escape for a worktree that is plainly inside the city, so this
+	// defense-in-depth check silently drops every reap candidate. The
+	// PathWithin gate directly above already compares normalized.
+	dir = pathutil.NormalizePathForCompare(dir)
+	path = pathutil.NormalizePathForCompare(path)
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..")
 }
