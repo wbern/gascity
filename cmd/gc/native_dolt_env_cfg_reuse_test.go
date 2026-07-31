@@ -227,9 +227,32 @@ func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
 		t.Fatalf("parsing cmd_bd.go: %v", err)
 	}
 
+	// This fork splits the upstream doBd into a thin doBd wrapper plus
+	// doBdWithProfiler, which carries the real body (the bd invocation
+	// profiler is fork-only). Look in the wrapper first so this stays
+	// identical to upstream where the split does not exist, then fall back
+	// to the profiler variant. The property under test is unchanged: whichever
+	// function issues the call must hand the write-ID guard's store and beads
+	// to the close gate.
 	fn := findFuncDecl(file, "doBd")
+	if fn != nil {
+		var found bool
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == callee {
+				found = true
+			}
+			return true
+		})
+		if !found {
+			fn = findFuncDecl(file, "doBdWithProfiler")
+		}
+	}
 	if fn == nil {
-		t.Fatal("doBd not found in cmd_bd.go")
+		t.Fatal("neither doBd nor doBdWithProfiler found in cmd_bd.go")
 	}
 
 	var calls int

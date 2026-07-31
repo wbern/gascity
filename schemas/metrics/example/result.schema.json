@@ -206,6 +206,7 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
+              "pack-registry-requests",
               "worktree-scan",
               "mcp-validate",
               "worktree-reap"

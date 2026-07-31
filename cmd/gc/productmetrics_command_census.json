@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 199,
+  "next_id": 200,
   "permanent_ids": [
     {
       "name": "help",
@@ -2413,7 +2413,7 @@
       "notice_policy": "eligible",
       "classification": "mcp-validate",
       "owner": "immediate",
-      "id": 197
+      "id": 198
     },
     {
       "path": "gc metrics",
@@ -2855,6 +2855,21 @@
       "classification": "pack-registry-remove",
       "owner": "immediate",
       "id": 106
+    },
+    {
+      "path": "gc pack registry requests",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-registry-requests",
+      "owner": "immediate",
+      "id": 196
     },
     {
       "path": "gc pack registry search",
@@ -4455,7 +4470,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-reap",
       "owner": "immediate",
-      "id": 198
+      "id": 199
     },
     {
       "path": "gc worktree scan",
@@ -4470,7 +4485,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-scan",
       "owner": "immediate",
-      "id": 196
+      "id": 197
     }
   ],
   "synthetic": [
