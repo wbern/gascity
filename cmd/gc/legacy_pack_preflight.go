@@ -109,14 +109,24 @@ func lockedBundledImportsUsable(cityPath string) bool {
 	if err != nil {
 		return false
 	}
+	// Bundled imports of one repository share a synthetic cache directory and
+	// ValidateSyntheticRepo checks every pack layout in it, so validating per
+	// import repeated the same whole-tree check. Deduplicate within this pass;
+	// the next readiness check still validates fresh.
+	validated := make(map[string]struct{})
 	for _, imp := range imports {
 		cachePath, err := packman.RepoCachePath(imp.source, imp.commit)
 		if err != nil {
 			return false
 		}
+		key := cachePath + "\x00" + imp.commit
+		if _, done := validated[key]; done {
+			continue
+		}
 		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) != nil {
 			return false
 		}
+		validated[key] = struct{}{}
 	}
 	return true
 }
