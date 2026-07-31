@@ -163,6 +163,20 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
 		// W-unexport).
 		"cmd/gc/session_beads.go": 1,
+		// cmd_worktree.go is a SANCTIONED EDGE, folded in rather than routed
+		// through session.Store.ListAll, because the typed front door cannot
+		// answer its question yet. worktreeLiveWorkerDirs needs each session's
+		// WORKER dir via contract.WorkerDirFromMetadata, which reads the
+		// canonical "worker_dir" key and only then falls back to the legacy
+		// "work_dir". Info carries just WorkDir, decoded from "work_dir" alone
+		// (info_codec.go). Routing this site through Info.WorkDir would silently
+		// drop every session that records the canonical key, shrinking the live
+		// set that gc worktree reap protects — i.e. it would classify live
+		// worktrees as reapable. Closing this edge properly means giving Info a
+		// WorkerDir field fed by WorkerDirFromMetadata; until then the honest
+		// move is to record the debt here rather than trade it for a
+		// worktree-deletion hazard.
+		"cmd/gc/cmd_worktree.go": 1,
 	},
 	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
 	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID
