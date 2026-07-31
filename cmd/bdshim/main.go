@@ -49,8 +49,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Strip the gc-only --city/--rig scope flags (raw bd does not accept them);
 	// --city overrides the routed target city, matching extractBdScopeFlags.
-	cityOverride, _, rawBDArgs := extractScopeFlags(args)
+	cityOverride, rigOverride, rawBDArgs := extractScopeFlags(args)
 	rawVerb, _ := bdshim.SplitGlobalFlags(rawBDArgs)
+
+	// --rig selects a DIFFERENT rig's bead store, and this shim has no way to
+	// honor that: it answers from the rig it was invoked in. Stripping the flag
+	// and proceeding returned the wrong store's beads with exit 0, so a
+	// cross-rig query looked like it had succeeded. That breaks the invariant
+	// this whole binary rests on — passthrough is a latency choice, never a
+	// semantic one — and it does so silently, which is the worst direction for
+	// a wrapper to fail in. Raw bd rejects --rig outright; refuse likewise, and
+	// name the form that actually works.
+	if rigOverride != "" {
+		logDisposition(rawVerb, rawBDArgs, "refuse", 1, start)
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"bdshim: --rig %s is not supported: bd reads only its own rig's store, so answering here would return the wrong beads. Use `gc bd` instead, which resolves across rigs.\n",
+			rigOverride)
+		return 1
+	}
 
 	// Expand the gc-only `heartbeat <id>` verb into the bd write that performs it.
 	bdArgs, err := rewriteHeartbeatArgs(rawBDArgs)
