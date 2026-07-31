@@ -1,6 +1,6 @@
 ---
 title: Holds that outlive their releaser
-description: Why a correct pause is indistinguishable from a deadlock today, and what a hold must carry to be safe — expiry, a resolvable releaser, and a self-evaluable predicate. Written from the GC3 incident of 2026-07-30.
+description: Why a correct pause is indistinguishable from a deadlock today, and why most of the fix already exists — bd --defer and dependency edges. Written from the GC3 incident of 2026-07-30, then cut down by an adversarial review for over-engineering.
 ---
 
 ## The incident, and the one fact that shapes everything below
@@ -71,70 +71,93 @@ Note that `hold:mayor` names a **role**, not a session. There is no session to
 probe for liveness, so a liveness check is not merely unimplemented — it is
 not expressible in the current shape.
 
-## The design
+## The design — and most of it already exists
 
-A hold is safe when it carries three things. Stated as invariants rather than
-an implementation, because the mechanism is a later decision:
+An earlier draft of this page proposed three new invariants: an expiry, a
+releaser-liveness check, and a self-evaluable predicate. An adversarial review
+for over-engineering killed two and a half of them. What follows is what
+survived.
 
-**1. An expiry.** After it, the hold self-releases or escalates — never
-silently persists. The default must be finite. An indefinite hold should be
-something you opt into loudly, not what you get by forgetting.
+**Expiry already exists.** `bd update <id> --defer <date>` hides a bead from
+`bd ready` until the date, then it returns on its own. Verified live: a scratch
+bead appeared in `bd ready`, was deferred, and disappeared from `ready`
+immediately, with no actor involved in its eventual return. **That is a
+self-releasing TTL, already implemented and already deployed.** Proposing a new
+expiry mechanism was reinvention.
 
-**2. A releaser that resolves to something live.** Not a role name: an
-identity the system can probe. If the releaser cannot be resolved, or resolves
-to a suspended session, the hold is **already broken at the moment it is set**
-and should be refused or immediately escalated — not discovered seven hours
-later. This is the same failure as `crm-workspace` escalating to *"a human/mayor
-must reconcile"* with no receiver, and the same as a bead being assigned to an
-agent that cannot read it.
+**Self-evaluating release already exists too.** A dependency edge is computed
+from real state: when the blocker closes, the block lifts, and nobody has to
+remember. The earlier draft correctly identified this as "the model to
+generalise" and then proposed a parallel predicate system anyway. Generalising
+it means *using it*, not rebuilding it.
 
-**3. A machine-readable predicate the worker can re-evaluate itself.** This is
-the most valuable of the three, because it removes the releaser from the
-critical path entirely. Two of the four workers were waiting on a condition
-that had already cleared. A worker that can ask *"is this still true?"* does not
-need anyone to come back. The dependency edge already works this way; that is
-the model to generalise.
+**Releaser liveness does not survive the review at all.** Two reasons. First,
+if a hold expires, the releaser's liveness stops mattering — the hold lifts
+regardless, which is a strictly simpler guarantee than probing a session.
+Second, "must resolve to a live session" is probably *wrong*, not merely
+excess: sessions sleep and despawn constantly by design, so a releaser asleep
+at set-time may be awake an hour later. Refusing a hold on that basis would
+generate false refusals to prevent a failure that expiry already prevents.
 
-### The part that is genuinely hard
+### So the real gap is smaller than it looked
 
-You cannot put a TTL on a sentence in a mail. So one of two things has to be
-true, and this is the real decision:
+Both time-bound and condition-bound pauses are already expressible today:
 
-- **(a) A hold is only binding if it is recorded structurally.** Prose asking a
-  worker to pause is advisory; the worker records an actual hold (with expiry,
-  releaser and predicate) or it keeps working. Puts the burden on the sender
-  and makes non-compliance correct behaviour.
-- **(b) A worker that accepts a mailed hold must durably declare it.** The
-  hold becomes visible the moment it is honoured, and gets its expiry then.
-  Puts the burden on the recipient, and composes with the worker-declared state
-  marker proposed for the idle watchdog: a durable
-  `blocked, waiting on <receiver>, predicate=<x>` record that a watchdog
-  **reads** rather than infers, turning an inference into a fact.
+| Pause is bound by | Use | Self-releases? |
+|---|---|---|
+| a time | `bd update --defer <date>` | yes |
+| another bead | `bd dep add <a> <b>` | yes |
+| a specific actor | `hold:<value>` label | **no** |
+| prose in a mail | *nothing* | **no** |
 
-**(b) is the better fit for Gas City** — it needs no enforcement against
-senders, it is the same artifact the watchdog already needs, and it keeps
-judgment out of Go. The system never decides *whether* a pause is legitimate;
-it only observes that one was declared, checks whether its clock has run out,
-and whether its releaser still exists. Those are mechanical predicates.
+The bottom two rows are the entire problem. And the incident lived in the last
+one.
+
+### The minimal fix
+
+A pause delivered as prose is invisible to every component by construction.
+The cheapest thing that would have prevented the incident is a convention, not
+a mechanism:
+
+> A mailed instruction to pause is **advisory** unless it is accompanied by a
+> `--defer` date or a dependency edge. If you want a worker to stop, record it
+> where the system can see it and where it will lift itself.
+
+That is a line in a prompt template. It needs no new storage, no new reader, no
+new evaluator, and no code — which matters here specifically, because Gas City
+rejects capability flags and a skills system on exactly this reasoning: a
+sentence in the prompt is sufficient, and judgment does not belong in Go.
+
+Only if that convention demonstrably fails should anything be built. The next
+increment after it — and *only* if needed — is surfacing the fourth row: a
+worker that honours a prose hold records it durably, so it becomes visible to
+the idle watchdog. That composes with the worker-declared state marker the
+watchdog already needs, so it is one artifact serving two purposes rather than
+a new subsystem.
 
 ### What this does not propose
 
-No role names in Go. The releaser is an opaque, config-supplied identity that
-the session layer can resolve — the same shape as any other session reference.
-Nothing here requires a Mayor, a DevOps, or any named role to exist.
+No new mechanism, no new storage, and no code. No role names in Go — nothing
+here requires a Mayor, a DevOps, or any named role to exist. If the convention
+proves insufficient, the increment after it is one durable marker that the
+idle watchdog already wants for its own reasons, not a hold subsystem.
 
 ## Verification criteria
 
-A design is not done until these are demonstrable:
+Scaled to the trimmed design. The first two are the whole of it:
 
-- A hold whose expiry passes releases or escalates without anyone acting.
-- A hold naming an unresolvable or suspended releaser is rejected **at set
-  time**, not at release time.
-- A worker whose predicate has cleared resumes without the releaser.
-- N concurrent holds on one worker are individually visible; clearing one does
-  not imply the others are gone, and the remaining ones are surfaced.
-- A mailed hold that a worker honours is visible to at least one other
+- A pause recorded with `--defer` returns to `bd ready` on its own, with no
+  actor involved. (Verified live 2026-07-31 on a scratch bead.)
+- A pause recorded as a dependency edge lifts when the blocker closes.
+- A mailed pause carrying neither is treated as advisory, and a worker that
+  keeps working after one is behaving correctly.
+
+Only if the convention fails in practice:
+
+- A prose hold a worker honours becomes visible to at least one other
   component within one watchdog tick.
+- N concurrent holds are individually visible; clearing one does not imply the
+  others are gone.
 
 ## Provenance
 
