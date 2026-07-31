@@ -563,3 +563,48 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
 	}
 }
+
+// TestValidateSyntheticRepoMemoInvalidatedByMaterialize pins that the
+// per-directory validation memo does not outlive a rewrite of the tree it
+// describes. MaterializeSyntheticRepo is the only writer, so it must drop the
+// entry; otherwise a rehydration would keep returning the pre-repair verdict.
+func TestValidateSyntheticRepoMemoInvalidatedByMaterialize(t *testing.T) {
+	dst := materializeTestRepo(t)
+	target := filepath.Join(dst, "internal/bootstrap/packs/core/pack.toml")
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("Remove(%q): %v", target, err)
+	}
+	if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+		t.Fatal("ValidateSyntheticRepo accepted a cache with a missing file")
+	}
+	// Repair through the real writer; the stale failure must not persist.
+	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepo after rehydration = %v, want nil", err)
+	}
+}
+
+// TestValidateSyntheticRepoMemoRechecksMarker pins that a memo hit is not a
+// blind cache: every hit still runs the marker-only check, so an eviction or a
+// rehydration performed by another process (which rewrites the marker) is
+// observed rather than masked.
+//
+// Limitation this test deliberately documents by omission: a memo hit does NOT
+// re-read file contents. An in-place corruption made by a different process
+// after this process has already validated the tree, and which leaves the
+// marker untouched, is not re-detected within this process's lifetime. Within
+// one short-lived CLI invocation that window is the process duration.
+func TestValidateSyntheticRepoMemoRechecksMarker(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+		t.Fatalf("first ValidateSyntheticRepo = %v, want nil", err)
+	}
+	if err := os.Remove(filepath.Join(dst, syntheticMarkerFile)); err != nil {
+		t.Fatalf("removing marker: %v", err)
+	}
+	if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+		t.Fatal("memo hit masked a removed cache marker")
+	}
+}
