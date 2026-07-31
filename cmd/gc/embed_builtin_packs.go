@@ -219,14 +219,25 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 
 func requiredBuiltinSourcesUsable(cityPath string) bool {
 	commit := bundledPackImportCommit()
+	// Every bundled source of a repository shares one synthetic cache
+	// directory, and ValidateSyntheticRepo checks all pack layouts in that
+	// directory regardless of which source asked. Validating once per source
+	// therefore repeated an identical whole-tree check. Deduplicate by cache
+	// path: this drops repeated work inside a single readiness check without
+	// caching a verdict across checks, so each check still validates fresh.
+	validated := make(map[string]struct{})
 	for _, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return false
 		}
+		if _, done := validated[cachePath]; done {
+			continue
+		}
 		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
 			return false
 		}
+		validated[cachePath] = struct{}{}
 	}
 	return true
 }
