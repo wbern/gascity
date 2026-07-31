@@ -494,10 +494,22 @@ This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full 
 
 ```bash
 bd ready              # Find available work
-bd show <id>          # View issue details
+bd show <id>          # View issue details (THIS RIG ONLY — see below)
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
 ```
+
+**Cross-rig lookups need `gc bd`, not `bd`.** `bd` is rig-unaware and only
+reads its own rig's store. Asked for a bead belonging to another rig it
+reports `no issue found matching "<id>"` — indistinguishable from the bead
+not existing. `gc bd` resolves by ID prefix across rigs:
+
+```bash
+bd show <other-rig-id>     # Error: no issue found  (wrong store, not absent)
+gc bd show <other-rig-id>  # resolves
+```
+
+If a bead ID's prefix is not your rig's, reach for `gc bd`.
 
 ### Rules
 
