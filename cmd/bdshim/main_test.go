@@ -255,13 +255,18 @@ func TestRunLogsGlobalFlagsWithoutScopeValues(t *testing.T) {
 	t.Setenv("GC_BD_REAL", bd)
 	t.Setenv("GC_BDSHIM_LOG", logPath)
 
+	// --rig is refused (the shim cannot answer for another rig's store), so this
+	// exercises the REFUSAL path. That is the stricter test for this file's
+	// subject: scope values must stay out of the route log even when the
+	// invocation is rejected, and the refusal message naming the rig goes to
+	// stderr, never to the log.
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{
 		"--city", "/Users/willi/private-city",
 		"--rig=private-rig",
 		"--readonly", "log", "--future-private-option=secret-value",
-	}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
+	}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (--rig must be refused)", code)
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
