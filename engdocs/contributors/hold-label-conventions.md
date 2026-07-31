@@ -94,6 +94,40 @@ different:**
   `ready-to-build`), not a pause-state label. It may legitimately co-occur
   with `hold:mayor`.
 
+## A pause nobody recorded is advisory
+
+Asking an agent to stop *in a mail* records nothing. No component can see it,
+so it cannot expire, cannot be surfaced, and cannot be distinguished from the
+agent being wedged. On 2026-07-30 that cost the GC3 fleet about seven hours:
+four workers were mailed an overnight hold with no expiry, naming a releaser
+that was suspended. It never lifted. By morning two of the four had no
+underlying problem at all. They were not malfunctioning — they were obeying.
+
+So:
+
+> **A mailed instruction to pause is advisory unless it is accompanied by a
+> `--defer` date or a dependency edge.** If you want a worker to stop,
+> record it where the system can see it and where it will lift itself.
+
+A worker that keeps working after an unrecorded pause request is behaving
+correctly, and should not be treated as having ignored an instruction.
+
+Both durable forms already exist and both self-release, which is the whole
+point — nobody has to remember to come back:
+
+| Pause bound by | Record it as | Lifts itself when |
+|---|---|---|
+| a time | `bd update <id> --defer <date>` | the date passes |
+| another bead | `bd dep add <a> <b>` | the blocker closes |
+| a specific actor | `hold:<value>` (above) | **never — needs the actor** |
+
+Prefer the first two. Reach for `hold:<value>` only when the pause genuinely
+depends on a specific actor and no date or bead expresses it, and say in
+`--reason` what would release it.
+
+Design rationale, and why the fix is a convention rather than a mechanism:
+`hold-expiry-and-releaser-liveness.md`.
+
 ## This is a data convention, not SDK behavior
 
 Nothing in this page requires or implies special-casing any role name in Go.
