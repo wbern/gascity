@@ -30,7 +30,7 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 		// (a city root that is not a Git worktree), which would otherwise re-spawn
 		// on every store-open forever.
 		v, err := preflightBDContextCached(cityPath, preflightScopeKey(cityPath, scope), func() (preflightBDContextValue, error) {
-			out, err := bdCommandRunnerForCity(cityPath)(scope, "bd", "context", "--json")
+			out, err := bdCommandRunnerForCity(cityPath)(scope, preflightBDBinary(), "context", "--json")
 			if err != nil {
 				return preflightBDContextValue{}, err
 			}
