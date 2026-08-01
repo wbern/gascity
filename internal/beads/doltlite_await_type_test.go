@@ -60,6 +60,56 @@ func TestDoltliteReadStoreToleratesMissingAwaitTypeColumn(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreProjectsPlainGateColumns pins created_by, owner and
+// notes — the three of bd's six missing list/show fields that are plain columns
+// rather than backend-computed counts.
+//
+// created_by and owner are also the last two fields of bd's `gate list`
+// projection the wire Bead did not carry, so without them a routed gate read
+// would still have dropped output silently even with await_type present.
+func TestDoltliteReadStoreProjectsPlainGateColumns(t *testing.T) {
+	store, closeStore := newAwaitTypeDoltliteStore(t, true)
+	defer closeStore()
+
+	rows, err := store.List(ListQuery{Type: "gate"})
+	if err != nil {
+		t.Fatalf("List gate beads: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("gate rows = %d, want 1", len(rows))
+	}
+	got := rows[0]
+	for _, tc := range []struct{ name, got, want string }{
+		{"CreatedBy", got.CreatedBy, "seeder"},
+		{"Owner", got.Owner, "owner-1"},
+		{"Notes", got.Notes, "gate notes"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestDoltliteReadStoreToleratesMissingPlainGateColumns pins that a snapshot
+// without created_by/owner still lists, for the same reason await_type does:
+// these go into the main list SELECT, and erroring there would take down every
+// list read.
+func TestDoltliteReadStoreToleratesMissingPlainGateColumns(t *testing.T) {
+	store, closeStore := newAwaitTypeDoltliteStore(t, false)
+	defer closeStore()
+
+	rows, err := store.List(ListQuery{Type: "gate"})
+	if err != nil {
+		t.Fatalf("List on a schema without the gate columns: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("gate rows = %d, want 1", len(rows))
+	}
+	if rows[0].CreatedBy != "" || rows[0].Owner != "" {
+		t.Fatalf("CreatedBy=%q Owner=%q, want empty when the columns are absent", rows[0].CreatedBy, rows[0].Owner)
+	}
+}
+
 // newAwaitTypeDoltliteStore builds a doltlite fixture holding one gate bead,
 // with or without bd's await_type column.
 func newAwaitTypeDoltliteStore(t *testing.T, withAwaitType bool) (*DoltliteReadStore, func()) {
@@ -85,12 +135,15 @@ func newAwaitTypeDoltliteStore(t *testing.T, withAwaitType bool) (*DoltliteReadS
 	insertCols, insertVals := "", ""
 	if withAwaitType {
 		cols += `,
-			await_type TEXT DEFAULT ''`
-		insertCols, insertVals = ", await_type", ", 'human'"
+			await_type TEXT DEFAULT '',
+			created_by TEXT DEFAULT '',
+			owner TEXT DEFAULT ''`
+		insertCols = ", await_type, created_by, owner"
+		insertVals = ", 'human', 'seeder', 'owner-1'"
 	}
 	createTestDoltliteSchemaWithRowColumns(t, db, cols)
-	if _, err := db.Exec(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, metadata` +
-		insertCols + `) VALUES ('gate-1', 'Gate: human', 'open', 'gate', 2, '2026-08-01T12:00:00Z', '2026-08-01T12:00:00Z', '{}'` +
+	if _, err := db.Exec(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, metadata, notes` +
+		insertCols + `) VALUES ('gate-1', 'Gate: human', 'open', 'gate', 2, '2026-08-01T12:00:00Z', '2026-08-01T12:00:00Z', '{}', 'gate notes'` +
 		insertVals + `)`); err != nil {
 		t.Fatalf("insert gate fixture: %v", err)
 	}

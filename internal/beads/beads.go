@@ -104,6 +104,16 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CreatedBy and Owner mirror bd's created_by/owner columns. They complete
+	// bd's `gate list` projection alongside AwaitType, and are two of the six
+	// fields bd's list/show output carries that this type did not. Empty on
+	// snapshots whose schema predates them.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	// Notes mirrors bd's notes column, the third plain-column member of that
+	// six. The remaining three (comment_count, dependency_count,
+	// dependent_count) are backend-computed over relations and comments.
+	Notes string `json:"notes,omitempty"`
 	// AwaitType is the condition a gate bead waits on ("human", "timer",
 	// "gh:run", "gh:pr"), mirroring bd's await_type column. It is the one field
 	// of bd's four-field gate contract (id/status/created_at/await_type) the

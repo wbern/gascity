@@ -651,6 +651,9 @@ type bdIssue struct {
 	// AwaitType is the gate condition bd emits on `bd gate list` (and only
 	// there — `bd list` omits it). Absent for every non-gate bead.
 	AwaitType string `json:"await_type,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
@@ -813,6 +816,9 @@ func (b *bdIssue) toBead() Bead {
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
 		IsBlocked:    b.IsBlocked.ptr(),
 		AwaitType:    b.AwaitType,
+		CreatedBy:    b.CreatedBy,
+		Owner:        b.Owner,
+		Notes:        b.Notes,
 		Revision:     b.Revision,
 	}
 }
