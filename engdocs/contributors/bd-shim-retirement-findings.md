@@ -200,6 +200,84 @@ A routed read pays **none** of `resolve_scope` (484 ms) and **none** of
   (one run showed 617 ms). The *shape* is stable and is what the argument rests
   on; the absolute is not precise.
 
+## 5b. Inefficiencies: what survived adversarial review
+
+Each candidate was attacked before being filed. Three survived (`gcw-yr0o.6`,
+`.7`, `.8`); three did not. The refutations are recorded because the failure mode
+repeated.
+
+### Survived
+
+- **`bdBeadExists` opens a Dolt store per candidate rig** to confirm a bead ID —
+  260 ms, 43% of CPU samples on a read (`gcw-yr0o.6`). `resolveBdScopeTarget`
+  matches the rig from the bead-ID prefix, then does not trust it: it opens that
+  rig's store and does a `Get`, throws the store away, and spawns `bd` to do the
+  real read. The probe is a real guard (it stops hyphenated flag values
+  retargeting the command), so it cannot just be deleted. **Its value depends on
+  `.1`:** a routed read never calls `resolveBdScopeTarget` at all, so this cost
+  vanishes for reads and is only independently worth fixing for writes and
+  explicit-scope invocations. Sequence it after `.1` and re-measure.
+- **Ready-federation parallelism is shipped, tested, and off** (`gcw-yr0o.7`).
+  Already implemented at `huma_handlers_beads.go:515-539` with a process-global
+  semaphore, a max-8 clamp, and tests for both paths — gated on
+  `GC_READY_FEDERATION_CONCURRENCY`, which defaults to 1. See 5c: the win is
+  **not** quantified.
+- **The telemetry log is unbounded** (`gcw-yr0o.8`), 65 MB and growing. It
+  matters because `.4` requires the telemetry to *survive* retirement, so the
+  successor must not inherit an unbounded design. Archive, do not delete — it is
+  the before/after baseline.
+
+### Refuted
+
+- **"gc loads the city config twice on a read (~300 ms)."** Wrong.
+  `openStoreResultAtForCityWithConfig` reloads only when `cfg == nil`;
+  `bdBeadExists` passes the loaded config, and carries a comment saying exactly
+  that. Already fixed. The claim came from summing **nested** phase data
+  (`load_city_config` 147.6 ms and a pprof `loadCityConfig` frame at 150 ms are
+  the *same* load) compounded by pprof attributing inlined frames to the
+  nil-config variant.
+- **"`--rig` is what makes `gc bd gate list` slow."** Wrong — measured with and
+  without: 294.1 vs 292.6 ms. `gate` simply is not fastpath-eligible.
+- **The ready-federation cost model** — see 5c.
+
+> **Lesson, now three times over:** nested profile data, inlined pprof frames,
+> and cost models all invite confident double-counting. Confirm a
+> duplicated-work claim by reading the call site, and validate a model against a
+> known measurement *before* using it to predict.
+
+## 5c. The ready-federation experiment refuted its own model
+
+Method: build a cost model, validate it against the measured endpoint, and only
+then predict the parallel win. The validation step failed.
+
+```
+per-store `bd ready --json --limit 0`, n=5 each — remarkably uniform:
+  city/hq 151.1 | gas-city-wbern 152.8 | gascity-packs 151.8
+  crm 154.8 | gas-city-infra 150.5 | statusline 150.9
+MODEL sequential (sum of 6)     = 911.9 ms
+MEASURED GET /beads/ready n=10  = 200.3 ms   (min 191.5, max 215.7 — tight)
+                                  366% error
+```
+
+The controller cannot be paying six sequential cold bd spawns: 200 ms total is
+less than **two** cold shell invocations. Its real per-source cost is ~33 ms, not
+~151 ms — roughly 4.5× cheaper, cause not yet determined (plausibly a warm
+long-lived process with page cache and pre-resolved env, no shim indirection, or
+sources that are not all cold bd-backed).
+
+**This makes `gcw-s5i0`'s root cause stale.** Its "~5–6 sequential bd subprocess
+spawns per ready call = ~355 ms" no longer reproduces, and its 2800× cache-serve
+figure was derived from the same decomposition — so it must be re-derived before
+being used to justify touching freshness semantics, which is the genuinely risky
+option since ready gates dispatch.
+
+**No speedup number should be quoted for parallelism.** What is solid: the code
+is shipped, tested on both paths, semantically identical (same `.Live` reads,
+scheduling only), clamped, and reverts by unsetting one env var. What is not
+solid: how much it buys. `GC_READY_FEDERATION_CONCURRENCY` is read once at
+startup, so validating it needs a controller restart — the same bounce gated on
+`gcw-75s5`.
+
 ## 6. What retirement still needs
 
 See `gcw-yr0o`. In short: reach the controller cheaply (`.1`), make the
