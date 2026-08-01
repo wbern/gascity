@@ -301,6 +301,16 @@ func earlyBdExperimentShape(verb string, args []string) (bdexperiment.Shape, boo
 		if bdshim.QueryRoutable(args) {
 			return bdexperiment.ShapeQueryEphemeral, true
 		}
+	case "ready":
+		// Serving ready in-process is byte-safe by construction, not by luck:
+		// cmd/bdshim and runEarlyBdDirect both hand a bdroute-resolved
+		// NewCityScopedClient to the same bddispatch.DispatchViaAPI. Approving
+		// the shape removes this verb's dependency on the shim BINARY, which is
+		// what bdshim retirement needs — without it, a city with no shim
+		// installed drops ~8.3% of bd traffic onto doBd.
+		if bdshim.ReadyRoutable(args) {
+			return bdexperiment.ShapeReadyJSON, true
+		}
 	case "mol":
 		sub, _, _, ok := bdshim.MolRoutable(args)
 		if ok && sub == "current" {

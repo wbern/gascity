@@ -420,12 +420,23 @@ func TestTryEarlyBdShimReadPreservesExternalDoltOverrideAndAllowsCanonicalProjec
 // that the early path declines when PATH's `bd` resolves to a different file
 // than the trusted managed shim, so a terminal whose bd is not the city's shim
 // keeps gc bd's full rig-local contract.
-func TestTryEarlyBdShimKeepsReadOnTheFullPathWhenTheManagedShimIsNotSelected(t *testing.T) {
+// An untrusted `bd` on PATH must never cause gc to exec it. Before `ready` had
+// an in-process implementation the only safe response was to decline to doBd;
+// now the routed shape is served from the controller instead, which is strictly
+// safer — doBd would itself have spawned that same untrusted PATH `bd`, while a
+// controller read touches no `bd` at all.
+func TestTryEarlyBdShimServesRoutedShapeInProcessWhenTheManagedShimIsNotSelected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	defer server.Close()
 	t.Setenv("GC_BD_FASTPATH", "1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_API_URL", server.URL)
 
-	shim := writeEarlyBdShim(t, "exit 0\n")
-	foreign := writeEarlyBdShim(t, "exit 0\n")
+	shim := writeEarlyBdShim(t, "exit 3\n") // exec'ing this would surface as rc=3
+	foreign := writeEarlyBdShim(t, "exit 3\n")
 	previousShimPath := earlyBdShimPath
 	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
 	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
@@ -433,8 +444,34 @@ func TestTryEarlyBdShimKeepsReadOnTheFullPathWhenTheManagedShimIsNotSelected(t *
 	earlyBdLookPath = func(string) (string, error) { return foreign, nil }
 	t.Cleanup(func() { earlyBdLookPath = previousLookPath })
 
-	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
-		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, false)", code, handled)
+	var stdout bytes.Buffer
+	code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), &stdout, io.Discard)
+	if !handled || code != 0 {
+		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (0, true) served in-process", code, handled)
+	}
+	if got, want := stdout.String(), "[]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q from the controller (not the untrusted shim)", got, want)
+	}
+}
+
+// The guard the test above used to provide still has to hold for a shape with
+// NO in-process implementation: a passthrough verb must stay on doBd, which
+// supplies gc's resolved scope and managed child environment. `list` is
+// permanently passthrough (classify.go), so it is the durable case here.
+func TestTryEarlyBdShimKeepsPassthroughShapeOnTheFullPath(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	shim := writeEarlyBdShim(t, "exit 0\n")
+	previousShimPath := earlyBdShimPath
+	earlyBdShimPath = func(_ string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdShimPath = previousShimPath })
+	previousLookPath := earlyBdLookPath
+	earlyBdLookPath = func(string) (string, error) { return shim, nil }
+	t.Cleanup(func() { earlyBdLookPath = previousLookPath })
+
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "list", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+		t.Fatalf("passthrough shape: got (%d, %t), want (0, false) so doBd handles it", code, handled)
 	}
 }
 
@@ -713,11 +750,24 @@ func TestTryEarlyBdShimReadServesApprovedShapeWithoutAShimBinary(t *testing.T) {
 	}
 }
 
-// A shape the experiment does not cover has no in-process implementation, so
-// without a shim it must DECLINE to doBd rather than fabricate a result.
-func TestTryEarlyBdShimReadDeclinesUnapprovedShapeWithoutAShimBinary(t *testing.T) {
+// Same retirement property as the test above, for `ready` specifically. It is
+// ~8.3% of measured fleet bd traffic — far more than query+mol combined — and
+// until it became an approved shape this case fell through to doBd, measured at
+// ~420 ms of client CPU against ~22.6 ms for the shim. Removing bdshim was
+// therefore a regression for this verb, which is exactly what retirement must
+// not be.
+func TestTryEarlyBdShimReadServesReadyWithoutAShimBinary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/v0/city/gc2/beads/ready"; got != want {
+			t.Errorf("request path = %q, want %q", got, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	defer server.Close()
 	t.Setenv("GC_BD_FASTPATH", "1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_API_URL", server.URL)
 
 	previous := earlyBdShimPath
 	earlyBdShimPath = func(string) (string, error) { return "", exec.ErrNotFound }
@@ -726,9 +776,12 @@ func TestTryEarlyBdShimReadDeclinesUnapprovedShapeWithoutAShimBinary(t *testing.
 	earlyBdLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
 	t.Cleanup(func() { earlyBdLookPath = previousLook })
 
-	// `ready` is fastpath-eligible but is NOT an approved experiment shape, so it
-	// has no in-process path.
-	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
-		t.Fatalf("unapproved shape without a shim: got (%d, %t), want (0, false) so doBd handles it", code, handled)
+	var stdout bytes.Buffer
+	code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), &stdout, io.Discard)
+	if !handled || code != 0 {
+		t.Fatalf("approved shape without a shim: got (%d, %t), want (0, true) served in-process", code, handled)
+	}
+	if got, want := stdout.String(), "[]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }

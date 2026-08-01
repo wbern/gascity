@@ -40,6 +40,10 @@ const (
 	ShapeListJSON Shape = "list_json"
 	// ShapeQueryEphemeral is the proven ephemeral query read shape.
 	ShapeQueryEphemeral Shape = "query_ephemeral"
+	// ShapeReadyJSON is the federated ready read shape. bd ready has always
+	// classified as Route; naming it here is what lets gc serve it in-process
+	// instead of only by exec'ing the bdshim binary.
+	ShapeReadyJSON Shape = "ready_json"
 	// ShapeMolCurrent is the molecule current-state read shape.
 	ShapeMolCurrent Shape = "mol_current"
 	// ShapeMolProgress is the molecule progress read shape.
@@ -174,7 +178,7 @@ func selectArm(config Config, next func(int) int) Arm {
 
 func knownShape(shape Shape) bool {
 	switch shape {
-	case ShapeShowJSON, ShapeListJSON, ShapeQueryEphemeral, ShapeMolCurrent, ShapeMolProgress:
+	case ShapeShowJSON, ShapeListJSON, ShapeQueryEphemeral, ShapeReadyJSON, ShapeMolCurrent, ShapeMolProgress:
 		return true
 	default:
 		return false
