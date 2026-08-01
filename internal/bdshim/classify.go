@@ -152,6 +152,60 @@ func UnsupportedUpdateMutationFlag(args []string) (string, bool) {
 	return "", false
 }
 
+// UpdatePositionals returns the positional arguments of a `bd update` arg list —
+// the issue ids — skipping every token consumed as a flag's value. It shares
+// UpdateFlagNeedsValue with UpdateRoutable and ParseUpdateOpts, so the three
+// agree on which tokens are values and which are ids.
+//
+// Reading the first non-flag token as the id instead (the earlier rule) picked
+// `a=1` out of `--set-metadata a=1 <id>`: cobra accepts flags before positionals
+// and raw bd honors that ordering, so the routed write targeted a bead named
+// after the metadata pair.
+func UpdatePositionals(args []string) []string {
+	var positionals []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			positionals = append(positionals, a)
+			continue
+		}
+		name := a
+		hasInlineValue := strings.IndexByte(a, '=') >= 0
+		if hasInlineValue {
+			name = a[:strings.IndexByte(a, '=')]
+		}
+		if !hasInlineValue && UpdateFlagNeedsValue[name] && i+1 < len(args) {
+			i++ // consume the space-separated value
+		}
+	}
+	return positionals
+}
+
+// UpdateMistypedMetadataPair reports whether a `bd update` arg list carries a
+// bare `key=value` token in bd's positional issue-id slot — the signature of a
+// dropped `--set-metadata` pair.
+//
+// `--set-metadata` is a repeatable stringArray that takes ONE pair per flag, so
+// in `--set-metadata a=1 b=2 c=3` only `a=1` is the flag's value; `b=2` and `c=3`
+// become positional issue ids. Raw bd tries to resolve them, fails, prints the
+// failures to stderr, still prints its success line for the id that DID resolve,
+// and exits 0 — leaving a caller unable to distinguish a full write from a
+// 1-of-N write by any means it has. Every `|| exit` guard in a fleet is blind to
+// it (measured 2026-08-01; upstream beads v1.1.2 is unchanged).
+//
+// The guard is safe because no bead id contains '='. Such a positional never
+// resolved under raw bd either, so refusing it cannot break an invocation that
+// previously succeeded — it only replaces a silent partial write with a loud
+// refusal issued BEFORE anything is written.
+func UpdateMistypedMetadataPair(args []string) bool {
+	for _, p := range UpdatePositionals(args) {
+		if strings.IndexByte(p, '=') >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateClaimShape reports whether a `bd update` arg list is the pure-claim
 // shape the shim routes to the controller's atomic claim endpoint: it carries
 // --claim and no other flag except --json (the id positional is allowed).
@@ -394,6 +448,21 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 		case "update":
 			if _, unsupported := UnsupportedUpdateMutationFlag(args); unsupported {
 				return Refuse
+			}
+			// A bare key=value in the id slot is a dropped --set-metadata pair.
+			// Refuse before any write rather than letting bd apply the subset and
+			// exit 0.
+			if UpdateMistypedMetadataPair(args) {
+				return Refuse
+			}
+			// The routed write carries exactly one id, so a multi-id update belongs
+			// to real bd, which applies it to EVERY id; routing served only the
+			// first and reported success, silently leaving the rest unwritten.
+			// (The id-LESS form keeps its existing loud refusal downstream rather
+			// than inheriting bd's last-touched fallback — a separate, deliberate
+			// choice this guard does not revisit.)
+			if len(UpdatePositionals(args)) > 1 {
+				return Passthrough
 			}
 			// The pure-claim shape routes to the atomic claim endpoint; the
 			// actor gate and fallback live in the shim's caller (cmd/bdshim's

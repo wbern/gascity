@@ -65,11 +65,17 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		}
 		return 0
 	case "update":
-		id, ok := FirstBdPositional(args)
-		if !ok {
+		// The id is the sole positional, found with the same value-skipping rule
+		// ParseUpdateOpts uses — not merely the first non-flag token, which in
+		// `--set-metadata a=1 <id>` is the metadata pair. ClassifyVerb sends every
+		// other positional count to real bd, so a count other than one here means
+		// the two disagreed: write nothing rather than guess an id.
+		positionals := bdshim.UpdatePositionals(args)
+		if len(positionals) != 1 {
 			fmt.Fprintln(stderr, "gc bd-shim: usage: update <id> [flags]") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		id := positionals[0]
 		opts, err := ParseUpdateOpts(args)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: update %q: %v\n", id, err) //nolint:errcheck // best-effort stderr

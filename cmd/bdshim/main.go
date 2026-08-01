@@ -156,6 +156,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	case bdshim.Refuse:
 		if verb == "update" {
+			if msg, mistyped := bdshim.MistypedMetadataPairRefusal("bdshim", verb, verbArgs); mistyped {
+				logDisposition(verb, rawBDArgs, "refuse", 1, start)
+				fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			if flag, unsupported := bdshim.UnsupportedUpdateMutationFlag(verbArgs); unsupported {
 				logDisposition(verb, rawBDArgs, "refuse", 1, start)
 				fmt.Fprintf(stderr, "bdshim: refusing update %s: this body/notes mutation is not routed to the controller\n", flag) //nolint:errcheck // best-effort stderr
