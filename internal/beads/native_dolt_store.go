@@ -2310,6 +2310,13 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:   issue.Ephemeral,
 		NoHistory:   issue.NoHistory,
 		DeferUntil:  cloneTimePtr(issue.DeferUntil),
+		// bd's plain-column fields. Without these a native-Dolt-backed rig store
+		// dropped them BEFORE the wire, so carrying them on beads.Bead and in the
+		// spec was not enough on this backend.
+		AwaitType: issue.AwaitType,
+		CreatedBy: issue.CreatedBy,
+		Owner:     issue.Owner,
+		Notes:     issue.Notes,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

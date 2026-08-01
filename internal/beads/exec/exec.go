@@ -198,6 +198,10 @@ func (w *beadWire) toBead() beads.Bead {
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		AwaitType:   w.AwaitType,
+		CreatedBy:   w.CreatedBy,
+		Owner:       w.Owner,
+		Notes:       w.Notes,
 	}
 }
 

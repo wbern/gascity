@@ -33,6 +33,13 @@ type DoltliteReadStore struct {
 	readyMu         sync.Mutex
 	readyCache      map[string][]Bead
 	readyHash       string
+	// columnMu/columnCache memoize the schema-presence probe. A snapshot's
+	// column set does not change under an open handle, and the probe is issued
+	// once per (table, column) per query BUILD — 12 per bounded List and 24 for
+	// TierBoth once the plain-column fields were added. Uncached that tripled
+	// the per-query pragma_table_info round-trips on the list path.
+	columnMu    sync.Mutex
+	columnCache map[string]bool
 }
 
 func (s *DoltliteReadStore) NeedsSessionTypeFallback() bool { return true }
@@ -1645,6 +1652,31 @@ func (s *DoltliteReadStore) tableHasColumn(table, column string) (bool, error) {
 }
 
 func (s *DoltliteReadStore) tableHasColumnCtx(ctx context.Context, table, column string) (bool, error) {
+	key := table + "\x00" + column
+	s.columnMu.Lock()
+	if has, ok := s.columnCache[key]; ok {
+		s.columnMu.Unlock()
+		return has, nil
+	}
+	s.columnMu.Unlock()
+
+	has, err := s.probeTableColumn(ctx, table, column)
+	if err != nil {
+		return false, err
+	}
+	s.columnMu.Lock()
+	if s.columnCache == nil {
+		s.columnCache = make(map[string]bool)
+	}
+	s.columnCache[key] = has
+	s.columnMu.Unlock()
+	return has, nil
+}
+
+// probeTableColumn issues the uncached schema probe. An error is never cached,
+// so a transient DB failure cannot latch a column as absent and silently
+// downgrade every later read.
+func (s *DoltliteReadStore) probeTableColumn(ctx context.Context, table, column string) (bool, error) {
 	var found string
 	err := s.db.QueryRowContext(ctx, `SELECT name FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&found)
 	if err != nil {
