@@ -46,13 +46,45 @@ func (d Disposition) String() string {
 // not appear here: bd's JSON projections carry backend-computed IssueDetails
 // and IssueWithCounts fields that the controller Bead does not retain. They
 // stay on the real CLI until a typed compatibility projection owns those fields.
+//
+// `delete` deliberately does NOT appear. The controller has no hard-delete —
+// DELETE /v0/city/{city}/bead/{id} is a soft-delete implemented as store.Close
+// ("Hard-delete is not exposed through the API",
+// internal/api/huma_handlers_beads.go:970-973) — so routing bd's hard-delete
+// onto it was wrong in both directions. Measured live: `bd delete <id>`, which
+// raw bd treats as a read-only PREVIEW, CLOSED the bead through the shim at
+// exit 0 with no output; `bd delete <id> --force` also merely closed it, leaving
+// the bead in the store while reporting success.
 var RoutedVerbs = map[string]bool{
 	"close":  true,
 	"ready":  true,
 	"update": true,
 	"reopen": true,
-	"delete": true,
 	"create": true,
+}
+
+// CloseReopenRoutable reports whether a `bd close` / `bd reopen` arg list is the
+// bare single-id shape the controller can serve faithfully.
+//
+// CloseBead(id) and ReopenBead(id) carry no input beyond the id, so every flag
+// bd accepts is discarded by routing — measured against a raw-bd control,
+// `bd close <id> --reason "..."` stored no reason through the shim and the full
+// reason through real bd, at exit 0 either way. --json is excluded for the same
+// reason in the other direction: raw bd emits a JSON result and the routed path
+// prints nothing, so a parsing consumer reads empty.
+//
+// Multi-id is excluded because real bd applies the op to EVERY id while routing
+// served only the first, and the id-less form because bd falls back to its
+// last-touched issue, which the routed call cannot resolve.
+func CloseReopenRoutable(args []string) bool {
+	positionals := 0
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return false
+		}
+		positionals++
+	}
+	return positionals == 1
 }
 
 // CreateRoutableFlags are the `bd create` flags that map cleanly onto the
@@ -382,6 +414,11 @@ func SplitGlobalFlags(args []string) (string, []string) {
 // rather than dropping graph data (graph-store-rollout-plan.md §X2).
 var GraphTouchingUnroutedVerbs = map[string]bool{
 	"gate": true, // bd gate check --escalate — a mutation on gate beads
+	// bd delete is a hard delete with no controller equivalent (the API exposes
+	// only a soft-delete), so it always reaches real bd. In the identity phase
+	// that is byte-identical; once graph storage is split, the work-only bd
+	// would silently miss graph-resident beads, so refuse loudly instead.
+	"delete": true,
 	// "query" and "mol" are now handled in ClassifyVerb: the ephemeral
 	// discovery shape maps to GET /beads/ephemeral and mol current|progress to
 	// GET /beads/graph/{root}, both reaching the SQLite graph store via the Router.
@@ -472,6 +509,10 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 				return Route
 			}
 			if !UpdateRoutable(args) {
+				return Passthrough
+			}
+		case "close", "reopen":
+			if !CloseReopenRoutable(args) {
 				return Passthrough
 			}
 		case "create":

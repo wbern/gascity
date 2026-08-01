@@ -53,17 +53,11 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			return 1
 		}
 		return 0
-	case "delete":
-		id, ok := FirstBdPositional(args)
-		if !ok {
-			fmt.Fprintln(stderr, "gc bd-shim: usage: delete <id>") //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := client.DeleteBead(id); err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: deleting %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+	// No "delete" case: the API exposes only a soft-delete (store.Close), so
+	// dispatching bd's hard-delete onto it closed the bead and reported success.
+	// The classifier keeps delete off this path; an arrival here falls to the
+	// default and fails loudly rather than quietly closing a bead the caller
+	// asked to destroy.
 	case "update":
 		// The id is the sole positional, found with the same value-skipping rule
 		// ParseUpdateOpts uses — not merely the first non-flag token, which in

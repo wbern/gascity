@@ -56,7 +56,13 @@ func TestClassifyVerb(t *testing.T) {
 		// passthrough to real bd (byte-identical in the identity phase).
 		{"update", []string{"x", "--claim", "--status", "closed"}, true, Passthrough},
 		{"reopen", []string{"x"}, true, Route},
-		{"delete", []string{"x", "--force"}, true, Route},
+		// delete has no controller equivalent — the API exposes only a
+		// soft-delete (store.Close), so routing bd's hard-delete onto it merely
+		// closed the bead and reported success. It always reaches real bd, and
+		// under the split phase refuses loudly rather than letting the work-only
+		// bd miss graph-resident beads.
+		{"delete", []string{"x", "--force"}, true, Refuse},
+		{"delete", []string{"x", "--force"}, false, Passthrough},
 	}
 	for _, tc := range cases {
 		if got := ClassifyVerb(tc.verb, tc.args, tc.split); got != tc.want {
