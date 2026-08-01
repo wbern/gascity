@@ -487,7 +487,31 @@ controller resolves cross-rig from a city-scoped request. **`rig=` is only
 meaningful for list-like queries — which are exactly the ones that cannot
 route.**
 
-### 8.3 VERIFIED: the silent-ignore defect family — three endpoints
+### 8.3 FIXED in `bb53ffc8d`: the silent-ignore defect family — three endpoints
+
+> **Status: shipped to `develop`, not yet deployed.** The fix is committed and
+> green (full `internal/api` suite, `go vet ./...`, `make dashboard-ci`), and was
+> validated over a real TCP round-trip through the production mux — every case
+> below now inverts. It reaches the running fleet only on the next
+> rebuild-bounce, like `b1fdaef30` and `0227f3a42` before it.
+>
+> ```
+> /beads?rig=no-such-rig            404 rig-not-found
+>                                   "rig no-such-rig has no bead store (unknown or unbound rig)"
+> /beads/ready?rig=no-such-rig      404 rig-not-found
+> /beads/ephemeral?rig=no-such-rig  404 rig-not-found
+> /beads/ready?rig=rig2             200, only rig2 — city store no longer federated under ?rig=
+> ```
+>
+> One correction to what this section originally claimed: **the dashboard does
+> send `rig=`** (`beadReads.ts:60`). "No production caller" was true of Go
+> (`ListBeadsOpts.Rig` is assigned only in `client_test.go`) and false of the
+> TypeScript client. It is still safe — `Beads.tsx:146-150` resets the filter to
+> ALL whenever it is absent from the live rig list, and a rejecting per-rig
+> `listBeads` already degrades the snapshot rather than collapsing it. But the
+> claim as written was wrong.
+
+The defect as originally measured, kept because it is the before-side evidence:
 
 Routing `--rig` today would re-ship `0227f3a42`. Proven live, not inferred:
 
