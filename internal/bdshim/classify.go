@@ -14,6 +14,8 @@ package bdshim
 import (
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/bdflags"
 )
 
 // Disposition is how the shim handles one bd subcommand.
@@ -208,6 +210,13 @@ func UnsupportedUpdateMutationFlag(args []string) (string, bool) {
 // and raw bd honors that ordering, so the routed write targeted a bead named
 // after the metadata pair.
 func UpdatePositionals(args []string) []string {
+	// Positional detection must know EVERY value-taking `bd update` flag, not
+	// just the routable subset in UpdateFlagNeedsValue. bdflags is the existing
+	// single source of truth for bd's per-subcommand flag names; using the
+	// routable subset here read the VALUE of any other value-taking flag as a
+	// positional id. `--add-label role=worker` — a form the core skill pack
+	// ships verbatim — was refused as a mistyped metadata pair because of it.
+	needsValue := bdflags.ValueFlags("update")
 	var positionals []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -220,7 +229,7 @@ func UpdatePositionals(args []string) []string {
 		if hasInlineValue {
 			name = a[:strings.IndexByte(a, '=')]
 		}
-		if !hasInlineValue && UpdateFlagNeedsValue[name] && i+1 < len(args) {
+		if !hasInlineValue && needsValue[name] && i+1 < len(args) {
 			i++ // consume the space-separated value
 		}
 	}
@@ -490,19 +499,6 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 		}
 		return Passthrough
 	}
-	// `bd gate list --json` routes: the wire Bead now carries bd's full gate
-	// projection (await_type, created_by, owner). Every other gate subcommand
-	// passes through — above all `bd gate check`, which evaluates gates and
-	// CLOSES the resolved ones, a mutation with no controller equivalent.
-	if verb == "gate" {
-		if GateListRoutable(args) {
-			return Route
-		}
-		if splitPhase {
-			return Refuse
-		}
-		return Passthrough
-	}
 	if RoutedVerbs[verb] {
 		switch verb {
 		case "ready":
@@ -696,76 +692,4 @@ func MolRoutable(args []string) (sub, id string, jsonOut, ok bool) {
 func MolRoutableArgs(args []string) bool {
 	_, _, _, ok := MolRoutable(args)
 	return ok
-}
-
-// GateListRoutableFlags are the `bd gate list` flags the controller read
-// reproduces exactly. --json is required (the routed path emits JSON and has no
-// human renderer); a limit is optional. Any other flag is a filter the read
-// would silently ignore, so it passes through instead.
-var GateListRoutableFlags = map[string]bool{
-	"--json":  true,
-	"--limit": true,
-	"-n":      true,
-}
-
-// GateListNeedsValue is the subset of GateListRoutableFlags consuming the next
-// token when written space-separated.
-var GateListNeedsValue = map[string]bool{"--limit": true, "-n": true}
-
-// GateListRoutable reports whether a `bd gate` arg list is the read the shim can
-// serve: `gate list --json` plus an optional limit.
-//
-// Only this shape may route. `bd gate check` — 62% of gate traffic — EVALUATES
-// gates and CLOSES the resolved ones, a mutation with no controller equivalent,
-// and every other subcommand is a write or an unmodelled read.
-func GateListRoutable(args []string) bool {
-	if len(args) == 0 || args[0] != "list" {
-		return false
-	}
-	sawJSON := false
-	for i := 1; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") {
-			return false // an unmodelled positional filter
-		}
-		name := a
-		hasInlineValue := false
-		if eq := strings.IndexByte(a, '='); eq >= 0 {
-			name, hasInlineValue = a[:eq], true
-		}
-		if !GateListRoutableFlags[name] {
-			return false
-		}
-		if name == "--json" {
-			if hasInlineValue {
-				return false // --json=<x> is not the plain boolean form
-			}
-			sawJSON = true
-		}
-		if !hasInlineValue && GateListNeedsValue[name] && i+1 < len(args) {
-			i++
-		}
-	}
-	return sawJSON
-}
-
-// GateListLimit returns the limit on a routable `bd gate list`, or 0 for none.
-func GateListLimit(args []string) int {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		name, raw := a, ""
-		if eq := strings.IndexByte(a, '='); eq >= 0 {
-			name, raw = a[:eq], a[eq+1:]
-		} else if GateListNeedsValue[a] && i+1 < len(args) {
-			raw = args[i+1]
-			i++
-		}
-		if !GateListNeedsValue[name] {
-			continue
-		}
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 0
 }

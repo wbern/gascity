@@ -123,25 +123,6 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			return 1
 		}
 		return WriteReadyJSON(read.Body, stdout, stderr)
-	case "gate":
-		// Only `bd gate list --json` reaches here; ClassifyVerb keeps every other
-		// gate subcommand on real bd, above all `gate check`, which closes
-		// resolved gates. The wire Bead carries bd's full gate projection
-		// (await_type, created_by, owner) as of the projection commits, so this
-		// read drops nothing.
-		if !bdshim.GateListRoutable(args) {
-			fmt.Fprintln(stderr, "gc bd-shim: usage: gate list --json [--limit N]") //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		read, err := client.ListBeads(beadclient.ListBeadsOpts{
-			Type:  "gate",
-			Limit: bdshim.GateListLimit(args),
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: gate list via API: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return WriteReadyJSON(read.Body, stdout, stderr)
 	case "query":
 		opts, ok := ParseQueryEphemeral(args)
 		if !ok {
