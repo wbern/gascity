@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -673,4 +674,61 @@ func setEarlyBDLookPath(t *testing.T, path string) {
 		return path, nil
 	}
 	t.Cleanup(func() { earlyBdLookPath = previous })
+}
+
+// Retiring bdshim (gcw-yr0o) removes the binary. Today the whole fast path is
+// gated on that binary existing AND being the `bd` on PATH — the gate runs
+// BEFORE the experiment is consulted, so even the in-process direct arm, which
+// never execs the shim, is unreachable without it. Deleting bdshim would
+// therefore silently drop every gc bd call onto the 600-780ms doBd path,
+// including the verbs that are fast today.
+//
+// An approved shape must be served in-process when no shim is installed.
+func TestTryEarlyBdShimReadServesApprovedShapeWithoutAShimBinary(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_BD_EXPERIMENT_ARMS", "shim=100,direct=0,legacy=0") // shim arm selected...
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"beads": []any{}})
+	}))
+	defer server.Close()
+	t.Setenv("GC_API_URL", server.URL)
+
+	// No bdshim anywhere.
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+	previousLook := earlyBdLookPath
+	earlyBdLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { earlyBdLookPath = previousLook })
+
+	var stdout, stderr bytes.Buffer
+	code, handled := tryEarlyBdShimRead([]string{"bd", "query", "--json", "ephemeral=true"}, strings.NewReader(""), &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("without a shim binary: got (%d, %t), want (0, true) served in-process; stderr=%q", code, handled, stderr.String())
+	}
+	if got, want := stdout.String(), "[]\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+// A shape the experiment does not cover has no in-process implementation, so
+// without a shim it must DECLINE to doBd rather than fabricate a result.
+func TestTryEarlyBdShimReadDeclinesUnapprovedShapeWithoutAShimBinary(t *testing.T) {
+	t.Setenv("GC_BD_FASTPATH", "1")
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+
+	previous := earlyBdShimPath
+	earlyBdShimPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { earlyBdShimPath = previous })
+	previousLook := earlyBdLookPath
+	earlyBdLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { earlyBdLookPath = previousLook })
+
+	// `ready` is fastpath-eligible but is NOT an approved experiment shape, so it
+	// has no in-process path.
+	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); handled || code != 0 {
+		t.Fatalf("unapproved shape without a shim: got (%d, %t), want (0, false) so doBd handles it", code, handled)
+	}
 }

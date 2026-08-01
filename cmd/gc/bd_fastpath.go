@@ -130,9 +130,12 @@ func tryEarlyBdShimOutcome(args []string, stdin io.Reader, stdout, stderr io.Wri
 	if !ok {
 		return 0, false, nil
 	}
+	// Same contract as tryEarlyBdShimReadOutcome: an absent or untrusted shim
+	// removes only the exec arm. runEarlyBdExperiment declines for any shape it
+	// cannot serve in-process.
 	shimPath, err := earlyBdShimPath(cityPath)
-	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
-		return 0, false, nil
+	if err != nil || !earlyBdShimIsOnPath(shimPath) {
+		shimPath = ""
 	}
 	return runEarlyBdExperiment(shimPath, bdArgs, stdin, stdout, stderr, mainStarted)
 }
@@ -166,9 +169,14 @@ func tryEarlyBdShimReadOutcome(args []string, stdin io.Reader, stdout, stderr io
 	if !ok {
 		return 0, false, nil
 	}
+	// An absent or untrusted shim is NOT a reason to abandon the fast path. It
+	// only removes the exec arm: the shapes with an in-process implementation are
+	// still served here, and everything else declines to doBd below. Gating the
+	// whole path on the binary would mean that retiring bdshim (gcw-yr0o) silently
+	// drops every gc bd call onto doBd — including the verbs that are fast today.
 	shimPath, err := earlyBdShimPath(cityPath)
-	if err != nil || shimPath == "" || !earlyBdShimIsOnPath(shimPath) {
-		return 0, false, nil
+	if err != nil || !earlyBdShimIsOnPath(shimPath) {
+		shimPath = ""
 	}
 	return runEarlyBdExperiment(shimPath, bdArgs, stdin, stdout, stderr, mainStarted)
 }
@@ -179,14 +187,30 @@ type earlyBdLegacyObservation struct {
 	shape  bdexperiment.Shape
 }
 
+// runEarlyBdExperiment serves an early-path invocation. shimPath may be empty,
+// meaning no trusted managed shim is installed; in that case only shapes with an
+// in-process implementation can be served and everything else declines to doBd.
 func runEarlyBdExperiment(shimPath string, bdArgs []string, stdin io.Reader, stdout, stderr io.Writer, mainStarted time.Time) (int, bool, *earlyBdLegacyObservation) {
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 	shape, approved := earlyBdExperimentShape(verb, verbArgs)
 	if !approved {
+		if shimPath == "" {
+			// No exec arm and no in-process implementation for this shape. Decline
+			// rather than invent a result: doBd keeps its resolved scope and its
+			// raw-bd contract.
+			return 0, false, nil
+		}
 		return runEarlyBdShim(shimPath, bdArgs, stdin, stdout, stderr), true, nil
 	}
 	config := bdexperiment.Parse(os.Getenv)
-	switch bdexperiment.SelectForShape(config, shape, earlyBdExperimentNext) {
+	arm := bdexperiment.SelectForShape(config, shape, earlyBdExperimentNext)
+	if arm == bdexperiment.ArmShim && shimPath == "" {
+		// The shim is what is unavailable, not the route. Serve the same read
+		// in-process and record the arm that actually ran, so the observation log
+		// never attributes a direct call to the shim arm.
+		arm = bdexperiment.ArmDirect
+	}
+	switch arm {
 	case bdexperiment.ArmLegacy:
 		return 0, false, &earlyBdLegacyObservation{config: config, verb: verb, shape: shape}
 	case bdexperiment.ArmDirect:
@@ -198,6 +222,12 @@ func runEarlyBdExperiment(shimPath string, bdArgs []string, stdin io.Reader, std
 			return runEarlyBdDirect(target.BaseURL, target.City, verb, verbArgs, observed, stderr)
 		}), true, nil
 	default:
+		// Defensive: the ArmShim case is converted above, but this branch also
+		// catches any arm value SelectForShape might grow later. Never exec an
+		// empty path — decline instead.
+		if shimPath == "" {
+			return 0, false, nil
+		}
 		return observeEarlyBdExperiment(config, bdexperiment.ArmShim, verb, shape, stdout, mainStarted, func(observed io.Writer) int {
 			return runEarlyBdShim(shimPath, bdArgs, stdin, observed, stderr)
 		}), true, nil
