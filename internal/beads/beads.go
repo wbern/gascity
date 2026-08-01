@@ -104,6 +104,13 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// AwaitType is the condition a gate bead waits on ("human", "timer",
+	// "gh:run", "gh:pr"), mirroring bd's await_type column. It is the one field
+	// of bd's four-field gate contract (id/status/created_at/await_type) the
+	// controller did not carry, so a gate read served from here used to drop it
+	// silently. Empty for every non-gate bead, and for snapshots whose schema
+	// predates bd's gate columns.
+	AwaitType string `json:"await_type,omitempty"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE

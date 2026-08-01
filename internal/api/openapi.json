@@ -856,6 +856,9 @@
           "assignee": {
             "type": "string"
           },
+          "await_type": {
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
