@@ -78,19 +78,31 @@ type preflightIdentityDiskEntry struct {
 	GCBuild                    string `json:"gc_build,omitempty"`
 }
 
-// preflightIdentityEntryFresh reports whether an entry may be served: it must
-// come from the running gc build and still be inside the TTL.
+// preflightIdentityEntryFresh reports whether an entry may be served. The TTL
+// is the whole test: an entry from any gc build is served while it is fresh.
 //
-// The build check is exact string equality on a value gc already holds, not a
-// stat/mtime heuristic — 585cca7e1 removed mtime-based cache validation as
-// unsound because a same-size rewrite inside one filesystem timestamp tick is
-// invisible to stat. An entry written before build stamping existed carries no
-// build and is therefore a miss, which costs one re-probe per scope after an
-// upgrade and never serves an entry whose provenance is unknown.
+// It deliberately does NOT reject an entry written by a different build, though
+// an earlier revision of this cache did. That was measured in production on
+// 2026-08-01 and was strictly worse than no build check at all. A
+// session-preserving rebuild-bounce leaves long-lived detached helpers (e.g.
+// `gc nudge poll`, observed still running a >24h-old binary) on the PREVIOUS
+// build. Those keep writing entries with no build stamp, every new process
+// rejects them, re-probes, and rewrites a stamped entry, which the old process
+// then overwrites unstamped. The hq entry was watched flipping
+// stamped -> unstamped -> stamped inside 90 seconds, and `bd context` spawns
+// stayed at the pre-fix rate because essentially every read missed. One stale
+// writer is enough to poison the cache for the entire fleet, indefinitely — so
+// the build check converted a bounded staleness into an unbounded cache outage.
+//
+// The TTL alone is sufficient for what the build stamp was buying. It bounds
+// staleness to preflightIdentityDiskTTL regardless of which build wrote the
+// entry, a deploy's own bounce takes far less than that window, and the cached
+// value is an advisory cross-check whose authoritative counterpart (the direct
+// project_id probe) is never cached to disk.
+//
+// GCBuild is still recorded on write: it costs nothing and it is what made this
+// diagnosable.
 func preflightIdentityEntryFresh(entry preflightIdentityDiskEntry) bool {
-	if entry.GCBuild == "" || entry.GCBuild != version {
-		return false
-	}
 	age := preflightNow().Sub(time.Unix(entry.CachedAtUnix, 0))
 	return age >= 0 && age < preflightIdentityDiskTTL
 }

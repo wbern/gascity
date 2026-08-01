@@ -226,19 +226,21 @@ func TestPreflightBDContextUnavailableDiskServesTheOrderCooldownBand(t *testing.
 	}
 }
 
-// A longer TTL is only safe because a rebuilt gc invalidates every entry. The
-// cached identity's remaining inputs are the bd binary (bd_version,
-// schema_version) and the scope's backend config (backend, dolt_mode) — the
-// resolved Dolt target is already folded into the scope key. Deploying a new bd
-// or a config change on this fleet goes through a gc rebuild-bounce, so keying
-// entries to the build turns "stale until the TTL expires" into "impossible past
-// a rebuild" for the operator-driven changes the short TTL was protecting.
+// REGRESSION (measured in production 2026-08-01): an earlier revision of this
+// cache rejected any entry whose gc_build differed from the running binary. That
+// was strictly worse than no build check at all.
 //
-// This is exact string equality on a value gc already holds, NOT a stat/mtime
-// heuristic: 585cca7e1 removed mtime-based cache validation as unsound because a
-// same-size rewrite inside one filesystem timestamp tick is invisible to stat.
-// No such assumption is made here.
-func TestReadPreflightIdentityDisk_EntryFromAnotherGCBuildIsAMiss(t *testing.T) {
+// A session-preserving rebuild-bounce leaves long-lived detached helpers (e.g.
+// `gc nudge poll`) running the PREVIOUS build. Those keep writing entries with no
+// build stamp; every new process rejected them, re-probed, and rewrote a stamped
+// entry, which the old process then overwrote unstamped. The live hq entry was
+// watched flipping stamped -> unstamped -> stamped inside 90 seconds while
+// `bd context` spawns stayed at the pre-fix rate, because essentially every read
+// missed. ONE stale writer poisons the cache for the whole fleet, indefinitely.
+//
+// So an entry from another build — or from before build stamping existed — MUST
+// be served while it is inside the TTL. The TTL is the whole freshness test.
+func TestReadPreflightIdentityDisk_ServesEntriesFromAnotherGCBuild(t *testing.T) {
 	city := t.TempDir()
 	withFixedPreflightNow(t, time.Unix(1000, 0))
 	key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
@@ -247,33 +249,29 @@ func TestReadPreflightIdentityDisk_EntryFromAnotherGCBuildIsAMiss(t *testing.T) 
 	if err := writePreflightIdentityDisk(city, key, fakeIdentity()); err != nil {
 		t.Fatalf("write under build-a: %v", err)
 	}
-	if v, ok := readPreflightIdentityDisk(city, key); !ok || v != fakeIdentity() {
-		t.Fatalf("same build must hit: %+v ok=%v", v, ok)
-	}
 
+	// A DIFFERENT build must still be served: rejecting here is what caused the
+	// production ping-pong.
 	withGCBuildVersion(t, "build-b")
-	if _, ok := readPreflightIdentityDisk(city, key); ok {
-		t.Fatalf("entry written by another gc build must be a miss")
+	if v, ok := readPreflightIdentityDisk(city, key); !ok || v != fakeIdentity() {
+		t.Fatalf("entry from another gc build must be served while fresh: %+v ok=%v", v, ok)
 	}
 
-	// The miss must recompute and re-stamp, not wedge the scope.
+	// And it must not trigger a re-probe.
 	withFreshL1Memo(t)
 	calls := 0
 	if _, err := preflightBDContextCached(city, key, func() (preflightBDContextValue, error) {
 		calls++
 		return fakeIdentity(), nil
 	}); err != nil {
-		t.Fatalf("recompute after build change: %v", err)
+		t.Fatalf("serve across builds: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("run ran %d times, want 1 (build change forces one re-probe)", calls)
-	}
-	if _, ok := readPreflightIdentityDisk(city, key); !ok {
-		t.Fatalf("recomputed entry must be readable under the new build")
+	if calls != 0 {
+		t.Fatalf("run ran %d times, want 0 — a foreign build stamp must not force a re-probe", calls)
 	}
 }
 
-func TestReadPreflightBDContextUnavailableDisk_EntryFromAnotherGCBuildIsAMiss(t *testing.T) {
+func TestReadPreflightBDContextUnavailableDisk_ServesEntriesFromAnotherGCBuild(t *testing.T) {
 	city := t.TempDir()
 	withFixedPreflightNow(t, time.Unix(1000, 0))
 	key := preflightScopeKeyFor(city, city, "host:3306/db|ext=false")
@@ -282,19 +280,15 @@ func TestReadPreflightBDContextUnavailableDisk_EntryFromAnotherGCBuildIsAMiss(t 
 	if err := writePreflightBDContextUnavailableDisk(city, key); err != nil {
 		t.Fatalf("write under build-a: %v", err)
 	}
-	if !readPreflightBDContextUnavailableDisk(city, key) {
-		t.Fatalf("same build must hit the persisted non-repository result")
-	}
-
 	withGCBuildVersion(t, "build-b")
-	if readPreflightBDContextUnavailableDisk(city, key) {
-		t.Fatalf("non-repository entry written by another gc build must be a miss")
+	if !readPreflightBDContextUnavailableDisk(city, key) {
+		t.Fatalf("non-repository entry from another gc build must be served while fresh")
 	}
 }
 
-// An entry persisted by a gc that predates build stamping carries no build, so
-// it must be a miss rather than silently inheriting the running build's trust.
-func TestReadPreflightIdentityDisk_LegacyEntryWithoutBuildIsAMiss(t *testing.T) {
+// An entry persisted by a gc that predates build stamping carries no build. It is
+// exactly what a surviving old-binary helper writes, so it must be served too.
+func TestReadPreflightIdentityDisk_ServesLegacyEntryWithoutBuild(t *testing.T) {
 	city := t.TempDir()
 	withFixedPreflightNow(t, time.Unix(1000, 0))
 	withGCBuildVersion(t, "build-a")
@@ -314,8 +308,23 @@ func TestReadPreflightIdentityDisk_LegacyEntryWithoutBuildIsAMiss(t *testing.T) 
 		t.Fatalf("write legacy: %v", err)
 	}
 
-	if _, ok := readPreflightIdentityDisk(city, key); ok {
-		t.Fatalf("legacy entry without a build stamp must be a miss")
+	if v, ok := readPreflightIdentityDisk(city, key); !ok || v != fakeIdentity() {
+		t.Fatalf("unstamped legacy entry must be served while fresh: %+v ok=%v", v, ok)
+	}
+}
+
+// The build stamp is still RECORDED — it is what made the ping-pong diagnosable.
+func TestWritePreflightIdentityDisk_RecordsTheGCBuild(t *testing.T) {
+	city := t.TempDir()
+	withFixedPreflightNow(t, time.Unix(1000, 0))
+	withGCBuildVersion(t, "build-xyz")
+	key := preflightScopeKeyFor(city, "rig-a", "host:3306/db|ext=false")
+	if err := writePreflightIdentityDisk(city, key, fakeIdentity()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := readPreflightIdentityDiskMap(city)
+	if got := m[key].GCBuild; got != "build-xyz" {
+		t.Fatalf("gc_build recorded = %q, want %q", got, "build-xyz")
 	}
 }
 
