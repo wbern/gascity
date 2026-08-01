@@ -617,3 +617,72 @@ one.
 - **§5.5's `--rig` bullet is correct about the endpoint and wrong about the
   reach.** `GET /beads?rig=` genuinely is ~24× faster; no verb that can reach it
   honours a rig.
+
+## 9. Re-baseline, 2026-08-01 — five of the plan's numbers were wrong
+
+Everything below replaces the corresponding figure in §1–§8. The earlier mix came
+from a 6,000-call / 14.1h window; this is **88,331 calls since 2026-07-26**, read
+from `~/gc2/.gc/bdshim.log`. Where the two disagree, prefer this one — but note
+the log spans binaries, so per-verb *disposition* is only trustworthy for the
+current binary (`show` appears to route in older rows; today it never does).
+
+### 9.1 Verb mix
+
+| verb | plan | measured | note |
+|---|---|---|---|
+| `context` | 20.6% | **24.7%** | now redirected off the shim entirely (`5e56f2b6e`) |
+| `list` | 31.0% | **23.3%** | still the largest routable gap |
+| `ready` | 10.2% | **16.2%** | routed |
+| `gate` | 24.6% | **13.9%** | only 38% of it is routable — see 9.3 |
+| `show` | 6.8% | **8.3%** | |
+| `dep` | 1.7% | **5.8%** | measured *slower* routed; stays on real bd |
+| `query` | 2.6% | **1.8%** | routed |
+| `update` | — | **1.2%** | routed |
+
+### 9.2 The ≥95% coverage gate is wrong in both directions
+
+**It is unnecessary.** At the inherited CPU-time constants (fast ≈35ms,
+`doBd` passthrough ≈450ms, shim blended ≈188ms), "within 90% of shim" means a
+207ms ceiling, which needs only **≈59% coverage** — 59% × 35 + 41% × 450 ≈ 205ms.
+
+**It is also unreachable.** ~12.7% of shim-facing traffic must never route, and
+each of those is now a settled correctness decision rather than pending work:
+`create` (no id ⇒ no resolvable store, `5188bd0eb`), `dep` (measured slower),
+`note`/`comment`/`unknown` (no path). Ceiling ≈87%.
+
+Use **59%** as the gate. Coverage after the commits of 2026-08-01 is ≈42.7%.
+
+### 9.3 `gate` is 7.1 points, not 24.6
+
+Only `gate list --json [--limit]` is routable: 4,687 of 12,366 gate calls. The
+other 62% is `bd gate check`, which evaluates gates and **closes** the resolved
+ones — a mutation with no controller equivalent. Routed in `b0d5d9cfc` as a
+shape allowlist, not a verb allowlist.
+
+### 9.4 The list/show projection gap was ten fields, then six, now three
+
+`priority`, `parent`, `dependencies` and `updated_at` had already landed when the
+plan still listed them. Of the remaining six, `await_type` (`c86f146c9`) and
+`created_by`/`owner`/`notes` (`1f2d14628`) are plain columns and are done.
+
+Left: **`comment_count`, `dependency_count`, `dependent_count`** — all
+backend-computed over relations and comments, which is the expensive part and the
+whole remaining blocker for `list` (21.2 pts) and `show` (11.2 pts).
+
+Consumer survey found **zero** fleet consumers of any of the six; every
+`bd list/show --json` consumer reads `.metadata`, `.status`, `.id`, `.title`. So
+the risk being bought is an unknown future consumer, not a known one.
+
+### 9.5 Method notes earned this round
+
+- **The route log's `dur_ms` is unusable for latency.** It is wall clock on a
+  loaded box: the median for `bd version` reads as 49 seconds. Use it for mix and
+  disposition only; latency must come from CPU-time measurement.
+- **A hand-written mapping can silently undo a wire change.** `beadFromGen`
+  (`internal/beadclient/wire_shared.go`) converts genclient → `beads.Bead` by
+  hand, so four fields added to the type and the spec were still dropped on the
+  way back until it was updated. A spec-in-sync check cannot catch this; only a
+  dispatch-level test did.
+- **Adding a column to the main list SELECT is a fleet risk.** Resolve it through
+  `tableHasColumnCtx` as the ephemeral/no_history flags do, so a snapshot at an
+  older migration yields empty rather than erroring every list read.
