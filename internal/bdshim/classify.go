@@ -421,9 +421,20 @@ func ListHasMetadataPredicate(args []string) bool {
 // are dropped (they govern bd's execution mode, irrelevant to in-process Router
 // reads). Returns ("", nil) when there is no subcommand.
 func SplitGlobalFlags(args []string) (string, []string) {
-	for i, a := range args {
+	// A global value-flag's VALUE is not the subcommand. Taking the first
+	// non-dash token read `bob` as the verb in `bd --actor bob update <id> ...`,
+	// which classified as Passthrough and bypassed every guard keyed off the
+	// verb — including the mistyped-metadata refusal, so raw bd went on to
+	// perform the silent 1-of-N write that guard exists to prevent.
+	globals := bdflags.GlobalValueFlags()
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if !strings.HasPrefix(a, "-") {
 			return a, args[i+1:]
+		}
+		// An inline --flag=value consumes nothing further.
+		if strings.IndexByte(a, '=') < 0 && globals[a] && i+1 < len(args) {
+			i++
 		}
 	}
 	return "", nil
