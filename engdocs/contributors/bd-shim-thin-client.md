@@ -90,10 +90,26 @@ passthrough exec, claim fallback, and loud-fail-on-down for still-routed reads.
 
 ## Status
 
+> **SUPERSEDED as strategy, 2026-08-01 — bdshim is being RETIRED.** William ruled
+> out both premises this document rests on: byte-identical `bd` output (the
+> consumer here is an LLM, not a script) and the binary-size argument for keeping
+> a second small binary. The direction is now that every bead operation goes
+> through the gc controller, with no early escape to `bd`. See
+> [bd-shim-retirement-findings.md](bd-shim-retirement-findings.md) and epic
+> `gcw-yr0o`.
+>
+> The measurements below remain accurate and useful — in particular the boot-floor
+> decomposition and the "size is not boot cost" finding. What has changed is the
+> conclusion drawn from them. The controller serves the same reads from its warm
+> index in 7–11 ms, i.e. **15–28× faster than bd**, so the shim's advantage was
+> only ever over *cold bd*, never over the index.
+
 Landed on `develop` (abc02d6f5). Live via a manual `.gc/shimbin/bd` → bdshim
 swap (holds until the next supervisor restart; `ensureCityBdShimbin` is
 start-only). Durable install lands via a blessed `gc-rebuild-bounce` of develop
 (devops requested — the new gc's `bdShimTarget` + Makefile make it survive
 future bounces). Rollback: `ln -sf .gc/shimbin/gc .gc/shimbin/bd`.
 
-Remaining ready lever: **gcw-s5i0** (controller ready endpoint cache-serve).
+Remaining ready lever: **gcw-s5i0** (controller ready endpoint cache-serve) —
+note its root-cause decomposition was re-measured on 2026-08-01 and **no longer
+reproduces**; see the retirement findings §5c before acting on it.

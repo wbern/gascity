@@ -2,10 +2,18 @@
 
 **Date:** 2026-08-01 · **Author:** gas-city-wbern/architect · **Driver:** William
 
-**Status: PROVISIONAL.** Section 5 (the `resolve_scope` claim) is verified to
-the standard described there. Everything else is measured but not independently
-reproduced, and two claims in section 3 were withdrawn after re-checking — treat
-the rest as evidence to confirm, not as settled fact.
+**Status: MIXED — read this first.**
+
+- **§7 is shipped and validated in production.** The context/preflight fix is
+  live: 83.2% fewer `bd context` spawns, against a prediction pre-registered
+  before deploying, and independently confirmed by a second method.
+- **§5 is verified** to the standard described there (the `resolve_scope` claim).
+- **§1–4 are measured but not independently reproduced**, and §2's traffic table
+  is now **superseded by §7** — the mix moved after the deploy. Treat those
+  sections as evidence to confirm, not as settled fact.
+- **Three claims were withdrawn and one recommendation retracted** (§3, §5b, §7).
+  They are kept, not deleted, because the failure mode repeated and the method
+  lesson is the durable part.
 
 Tracking: epic `gcw-yr0o`. Related: `gcw-5oio`, `gcw-9kwl`, `gcw-a7z0`,
 `gcw-s5i0`, `gcw-2wi0`, `gcw-joxf`.
@@ -26,6 +34,10 @@ operations go through the gc controller; get the speed from gc internals and
 indexing.
 
 ## 2. Where the traffic actually comes from
+
+>  **SUPERSEDED by §7.** These shares are pre-deploy. `context` has since dropped
+>  ~83%, and `gate` doubled on 07-29/30 from a newly-added caller. The *callers*
+>  below are still correct; the *shares* are not. Use §7 for prioritisation.
 
 Measured from `$GC_CITY_PATH/.gc/bdshim.log` (60k recent calls):
 
@@ -61,6 +73,10 @@ bands do not overlap at all (route 1–10 ms vs passthrough 113–283 ms) and an
 internal control rules out machine drift: in the *same hours*, with both verbs
 routed, `show`-route was 1–10 ms while `list`-route was 41–364 ms (14–121×). The
 morning was not uniformly fast.
+
+> The *per-call* finding above stands. The **priority** conclusion drawn from it
+> — "therefore do `show` first" — is **retracted in §7**: `show` is bursty
+> (0–56 across eight identical windows) and that snapshot caught it active.
 
 > **Method rule:** a before/after switchover is not an A/B on a machine with this
 > much hourly variance. `internal/bdexperiment` already does randomized
@@ -126,7 +142,7 @@ chain, resolved by peeking each frame:
 ```
 resolve_scope
   main.openStoreAtForCity                      290 ms  (51% of CPU samples)
-    main.loadCityConfig                        150 ms  <- a SECOND config load
+    main.loadCityConfig                        150 ms  <- see the caveat below
     beads.OpenStoreAtForCity                   140 ms
       StoreOpenOptions.openNativeStore         130 ms
         main.nativeDoltOpenEnvForScope         120 ms  <- opens a Dolt connection
@@ -134,17 +150,30 @@ resolve_scope
         PreflightChecker.readBDContext                 <- spawns `bd context`
 ```
 
+The entry point is `bdBeadExists` (`cmd_bd.go:128`, a package-level func var, so
+pprof labels it `main.init.func69`). `resolveBdScopeTarget` matches the target rig
+from the bead-ID prefix in argv, then does not trust it: it opens that rig's store
+and does a `Get` to confirm the bead exists, throws the store away, and spawns
+`bd` to do the actual read. The probe is a deliberate guard against hyphenated
+flag values retargeting the command.
+
 So on a single **read**, gc:
 
-1. loads city config **twice** (~300 ms total),
-2. opens **its own native Dolt connection** (~130 ms),
-3. runs the store preflight, which **spawns `bd context`**,
-4. then spawns `bd`, which opens **another** connection to the same Dolt server,
-5. while the controller sits there holding an already-warm store that answers
+1. opens **its own native Dolt connection** (~130 ms) purely to confirm a bead
+   ID it had already matched by prefix,
+2. runs the store preflight, which **spawns `bd context`**,
+3. then spawns `bd`, which opens **another** connection to the same Dolt server,
+4. while the controller sits there holding an already-warm store that answers
    the same query in 11 ms.
 
-Three connections to the same data and two config loads, to answer a question
-the controller answers in 11 ms.
+> **CAVEAT — do not read a second config load into that `loadCityConfig` frame.**
+> An earlier revision of this doc claimed gc loads the city config twice, ~300 ms.
+> That claim is **withdrawn** (§5b): `openStoreResultAtForCityWithConfig` reloads
+> only when `cfg == nil`, and `bdBeadExists` passes the config the caller already
+> loaded — the function carries a comment saying exactly that, and it was fixed
+> before this investigation started. The frame appears because pprof attributes
+> inlined store-open frames to the nil-config variant. The load-bearing finding
+> here is the **Dolt connection and the preflight**, not a duplicated config load.
 
 This also independently confirms, by a completely different method, why
 `context` is 26% of bd traffic: it is gc's own store-open preflight, reached
@@ -188,9 +217,17 @@ A routed read pays **none** of `resolve_scope` (484 ms) and **none** of
   close gate, which legitimately read the store (see `690675170`,
   "reuse the write-guard's store read in the bd close gate"). Do **not** blanket-
   apply this to writes without separate validation.
-- **Explicit `--city` / `--rig` must keep the full validating path.** Those ask
-  gc to validate a specific scope. `hasExplicitBdScopeFlag()` already encodes
-  this carve-out; reuse it rather than inventing a new condition.
+- **`--city` must keep the full validating path** — it pins a *different* city,
+  and the cheap resolution assumes the ambient one.
+- **`--rig` should NOT.** An earlier revision of this doc lumped it in with
+  `--city`; that was wrong and gave up the largest win on the fleet for no
+  reason. `GET /v0/city/{city}/beads` already accepts a `rig` query parameter,
+  verified live and correctly filtered: `?rig=gas-city-infra` → 17.8 ms,
+  `?rig=crm` → 18.1 ms, `?rig=gas-city-infra&type=gate` → 12.1 ms, against
+  `gc bd gate list --rig gas-city-infra` at 294 ms (~24×). And the fleet's
+  single largest bd consumer uses `--rig` *deliberately* (§7). Routing it must
+  preserve gc's rig-validation errors — unknown rig, declared-but-unbound rig —
+  so they do not degrade into a bare empty result.
 - **Cross-rig resolution proven for 4 of 6 rigs.** `statusline` and
   `gascity-packs` had no beads to test with.
 - **Controller-down behaviour is undecided.** bdshim fails loud (rc=1) for
@@ -301,3 +338,72 @@ against the ledger, and the controller has no business projecting it. Those
 either keep invoking bd directly or leave gc's surface. Either way they are off
 the hot path, and the rule holds without exception: **every bead operation goes
 through the controller.**
+
+## 7. Deployed 2026-08-01: the context fix, and what production taught
+
+The preflight-TTL work (`gcw-5oio`, `gcw-75s5`) is **live and validated**. It is
+the only change from this investigation that has shipped.
+
+| metric | before | after | |
+|---|---|---|---|
+| `bd context` calls | 2.120/min | **0.357/min** | **83.2% fewer** |
+| failures | 1.067/min | 0.159/min | 85.1% fewer |
+
+Measured over 25.2 min (1.7 TTL cycles) against a baseline captured on the same
+metric in the 60 min before the bounce. The prediction — 82%, derived from the
+order-cooldown model — was **pre-registered on the bead before deploying**.
+
+Independently confirmed by a second method: the same 36-min clock window on
+eight consecutive days, which controls for time-of-day. `context` sat at 77–97
+in that window every prior day and was 23 on deploy day.
+
+### It took two deploys, and the failure is the lesson
+
+Deploy 1 (`61eb7e5f8`) moved the live rate 2.120 → 1.984/min. **6.4%** — nothing,
+against an isolated single-binary A/B that had shown the mechanism working
+perfectly.
+
+The cause was the `gc_build` stamp added in that same commit. **A
+session-preserving rebuild-bounce does not replace long-lived detached helpers.**
+Two `gc nudge poll` daemons were still running binaries from the previous day.
+They kept writing entries with no build stamp; every new process rejected them,
+re-probed, and rewrote a stamped entry, which the old process overwrote
+unstamped. The live `hq` entry was watched flipping
+stamped → unstamped → stamped **inside 90 seconds**. One stale writer poisoned
+the cache for the whole fleet, indefinitely.
+
+Deploy 2 (`c45bd6783`) removed the *rejection* — the stamp is still recorded,
+because it is what made this diagnosable — and produced the 83.2%.
+
+> **The generalisable rule (`gcw-tr46`): a shared on-disk format must stay
+> readable by, and tolerant of, the previous binary, because the previous binary
+> is still running after a successful bounce.** Verify with
+> `ps -Ao pid=,lstart=,command= | grep 'gc nudge poll'`; anything with an
+> `lstart` before the bounce is running old code.
+
+The 83.2% is a **floor** — those stale pollers are still on the old 60 s TTL.
+
+### The traffic mix moved, and one earlier recommendation is retracted
+
+Same eight-day controlled windows:
+
+- **`list` is 51–80 on every single day** — the only high-volume verb that is
+  stable, and therefore the best target despite its per-call payoff being
+  unproven (the `+62 ms` claim was withdrawn in §5b).
+- **`gate` doubled on 07-29/30.** Split by shape: `gate check --escalate` has been
+  flat at ~1,080–1,190/day throughout, while `gc bd gate list` was *absent* until
+  07-29 and then jumped to ~1,512/day. A new core-pack caller appeared —
+  `gate-sweep` (2 m cooldown) → `renudge-stale-human-gates.sh`, which loops
+  `gc bd gate list` over HQ and every rig. At 294 ms/call that is ~444 s/day, now
+  the largest single identifiable bd cost on the fleet. Its own comment says it
+  uses `--rig` *because* that routes through `gc bd` — so it sits deliberately on
+  the slow path, and §5.5's revised `--rig` scope is what would fix it.
+- **`show` is retracted as the top candidate.** It ranges 0–56 across those eight
+  identical windows and was 1 on deploy day. It is bursty and agent-driven, so its
+  share depends entirely on when you sample; the earlier snapshot happened to
+  catch it active. The per-call analysis on `gcw-9kwl` still stands — what does
+  not stand is "therefore do `show` first".
+
+> **Method rule, earned twice:** prioritise on a time-of-day-controlled series,
+> never on a single window. A single snapshot produced both the withdrawn `list`
+> payoff and the retracted `show` priority.
