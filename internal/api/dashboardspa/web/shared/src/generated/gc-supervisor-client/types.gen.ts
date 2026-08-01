@@ -10612,6 +10612,10 @@ export type GetV0CityByCityNameBeadsEphemeralData = {
          */
         parent?: string;
         /**
+         * Filter by rig.
+         */
+        rig?: string;
+        /**
          * Include closed beads.
          */
         all?: boolean;
@@ -10708,6 +10712,10 @@ export type GetV0CityByCityNameBeadsReadyData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * Filter by rig.
+         */
+        rig?: string;
     };
     url: '/v0/city/{cityName}/beads/ready';
 };

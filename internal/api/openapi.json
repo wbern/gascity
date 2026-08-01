@@ -26840,6 +26840,16 @@
             }
           },
           {
+            "description": "Filter by rig.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig.",
+              "type": "string"
+            }
+          },
+          {
             "description": "Include closed beads.",
             "explode": false,
             "in": "query",
@@ -27085,6 +27095,16 @@
             "name": "wait",
             "schema": {
               "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rig.",
+            "explode": false,
+            "in": "query",
+            "name": "rig",
+            "schema": {
+              "description": "Filter by rig.",
               "type": "string"
             }
           }

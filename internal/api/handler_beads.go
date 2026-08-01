@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -365,6 +366,36 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 		deduped = append(deduped, name)
 	}
 	return deduped
+}
+
+// rigScopeNames resolves the `rig` query parameter shared by the bead-read
+// endpoints into the set of stores to federate. An empty rig means the whole
+// city; a named rig must have a store.
+//
+// A rig the city has no store for is an ERROR, not an empty page. The two are
+// otherwise indistinguishable to a caller, and answering 200 with an empty list
+// is the same silent-wrong shape as a scoped read served from the wrong store
+// (0227f3a42). `gc bd list --rig <unknown>` already exits 1 with "rig not
+// found"; a read routed through the controller must not downgrade that.
+//
+// This deliberately keys on store presence, not on result count: a rig that
+// exists and holds no matching beads is an ordinary empty result. It also makes
+// an unbound rig report loudly, which is what buildStores already intends when
+// it skips rigs with no site binding "so the API reports no store for the rig
+// and operators notice the unbound state".
+func rigScopeNames(stores map[string]beads.Store, rig string) ([]string, error) {
+	if rig == "" {
+		return sortedRigNames(stores), nil
+	}
+	if _, ok := stores[rig]; !ok {
+		// Deliberately names both causes. A rig declared in city.toml but
+		// missing its site binding is skipped by buildStores, so it reaches
+		// here looking exactly like a typo — and it is reachable from a UI
+		// whose rig picker is populated from the DECLARED rig list rather
+		// than from the stores map.
+		return nil, apierr.RigNotFound.Msg("rig " + rig + " has no bead store (unknown or unbound rig)")
+	}
+	return []string{rig}, nil
 }
 
 // BeadGraphResponse is the response shape for GET /v0/beads/graph/{rootID}.

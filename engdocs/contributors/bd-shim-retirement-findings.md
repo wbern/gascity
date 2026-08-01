@@ -7,7 +7,12 @@
 - **§7 is shipped and validated in production.** The context/preflight fix is
   live: 83.2% fewer `bd context` spawns, against a prediction pre-registered
   before deploying, and independently confirmed by a second method.
-- **§5 is verified** to the standard described there (the `resolve_scope` claim).
+- **§5 is verified** to the standard described there (the `resolve_scope` claim),
+  **but §5.5's revised `--rig` scope is not reachable** — see §8, which is the
+  newest section and the one that changes what to build next.
+- **§8 blocks `gcw-yr0o.1` as written.** No verb both routes to the controller
+  and honours a rig filter, and three endpoints silently discard `rig=` today.
+  §8 also **retracts** a claim of mine from the same day (§8.1).
 - **§1–4 are measured but not independently reproduced**, and §2's traffic table
   is now **superseded by §7** — the mix moved after the deploy. Treat those
   sections as evidence to confirm, not as settled fact.
@@ -407,3 +412,184 @@ Same eight-day controlled windows:
 > **Method rule, earned twice:** prioritise on a time-of-day-controlled series,
 > never on a single window. A single snapshot produced both the withdrawn `list`
 > payoff and the retracted `show` priority.
+
+## 8. The `--rig` routing scope §5.5 promised does not exist yet
+
+Investigated 2026-08-01, later the same day, against the live controller on
+`fork-c45bd6783`. §5.5 revised `--rig` *into* scope and §7 named
+`gc bd gate list --rig` the largest single identifiable bd cost on the fleet
+(~444 s/day). This section checks whether that scope is reachable. **It is not,
+for a reason neither section anticipated.**
+
+Confidence labels used below: **VERIFIED** = live, reproduced, n≥3.
+**MEASURED** = live, small n. **UNVERIFIED** = argued from source, never
+exercised. **RETRACTED** = claimed here earlier and wrong.
+
+### 8.1 RETRACTED: "`resolve_scope` costs nothing"
+
+I profiled `gc bd list --json` (n=5) and found `resolve_scope` at
+**0.03–0.09 ms**, and concluded `gcw-yr0o.1`'s premise was falsified. **That
+conclusion was wrong.** `resolve_scope` is verb-class-dependent:
+
+| command | `resolve_scope` | why |
+|---|---|---|
+| `gc bd show <id> --json` (n=3) | **153.9 / 159.1 / 173.7 ms** (~30%) | ID in argv ⇒ `bdBeadExists` opens a store to confirm it |
+| `gc bd list --json` (n=5) | **0.03–0.09 ms** | no bead ID ⇒ `resolveBdScopeTarget` never fires |
+
+§5 is right. It profiled `show`; I profiled `list`. The cost is real on
+**ID-bearing** reads and absent on list-like ones.
+
+Note the drift worth watching: §5.1 recorded `resolve_scope` at 483.8 ms for the
+same command that now measures ~160 ms. That is **consistent with** §7's
+preflight-TTL fix removing the `bd context` spawn §5.2 found *inside*
+`resolve_scope` — but §5.5 already admits that figure swung 484→617 ms across
+runs, so treat this as a corroborating signal, **not** as a measured effect size.
+
+> **Method rule, now earned a third time:** a phase cost is a property of the
+> *verb class*, not of `gc bd`. Profile the verb you intend to change.
+
+### 8.2 VERIFIED: routable ∩ rig-aware is the empty set
+
+This is the finding that blocks §5.5's revised scope. A verb can be routed to
+the controller, or it can honour a rig filter. **No verb does both.**
+
+| verb | `ClassifyVerb` | in fastpath shape allowlist | honours `rig=` |
+|---|---|---|---|
+| `list` | **passthrough** (`classify.go:355`) | no | **yes** |
+| `show` | **passthrough** (`classify.go:355`) | no | n/a (ID-scoped) |
+| `ready` | route | **no** | **no** |
+| `query` (ephemeral) | route | yes | **no** |
+| `mol current\|progress` | route | yes | n/a (ID-scoped) |
+
+Dispositions are test-verified against `bdshim.ClassifyVerb` directly, not read
+off the source. The shape allowlist is `earlyBdExperimentShape`
+(`cmd/gc/bd_fastpath.go:298`), which approves **only** `ShapeQueryEphemeral`,
+`ShapeMolCurrent` and `ShapeMolProgress`.
+
+The two halves fail for unrelated reasons, so neither is a quick fix:
+
+- **`list` cannot route** because of the output contract at `classify.go:350`.
+  Verified by diffing field sets live: `bd list --json` emits `priority`,
+  `parent`, `dependencies`, `dependency_count`, `dependent_count`,
+  `comment_count`, `notes`, `owner`, `created_by`, `updated_at` — the
+  controller's `/beads` emits **none of those ten**. Under §1's *semantic, not
+  syntactic* bar the gap is smaller than full `IssueWithCounts` parity, but
+  `priority`, `parent` and the dependency edges are load-bearing data, not
+  formatting. The refusal comment is accurate and current.
+- **`ready` / `query` cannot be rig-scoped** because the rig dimension does not
+  exist on them: `BeadReadyInput` and `BeadEphemeralInput` have no `Rig` field
+  (`internal/api/huma_types_beads.go:35,47`), while `BeadListInput` does
+  (line 27).
+
+There is also a structural reason the sets do not overlap by accident: for
+ID-bearing verbs the bead ID *already* determines the rig, and §5.3 verified the
+controller resolves cross-rig from a city-scoped request. **`rig=` is only
+meaningful for list-like queries — which are exactly the ones that cannot
+route.**
+
+### 8.3 VERIFIED: the silent-ignore defect family — three endpoints
+
+Routing `--rig` today would re-ship `0227f3a42`. Proven live, not inferred:
+
+```
+GET /beads/ready?rig=gas-city-wbern      -> 200, 402 beads across gc2/crm/gci/gcw
+GET /beads/ephemeral?rig=gas-city-wbern  -> 200, identical to no-rig and to rig=nonsense
+GET /beads?rig=nope-does-not-exist       -> 200 {"items":[],"total":0}
+gc bd list --rig gcw                     -> exit 1, `gc bd: rig "gcw" not found`
+```
+
+`ready` is the verb from the original `0227f3a42` report. Three distinct
+defects:
+
+1. **`/beads`** honours `rig=` but does not validate it. `huma_handlers_beads.go:130`
+   has no `else`: an unknown rig leaves `rigNames` nil and federates nothing.
+   gc's loud error degrades into a silent empty 200.
+2. **`/beads/ready`** federates city + every rig unconditionally
+   (`huma_handlers_beads.go:488`). `rig=` is not a parameter, so it is discarded
+   as an unknown query param.
+3. **`/beads/ephemeral`** same, at `huma_handlers_beads.go:437`.
+
+Unknown query params are silently dropped generally — `?totallyBogusParam=xyz`
+returns a full 200 — so on `ready` and `ephemeral` a `rig=` typo and a real rig
+are indistinguishable to the caller. That is strictly worse than an unknown-rig
+404: the request *looks* scoped and is not.
+
+Two counter-arguments were tested and **failed**, which is why the fix is safe:
+
+- *"A 404 would misfire on suspended rigs."* No. Suspension gates only
+  background refresh (`rigStoreBackgroundRefresh`); `stores[rig.Name]` is
+  populated either way.
+- *"A 404 would misfire on declared-but-unbound rigs."* That is the intended
+  behaviour, already written down: `buildStores` skips unbound rigs *"so the API
+  reports no store for the rig and operators notice the unbound state"*
+  (`cmd/gc/api_state.go:334-342`). The silent 200 is what defeats that stated
+  intent today.
+
+Blast radius is near zero: **no production caller sets `rig=`** on any of these
+endpoints — `ListBeadsOpts.Rig` is assigned only in `client_test.go:1838`, and
+`ParseListOpts` never populates it. `apierr.RigNotFound` (`rig-not-found`, 404)
+already exists in the catalog, so no new problem type is needed.
+
+### 8.4 VERIFIED: the direct path works, and §5.4's projection was right
+
+The 30 ms end-state is not a projection any more:
+
+```
+gc bd query --json 'ephemeral=true'   0.10 / 0.03 / 0.03 s   -> 100 real rows
+gc bd list  --json                    0.90 / 0.43 / 0.44 s
+```
+
+30 ms against a ~505 ms median for `list` — **~17×**, matching §5.4's ~30 ms
+almost exactly. The architecture is validated. What is *not* validated is its
+reach: it currently serves only `query`-ephemeral and `mol`.
+
+The cost `list` pays instead decomposes cleanly (n=5, medians): `bd_subprocess`
+~42%, `load_city_config` ~48% — together ~90%. **Routing removes the subprocess;
+the fastpath removes the config load.** The 30 ms figure is what you get only
+when both go, which is why neither half alone reaches it.
+
+### 8.5 UNVERIFIED: the gate-list target is the highest-value one, and may be blocked
+
+§7 makes `gc bd gate list --rig` the top fleet cost (~444 s/day at 294 ms/call),
+and §5.5 measured `GET /beads?rig=gas-city-infra&type=gate` at **12.1 ms** —
+a ~24× headroom on the single largest identifiable line item.
+
+The output contract is unusually small. `renudge-stale-human-gates.sh:152-160`
+consumes exactly four fields:
+
+```sh
+GATES_JSON="$(gc bd gate list ${RIG_ARG1:+...} --limit 0 --json)"
+... | jq -r 'select(.await_type == "human" and .status == "open")
+             | "\(.id)\t\(.created_at // "")"'
+```
+
+`id`, `status` and `created_at` are already on the controller's bead. **The open
+question is `await_type`,** and it is a real risk rather than a detail: the
+string does not appear anywhere in Gas City's Go source, so it is a `bd`-side
+gate concept. It reaches a controller response only if `bd` persists it into
+bead metadata that the controller's `metadata` map passes through.
+
+**This could not be tested.** There are zero gate beads in the city right now
+(`gc bd gate list` returns `null`; `?type=gate` returns `total: 0`), so there
+was nothing to inspect. Do not treat gate routing as shovel-ready until one gate
+bead has been checked for `await_type` through `/beads`.
+
+Note also that `gate` is not in the fastpath allowlist *or* in `RoutedVerbs`, so
+this needs a new routable shape as well as the rig plumbing — two pieces, not
+one.
+
+### 8.6 What this changes
+
+- **`gcw-yr0o.1` should not be built as written.** Its ID-bearing-read premise
+  (§8.1) is sound, but the `--rig` half it was revised to include has no valid
+  target verb (§8.2). Split the bead: keep the cheap-controller-reach half,
+  drop or re-scope the `--rig` half.
+- **The rig-validation work is worth doing on its own** (§8.3) — small, uses an
+  existing error type, near-zero blast radius, and it is the guard that makes
+  any later rig routing safe. It is a *prerequisite*, not a competitor.
+- **`--rig` routing is gated on a routable rig-aware verb existing.** Today that
+  means either giving `ready`/`ephemeral` a rig dimension, or closing enough of
+  `list`'s ten-field gap to route it under §1's semantic bar.
+- **§5.5's `--rig` bullet is correct about the endpoint and wrong about the
+  reach.** `GET /beads?rig=` genuinely is ~24× faster; no verb that can reach it
+  honours a rig.

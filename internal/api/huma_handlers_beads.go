@@ -126,13 +126,9 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	stores := s.state.BeadStores()
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
-	var rigNames []string
-	if input.Rig != "" {
-		if _, ok := stores[input.Rig]; ok {
-			rigNames = []string{input.Rig}
-		}
-	} else {
-		rigNames = sortedRigNames(stores)
+	rigNames, err := rigScopeNames(stores, input.Rig)
+	if err != nil {
+		return nil, err
 	}
 
 	var all []beads.Bead
@@ -434,8 +430,12 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 	}
 
 	stores := s.state.BeadStores()
+	rigNames, err := rigScopeNames(stores, input.Rig)
+	if err != nil {
+		return nil, err
+	}
 	var all []beads.Bead
-	for _, rigName := range sortedRigNames(stores) {
+	for _, rigName := range rigNames {
 		store := stores[rigName]
 		if store == nil {
 			continue
@@ -485,7 +485,10 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 
 	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	rigNames, err := rigScopeNames(stores, input.Rig)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build the federation source list in the SAME deterministic order the former
 	// sequential loop used: the city store first, then each rig (skipping the
@@ -494,11 +497,19 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// federated explicitly or HTTP `bd ready` would never surface it (#3817). In
 	// production BeadStores() also returns the city store keyed by CityName(), so
 	// the rig loop skips that duplicate key to avoid querying it twice.
+	//
+	// A rig-scoped read federates ONLY that rig. The implicit city source is an
+	// unscoped-read concern; including it under ?rig= would answer a scoped
+	// question with city-scope work, which is the defect this parameter exists
+	// to make impossible. A caller wanting the city store asks for it by name —
+	// in production BeadStores() keys it under CityName().
 	cityName := s.state.CityName()
 	sources := make([]readySource, 0, len(rigNames)+1)
-	sources = append(sources, readySource{label: "city", store: s.state.CityBeadStore()})
+	if input.Rig == "" {
+		sources = append(sources, readySource{label: "city", store: s.state.CityBeadStore()})
+	}
 	for _, rigName := range rigNames {
-		if rigName == cityName {
+		if rigName == cityName && input.Rig == "" {
 			continue
 		}
 		sources = append(sources, readySource{label: "rig " + rigName, store: stores[rigName]})
