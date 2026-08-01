@@ -430,3 +430,70 @@ func TestRunClaimWithoutIDLogsRedactedRefusal(t *testing.T) {
 		t.Fatalf("refusal record = %+v, want update/refuse/1/flags=--claim", got)
 	}
 }
+
+// gc resolves a --rig scope itself and hands the child a BEADS_DIR pinned to
+// THAT rig's store, plus GC_STORE_SCOPE=rig / GC_STORE_ROOT to say so. The shim
+// cannot represent a rig in a controller request — it is city-scoped by
+// construction, which is exactly why bare `bd --rig` is refused outright. So a
+// routed verb under a pinned rig scope answered from the CITY, silently
+// discarding the scope gc had resolved.
+//
+// Measured live on gc2 before this guard:
+//
+//	gc bd --rig statusline ready --json  ->  {gc2: 16, crm: 4}, zero statusline
+//	gc bd --rig gas-city-wbern create    ->  bead landed in the HQ store
+//
+// Passthrough is the correct answer here, and it is available precisely because
+// gc already set BEADS_DIR: real bd honors it and hits the right store.
+func TestRunPinnedRigScopePassesThroughInsteadOfRouting(t *testing.T) {
+	for _, verb := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "routed read", args: []string{"ready", "--json"}, want: "ready --json"},
+		{name: "routed write", args: []string{"create", "a title", "--json"}, want: "create"},
+		{name: "routed update", args: []string{"update", "gcw-1", "--status", "open"}, want: "update gcw-1"},
+	} {
+		t.Run(verb.name, func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "calls.txt")
+			bd := fakeBd(t, dir, out, 0)
+			t.Setenv("GC_BD_REAL", bd)
+			// A city and controller ARE resolvable — routing would otherwise happen.
+			t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+			t.Setenv("GC_API_URL", "http://127.0.0.1:1")
+			t.Setenv("GC_BDSHIM_LOG", "")
+			// gc pinned a rig store for this invocation.
+			t.Setenv("GC_STORE_SCOPE", "rig")
+			t.Setenv("GC_STORE_ROOT", "/some/rig")
+
+			var stdout, stderr bytes.Buffer
+			if code := run(verb.args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, want 0 (passthrough); stderr=%q", code, stderr.String())
+			}
+			got, _ := os.ReadFile(out)
+			if !strings.Contains(string(got), verb.want) {
+				t.Fatalf("a pinned rig scope must pass through to real bd; calls=%q", string(got))
+			}
+		})
+	}
+}
+
+// The city scope is what the shim CAN represent, so it must keep routing.
+func TestRunCityStoreScopeStillRoutes(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "calls.txt")
+	bd := fakeBd(t, dir, out, 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
+	t.Setenv("GC_API_URL", "http://127.0.0.1:1") // controller down -> routed reads fail loud
+	t.Setenv("GC_BDSHIM_LOG", "")
+	t.Setenv("GC_STORE_SCOPE", "city")
+	t.Setenv("GC_STORE_ROOT", "/tmp/gc2")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"ready", "--json"}, strings.NewReader(""), &stdout, &stderr); code == 0 {
+		t.Fatalf("city scope must still ROUTE (and fail loud with the controller down); got 0, calls=%q", func() string { b, _ := os.ReadFile(out); return string(b) }())
+	}
+}

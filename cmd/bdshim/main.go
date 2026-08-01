@@ -89,6 +89,24 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	// A caller that pinned a NON-CITY store scope has already chosen the store,
+	// and this shim cannot represent that choice in a controller request — the
+	// dispatch is city-scoped by construction, which is exactly why a bare
+	// `bd --rig` is refused above. gc pins one on every `gc bd --rig <rig>`
+	// invocation: it resolves the rig itself, sets BEADS_DIR to that rig's store,
+	// and announces it with GC_STORE_SCOPE/GC_STORE_ROOT. Routing anyway silently
+	// answered from the city instead. Measured live on gc2 before this guard:
+	//
+	//	gc bd --rig statusline ready --json -> {gc2:16, crm:4}, ZERO statusline
+	//	gc bd --rig gas-city-wbern create   -> bead created in the HQ store
+	//
+	// Both reads and writes, both silently wrong, both looking like success.
+	// Passthrough is the correct answer and is available precisely because gc
+	// already set BEADS_DIR: real bd honors it and reaches the pinned store.
+	if pinnedNonCityStoreScope() {
+		return passthrough()
+	}
+
 	// splitPhase is pinned false: no split graph store is wired, so the city is
 	// in the identity phase. Route is therefore always a pure latency choice;
 	// passthrough is always byte-identical to raw bd.
@@ -195,4 +213,25 @@ func rewriteHeartbeatArgs(bdArgs []string) ([]string, error) {
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+}
+
+// storeScopeEnv is the store scope gc resolved for this invocation. gc sets it
+// (alongside GC_STORE_ROOT) in bdCommandEnv for every `gc bd` child.
+const storeScopeEnv = "GC_STORE_SCOPE"
+
+// pinnedNonCityStoreScope reports whether the caller pinned a store scope this
+// shim cannot express in a city-scoped controller request. Only "city" (and an
+// unset value, meaning the caller expressed no opinion) are representable; any
+// other scope — "rig" today — must pass through to real bd, which honors the
+// BEADS_DIR the caller set.
+//
+// It fails CLOSED on an unrecognized scope: a future scope kind is treated as
+// unrepresentable and passes through, which is byte-identical to raw bd, rather
+// than being routed to the wrong store.
+func pinnedNonCityStoreScope() bool {
+	scope := strings.TrimSpace(os.Getenv(storeScopeEnv))
+	if scope == "" || scope == "city" {
+		return false
+	}
+	return true
 }
