@@ -55,12 +55,26 @@ func (d Disposition) String() string {
 // raw bd treats as a read-only PREVIEW, CLOSED the bead through the shim at
 // exit 0 with no output; `bd delete <id> --force` also merely closed it, leaving
 // the bead in the store while reporting success.
+// `create` deliberately does not appear either, for a different reason: it is
+// the only routed verb with no issue id, so it is the only one whose target
+// store cannot be resolved from its arguments. Every other routed write names a
+// bead the controller can locate; create names nothing, so routing it wrote to
+// the controller's own city store regardless of which store the caller meant —
+// while show and list always pass through to the caller's BEADS_DIR. Measured
+// in a managed agent session, whose env gc itself sets:
+//
+//	bd create "probe" --json   -> {"id":"gc2-kxwt5"}  (CITY store)
+//	bd show gc2-kxwt5          -> no issue found      (reads the RIG store)
+//	raw bd create "probe"      -> gcw-xqed            (RIG store, honors BEADS_DIR)
+//
+// The agent could not read back the bead it had just created. Not routing it
+// costs almost nothing: of 4,225 creates observed, 4,185 already passed through
+// and only 40 routed.
 var RoutedVerbs = map[string]bool{
 	"close":  true,
 	"ready":  true,
 	"update": true,
 	"reopen": true,
-	"create": true,
 }
 
 // CloseReopenRoutable reports whether a `bd close` / `bd reopen` arg list is the
