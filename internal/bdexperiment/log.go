@@ -22,8 +22,14 @@ type Record struct {
 	Exit             int    `json:"exit"`
 	StdoutBytes      int64  `json:"stdout_bytes"`
 	ConfigGeneration string `json:"config_generation"`
-	MainMS           int64  `json:"main_ms"`
-	DispatcherMS     int64  `json:"dispatcher_ms"`
+	// ConfigSuperseded records that an explicit arm weighting was ignored
+	// because it declared a generation older than CurrentGeneration. omitempty
+	// so every existing record and reader is unaffected; its presence is the
+	// only signal that a selection did not come from the configuration the
+	// environment asked for.
+	ConfigSuperseded bool  `json:"config_superseded,omitempty"`
+	MainMS           int64 `json:"main_ms"`
+	DispatcherMS     int64 `json:"dispatcher_ms"`
 }
 
 // Append adds one validated observation. It is best-effort: false means that

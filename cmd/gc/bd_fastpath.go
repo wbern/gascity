@@ -252,6 +252,7 @@ func observeEarlyBdExperiment(config bdexperiment.Config, arm bdexperiment.Arm, 
 		Exit:             code,
 		StdoutBytes:      observed.BytesWritten(),
 		ConfigGeneration: generation,
+		ConfigSuperseded: config.Superseded,
 		MainMS:           time.Since(mainStarted).Milliseconds(),
 		DispatcherMS:     time.Since(dispatcherStarted).Milliseconds(),
 	})
@@ -273,6 +274,7 @@ func observeLegacyBdExperiment(observation earlyBdLegacyObservation, stdoutBytes
 		Exit:             exit,
 		StdoutBytes:      stdoutBytes,
 		ConfigGeneration: generation,
+		ConfigSuperseded: observation.config.Superseded,
 		MainMS:           time.Since(mainStarted).Milliseconds(),
 		DispatcherMS:     0,
 	})

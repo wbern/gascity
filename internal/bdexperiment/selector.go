@@ -27,8 +27,25 @@ const ForceArmEnv = "GC_BD_EXPERIMENT_FORCE_ARM"
 // ShapeOverridesEnv pins individual approved command shapes to an arm.
 const ShapeOverridesEnv = "GC_BD_EXPERIMENT_SHAPE_OVERRIDES"
 
-// GenerationEnv identifies a numeric configuration revision in observations.
+// GenerationEnv identifies a numeric configuration revision. It is both stamped
+// onto observations and load-bearing: see CurrentGeneration.
 const GenerationEnv = "GC_BD_EXPERIMENT_GENERATION"
+
+// CurrentGeneration is the arm-configuration revision this binary expects.
+//
+// An explicit GC_BD_EXPERIMENT_ARMS wins over the built-in default by design,
+// which is correct for a deliberate choice and wrong for an inherited one. Agent
+// sessions outlive supervisor bounces, so a weighting exported during some past
+// experiment survives in the environment indefinitely and silently outranks
+// every later default. Measured on 2026-08-02: five of six live sessions carried
+// shim=95,direct=5 from an earlier generation, suppressing a default that had
+// already been deployed, and the value existed in no config file or shell
+// profile anyone could point at.
+//
+// Bumping this retires such a config: an explicitly-versioned OLDER one is
+// ignored in favor of the built-in default, so a stale weighting expires at the
+// next binary upgrade instead of persisting until someone recycles the session.
+const CurrentGeneration = 4
 
 // Shape is the closed, value-free command shape vocabulary used by this experiment.
 type Shape string
@@ -52,10 +69,17 @@ const (
 
 // Config holds the experiment weights. Its zero value is the safe control.
 type Config struct {
-	Weights    map[Arm]int
-	Force      Arm
-	Overrides  map[Shape]Arm
+	Weights   map[Arm]int
+	Force     Arm
+	Overrides map[Shape]Arm
+	// Generation is the configuration revision this selection was made under.
 	Generation string
+	// Superseded records that an explicit arm weighting was IGNORED because it
+	// declared a generation older than CurrentGeneration. It exists so the
+	// observation can say so: a config silently ignored is the same class of bug
+	// as a config silently honored, and the incident this mechanism answers was
+	// precisely a silent override.
+	Superseded bool
 	Valid      bool
 }
 
@@ -95,7 +119,39 @@ func Parse(getenv func(string) string) Config {
 	if len(weights) != 3 || weights[ArmShim]+weights[ArmDirect]+weights[ArmLegacy] != 100 || weights[ArmLegacy] > 10 {
 		return Config{}
 	}
-	return withGeneration(parseOverrides(parseForce(Config{Weights: weights, Valid: true}, getenv), getenv), getenv)
+	config := Config{Weights: weights, Valid: true}
+	if supersededGeneration(getenv) {
+		config = Config{Weights: map[Arm]int{ArmDirect: 100}, Valid: true, Superseded: true}
+	}
+	return withGeneration(parseOverrides(parseForce(config, getenv), getenv), getenv)
+}
+
+// supersededGeneration reports whether an explicit arm weighting declares a
+// generation this binary has moved past.
+//
+// The three cases are deliberate:
+//
+//   - ABSENT generation: honored. A hand-set GC_BD_EXPERIMENT_ARMS with no
+//     generation is how an operator pins arms while debugging, and refusing it
+//     would break that with no warning. Unversioned means "I mean it now".
+//   - OLDER than CurrentGeneration: superseded. This is the inherited-stale case
+//     the mechanism exists for.
+//   - NEWER than CurrentGeneration: honored. An older binary in a mixed fleet
+//     must not discard a rollout that is ahead of it; that would invert the
+//     intended direction.
+//
+// A malformed generation is left to withGeneration, which invalidates the whole
+// config rather than guessing.
+func supersededGeneration(getenv func(string) string) bool {
+	raw := strings.TrimSpace(getenv(GenerationEnv))
+	if raw == "" {
+		return false
+	}
+	declared, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil {
+		return false
+	}
+	return declared < CurrentGeneration
 }
 
 func withGeneration(config Config, getenv func(string) string) Config {
