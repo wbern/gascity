@@ -46,7 +46,12 @@ func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, war
 		return nil, err
 	}
 	endLoadWithIncludes := profiler.phase("config_load_with_includes")
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	// This loader does not return the Provenance, so nothing downstream can
+	// compute a Revision from it — the load-time revision snapshot would be
+	// content-hashing every pack directory for a value no caller can read.
+	// Long-running processes that do compute a Revision load config through
+	// their own paths and keep the default.
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, config.LoadOptions{SkipRevisionSnapshot: true})
 	endLoadWithIncludes()
 	if err != nil {
 		return nil, err

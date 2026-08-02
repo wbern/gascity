@@ -98,9 +98,28 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// SkipRevisionSnapshot declines the load-time revision snapshot, which
+	// content-hashes every pack directory so a later Revision() call can
+	// compare against the config as it was loaded.
+	//
+	// Only long-running processes (the controller, the supervisor, the API
+	// server) call Revision at all; a one-shot command loads config, uses it
+	// and exits. Set this on those short-lived paths to skip work nothing
+	// will read — on `gc bd list --json --limit 5` the snapshot accounted for
+	// 16% of the process's CPU samples.
+	//
+	// Declining it cannot change a revision VALUE: every read of the snapshot
+	// already falls back to reading from disk (writeRevisionDirHash,
+	// revisionSnapshotFile, revisionConventionDirs), so the snapshot is a
+	// prefetch, not an input. What it does give up is load-time faithfulness —
+	// a revision computed without it reflects the tree at Revision() time
+	// rather than at load time. That distinction only matters to a caller that
+	// holds a Provenance across a window in which the config may change, which
+	// is exactly the long-running case that should leave this false.
+	SkipRevisionSnapshot    bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -776,8 +795,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Callers that never compute a Revision opt out
+	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
+	// the value is unchanged either way.
+	if !opts.SkipRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot)
+	}
 
 	return root, prov, nil
 }
