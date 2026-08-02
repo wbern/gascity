@@ -309,8 +309,23 @@ var ReadyRoutableFlags = map[string]bool{
 }
 
 // ReadyRoutable reports whether a `bd ready` arg list uses only flags the shim
-// can replicate (directly via ReadyQuery or via the discovery post-filter).
+// can replicate (directly via ReadyQuery or via the discovery post-filter) AND
+// asked for JSON.
+//
+// --json is REQUIRED, not merely permitted. The routed path renders through
+// internal/bddispatch, which implements only the JSON projection, while real bd
+// prints a compact human table when --json is absent. Routing the table form
+// therefore replaces a short list with a full-store JSON dump at exit 0.
+// Measured on the deployed shim (gcw-tcuk): `bd ready` returned 2,736,285 bytes
+// of JSON where raw bd returned 13,656 bytes of table, and bdshim.log showed
+// 9,721 of 33,060 ready calls taking that path — the modal agent invocation.
+//
+// This mirrors the rule CloseReopenRoutable already applies in the opposite
+// direction, where --json is EXCLUDED because the routed path prints nothing
+// while raw bd prints a JSON result. One principle both times: route only the
+// output form the shim can reproduce.
 func ReadyRoutable(args []string) bool {
+	sawJSON := false
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") {
 			continue // a bare value (e.g. a space-separated flag arg) — not a gate
@@ -322,8 +337,11 @@ func ReadyRoutable(args []string) bool {
 		if !ReadyRoutableFlags[name] {
 			return false
 		}
+		if name == "--json" {
+			sawJSON = true
+		}
 	}
-	return true
+	return sawJSON
 }
 
 // ListRoutableFlags defines the `bd list` grammar an eventual typed
