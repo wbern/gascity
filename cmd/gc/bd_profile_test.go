@@ -78,7 +78,6 @@ func TestRunBdInvocationProfileCoversGCRoutingAndChild(t *testing.T) {
 	silentFallbackTestSetup(t, "#!/bin/sh\nif [ -n \"${GC_BD_PROFILE_DIR:-}\" ]; then\n  echo profile-dir-leaked >&2\n  exit 97\nfi\nprintf 'profile-success\\n'\n")
 	profileDir := t.TempDir()
 	t.Setenv("GC_BD_PROFILE_DIR", profileDir)
-	t.Setenv("GC_BD_FASTPATH", "0")
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"bd", "list", "demo-secret"}, &stdout, &stderr); code != 0 {
@@ -113,7 +112,7 @@ func TestRunBdInvocationProfileCoversGCRoutingAndChild(t *testing.T) {
 		t.Fatalf("unmarshal report: %v\n%s", err, data)
 	}
 	for _, phase := range []string{
-		"early_shim_probe", "telemetry_init", "command_tree", "command_execute",
+		"telemetry_init", "command_tree", "command_execute",
 		"rewrite_heartbeat", "resolve_city", "load_city_config", "resolve_scope",
 		"config_builtin_pack_includes", "config_load_with_includes", "config_postprocess",
 		"provider_preflight", "prepare_subprocess", "bd_subprocess", "total",

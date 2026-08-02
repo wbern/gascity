@@ -27,6 +27,16 @@ import (
 
 const defaultManagedDoltHost = "127.0.0.1"
 
+// canonicalDoltHostEnv and canonicalDoltPortEnv carry the provenance of the
+// Dolt endpoint gc itself resolved for a scope. setCanonicalDoltProjectionProvenance
+// writes them alongside GC_DOLT_HOST / GC_DOLT_PORT when the scope's config is
+// authoritative, so a child process can tell a gc-projected endpoint apart from
+// one inherited from an ambient parent shell.
+const (
+	canonicalDoltHostEnv = "GC_BD_FASTPATH_CANONICAL_DOLT_HOST"
+	canonicalDoltPortEnv = "GC_BD_FASTPATH_CANONICAL_DOLT_PORT"
+)
+
 var postgresCredentialResolvedSeen sync.Map // map[string]struct{}
 
 func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCredentialResolvedPayload) string {
