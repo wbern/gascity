@@ -849,8 +849,14 @@
           "assignee": {
             "type": "string"
           },
+          "await_type": {
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
             "type": "string"
           },
           "defer_until": {
@@ -910,6 +916,12 @@
           },
           "no_history": {
             "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
           },
           "parent": {
             "type": "string"

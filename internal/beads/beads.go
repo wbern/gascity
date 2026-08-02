@@ -104,6 +104,24 @@ type Bead struct {
 	// store did not provide the projection and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CreatedBy and Owner mirror bd's created_by/owner columns. Together with
+	// Notes and AwaitType they are the four plain columns bd emits on its JSON
+	// projections that this type did not model, so every store dropped them and
+	// a bead read through gc showed less than the same bead read through bd.
+	// Empty on stores whose schema predates them.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	// Notes mirrors bd's notes column. The three remaining fields of bd's
+	// projection (comment_count, dependency_count, dependent_count) are
+	// backend-computed over relations and comments rather than plain columns,
+	// and are deliberately out of scope here.
+	Notes string `json:"notes,omitempty"`
+	// AwaitType is the condition a gate bead waits on ("human", "timer",
+	// "gh:run", "gh:pr", "mail"), mirroring bd's await_type column. It is the
+	// one field of bd's four-field gate contract (id/status/created_at/
+	// await_type) this type did not carry, so a gate bead served from any store
+	// dropped its condition silently. Empty for every non-gate bead.
+	AwaitType string `json:"await_type,omitempty"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
