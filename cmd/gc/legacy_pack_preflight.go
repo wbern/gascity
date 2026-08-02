@@ -75,7 +75,7 @@ func lockedBundledCanonicalImports(cityPath string) ([]lockedBundledImport, erro
 // validation failure does the preflight take the write-locked
 // packman.EnsureRepoInCache repair path, which revalidates under the lock
 // (a concurrent repair between the two checks is therefore benign).
-func ensureBundledLockedRemoteImportsCached(cityPath string) error {
+func ensureBundledLockedRemoteImportsCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
 		return err
@@ -85,12 +85,13 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", imp.source, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) == nil {
+		if verifier.Valid(cachePath, imp.commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, imp.source, imp.commit); err != nil {
 			return fmt.Errorf("caching bundled import %q from packs.lock: %w", imp.source, err)
 		}
+		verifier.Invalidate(cachePath, imp.commit)
 	}
 	return nil
 }
@@ -104,7 +105,7 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 // locked-but-missing synthetic cache. A lockfile that cannot be read or that
 // has a malformed entry is reported unusable so the caller falls through to
 // ensureBundledLockedRemoteImportsCached, which surfaces the underlying error.
-func lockedBundledImportsUsable(cityPath string) bool {
+func lockedBundledImportsUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
 		return false
@@ -123,7 +124,7 @@ func lockedBundledImportsUsable(cityPath string) bool {
 		if _, done := validated[key]; done {
 			continue
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) != nil {
+		if !verifier.Valid(cachePath, imp.commit) {
 			return false
 		}
 		validated[key] = struct{}{}
