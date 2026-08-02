@@ -271,3 +271,94 @@ func TestValidateSyntheticRepoRejectsUnknownRepository(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateSyntheticRepoRejectsDeletedFile pins the one property whose
+// MECHANISM changed when the file-set walk and the per-file content compare were
+// fused into a single traversal.
+//
+// Before the fusion, a manifest-driven os.Lstat per expected file failed loudly
+// on a deletion. A walk cannot: it simply never visits the missing path, so
+// without an explicit count a short cache would validate clean. That is the
+// worst possible direction for a cache-integrity check to fail, because the
+// self-heal it feeds would never fire.
+//
+// There was no test for this class at all before — deletion was covered only
+// implicitly by the Lstat that no longer runs.
+func TestValidateSyntheticRepoRejectsDeletedFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeSyntheticRepo(dir, Repository, "deadbeef"); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	if err := ValidateSyntheticRepo(dir, Repository, "deadbeef"); err != nil {
+		t.Fatalf("freshly materialized cache is invalid: %v", err)
+	}
+
+	// Delete one expected file, leaving everything else intact.
+	allowed, _, err := syntheticRepoAllowedPaths(Repository)
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+	}
+	if len(allowed) == 0 {
+		t.Fatal("no expected files; the fixture cannot exercise deletion")
+	}
+	var victim string
+	for rel := range allowed {
+		victim = rel
+		break
+	}
+	if err := os.Remove(filepath.Join(dir, filepath.FromSlash(victim))); err != nil {
+		t.Fatalf("removing %s: %v", victim, err)
+	}
+
+	err = ValidateSyntheticRepo(dir, Repository, "deadbeef")
+	if err == nil {
+		t.Fatalf("a cache missing %s validated clean; deletion is undetected", victim)
+	}
+	if !strings.Contains(err.Error(), "expected files") {
+		t.Errorf("error = %v, want a missing-file rejection naming the shortfall", err)
+	}
+}
+
+// TestValidateSyntheticRepoStillRejectsTamperedContentAfterFusion pins that the
+// byte-compare survived being moved into the walk. It is deliberately redundant
+// with the pre-existing tamper test: that one tampers with a file this package
+// picks, while this one tampers with whatever the expected set actually names,
+// so it cannot pass because of a stale hardcoded path.
+func TestValidateSyntheticRepoStillRejectsTamperedContentAfterFusion(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeSyntheticRepo(dir, Repository, "deadbeef"); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	allowed, _, err := syntheticRepoAllowedPaths(Repository)
+	if err != nil {
+		t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+	}
+	var victim string
+	for rel := range allowed {
+		victim = rel
+		break
+	}
+	target := filepath.Join(dir, filepath.FromSlash(victim))
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading %s: %v", victim, err)
+	}
+	// Same length, different bytes: a size-only check would miss this.
+	tampered := make([]byte, len(original))
+	copy(tampered, original)
+	if len(tampered) == 0 {
+		t.Skipf("expected file %s is empty; cannot tamper in place", victim)
+	}
+	tampered[0] ^= 0xFF
+	if err := os.WriteFile(target, tampered, 0o644); err != nil {
+		t.Fatalf("tampering with %s: %v", victim, err)
+	}
+
+	err = ValidateSyntheticRepo(dir, Repository, "deadbeef")
+	if err == nil {
+		t.Fatalf("same-length content drift in %s was accepted", victim)
+	}
+	if !strings.Contains(err.Error(), "content differs") && !strings.Contains(err.Error(), "has mode") {
+		t.Errorf("error = %v, want a content-differs rejection", err)
+	}
+}
