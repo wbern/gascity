@@ -84,9 +84,17 @@ morning was not uniformly fast.
 > (0–56 across eight identical windows) and that snapshot caught it active.
 
 > **Method rule:** a before/after switchover is not an A/B on a machine with this
-> much hourly variance. `internal/bdexperiment` already does randomized
-> **per-call** arm assignment, which is the design that defeats this. Any future
-> payoff claim must come from that harness.
+> much hourly variance. Randomized **per-call** arm assignment is the design that
+> defeats it, and any future payoff claim must come from a harness that does it.
+>
+> **Amended 2026-08-02 (`gcw-scyj`):** this used to name `internal/bdexperiment`
+> as that harness. It is deleted — its arm selection had no caller left once
+> `dd786179e` removed the `gc bd` fastpath, and it timed only the in-process
+> window (`main_ms`/`dispatcher_ms`), excluding process spawn and a 127 MB
+> binary's startup, which is where the cost this document measures actually is.
+> The method rule stands; the instrument does not. A replacement must randomize
+> per call **and** measure subprocess wall time. See
+> `gc-bd-experiment-runbook.md` for its final results and how to recover it.
 
 A third correction: a live "proof" that attributed subprocess spawns by
 ps-polling on PPID reported a false zero — the poller missed a ~120 ms child. The
