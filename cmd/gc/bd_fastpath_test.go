@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bdexperiment"
 )
 
 // TestHasExplicitBdScopeFlagHandlesEmptyArgs is the regression guard for a live
@@ -239,6 +241,7 @@ func TestTryEarlyBdShimDeclinesShapesTheShimNoLongerRoutes(t *testing.T) {
 
 func TestTryEarlyBdShimReadRoutesOnlyThroughTheManagedShimAlreadyOnPath(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
+	forceEarlyBdShimExecArm(t)
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "printf 'shim:%s\\n' \"$*\"\n")
@@ -477,6 +480,7 @@ func TestTryEarlyBdShimKeepsPassthroughShapeOnTheFullPath(t *testing.T) {
 
 func TestRunUsesEarlyBdShimReadBeforeNormalBdPath(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
+	forceEarlyBdShimExecArm(t)
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "printf 'shim:%s\\n' \"$*\"\n")
@@ -527,6 +531,7 @@ func TestTryEarlyBdShimHonorsExplicitOptOut(t *testing.T) {
 
 func TestTryEarlyBdShimPreservesManagedBDEntrypointName(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
+	forceEarlyBdShimExecArm(t)
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 	managedPath := filepath.Join(t.TempDir(), ".gc", "shimbin", "bd")
 	if err := os.MkdirAll(filepath.Dir(managedPath), 0o755); err != nil {
@@ -663,6 +668,7 @@ func TestTryEarlyBdShimFallsBackWithoutManagedCityOrShim(t *testing.T) {
 
 func TestTryEarlyBdShimPreservesShimExitCode(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
+	forceEarlyBdShimExecArm(t)
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "printf controller-down >&2\nexit 7\n")
@@ -679,6 +685,7 @@ func TestTryEarlyBdShimPreservesShimExitCode(t *testing.T) {
 
 func TestTryEarlyBdShimNormalizesSignalExitToFailure(t *testing.T) {
 	t.Setenv("GC_BD_FASTPATH", "1")
+	forceEarlyBdShimExecArm(t)
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 
 	shim := writeEarlyBdShim(t, "kill -TERM $$\n")
@@ -690,6 +697,20 @@ func TestTryEarlyBdShimNormalizesSignalExitToFailure(t *testing.T) {
 	if code, handled := tryEarlyBdShimRead([]string{"bd", "ready", "--json"}, strings.NewReader(""), io.Discard, io.Discard); !handled || code != 1 {
 		t.Fatalf("tryEarlyBdShimRead() = (%d, %t), want (1, true)", code, handled)
 	}
+}
+
+// forceEarlyBdShimExecArm pins the exec-bdshim arm for a test that is
+// specifically exercising it.
+//
+// The default arm serves approved read shapes in-process, so a test that
+// installs a fake shim script and asserts its exit code, its argv[0] or its
+// output would otherwise never reach that script — it would silently assert
+// against the in-process path instead and fail, or worse, pass vacuously. The
+// arm under test has to be stated rather than inherited from whichever arm
+// happens to be preferred.
+func forceEarlyBdShimExecArm(t *testing.T) {
+	t.Helper()
+	t.Setenv(bdexperiment.ForceArmEnv, string(bdexperiment.ArmShim))
 }
 
 func writeEarlyBdShim(t *testing.T, body string) string {
