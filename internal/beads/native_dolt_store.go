@@ -2296,12 +2296,17 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
 	b := Bead{
-		ID:          issue.ID,
-		Title:       issue.Title,
-		Status:      mapBdStatus(string(issue.Status)),
-		Type:        string(issue.IssueType),
-		Priority:    nativePriorityFromIssue(issue),
-		CreatedAt:   issue.CreatedAt,
+		ID:        issue.ID,
+		Title:     issue.Title,
+		Status:    mapBdStatus(string(issue.Status)),
+		Type:      string(issue.IssueType),
+		Priority:  nativePriorityFromIssue(issue),
+		CreatedAt: issue.CreatedAt,
+		// UpdatedAt is carried verbatim, including the zero value. Bead.UpdatedAt
+		// documents zero as meaningful — UpdatedBefore falls back to CreatedAt for
+		// legacy beads — so back-filling it here would destroy the distinction
+		// that fallback depends on.
+		UpdatedAt:   issue.UpdatedAt,
 		Assignee:    issue.Assignee,
 		From:        issue.Sender,
 		Description: issue.Description,
