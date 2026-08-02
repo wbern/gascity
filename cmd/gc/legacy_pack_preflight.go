@@ -85,7 +85,11 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", imp.source, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) == nil {
+		repository, known := builtinpacks.RepositoryForSource(imp.source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for locked import %q", imp.source)
+		}
+		if builtinpacks.ValidateSyntheticRepo(cachePath, repository, imp.commit) == nil {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, imp.source, imp.commit); err != nil {
@@ -114,7 +118,8 @@ func lockedBundledImportsUsable(cityPath string) bool {
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) != nil {
+		repository, known := builtinpacks.RepositoryForSource(imp.source)
+		if !known || builtinpacks.ValidateSyntheticRepo(cachePath, repository, imp.commit) != nil {
 			return false
 		}
 	}

@@ -150,7 +150,7 @@ func TestMaterializeSyntheticRepoRoundTripReplacesDestination(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "cache")
 	writeFile(t, filepath.Join(dst, "stale.txt"), "stale")
 
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "stale.txt")); !os.IsNotExist(err) {
@@ -159,13 +159,13 @@ func TestMaterializeSyntheticRepoRoundTripReplacesDestination(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dst, syntheticMarkerFile)); err != nil {
 		t.Fatalf("marker stat: %v", err)
 	}
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo: %v", err)
 	}
 }
 
 func TestMaterializeSyntheticRepoRejectsEmptyCommit(t *testing.T) {
-	err := MaterializeSyntheticRepo(filepath.Join(t.TempDir(), "cache"), " \t\n")
+	err := MaterializeSyntheticRepo(filepath.Join(t.TempDir(), "cache"), Repository, " \t\n")
 	if err == nil {
 		t.Fatal("MaterializeSyntheticRepo accepted empty commit")
 	}
@@ -177,7 +177,7 @@ func TestMaterializeSyntheticRepoRejectsEmptyCommit(t *testing.T) {
 func TestMaterializeSyntheticRepoRejectsUnsafeDestination(t *testing.T) {
 	for _, dst := range []string{"", string(filepath.Separator)} {
 		t.Run(dst, func(t *testing.T) {
-			err := MaterializeSyntheticRepo(dst, testCommit)
+			err := MaterializeSyntheticRepo(dst, Repository, testCommit)
 			if err == nil {
 				t.Fatalf("MaterializeSyntheticRepo(%q) succeeded, want unsafe-path error", dst)
 			}
@@ -250,7 +250,7 @@ func TestMaterializeSyntheticRepoProductionCallersStayAllowlisted(t *testing.T) 
 
 func TestValidateSyntheticRepoAcceptsEquivalentCommit(t *testing.T) {
 	dst := materializeTestRepo(t)
-	if err := ValidateSyntheticRepo(dst, "ABCDEF1"); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, "ABCDEF1"); err != nil {
 		t.Fatalf("ValidateSyntheticRepo with abbreviated uppercase commit: %v", err)
 	}
 }
@@ -276,7 +276,7 @@ name = "tampered"
 schema = 1
 `)
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered content")
 	}
@@ -292,7 +292,7 @@ func TestValidateSyntheticRepoRejectsTamperedMode(t *testing.T) {
 		t.Fatalf("Chmod(%q): %v", target, err)
 	}
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered file mode")
 	}
@@ -314,7 +314,7 @@ func TestValidateSyntheticRepoRejectsSymlinkAncestor(t *testing.T) {
 		t.Fatalf("Symlink(internal): %v", err)
 	}
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted symlink ancestor")
 	}
@@ -330,7 +330,7 @@ func TestValidateSyntheticRepoRejectsSymlinkRoot(t *testing.T) {
 		t.Fatalf("Symlink(cache-link): %v", err)
 	}
 
-	err := ValidateSyntheticRepo(link, testCommit)
+	err := ValidateSyntheticRepo(link, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted symlink root")
 	}
@@ -343,7 +343,7 @@ func TestValidateSyntheticRepoRejectsNonDirectoryRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cache")
 	writeFile(t, root, "not a directory")
 
-	err := ValidateSyntheticRepo(root, testCommit)
+	err := ValidateSyntheticRepo(root, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted non-directory root")
 	}
@@ -356,7 +356,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedFiles(t *testing.T) {
 	dst := materializeTestRepo(t)
 	writeFile(t, filepath.Join(dst, "internal/bootstrap/packs/core/agents/injected/prompt.md"), "malicious")
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted unexpected file")
 	}
@@ -369,7 +369,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedRootSibling(t *testing.T) {
 	dst := materializeTestRepo(t)
 	writeFile(t, filepath.Join(dst, "scratch.txt"), "malicious")
 
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted unexpected root sibling")
 	}
@@ -381,7 +381,7 @@ func TestValidateSyntheticRepoRejectsUnexpectedRootSibling(t *testing.T) {
 func materializeTestRepo(t *testing.T) string {
 	t.Helper()
 	dst := filepath.Join(t.TempDir(), "cache")
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	return dst
@@ -430,14 +430,14 @@ func testRepoRoot(t *testing.T) string {
 
 func TestValidateSyntheticRepoFastAcceptsValidRepo(t *testing.T) {
 	dst := materializeTestRepo(t)
-	if err := ValidateSyntheticRepoFast(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepoFast(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepoFast: %v", err)
 	}
 }
 
 func TestValidateSyntheticRepoFastAcceptsEquivalentCommit(t *testing.T) {
 	dst := materializeTestRepo(t)
-	if err := ValidateSyntheticRepoFast(dst, "ABCDEF1"); err != nil {
+	if err := ValidateSyntheticRepoFast(dst, Repository, "ABCDEF1"); err != nil {
 		t.Fatalf("ValidateSyntheticRepoFast with abbreviated uppercase commit: %v", err)
 	}
 }
@@ -448,7 +448,7 @@ func TestValidateSyntheticRepoFastRejectsSymlinkRoot(t *testing.T) {
 	if err := os.Symlink(dst, link); err != nil {
 		t.Fatalf("Symlink(cache-link): %v", err)
 	}
-	err := ValidateSyntheticRepoFast(link, testCommit)
+	err := ValidateSyntheticRepoFast(link, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFast accepted symlink root")
 	}
@@ -460,7 +460,7 @@ func TestValidateSyntheticRepoFastRejectsSymlinkRoot(t *testing.T) {
 func TestValidateSyntheticRepoFastRejectsNonDirectoryRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cache")
 	writeFile(t, root, "not a directory")
-	err := ValidateSyntheticRepoFast(root, testCommit)
+	err := ValidateSyntheticRepoFast(root, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFast accepted non-directory root")
 	}
@@ -474,7 +474,7 @@ func TestValidateSyntheticRepoFastRejectsMissingMarker(t *testing.T) {
 	if err := os.Remove(filepath.Join(dst, syntheticMarkerFile)); err != nil {
 		t.Fatalf("Remove(marker): %v", err)
 	}
-	err := ValidateSyntheticRepoFast(dst, testCommit)
+	err := ValidateSyntheticRepoFast(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFast accepted missing marker")
 	}
@@ -485,7 +485,7 @@ func TestValidateSyntheticRepoFastRejectsMissingMarker(t *testing.T) {
 
 func TestValidateSyntheticRepoFastRejectsWrongCommit(t *testing.T) {
 	dst := materializeTestRepo(t)
-	err := ValidateSyntheticRepoFast(dst, "0000000000000000000000000000000000000000")
+	err := ValidateSyntheticRepoFast(dst, Repository, "0000000000000000000000000000000000000000")
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFast accepted wrong commit")
 	}
@@ -505,7 +505,7 @@ func TestValidateSyntheticRepoFastRejectsWrongContentHash(t *testing.T) {
 	if err := os.WriteFile(markerPath, []byte(tampered), 0o644); err != nil {
 		t.Fatalf("WriteFile(marker): %v", err)
 	}
-	err = ValidateSyntheticRepoFast(dst, testCommit)
+	err = ValidateSyntheticRepoFast(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFast accepted wrong content hash")
 	}
@@ -514,6 +514,15 @@ func TestValidateSyntheticRepoFastRejectsWrongContentHash(t *testing.T) {
 	}
 }
 
+// TestSyntheticCacheKeyComponentMatchesContentHash pins that the cache key stays
+// bound to the embedded pack content, which is what stops two binaries with
+// different packs sharing one cache directory.
+//
+// The component is no longer the bare content hash: the marker schema is folded
+// in alongside it, because a schema change alters the on-disk layout a binary
+// expects WITHOUT altering the content that produced it. See
+// TestSyntheticCacheKeyComponentBindsToMarkerSchema. The content hash must still
+// be present and the value must still be stable.
 func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 	want, err := SyntheticContentHash()
 	if err != nil {
@@ -523,13 +532,51 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 	if got == "" {
 		t.Fatal("SyntheticCacheKeyComponent returned empty for a valid binary")
 	}
-	if got != want {
-		t.Fatalf("SyntheticCacheKeyComponent = %q, want content hash %q", got, want)
+	if !strings.Contains(got, want) {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want it to contain the content hash %q", got, want)
 	}
 	if !strings.HasPrefix(got, "sha256:") {
 		t.Fatalf("SyntheticCacheKeyComponent = %q, want sha256 prefix", got)
 	}
 	if second := SyntheticCacheKeyComponent(); second != got {
 		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
+	}
+}
+
+// TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins that a stray file is
+// rejected wherever it lands in the tree, now that the allowed set is scoped to
+// the cache's own repository.
+//
+// validateSyntheticRepoFileSet walks the whole tree and checks every path against
+// the union of the manifests of that repository's layouts. Scoping only removes
+// paths from that union, so nothing a stray could previously land on has become
+// allowed. Nested layouts (examples/bd contains examples/bd/dolt) are covered
+// explicitly: flattening several manifests into one allowed set is where a path
+// claimed by no single manifest could conceivably slip through, and both the
+// nested directory and its parent are exercised.
+func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rel  string
+	}{
+		{"pack root", "internal/bootstrap/packs/core/STRAY.txt"},
+		{"deep inside a pack", "internal/bootstrap/packs/core/assets/STRAY.txt"},
+		{"inside a nested pack", "examples/bd/dolt/STRAY.txt"},
+		{"in the parent of a nested pack", "examples/bd/STRAY.txt"},
+		{"cache root", "STRAY.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := materializeTestRepo(t)
+			stray := filepath.Join(dst, filepath.FromSlash(tc.rel))
+			if err := os.MkdirAll(filepath.Dir(stray), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(stray, []byte("stray"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if err := ValidateSyntheticRepo(dst, Repository, testCommit); err == nil {
+				t.Fatalf("ValidateSyntheticRepo accepted a stray file at %s", tc.rel)
+			}
+		})
 	}
 }
