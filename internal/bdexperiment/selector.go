@@ -64,7 +64,17 @@ type Config struct {
 func Parse(getenv func(string) string) Config {
 	raw := strings.TrimSpace(getenv(ArmsEnv))
 	if raw == "" {
-		return withGeneration(parseOverrides(parseForce(Config{Weights: map[Arm]int{ArmShim: 100}, Valid: true}, getenv), getenv), getenv)
+		// Default to serving approved shapes in-process rather than spawning the
+		// bdshim binary. gc has already paid its own startup by the time it
+		// decides, so the exec arm adds a second process for nothing: measured on
+		// `gc bd ready --json --limit 1` (CPU time, interleaved, n=13) the exec arm
+		// costs 58.8 ms against the in-process arm's 55.6 ms. Byte parity was
+		// verified live across every approved shape first — ready (three shapes),
+		// query ephemeral and mol current — 5/5 identical stdout, stderr and exit
+		// code. An explicit GC_BD_EXPERIMENT_ARMS still wins, and an absent shim
+		// already fell back here anyway, so this only changes which arm is
+		// preferred when the binary happens to be installed.
+		return withGeneration(parseOverrides(parseForce(Config{Weights: map[Arm]int{ArmDirect: 100}, Valid: true}, getenv), getenv), getenv)
 	}
 	weights := make(map[Arm]int, 3)
 	for _, item := range strings.Split(raw, ",") {
