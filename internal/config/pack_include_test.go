@@ -455,7 +455,7 @@ func TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache(t *te
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 
@@ -490,7 +490,7 @@ func TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast(t *testing.T
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 

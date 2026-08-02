@@ -29,16 +29,16 @@ func TestSyntheticCacheVerifierReusesPositiveVerdictWithinAPass(t *testing.T) {
 	cacheDir, commit := materializeVerifierCacheForTest(t)
 
 	pass := newSyntheticCacheVerifier()
-	if !pass.Valid(cacheDir, commit) {
+	if !pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Fatal("freshly materialized cache reported invalid")
 	}
 
 	corruptVerifierCacheFile(t, cacheDir)
 
-	if !pass.Valid(cacheDir, commit) {
+	if !pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("verifier re-validated inside a single pass; the duplicate walk is back")
 	}
-	if newSyntheticCacheVerifier().Valid(cacheDir, commit) {
+	if newSyntheticCacheVerifier().Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("a new pass reused a stale verdict; corruption would never self-heal")
 	}
 }
@@ -57,7 +57,7 @@ func TestSyntheticCacheVerifierDoesNotMemoizeNegatives(t *testing.T) {
 
 	pass := newSyntheticCacheVerifier()
 	corruptVerifierCacheFile(t, cacheDir)
-	if pass.Valid(cacheDir, commit) {
+	if pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Fatal("corrupted cache reported valid")
 	}
 
@@ -65,7 +65,7 @@ func TestSyntheticCacheVerifierDoesNotMemoizeNegatives(t *testing.T) {
 	if err := os.WriteFile(corrupted, original, 0o644); err != nil {
 		t.Fatalf("restore pack file: %v", err)
 	}
-	if !pass.Valid(cacheDir, commit) {
+	if !pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("verifier cached the negative verdict; a repaired cache still reads as broken")
 	}
 }
@@ -76,13 +76,13 @@ func TestSyntheticCacheVerifierInvalidateDropsAVerdict(t *testing.T) {
 	cacheDir, commit := materializeVerifierCacheForTest(t)
 
 	pass := newSyntheticCacheVerifier()
-	if !pass.Valid(cacheDir, commit) {
+	if !pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Fatal("freshly materialized cache reported invalid")
 	}
 	corruptVerifierCacheFile(t, cacheDir)
-	pass.Invalidate(cacheDir, commit)
+	pass.Invalidate(cacheDir, builtinpacks.Repository, commit)
 
-	if pass.Valid(cacheDir, commit) {
+	if pass.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("Invalidate did not drop the memoized verdict")
 	}
 }
@@ -93,12 +93,12 @@ func TestSyntheticCacheVerifierInvalidateDropsAVerdict(t *testing.T) {
 func TestSyntheticCacheVerifierNilIsUsable(t *testing.T) {
 	cacheDir, commit := materializeVerifierCacheForTest(t)
 	var nilVerifier *syntheticCacheVerifier
-	if !nilVerifier.Valid(cacheDir, commit) {
+	if !nilVerifier.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("nil verifier rejected a valid cache")
 	}
-	nilVerifier.Invalidate(cacheDir, commit) // must not panic
+	nilVerifier.Invalidate(cacheDir, builtinpacks.Repository, commit) // must not panic
 	corruptVerifierCacheFile(t, cacheDir)
-	if nilVerifier.Valid(cacheDir, commit) {
+	if nilVerifier.Valid(cacheDir, builtinpacks.Repository, commit) {
 		t.Error("nil verifier accepted a corrupted cache; it is memoizing something")
 	}
 }
@@ -115,7 +115,7 @@ func materializeVerifierCacheForTest(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	return cacheDir, commit

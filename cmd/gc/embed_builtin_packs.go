@@ -264,14 +264,14 @@ func newSyntheticCacheVerifier() *syntheticCacheVerifier {
 
 // Valid reports whether the synthetic cache at cachePath validates for commit,
 // reusing a positive verdict already reached in this pass.
-func (v *syntheticCacheVerifier) Valid(cachePath, commit string) bool {
-	key := cachePath + "\x00" + commit
+func (v *syntheticCacheVerifier) Valid(cachePath, repository, commit string) bool {
+	key := cachePath + "\x00" + repository + "\x00" + commit
 	if v != nil {
 		if _, ok := v.valid[key]; ok {
 			return true
 		}
 	}
-	if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+	if builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit) != nil {
 		return false
 	}
 	if v != nil {
@@ -281,11 +281,11 @@ func (v *syntheticCacheVerifier) Valid(cachePath, commit string) bool {
 }
 
 // Invalidate drops a cached verdict after the cache is rewritten.
-func (v *syntheticCacheVerifier) Invalidate(cachePath, commit string) {
+func (v *syntheticCacheVerifier) Invalidate(cachePath, repository, commit string) {
 	if v == nil {
 		return
 	}
-	delete(v.valid, cachePath+"\x00"+commit)
+	delete(v.valid, cachePath+"\x00"+repository+"\x00"+commit)
 }
 
 // ensureRequiredBuiltinSourcesCached hydrates the user-global cache for the
@@ -299,13 +299,17 @@ func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCach
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if verifier.Valid(cachePath, commit) {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for %s pack source %q", name, source)
+		}
+		if verifier.Valid(cachePath, repository, commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
 			return fmt.Errorf("caching bundled %s pack: %w", name, err)
 		}
-		verifier.Invalidate(cachePath, commit)
+		verifier.Invalidate(cachePath, repository, commit)
 	}
 	return nil
 }
@@ -327,7 +331,8 @@ func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerif
 		if _, done := validated[cachePath]; done {
 			continue
 		}
-		if !verifier.Valid(cachePath, commit) {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known || !verifier.Valid(cachePath, repository, commit) {
 			return false
 		}
 		validated[cachePath] = struct{}{}
