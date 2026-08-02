@@ -51,7 +51,7 @@ func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, war
 	// content-hashing every pack directory for a value no caller can read.
 	// Long-running processes that do compute a Revision load config through
 	// their own paths and keep the default.
-	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, config.LoadOptions{SkipRevisionSnapshot: true})
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
 	endLoadWithIncludes()
 	if err != nil {
 		return nil, err
@@ -68,6 +68,20 @@ func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, war
 	return cfg, nil
 }
 
+// skipRevisionSnapshot is the load option every loader in this file uses.
+//
+// The revision snapshot content-hashes every pack directory at load time so a
+// later config.Revision() call can compare against the tree as it was loaded.
+// None of the loaders here return the Provenance — they use it only to emit
+// warnings and then drop it — so nothing they load can ever observe the
+// snapshot, and building it is pure cost on a one-shot command. Loaders that DO
+// hand the Provenance back (loadCityConfigWithBuiltinPacks) keep the default.
+//
+// Revision falls back to reading from disk for anything the snapshot does not
+// hold, so declining it changes no revision value; see
+// config.LoadOptions.SkipRevisionSnapshot.
+var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
+
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
@@ -75,7 +89,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +108,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 // briefly reflect stale builtin-pack content after an upgrade until a normal
 // gc command refreshes the generated packs.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
