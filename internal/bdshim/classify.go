@@ -210,30 +210,7 @@ func UnsupportedUpdateMutationFlag(args []string) (string, bool) {
 // and raw bd honors that ordering, so the routed write targeted a bead named
 // after the metadata pair.
 func UpdatePositionals(args []string) []string {
-	// Positional detection must know EVERY value-taking `bd update` flag, not
-	// just the routable subset in UpdateFlagNeedsValue. bdflags is the existing
-	// single source of truth for bd's per-subcommand flag names; using the
-	// routable subset here read the VALUE of any other value-taking flag as a
-	// positional id. `--add-label role=worker` — a form the core skill pack
-	// ships verbatim — was refused as a mistyped metadata pair because of it.
-	needsValue := bdflags.ValueFlags("update")
-	var positionals []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") {
-			positionals = append(positionals, a)
-			continue
-		}
-		name := a
-		hasInlineValue := strings.IndexByte(a, '=') >= 0
-		if hasInlineValue {
-			name = a[:strings.IndexByte(a, '=')]
-		}
-		if !hasInlineValue && needsValue[name] && i+1 < len(args) {
-			i++ // consume the space-separated value
-		}
-	}
-	return positionals
+	return bdflags.Positionals("update", args)
 }
 
 // UpdateMistypedMetadataPair reports whether a `bd update` arg list carries a
@@ -253,12 +230,7 @@ func UpdatePositionals(args []string) []string {
 // previously succeeded — it only replaces a silent partial write with a loud
 // refusal issued BEFORE anything is written.
 func UpdateMistypedMetadataPair(args []string) bool {
-	for _, p := range UpdatePositionals(args) {
-		if strings.IndexByte(p, '=') >= 0 {
-			return true
-		}
-	}
-	return false
+	return len(bdflags.DroppedMetadataPairs(args)) > 0
 }
 
 // UpdateClaimShape reports whether a `bd update` arg list is the pure-claim
@@ -421,23 +393,7 @@ func ListHasMetadataPredicate(args []string) bool {
 // are dropped (they govern bd's execution mode, irrelevant to in-process Router
 // reads). Returns ("", nil) when there is no subcommand.
 func SplitGlobalFlags(args []string) (string, []string) {
-	// A global value-flag's VALUE is not the subcommand. Taking the first
-	// non-dash token read `bob` as the verb in `bd --actor bob update <id> ...`,
-	// which classified as Passthrough and bypassed every guard keyed off the
-	// verb — including the mistyped-metadata refusal, so raw bd went on to
-	// perform the silent 1-of-N write that guard exists to prevent.
-	globals := bdflags.GlobalValueFlags()
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") {
-			return a, args[i+1:]
-		}
-		// An inline --flag=value consumes nothing further.
-		if strings.IndexByte(a, '=') < 0 && globals[a] && i+1 < len(args) {
-			i++
-		}
-	}
-	return "", nil
+	return bdflags.SplitGlobalFlags(args)
 }
 
 // GraphTouchingUnroutedVerbs are bd subcommands that read or mutate

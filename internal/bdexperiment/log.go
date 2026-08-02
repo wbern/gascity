@@ -49,11 +49,26 @@ func Append(path string, record Record) bool {
 func validRecord(record Record) bool {
 	if record.Schema != SchemaVersion || record.Build == "" || !knownShape(record.Shape) ||
 		(record.Arm != ArmShim && record.Arm != ArmDirect && record.Arm != ArmLegacy) ||
-		(record.Verb != "show" && record.Verb != "list" && record.Verb != "query" && record.Verb != "mol") ||
+		!acceptedVerb(record.Verb) ||
 		(record.Disposition != "controller" && record.Disposition != "legacy") ||
 		record.StdoutBytes < 0 || record.MainMS < 0 || record.DispatcherMS < 0 {
 		return false
 	}
 	_, err := strconv.ParseUint(record.ConfigGeneration, 10, 32)
 	return err == nil
+}
+
+// acceptedVerb reports whether an observation's verb belongs to a shape the
+// selector can approve. It must cover every shape knownShape accepts: a shape
+// approved for the fastpath whose verb is rejected here is unobservable, and
+// because Append's error is dropped at the call site that looks like clean data
+// rather than a gap. ShapeReadyJSON shipped with `ready` missing from this set,
+// so every ready observation was silently discarded.
+func acceptedVerb(verb string) bool {
+	switch verb {
+	case "show", "list", "query", "mol", "ready":
+		return true
+	default:
+		return false
+	}
 }
