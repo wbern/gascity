@@ -1718,9 +1718,26 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 		}
 	}()
 
-	// Force bracketed paste so multiline nudges arrive as one paste operation
-	// instead of being interpreted as individual keypresses by provider TUIs.
-	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
+	// -p forces bracketed paste so multiline nudges arrive as one paste
+	// operation instead of being interpreted as individual keypresses by
+	// provider TUIs.
+	//
+	// -r keeps LF as LF. Without it paste-buffer rewrites every LF to CR, and
+	// CR is the byte Enter sends: a TUI that has NOT requested bracketed paste
+	// would then read a multi-line nudge as one submission per line, silently
+	// fragmenting an order into N messages. Measured against a raw reader that
+	// enables nothing:
+	//
+	//	send-keys -l        line1<0a>line2<0a>line3
+	//	paste-buffer -p     line1<0d>line2<0d>line3   <- every line submits
+	//	paste-buffer -p -r  line1<0a>line2<0a>line3   <- identical to send-keys
+	//
+	// With -r this path is byte-identical to the keystroke path for any TUI
+	// that did not opt in, so switching to it cannot regress an untested
+	// provider. Verified not to regress the providers that DO opt in: codex
+	// 0.146.0 and Claude Code 2.1.220 both accepted a 3530-byte, 60-line body
+	// as a single paste with no premature submit.
+	if _, err := t.run("paste-buffer", "-p", "-r", "-d", "-b", bufferName, "-t", target); err != nil {
 		return fmt.Errorf("pasting tmux buffer: %w", err)
 	}
 	loaded = false

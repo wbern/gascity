@@ -253,3 +253,29 @@ func TestShortKeystrokePayloadStaysOnSendKeys(t *testing.T) {
 		t.Fatalf("a short payload must not allocate a paste buffer (idx %d); calls=%v", idx, fe.calls)
 	}
 }
+
+// TestPasteKeepsLineFeeds pins the -r flag. paste-buffer rewrites LF to CR
+// unless told not to, and CR is the byte Enter sends. Routing nudges onto the
+// paste path without -r would therefore make any TUI that has NOT requested
+// bracketed paste read a multi-line order as one submission per line. Measured
+// against a raw reader that enables nothing:
+//
+//	send-keys -l        line1<0a>line2<0a>line3
+//	paste-buffer -p     line1<0d>line2<0d>line3
+//	paste-buffer -p -r  line1<0a>line2<0a>line3
+//
+// -r is what makes "switching to the paste path cannot regress a provider we
+// have not tested" a true statement rather than an assumption.
+func TestPasteKeepsLineFeeds(t *testing.T) {
+	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
+	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+
+	if err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("line\n", 400), time.Second); err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
+	}
+
+	idx := callIndexWithTokens(fe.calls, "paste-buffer", "-p", "-r")
+	if idx < 0 {
+		t.Fatalf("paste must pass -r so LF survives as LF, not CR; calls=%v", fe.calls)
+	}
+}
