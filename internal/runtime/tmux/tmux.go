@@ -1823,15 +1823,33 @@ func (t *Tmux) paneBusy(target string) (bool, error) {
 	return paneContainsBusyIndicator(lines), nil
 }
 
+// submitVerifyFamilies lists the provider families whose busy indicator is
+// reliable enough to confirm a submit against. Membership is evidence-based:
+// a family belongs here only once paneContainsBusyIndicator has been observed
+// matching its live footer, because an unconfirmable pane would draw the full
+// re-send budget on every nudge instead of a single Enter.
+//
+//   - claude — live spinner / "esc to interrupt" (the original ga-bwm fix).
+//   - codex  — "esc to interrupt", the same footer paneContainsBusyIndicator
+//     already documents Codex as producing; captured live from codex 0.145.0
+//     during a real turn (gcw-3e62).
+var submitVerifyFamilies = []string{"claude", "codex"}
+
 // submitVerifyEligible reports whether the target runs a provider whose busy
-// indicator is reliable enough to confirm a submit. Scoped to the Claude family
-// (the confirmed ga-bwm failure); other providers keep best-effort single
-// delivery so this change cannot regress them.
+// indicator is reliable enough to confirm a submit. Providers outside
+// submitVerifyFamilies keep best-effort single delivery so widening the gate
+// cannot regress them.
 func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
-		return sessionlog.ProviderFamily(provider) == "claude"
+		family := sessionlog.ProviderFamily(provider)
+		for _, eligible := range submitVerifyFamilies {
+			if family == eligible {
+				return true
+			}
+		}
+		return false
 	}
-	return t.targetLooksLikeProvider(target, "claude")
+	return t.targetLooksLikeAnyProvider(target, submitVerifyFamilies...)
 }
 
 // NudgeSession sends a message to a Claude Code session reliably.
@@ -1886,6 +1904,13 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
+
+	// A pane parked in copy-mode routes send-keys into copy-mode's key table,
+	// where the message's characters are navigation COMMANDS rather than input:
+	// the nudge is executed as scrolling and then lost, with no error anywhere.
+	// Exit copy-mode first so the text reaches the prompt. Probing
+	// #{pane_in_mode} keeps this a no-op on the happy path.
+	t.cancelCopyModeIfParked(target)
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -1965,6 +1990,9 @@ func (t *Tmux) NudgePane(pane, message string) error {
 			commitPoke()
 		}
 	}()
+
+	// See NudgeSession: copy-mode swallows the message as navigation commands.
+	t.cancelCopyModeIfParked(pane)
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout); err != nil {
