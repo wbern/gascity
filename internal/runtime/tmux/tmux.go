@@ -164,7 +164,22 @@ const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
-	maxSendKeysLiteralLen    = 4096
+	// maxSendKeysLiteralLen is the largest payload still delivered as literal
+	// keystrokes. Above it, delivery switches to a bracketed paste buffer.
+	//
+	// This is a keystroke/message boundary, not a tmux limit. tmux itself
+	// carries far more (ARG_MAX is 2 MB on the hosts we run), and the pty is
+	// innocent: a 3000-byte send-keys -l arrives at a raw reader as one
+	// 3000-byte chunk, instantly. The constraint is the receiving TUI. Without
+	// bracketed-paste markers a burst is decoded as N individual key events,
+	// and codex 0.144.4 keeps only whole 1024-byte chunks of one — silently,
+	// with no error at any layer (gcw-3e62; 3000 bytes in, 1024 retained).
+	//
+	// 256 sits far enough below that cliff to hold across TUI versions while
+	// leaving genuinely keystroke-shaped payloads (an approval digit, a short
+	// answer) on send-keys, where a bracketed paste would be the wrong shape
+	// and a temp file per keypress would be waste.
+	maxSendKeysLiteralLen = 256
 )
 
 // tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
