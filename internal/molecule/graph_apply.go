@@ -128,6 +128,10 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	if len(recipe.Steps) == 0 {
 		return nil, false, "", fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
+	}
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	priorityOverride := clonePriority(opts.PriorityOverride)
@@ -386,6 +390,13 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	}
 	if len(recipe.Steps) == 0 {
 		return &beads.GraphApplyPlan{}, nil
+	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = fragmentRecipeWithNativeStepDependencies(recipe)
+		if err := applyExternalNativeStepDependencies(store, recipe.Steps, opts.ExternalDeps); err != nil {
+			return nil, err
+		}
+		opts.nativeStepTopologyPrepared = true
 	}
 
 	existingLogicalBeadIDs, err := existingLogicalBeadIDIndex(store, opts.RootID)

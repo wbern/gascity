@@ -78,11 +78,10 @@ func TestWorktreeIsLive_NothingMatches(t *testing.T) {
 	}
 }
 
-// TestCollectLiveWorktreeState_IncludesOwnCWD no longer skips off linux. It used
-// to, on the grounds that "collectLiveWorktreeState relies on /proc; GOOS=%s has
-// none" — which described the defect rather than testing for it, and let the
-// reaper stay inert on every macOS host with a green suite. The portable
-// fallback makes the assertion meaningful on both platforms.
+// TestCollectLiveWorktreeState_IncludesOwnCWD no longer skips off Linux. The
+// skip described the /proc-only limitation instead of asserting against it,
+// which let the gate stay permanently indeterminate on other platforms with a
+// green suite. The portable fallback makes the assertion meaningful on both.
 func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
 	live := collectLiveWorktreeState()
 	if !live.scanned {
