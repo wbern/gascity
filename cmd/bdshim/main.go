@@ -107,6 +107,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return passthrough()
 	}
 
+	// A GitHub PR gate is a cross-bead invariant, not a plain store mutation:
+	// the target bead may not wait on the PR it owns. Route this one existing bd
+	// spelling through gc's exact-store guard before real bd performs the write.
+	// This check must follow pinnedNonCityStoreScope: gc's guarded child call is
+	// pinned and must pass through to real bd rather than recurse back into gc.
+	if _, match, err := bdshim.ParsePRGateCreateArgs(bdArgs); err != nil {
+		logDisposition("gate", rawBDArgs, "refuse", 1, start)
+		fmt.Fprintf(stderr, "bdshim: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if match {
+		code := executeGCBD(args, stdin, stdout, stderr)
+		logDisposition("gate", rawBDArgs, "guard", code, start)
+		return code
+	}
+
 	// splitPhase is pinned false: no split graph store is wired, so the city is
 	// in the identity phase. Route is therefore always a pure latency choice;
 	// passthrough is always byte-identical to raw bd.

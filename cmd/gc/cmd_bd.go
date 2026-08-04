@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -57,6 +58,8 @@ type headLimitedWriter struct {
 	buf   []byte
 	limit int
 }
+
+var bdSelfPRGateGuard = runBdSelfPRGateGuard
 
 func (w *headLimitedWriter) Write(p []byte) (int, error) {
 	if room := w.limit - len(w.buf); room > 0 {
@@ -256,6 +259,16 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := bdSelfPRGateGuard(bdArgs, func(id string) (beads.Bead, error) {
+		store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+		if storeErr != nil {
+			return beads.Bead{}, storeErr
+		}
+		return store.Get(id)
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc bd: refusing unsafe PR gate: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -415,6 +428,33 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	}
 
 	return 0
+}
+
+func rejectSelfPRGate(target beads.Bead, gate bdshim.PRGateCreate) error {
+	ownedPR := strings.TrimSpace(target.Metadata["pr_number"])
+	if ownedPR == "" {
+		ownedPR = strings.TrimSpace(target.Metadata["gc.pr_number"])
+	}
+	if ownedPR == gate.PRNumber {
+		return fmt.Errorf(
+			"bead %s owns PR #%s; blocking it on that PR would deadlock its own repair",
+			gate.TargetID,
+			gate.PRNumber,
+		)
+	}
+	return nil
+}
+
+func runBdSelfPRGateGuard(args []string, get func(string) (beads.Bead, error)) error {
+	gate, matches, err := bdshim.ParsePRGateCreateArgs(args)
+	if err != nil || !matches {
+		return err
+	}
+	target, err := get(gate.TargetID)
+	if err != nil {
+		return fmt.Errorf("cannot verify target bead %s before gh:pr gate creation: %w", gate.TargetID, err)
+	}
+	return rejectSelfPRGate(target, gate)
 }
 
 func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok bool, err error) {

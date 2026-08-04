@@ -24,6 +24,32 @@ const realBdEnvVar = "GC_BD_REAL"
 // refuses before it can start a further process.
 const passthroughSentinelEnv = "GC_BDSHIM_PASSTHROUGH"
 
+var executeGCBD = execGCBD
+
+// execGCBD delegates an existing bd invocation to gc's exact-store wrapper.
+// This is used only for mutations whose safety depends on cross-bead state.
+func execGCBD(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	gcPath, err := exec.LookPath("gc")
+	if err != nil {
+		fmt.Fprintf(stderr, "bdshim: gc not found for guarded gate creation: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	cmd := exec.Command(gcPath, append([]string{"bd"}, args...)...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = os.Environ()
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintf(stderr, "bdshim: running gc bd: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	return 0
+}
+
 // resolveRealBdPath returns the absolute path of the real bd binary. An explicit
 // GC_BD_REAL remains the normal production path. The PATH fallback keeps the
 // standalone binary usable, but it must never resolve to this running bdshim:
