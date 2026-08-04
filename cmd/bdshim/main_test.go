@@ -229,7 +229,13 @@ func TestBareBdHQGuardScopeAndAuthorization(t *testing.T) {
 	city := filepath.Join(dir, "city")
 	rig := filepath.Join(city, "rigs", "demo")
 	otherRig := filepath.Join(city, "rigs", "other")
-	for _, path := range []string{filepath.Join(city, ".beads"), filepath.Join(rig, ".beads"), otherRig} {
+	nestedHQ := filepath.Join(city, "scratch", "nested")
+	for _, path := range []string{
+		filepath.Join(city, ".beads"),
+		filepath.Join(rig, ".beads"),
+		filepath.Join(otherRig, ".beads"),
+		nestedHQ,
+	} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -250,6 +256,8 @@ func TestBareBdHQGuardScopeAndAuthorization(t *testing.T) {
 	}{
 		{name: "own rig store", args: []string{"list"}, beadsDir: filepath.Join(rig, ".beads")},
 		{name: "foreign rig directory", args: []string{"list", "-C", otherRig}, beadsDir: filepath.Join(rig, ".beads")},
+		{name: "nested HQ directory", args: []string{"list", "-C", nestedHQ}, beadsDir: filepath.Join(rig, ".beads"), refuse: true},
+		{name: "missing path still discovers HQ ancestor", args: []string{"list", "-C", filepath.Join(city, "missing", "child")}, beadsDir: filepath.Join(rig, ".beads"), refuse: true},
 		{name: "directory overrides rig env with HQ", args: []string{"list", "-C", city}, beadsDir: filepath.Join(rig, ".beads"), refuse: true},
 		{name: "explicit HQ store", args: []string{"list"}, beadsDir: filepath.Join(city, ".beads"), refuse: true},
 		{name: "authorized HQ store", args: []string{"list"}, beadsDir: filepath.Join(city, ".beads"), access: "1"},

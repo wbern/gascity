@@ -211,25 +211,23 @@ func bareBDHQGuardRefusal(args []string, verb string) (string, bool) {
 		return "managed-session HQ guard has no city path; refusing an unverified bare bd target", true
 	}
 
-	target := strings.TrimSpace(extractBareBDDirectory(args))
-	if target == "" {
-		target = strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	target, explicitDirectory := extractBareBDDirectory(args)
+	target = strings.TrimSpace(target)
+	store := ""
+	if explicitDirectory {
+		store = nearestBareBDStore(target)
+	} else if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
+		// BEADS_DIR names the store itself; unlike -C and cwd, bd does not
+		// search its ancestors for another .beads entry.
+		store = pathutil.NormalizePathForCompare(beadsDir)
+	} else if cwd, err := os.Getwd(); err == nil {
+		store = nearestBareBDStore(cwd)
+	} else {
+		return "managed-session HQ guard could not determine the bare bd target; refusing unverified access", true
 	}
-	if target == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			target = cwd
-		}
-	}
-	target = pathutil.NormalizePathForCompare(target)
 	rigRoot := pathutil.NormalizePathForCompare(strings.TrimSpace(os.Getenv("GC_RIG_ROOT")))
-
-	// A target demonstrably inside the managed agent's rig is allowed. Any
-	// other target is allowed unless it names the city root or its HQ store.
-	if rigRoot != "" && pathutil.PathWithin(rigRoot, target) {
-		return "", false
-	}
 	cityStore := pathutil.NormalizePathForCompare(filepath.Join(city, ".beads"))
-	if target != city && target != cityStore {
+	if store != city && store != cityStore {
 		return "", false
 	}
 
@@ -261,16 +259,40 @@ func bareBDHQGuardRefusal(args []string, verb string) (string, bool) {
 	), true
 }
 
-func extractBareBDDirectory(args []string) string {
+// nearestBareBDStore mirrors bd's workspace discovery closely enough for the
+// HQ fence: -C and cwd select a workspace, then bd walks toward the filesystem
+// root until it finds .beads. The starting path need not exist.
+func nearestBareBDStore(start string) string {
+	current := pathutil.NormalizePathForCompare(strings.TrimSpace(start))
+	for current != "" {
+		if filepath.Base(current) == ".beads" {
+			if _, err := os.Lstat(current); err == nil {
+				return current
+			}
+		}
+		candidate := filepath.Join(current, ".beads")
+		if _, err := os.Lstat(candidate); err == nil {
+			return pathutil.NormalizePathForCompare(candidate)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
+func extractBareBDDirectory(args []string) (string, bool) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
-			return args[i+1]
+			return args[i+1], true
 		case strings.HasPrefix(args[i], "--directory="):
-			return strings.TrimPrefix(args[i], "--directory=")
+			return strings.TrimPrefix(args[i], "--directory="), true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // extractScopeFlags strips the gc-only --city/--rig flags from a bd arg list,
