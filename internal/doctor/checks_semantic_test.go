@@ -692,6 +692,8 @@ type fakeGitWorktree struct {
 	uncommitted map[string]bool
 	unpushed    map[string]bool
 	unpushedErr map[string]error
+	unpreserved map[string]bool
+	unpresErr   map[string]error
 	stashed     map[string]bool
 	stashedErr  map[string]error
 	removeCalls *[]string // path argument of each WorktreeRemove call
@@ -721,6 +723,16 @@ func (f *fakeGitWorktree) HasUnpushedCommitsResult() (bool, error) {
 // internal/git covers against real repositories.
 func (f *fakeGitWorktree) HasUnlandedCommitsResult() (bool, error) {
 	return f.HasUnpushedCommitsResult()
+}
+
+// HasUnpreservedCommitsResult reports whether removal would strand commits.
+// Unset means false — the checkout sits on a branch, which is what preserves
+// its commits — so tests opt into the stranding case explicitly.
+func (f *fakeGitWorktree) HasUnpreservedCommitsResult() (bool, error) {
+	if err := f.unpresErr[f.currentPath]; err != nil {
+		return true, err
+	}
+	return f.unpreserved[f.currentPath], nil
 }
 
 func (f *fakeGitWorktree) HasStashesResult() (bool, error) {
@@ -842,6 +854,9 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 				},
 				uncommitted: map[string]bool{dirty: true},
 				unpushed:    map[string]bool{unpushed: true},
+				// Commits no ref carries: the shape removal destroys, and so
+				// the only commit shape that makes a nested worktree unsafe.
+				unpreserved: map[string]bool{unpushed: true},
 				stashed:     map[string]bool{stashed: true},
 				removeCalls: &removes,
 				currentPath: path,
@@ -864,7 +879,8 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	// task-stashed counts as SAFE: refs/stash is repo-wide, so its presence says
 	// nothing about this worktree and its removal cannot destroy the stash
 	// (internal/git's TestWorktreeRemove_PreservesStashes). Only task-dirty and
-	// task-unpushed hold work removal would lose.
+	// task-unpushed hold work removal would lose — task-unpushed because its
+	// commits are reachable from no ref, not merely because they are unlanded.
 	if safeCount != 2 {
 		t.Errorf("safeCount = %d, want 2 (clean + repo-wide-stash-only)", safeCount)
 	}

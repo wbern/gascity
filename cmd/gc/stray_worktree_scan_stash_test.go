@@ -66,10 +66,14 @@ func TestClassifyStrayWorktree_StashProbeFailureIsOnlyAWarning(t *testing.T) {
 	}
 }
 
-// TestClassifyStrayWorktree_StillProtectsRealWork is the over-correction guard.
-// Uncommitted changes and unpushed commits are worktree-local — removal DOES
-// destroy them — so those gates must survive untouched. It passes before and
-// after the fix; if it ever fails, the gate was narrowed too far.
+// TestClassifyStrayWorktree_StillProtectsRealWork is the over-correction guard:
+// whatever removal DOES destroy must keep protecting the checkout.
+//
+// Two shapes qualify. Uncommitted changes live only in the working files.
+// Commits qualify only when no ref carries them — a checkout sitting on a
+// branch is not one of them, because removal deletes the directory and leaves
+// the branch, so `unpushed` alone is not the condition. The commit case
+// therefore sets unpreserved, which is what "removal destroys this" means.
 func TestClassifyStrayWorktree_StillProtectsRealWork(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -82,8 +86,8 @@ func TestClassifyStrayWorktree_StillProtectsRealWork(t *testing.T) {
 			wantReason: "uncommitted",
 		},
 		{
-			name:       "unlanded commits with a repo-wide stash present",
-			probe:      stashProbe{fakeStrayProbe: fakeStrayProbe{isRepo: true, unpushed: true, stashes: true}},
+			name:       "unlanded commits no ref carries, with a repo-wide stash present",
+			probe:      stashProbe{fakeStrayProbe: fakeStrayProbe{isRepo: true, unpushed: true, unpreserved: true, stashes: true}},
 			wantReason: "unlanded",
 		},
 		{

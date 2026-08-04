@@ -151,12 +151,14 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HasUncommitted(t *testing.T) {
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_HasUnlanded(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
+	// Unpreserved as well as unlanded: commits no ref carries are the ones
+	// pruning the directory would actually destroy.
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, hasUnpreserved: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "unlanded commits") {
-		t.Errorf("expected unlanded-reason log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "reachable from no ref") {
+		t.Errorf("expected commits-reachable-from-no-ref log; got %q", stderr.String())
 	}
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
 }

@@ -325,15 +325,34 @@ func reapClosedBeadWorktrees(
 			// warning below. See the stash note on this function.
 			wg := newGitProbe(worktreePath)
 			holdsUnlandedWork := false
+			unlandedButPreserved := ""
 			if reason == "" {
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnlanded, unlandedErr := wg.HasUnlandedCommitsResult()
+				hasUnpreserved, preservedErr := wg.HasUnpreservedCommitsResult()
+				holdsUnlandedWork = unlandedErr == nil && hasUnlanded
 				switch {
 				case unlandedErr != nil:
 					reason = fmt.Sprintf("unsafe git state: unlanded probe failed: %v", unlandedErr)
-				case hasUncommitted || hasUnlanded:
+				case preservedErr != nil:
+					reason = fmt.Sprintf("unsafe git state: preservation probe failed: %v", preservedErr)
+				case hasUncommitted:
 					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unlanded=%v", hasUncommitted, hasUnlanded)
-					holdsUnlandedWork = hasUnlanded
+				case hasUnlanded && hasUnpreserved:
+					// The only shape removal actually destroys: commits no
+					// durable ref carries, so the worktree's own HEAD is their
+					// last holder.
+					reason = "unsafe git state: uncommitted=false unlanded=true unpreserved=true (commits reachable from no branch, tag or remote)"
+				case hasUnlanded:
+					// Unlanded but branch-backed. Removal cannot destroy these
+					// commits, so it is not a reason to hold the working files
+					// — but the work is still unlanded, and saying so is the
+					// visibility this gate used to provide by holding the tree.
+					branch, _ := wg.CurrentBranch()
+					if branch == "" {
+						branch = "a ref other than HEAD"
+					}
+					unlandedButPreserved = branch
 				}
 			}
 
@@ -349,6 +368,21 @@ func reapClosedBeadWorktrees(
 					warning = fmt.Sprintf("repo-wide stash probe failed: %v", stashErr)
 				case hasStashes:
 					warning = "repository holds stashed work (repo-wide; not owned by this worktree and not destroyed by its removal)"
+				}
+			}
+			// Same shape as the stash warning, and for the same reason: the
+			// work is unlanded, but a branch — not this worktree — is what
+			// holds it, so removal cannot destroy it. Reported so the unlanded
+			// work stays visible once the working files are gone.
+			if reason == "" && unlandedButPreserved != "" {
+				note := fmt.Sprintf(
+					"holds unlanded commits, preserved by %s (survives removal; land or delete that branch to dispose of the work)",
+					unlandedButPreserved,
+				)
+				if warning == "" {
+					warning = note
+				} else {
+					warning += "; " + note
 				}
 			}
 
@@ -403,6 +437,7 @@ func reapClosedBeadWorktrees(
 				recordReapSkipped(rec, beadID, worktreePath, rigName, whatIf)
 				report.Reaped = append(report.Reaped, reapDecision{
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
+					HoldsUnlandedWork: holdsUnlandedWork,
 				})
 				continue
 			}
@@ -433,6 +468,7 @@ func reapClosedBeadWorktrees(
 			}
 			report.Reaped = append(report.Reaped, reapDecision{
 				BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
+				HoldsUnlandedWork: holdsUnlandedWork,
 			})
 			removedThisPass++
 			if pace > 0 {

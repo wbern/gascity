@@ -402,6 +402,7 @@ type gitWorktree interface {
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
+	HasUnpreservedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
@@ -667,8 +668,19 @@ func classifyNested(newGit func(string) gitWorktree, path, parent, branch string
 		f.probeErr = true
 		return f
 	}
-	if hasUnlanded {
-		f.reason = "has unlanded commits"
+	hasUnpreserved, err := gw.HasUnpreservedCommitsResult()
+	if err != nil {
+		f.reason = fmt.Sprintf("commit preservation probe failed: %v", err)
+		f.probeErr = true
+		return f
+	}
+	// Unlanded alone does not make a nested worktree unsafe to remove:
+	// removal deletes the directory and leaves the branch, which keeps every
+	// commit. Only commits no ref carries die with it. Same boundary the
+	// closed-bead reaper and the worker-dir prune apply, so all three agree
+	// about the same directory.
+	if hasUnlanded && hasUnpreserved {
+		f.reason = "has unlanded commits reachable from no ref"
 		return f
 	}
 	// Stashes are deliberately NOT a gate. refs/stash lives in the

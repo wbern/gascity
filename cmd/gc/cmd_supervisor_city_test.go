@@ -2056,6 +2056,30 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// gitStdout runs a git command with mustGit's sanitized environment and
+// returns its stdout, failing the test on error. Tests that need to read a ref
+// back — rather than only assert a command succeeded — use this.
+func gitStdout(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	fullArgs := append([]string{"-c", "core.hooksPath="}, args...)
+	cmd := exec.Command("git", fullArgs...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	for _, env := range os.Environ() {
+		if key, _, ok := strings.Cut(env, "="); ok && testGitEnvBlacklist[key] {
+			continue
+		}
+		cmd.Env = append(cmd.Env, env)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
+}
+
 func TestWaitForSupervisorCityPrintsStatusChanges(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)

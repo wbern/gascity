@@ -23,6 +23,8 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
+	hasUnpreserved   bool
+	unpreservedErr   error
 	hasStashes       bool
 	stashesErr       error
 	worktreeRemove   func(path string, force bool) error
@@ -45,6 +47,14 @@ func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 // internal/git covers against real repositories.
 func (f *fakeGitProbe) HasUnlandedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
+}
+
+// HasUnpreservedCommitsResult reports whether removal would strand commits.
+// The zero value is false — "a branch holds this work" — which is the shape
+// of every worktree the reaper meets in practice; tests that need the
+// stranding case set hasUnpreserved explicitly.
+func (f *fakeGitProbe) HasUnpreservedCommitsResult() (bool, error) {
+	return f.hasUnpreserved, f.unpreservedErr
 }
 func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
@@ -293,16 +303,37 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
 
 func TestPruneAgentHomeWorktreeIfSafe_HasUnlanded(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, hasUnpreserved: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
 		t.Fatal("prune returned true with unlanded commits")
 	}
-	if !strings.Contains(stderr.String(), "unlanded commits") {
-		t.Errorf("expected unlanded-reason log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "reachable from no ref") {
+		t.Errorf("expected commits-reachable-from-no-ref log; got %q", stderr.String())
 	}
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
+}
+
+// TestPruneAgentHomeWorktreeIfSafe_PrunesUnlandedWorkHeldByABranch is the
+// other side of the boundary: unlanded commits that a branch still holds are
+// not a reason to keep the working files, because pruning removes the
+// directory and leaves the branch. Keeping them was how agent homes
+// accumulated indefinitely.
+func TestPruneAgentHomeWorktreeIfSafe_PrunesUnlandedWorkHeldByABranch(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-kept"})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatalf("prune returned false for branch-backed unlanded work; stderr=%s", stderr.String())
+	}
+	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir {
+		t.Fatalf("expected WorktreeRemove(%q); got invoked=%v path=%q", fx.workerDir, rigProbe.removeInvoked, rigProbe.removedPath)
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_UnlandedProbeError(t *testing.T) {

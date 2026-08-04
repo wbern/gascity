@@ -24,6 +24,7 @@ type gitProbe interface {
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
+	HasUnpreservedCommitsResult() (bool, error)
 	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
@@ -100,10 +101,20 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: unlanded probe failed: %v\n", workerDir, err) //nolint:errcheck
 		return "unlanded probe failed"
 	}
-	if hasUnlanded {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unlanded commits\n", workerDir) //nolint:errcheck
+	hasUnpreserved, err := gp.HasUnpreservedCommitsResult()
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: preservation probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return "preservation probe failed"
+	}
+	// Unlanded is not by itself a reason to keep the directory: pruning
+	// removes the working files and leaves the branch, which goes on holding
+	// every commit. Only commits no ref carries die with the directory. Same
+	// boundary as the closed-bead reaper, so the two cannot disagree about the
+	// same worktree.
+	if hasUnlanded && hasUnpreserved {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has commits reachable from no ref\n", workerDir) //nolint:errcheck
 		writeWorktreeStaleMarker(gp, workerDir, "unlanded-commits", stderr)
-		return "has unlanded commits"
+		return "has unlanded commits reachable from no ref"
 	}
 	warning := ""
 	if hasStashes, stashErr := gp.HasStashesResult(); stashErr != nil {

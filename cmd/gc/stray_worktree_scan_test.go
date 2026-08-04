@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +14,7 @@ type fakeStrayProbe struct {
 	isRepo      bool
 	uncommitted bool
 	unpushed    bool
+	unpreserved bool
 	stashes     bool
 	branch      string
 }
@@ -22,8 +24,13 @@ func (f fakeStrayProbe) CurrentBranch() (string, error)          { return f.bran
 func (f fakeStrayProbe) HasUncommittedWork() bool                { return f.uncommitted }
 func (f fakeStrayProbe) HasUnpushedCommitsResult() (bool, error) { return f.unpushed, nil }
 func (f fakeStrayProbe) HasUnlandedCommitsResult() (bool, error) { return f.unpushed, nil }
-func (f fakeStrayProbe) HasStashesResult() (bool, error)         { return f.stashes, nil }
-func (f fakeStrayProbe) WorktreeRemove(string, bool) error       { return nil }
+
+// HasUnpreservedCommitsResult defaults to false: the fixture's checkouts sit on
+// a branch, which is what preserves their commits across a removal. Set
+// unpreserved for the detached-HEAD-with-no-covering-ref case.
+func (f fakeStrayProbe) HasUnpreservedCommitsResult() (bool, error) { return f.unpreserved, nil }
+func (f fakeStrayProbe) HasStashesResult() (bool, error)            { return f.stashes, nil }
+func (f fakeStrayProbe) WorktreeRemove(string, bool) error          { return nil }
 
 // mkCheckout creates dir/.git (a directory, mimicking an unregistered clone)
 // so the scan treats dir as a git checkout.
@@ -45,6 +52,9 @@ func TestScanStrayWorktrees(t *testing.T) {
 	orphanClean := mkCheckout(t, filepath.Join(root, "orphan-clean"))
 	orphanDirty := mkCheckout(t, filepath.Join(root, "orphan-dirty"))
 	orphanUnpushed := mkCheckout(t, filepath.Join(root, "orphan-unpushed"))
+	// Unlanded, but sitting on a branch: removal deletes the directory and
+	// leaves the branch holding every commit, so this one IS reclaimable.
+	orphanBranchBacked := mkCheckout(t, filepath.Join(root, "orphan-branch-backed"))
 	// A plain directory with no .git must be ignored entirely.
 	if err := os.MkdirAll(filepath.Join(root, "plain-dir"), 0o755); err != nil {
 		t.Fatal(err)
@@ -54,7 +64,9 @@ func TestScanStrayWorktrees(t *testing.T) {
 	probes := map[string]gitProbe{
 		orphanClean:    fakeStrayProbe{isRepo: true},
 		orphanDirty:    fakeStrayProbe{isRepo: true, uncommitted: true},
-		orphanUnpushed: fakeStrayProbe{isRepo: true, unpushed: true},
+		orphanUnpushed: fakeStrayProbe{isRepo: true, unpushed: true, unpreserved: true},
+		// Same unlanded commits, but a branch holds them.
+		orphanBranchBacked: fakeStrayProbe{isRepo: true, unpushed: true, branch: "wt/orphan"},
 	}
 	probeFor := func(dir string) gitProbe {
 		if p, ok := probes[filepath.Clean(dir)]; ok {
@@ -84,16 +96,20 @@ func TestScanStrayWorktrees(t *testing.T) {
 
 	assertStray(t, byPath, orphanClean, true, "")
 	assertStray(t, byPath, orphanDirty, false, "uncommitted changes")
-	assertStray(t, byPath, orphanUnpushed, false, "unlanded commits")
+	assertStray(t, byPath, orphanUnpushed, false, "unlanded commits reachable from no ref")
+	assertStray(t, byPath, orphanBranchBacked, true, "")
+	if w := byPath[filepath.Clean(orphanBranchBacked)].Warning; !strings.Contains(w, "wt/orphan") {
+		t.Errorf("branch-backed stray Warning = %q, want it to name the branch still holding the work", w)
+	}
 
-	// Exactly the three orphans, nothing else.
-	if len(got) != 3 {
+	// Exactly the four orphans, nothing else.
+	if len(got) != 4 {
 		paths := make([]string, 0, len(got))
 		for _, s := range got {
 			paths = append(paths, s.Path)
 		}
 		sort.Strings(paths)
-		t.Fatalf("expected 3 stray checkouts, got %d: %v", len(got), paths)
+		t.Fatalf("expected 4 stray checkouts, got %d: %v", len(got), paths)
 	}
 }
 
