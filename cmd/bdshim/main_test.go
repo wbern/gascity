@@ -180,6 +180,92 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
+func TestRunHQGuardRefusesBareBdBeforeRoutingOrPassthrough(t *testing.T) {
+	dir := t.TempDir()
+	city := filepath.Join(dir, "city")
+	rig := filepath.Join(city, "rigs", "demo")
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "calls.txt")
+	bd := fakeBd(t, dir, out, 0)
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_BDSHIM_LOG", "")
+	t.Setenv("GC_BD_HQ_GUARD", "1")
+	t.Setenv("GC_BD_HQ_ACCESS", "")
+	t.Setenv("GC_BD_HQ_GUARD_CITY", city)
+	t.Setenv("GC_CITY_PATH", city)
+	t.Setenv("GC_ALIAS", "demo/worker-2")
+	t.Setenv("GC_AGENT", "demo/worker")
+	t.Setenv("GC_RIG", "demo")
+	t.Setenv("GC_RIG_ROOT", rig)
+	t.Setenv("BEADS_DIR", filepath.Join(city, ".beads"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run(bare bd list) = 0, want managed HQ refusal")
+	}
+	for _, want := range []string{
+		`managed agent "demo/worker-2"`,
+		`denied HQ store "` + city + `"`,
+		`agent rig "demo"`,
+		"`gc bd list --rig demo ...`",
+		`rig store "` + rig + `"`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	if got, err := os.ReadFile(out); err == nil && strings.TrimSpace(string(got)) != "" {
+		t.Fatalf("HQ-refused command reached real bd: %q", got)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read fake bd calls: %v", err)
+	}
+}
+
+func TestBareBdHQGuardScopeAndAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	city := filepath.Join(dir, "city")
+	rig := filepath.Join(city, "rigs", "demo")
+	otherRig := filepath.Join(city, "rigs", "other")
+	for _, path := range []string{filepath.Join(city, ".beads"), filepath.Join(rig, ".beads"), otherRig} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GC_BD_HQ_GUARD", "1")
+	t.Setenv("GC_BD_HQ_ACCESS", "")
+	t.Setenv("GC_BD_HQ_GUARD_CITY", city)
+	t.Setenv("GC_ALIAS", "demo/worker-1")
+	t.Setenv("GC_RIG", "demo")
+	t.Setenv("GC_RIG_ROOT", rig)
+
+	tests := []struct {
+		name     string
+		args     []string
+		beadsDir string
+		access   string
+		refuse   bool
+	}{
+		{name: "own rig store", args: []string{"list"}, beadsDir: filepath.Join(rig, ".beads")},
+		{name: "foreign rig directory", args: []string{"list", "-C", otherRig}, beadsDir: filepath.Join(rig, ".beads")},
+		{name: "directory overrides rig env with HQ", args: []string{"list", "-C", city}, beadsDir: filepath.Join(rig, ".beads"), refuse: true},
+		{name: "explicit HQ store", args: []string{"list"}, beadsDir: filepath.Join(city, ".beads"), refuse: true},
+		{name: "authorized HQ store", args: []string{"list"}, beadsDir: filepath.Join(city, ".beads"), access: "1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", tc.beadsDir)
+			t.Setenv("GC_BD_HQ_ACCESS", tc.access)
+			msg, refuse := bareBDHQGuardRefusal(tc.args, "list")
+			if refuse != tc.refuse {
+				t.Fatalf("bareBDHQGuardRefusal(%v) = (%q, %v), want refuse=%v", tc.args, msg, refuse, tc.refuse)
+			}
+		})
+	}
+}
+
 // TestRunRefusesUnsupportedBodyMutations prevents an unsupported body or notes
 // write from falling through to real bd. On a fastpath city that command may
 // write a different Dolt working set while bdshim reports success, so it must

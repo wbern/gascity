@@ -5,15 +5,17 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/bdguard"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 const (
-	bdGuardMarkerEnv   = "GC_BD_HQ_GUARD"
 	bdGuardMarkerValue = "1"
-	bdGuardAccessEnv   = "GC_BD_HQ_ACCESS"
-	bdGuardCityEnv     = "GC_BD_HQ_GUARD_CITY"
+	bdGuardMarkerEnv   = bdguard.MarkerEnv
+	bdGuardAccessEnv   = bdguard.AccessEnv
+	bdGuardCityEnv     = bdguard.CityEnv
 	bdGuardFingerprint = "bd_guard:hq"
 )
 
@@ -76,7 +78,42 @@ func activeBdGuardRefusal(cfg *config.City, cityPath string, args []string, targ
 		os.Getenv(bdGuardAccessEnv),
 		target,
 	); refuse {
-		return msg, true
+		return contextualizeBdGuardRefusal(msg, args, target), true
 	}
 	return bdGuardDirectoryRefusal(cfg, cityPath, extractBdDirectoryFlag(args), target)
+}
+
+func contextualizeBdGuardRefusal(msg string, args []string, target execStoreTarget) string {
+	if !strings.Contains(msg, "refusing city (HQ) store") {
+		return msg
+	}
+	agentName := strings.TrimSpace(os.Getenv("GC_ALIAS"))
+	if agentName == "" {
+		agentName = strings.TrimSpace(os.Getenv("GC_AGENT"))
+	}
+	if agentName == "" {
+		agentName = "unknown"
+	}
+	rigName := strings.TrimSpace(os.Getenv("GC_RIG"))
+	if rigName == "" {
+		rigName = "unknown"
+	}
+	rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT"))
+	if rigRoot == "" {
+		rigRoot = "unknown"
+	}
+	verb, _ := bdflags.SplitGlobalFlags(args)
+	if verb == "" {
+		verb = "<verb>"
+	}
+	return fmt.Sprintf(
+		"%s: managed agent %q (agent rig %q, rig store %q) was denied HQ store %q; you may have meant `gc bd %s --rig %s ...`; ask the operator if HQ access is required",
+		msg,
+		agentName,
+		rigName,
+		rigRoot,
+		target.ScopeRoot,
+		verb,
+		rigName,
+	)
 }

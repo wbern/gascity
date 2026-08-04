@@ -30,12 +30,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bddispatch"
+	"github.com/gastownhall/gascity/internal/bdguard"
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func main() {
@@ -65,6 +68,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 			"bdshim: --rig %s is not supported: bd reads only its own rig's store, so answering here would return the wrong beads. Use `gc bd` instead, which resolves across rigs.\n",
 			rigOverride)
+		return 1
+	}
+	if msg, refuse := bareBDHQGuardRefusal(rawBDArgs, rawVerb); refuse {
+		logDisposition(rawVerb, rawBDArgs, "refuse", 1, start)
+		fmt.Fprintf(stderr, "bdshim: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -188,6 +196,81 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default: // bdshim.Passthrough
 		return passthrough()
 	}
+}
+
+// bareBDHQGuardRefusal applies the same managed-session HQ fence to the `bd`
+// PATH shim as `gc bd`. Otherwise an agent could bypass the operator's policy
+// merely by dropping the `gc` prefix.
+func bareBDHQGuardRefusal(args []string, verb string) (string, bool) {
+	if strings.TrimSpace(os.Getenv(bdguard.MarkerEnv)) != "1" ||
+		strings.TrimSpace(os.Getenv(bdguard.AccessEnv)) == "1" {
+		return "", false
+	}
+	city := pathutil.NormalizePathForCompare(strings.TrimSpace(os.Getenv(bdguard.CityEnv)))
+	if city == "" {
+		return "managed-session HQ guard has no city path; refusing an unverified bare bd target", true
+	}
+
+	target := strings.TrimSpace(extractBareBDDirectory(args))
+	if target == "" {
+		target = strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	}
+	if target == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			target = cwd
+		}
+	}
+	target = pathutil.NormalizePathForCompare(target)
+	rigRoot := pathutil.NormalizePathForCompare(strings.TrimSpace(os.Getenv("GC_RIG_ROOT")))
+
+	// A target demonstrably inside the managed agent's rig is allowed. Any
+	// other target is allowed unless it names the city root or its HQ store.
+	if rigRoot != "" && pathutil.PathWithin(rigRoot, target) {
+		return "", false
+	}
+	cityStore := pathutil.NormalizePathForCompare(filepath.Join(city, ".beads"))
+	if target != city && target != cityStore {
+		return "", false
+	}
+
+	identity := strings.TrimSpace(os.Getenv("GC_ALIAS"))
+	if identity == "" {
+		identity = strings.TrimSpace(os.Getenv("GC_AGENT"))
+	}
+	if identity == "" {
+		identity = "unknown"
+	}
+	rig := strings.TrimSpace(os.Getenv("GC_RIG"))
+	if rig == "" {
+		rig = "unknown"
+	}
+	if rigRoot == "" {
+		rigRoot = "unknown"
+	}
+	if verb == "" {
+		verb = "<verb>"
+	}
+	return fmt.Sprintf(
+		"managed agent %q (agent rig %q, rig store %q) was denied HQ store %q; you may have meant `gc bd %s --rig %s ...`; ask the operator if HQ access is required",
+		identity,
+		rig,
+		rigRoot,
+		city,
+		verb,
+		rig,
+	), true
+}
+
+func extractBareBDDirectory(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(args[i], "--directory="):
+			return strings.TrimPrefix(args[i], "--directory=")
+		}
+	}
+	return ""
 }
 
 // extractScopeFlags strips the gc-only --city/--rig flags from a bd arg list,

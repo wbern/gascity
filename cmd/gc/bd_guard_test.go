@@ -117,7 +117,10 @@ prefix = "rg"
 	t.Setenv(bdGuardMarkerEnv, bdGuardMarkerValue)
 	t.Setenv(bdGuardCityEnv, cityDir)
 	t.Setenv(bdGuardAccessEnv, "")
+	t.Setenv("GC_ALIAS", "demo/worker-2")
+	t.Setenv("GC_AGENT", "demo/worker")
 	t.Setenv("GC_RIG", "rig")
+	t.Setenv("GC_RIG_ROOT", rigDir)
 
 	for _, args := range [][]string{
 		{"--city", cityDir, "list"},
@@ -134,6 +137,18 @@ prefix = "rg"
 		}
 		if got := stderr.String(); !strings.Contains(got, "refusing city (HQ) store") {
 			t.Fatalf("doBd(%v) stderr = %q, want HQ refusal", args, got)
+		}
+		for _, want := range []string{
+			`managed agent "demo/worker-2"`,
+			`denied HQ store "` + cityDir + `"`,
+			`agent rig "rig"`,
+			`gc bd`,
+			`--rig rig`,
+			`rig store "` + rigDir + `"`,
+		} {
+			if got := stderr.String(); !strings.Contains(got, want) {
+				t.Fatalf("doBd(%v) stderr = %q, want actionable context %q", args, got, want)
+			}
 		}
 	}
 
