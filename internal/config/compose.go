@@ -703,6 +703,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateGitHubPRMonitors(root); err != nil {
 		return nil, nil, err
 	}
+	if err := ValidateBdGuard(root); err != nil {
+		return nil, nil, err
+	}
 
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
@@ -1069,6 +1072,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
 		}
+	}
+	if fragMeta.IsDefined("bd_guard") {
+		base.BdGuard = fragment.BdGuard
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
