@@ -296,9 +296,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_RIG_ROOT": "",
 		"BEADS_DIR":   "",
 		// These keys are always authoritative at the managed-session boundary.
-		// Explicit empties scrub stale ambient markers when an agent is removed
-		// from the operator's bd_guard allowlist.
+		// Explicit empties scrub stale ambient policy or authorization markers.
 		bdGuardMarkerEnv: "",
+		bdGuardAccessEnv: "",
 		bdGuardCityEnv:   "",
 		// GT_ROOT stays city-scoped by default. bd formula discovery falls back
 		// to $GT_ROOT/.beads/formulas when agents run outside the city/rig repo
@@ -322,14 +322,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		)
 	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
-	if p.city != nil && p.city.BdGuard.AppliesTo(cfgAgent) {
+	if p.city != nil && p.city.BdGuard.Enabled {
 		agentEnv[bdGuardMarkerEnv] = bdGuardMarkerValue
 		agentEnv[bdGuardCityEnv] = p.cityPath
 		fpExtra = maps.Clone(fpExtra)
 		if fpExtra == nil {
 			fpExtra = make(map[string]string)
 		}
-		fpExtra[bdGuardFingerprint] = bdGuardMarkerValue
+		fpExtra[bdGuardFingerprint] = "fenced"
+		if p.city.BdGuard.HasHQAccess(cfgAgent) {
+			agentEnv[bdGuardAccessEnv] = bdGuardMarkerValue
+			fpExtra[bdGuardFingerprint] = "access"
+		}
 	}
 	// GC_BIN points at the city's gc-as-bd shim bin dir when installed (so a
 	// session's `bd` routes through the controller), else the running gc binary.

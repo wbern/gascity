@@ -100,9 +100,10 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
-When an operator enables [bd_guard] for a managed agent, gc bd refuses every
-route to the city (HQ) store and continues to allow registered rig stores. This
-is a managed-session guardrail, not a security boundary: invoking raw bd or
+When an operator enables [bd_guard], managed agents may route gc bd to the city
+(HQ) store only when their exact identity appears in hq_access_agents. Other
+managed agents remain able to use registered rig stores. This is a
+managed-session guardrail, not a security boundary: invoking raw bd or
 accessing a store directly bypasses it.
 
 Set GC_BD_PROFILE_DIR to an existing writable directory to write an
@@ -264,7 +265,7 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if msg, refuse := activeBdGuardRefusal(cityPath, target); refuse {
+	if msg, refuse := activeBdGuardRefusal(cfg, cityPath, bdArgs, target); refuse {
 		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -675,15 +676,21 @@ func extractRigFlag(args []string) (string, []string) {
 // extractBdDirectoryFlag returns the -C / --directory value from bd passthrough
 // args, or "" if not present. The flag is left in args so bd itself still sees it.
 func extractBdDirectoryFlag(args []string) string {
+	directory := ""
 	for i := 0; i < len(args); i++ {
 		switch {
 		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
-			return args[i+1]
+			directory = args[i+1]
+			i++
 		case strings.HasPrefix(args[i], "--directory="):
-			return strings.TrimPrefix(args[i], "--directory=")
+			directory = strings.TrimPrefix(args[i], "--directory=")
+		case strings.HasPrefix(args[i], "-C="):
+			directory = strings.TrimPrefix(args[i], "-C=")
+		case strings.HasPrefix(args[i], "-C") && len(args[i]) > len("-C"):
+			directory = strings.TrimPrefix(args[i], "-C")
 		}
 	}
-	return ""
+	return directory
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
