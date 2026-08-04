@@ -282,9 +282,10 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
-When an operator enables [bd_guard] for a managed agent, gc bd refuses every
-route to the city (HQ) store and continues to allow registered rig stores. This
-is a managed-session guardrail, not a security boundary: invoking raw bd or
+When an operator enables [bd_guard], managed agents may route gc bd to the city
+(HQ) store only when their exact identity appears in hq_access_agents. Other
+managed agents remain able to use registered rig stores. This is a
+managed-session guardrail, not a security boundary: invoking raw bd or
 accessing a store directly bypasses it.
 
 Set GC_BD_PROFILE_DIR to an existing writable directory to write an

@@ -26,7 +26,7 @@ City is the top-level configuration for a Gas City instance.
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
-| `bd_guard` | BdGuardConfig |  |  | BdGuard configures the opt-in managed-session fence that prevents selected agents from routing gc bd commands to the city (HQ) store. It is operator governance: packs cannot author this section. |
+| `bd_guard` | BdGuardConfig |  |  | BdGuard configures operator-owned positive authorization for managed agents to route gc bd commands to the city bead store. When enabled, managed agents not explicitly authorized remain rig-scoped. Packs cannot author this section. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
@@ -274,12 +274,12 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 
 ## BdGuardConfig
 
-BdGuardConfig configures the opt-in gc bd city-store fence projected into selected managed agent sessions.
+BdGuardConfig configures positive authorization for managed agent sessions to access the city bead store through gc bd.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean |  |  | Enabled activates projection for exact identities in AllowedAgents. Unset or false preserves legacy gc bd routing. |
-| `allowed_agents` | []string |  |  | AllowedAgents lists exact configured agent identities to fence, such as "worker" or "my-rig/worker". An enabled config rejects unknown entries. |
+| `enabled` | boolean |  |  | Enabled fences every managed agent from the city bead store unless its exact identity is listed in hq_access_agents. Unset or false preserves legacy gc bd routing. |
+| `hq_access_agents` | []string |  |  | HQAccessAgents is the hq_access_agents list of exact configured identities authorized to use the city bead store, such as "worker" or "my-rig/worker". An enabled config rejects unknown entries. |
 
 ## BeadPolicyConfig
 

@@ -1012,19 +1012,19 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Enabled activates projection for exact identities in AllowedAgents.\nUnset or false preserves legacy gc bd routing."
+          "description": "Enabled fences every managed agent from the city bead store unless its\nexact identity is listed in hq_access_agents. Unset or false preserves\nlegacy gc bd routing."
         },
-        "allowed_agents": {
+        "hq_access_agents": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "AllowedAgents lists exact configured agent identities to fence, such as\n\"worker\" or \"my-rig/worker\". An enabled config rejects unknown entries."
+          "description": "HQAccessAgents is the hq_access_agents list of exact configured identities\nauthorized to use the city bead store, such as \"worker\" or\n\"my-rig/worker\". An enabled config rejects unknown entries."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "BdGuardConfig configures the opt-in gc bd city-store fence projected into selected managed agent sessions."
+      "description": "BdGuardConfig configures positive authorization for managed agent sessions to access the city bead store through gc bd."
     },
     "BeadPolicyConfig": {
       "properties": {
@@ -1184,7 +1184,7 @@
         },
         "bd_guard": {
           "$ref": "#/$defs/BdGuardConfig",
-          "description": "BdGuard configures the opt-in managed-session fence that prevents\nselected agents from routing gc bd commands to the city (HQ) store.\nIt is operator governance: packs cannot author this section."
+          "description": "BdGuard configures operator-owned positive authorization for managed\nagents to route gc bd commands to the city bead store. When enabled,\nmanaged agents not explicitly authorized remain rig-scoped.\nPacks cannot author this section."
         },
         "session": {
           "$ref": "#/$defs/SessionConfig",

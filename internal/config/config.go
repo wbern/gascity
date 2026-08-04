@@ -254,9 +254,10 @@ type City struct {
 	Patches Patches `toml:"patches,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
-	// BdGuard configures the opt-in managed-session fence that prevents
-	// selected agents from routing gc bd commands to the city (HQ) store.
-	// It is operator governance: packs cannot author this section.
+	// BdGuard configures operator-owned positive authorization for managed
+	// agents to route gc bd commands to the city bead store. When enabled,
+	// managed agents not explicitly authorized remain rig-scoped.
+	// Packs cannot author this section.
 	BdGuard BdGuardConfig `toml:"bd_guard,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`

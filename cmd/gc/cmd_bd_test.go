@@ -150,8 +150,11 @@ func TestExtractBdDirectoryFlag(t *testing.T) {
 		want string
 	}{
 		{"short flag", []string{"create", "-C", "/tmp/packs", "--json"}, "/tmp/packs"},
+		{"short flag equals", []string{"create", "-C=/tmp/packs"}, "/tmp/packs"},
+		{"short flag compact", []string{"create", "-C/tmp/packs"}, "/tmp/packs"},
 		{"long flag space", []string{"create", "--directory", "/tmp/packs"}, "/tmp/packs"},
 		{"long flag equals", []string{"create", "--directory=/tmp/packs"}, "/tmp/packs"},
+		{"last flag wins", []string{"create", "-C", "/tmp/first", "--directory=/tmp/second"}, "/tmp/second"},
 		{"absent", []string{"create", "--json"}, ""},
 		{"short flag at end no value", []string{"create", "-C"}, ""},
 	}
