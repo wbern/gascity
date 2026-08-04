@@ -282,6 +282,11 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
+When an operator enables [bd_guard] for a managed agent, gc bd refuses every
+route to the city (HQ) store and continues to allow registered rig stores. This
+is a managed-session guardrail, not a security boundary: invoking raw bd or
+accessing a store directly bypasses it.
+
 Set GC_BD_PROFILE_DIR to an existing writable directory to write an
 opt-in CPU profile, Go runtime trace, and redacted phase-timing report for one
 gc bd invocation.

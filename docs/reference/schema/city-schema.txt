@@ -1008,6 +1008,24 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BdGuardConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled activates projection for exact identities in AllowedAgents.\nUnset or false preserves legacy gc bd routing."
+        },
+        "allowed_agents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "AllowedAgents lists exact configured agent identities to fence, such as\n\"worker\" or \"my-rig/worker\". An enabled config rejects unknown entries."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BdGuardConfig configures the opt-in gc bd city-store fence projected into selected managed agent sessions."
+    },
     "BeadPolicyConfig": {
       "properties": {
         "storage": {
@@ -1163,6 +1181,10 @@
         "beads": {
           "$ref": "#/$defs/BeadsConfig",
           "description": "Beads configures the bead store backend."
+        },
+        "bd_guard": {
+          "$ref": "#/$defs/BdGuardConfig",
+          "description": "BdGuard configures the opt-in managed-session fence that prevents\nselected agents from routing gc bd commands to the city (HQ) store.\nIt is operator governance: packs cannot author this section."
         },
         "session": {
           "$ref": "#/$defs/SessionConfig",
