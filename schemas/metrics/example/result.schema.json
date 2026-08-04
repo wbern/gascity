@@ -209,7 +209,8 @@
               "pack-registry-requests",
               "worktree-scan",
               "mcp-validate",
-              "worktree-reap"
+              "worktree-reap",
+              "events-reemit-execution"
             ]
           },
           "event_id": {

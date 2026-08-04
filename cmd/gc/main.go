@@ -752,10 +752,7 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return resolvedContext{}, err
-	}
+	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config
 	// must not abort resolution of a perfectly healthy explicit target
@@ -795,10 +792,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 
 // validateCityPath resolves and validates a path as a city directory.
 func validateCityPath(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
+	abs := normalizePathForCompare(p)
 	if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
 		return abs, nil
 	}

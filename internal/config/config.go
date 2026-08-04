@@ -3190,9 +3190,11 @@ func (c *City) FormulasDir() string {
 
 // AllPackDirs returns the union of city-level and all rig-level pack directories
 // (city dirs first, then sorted-by-rig-name dirs), deduplicated. Use this for
-// global scans that intentionally need the full pack-fragment universe. Prompt
-// rendering for a specific rig should use PackDirsForRig so one rig's fragments
-// cannot override another rig's same-named fragments.
+// global scans that intentionally need the full pack-fragment universe, and as
+// the fallback PackDirsForRig("") uses for rig-less (scope="city") agents, which
+// have no single rig to scope to. Prompt rendering for a specific rig should use
+// PackDirsForRig so one rig's fragments cannot override another rig's
+// same-named fragments.
 func (c *City) AllPackDirs() []string {
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
@@ -3211,12 +3213,27 @@ func (c *City) AllPackDirs() []string {
 // directories imported by rigName, deduplicated with city-level dirs kept first.
 // Use this when rendering prompts for one agent so rig-imported template
 // fragments are available without exposing fragments imported by other rigs.
+//
+// rigName == "" means a rig-less (scope="city") agent — e.g. deep-investigator,
+// supervisor, pack-author — which has no single rig to scope to. Those agents
+// fall back to AllPackDirs(): the union across every rig, sorted by rig name for
+// determinism. A fragment name defined identically in more than one rig's pack
+// resolves fine (that's the common case: a shared vocabulary like
+// handoff-routing, meant to render identically everywhere). A name defined with
+// DIFFERENT content in two rigs' packs silently picks whichever rig sorts LAST
+// alphabetically: renderPrompt parses pack dirs in order and a later
+// {{ define }} replaces an earlier one. For the same reason, a rig-imported
+// fragment can shadow a same-named city-level imported-pack fragment (city
+// dirs are parsed first) — city-ROOT fragments still win, they load last.
+// This is a pack-authoring collision this function does not detect.
+// See ga-bmjqvb.
 func (c *City) PackDirsForRig(rigName string) []string {
+	if rigName == "" {
+		return c.AllPackDirs()
+	}
 	var dirs []string
 	dirs = appendUnique(dirs, c.PackDirs...)
-	if rigName != "" {
-		dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
-	}
+	dirs = appendUnique(dirs, c.RigPackDirs[rigName]...)
 	return dirs
 }
 

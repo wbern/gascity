@@ -306,6 +306,7 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
+LINT_READONLY_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 CI_STATIC_GO ?= go
 
@@ -324,15 +325,16 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	GOFLAGS="$(LINT_READONLY_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	GOFLAGS="$(LINT_READONLY_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
-	@case "$(LINT_CHANGED_SCOPE)" in \
+	@export GOFLAGS="$(LINT_READONLY_GOFLAGS)"; \
+	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
 			;; \
@@ -355,10 +357,15 @@ lint-changed: $(GOLANGCI_LINT)
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	pkgs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u | while IFS= read -r dir; do \
+	dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
+	pkgs="$$(for dir in $$dirs; do \
 		if [ "$$dir" = "." ]; then pkg="."; else pkg="./$$dir"; fi; \
-		if go list "$$pkg" >/dev/null 2>&1; then printf '%s\n' "$$pkg"; fi; \
-	done | sort -u)"; \
+		if ! go list "$$pkg" >/dev/null; then \
+			echo "lint-changed: unable to load $$pkg" >&2; \
+			exit 1; \
+		fi; \
+		printf '%s\n' "$$pkg"; \
+	done)" || exit $$?; \
 	if [ -z "$$pkgs" ]; then \
 		echo "lint-changed: no lintable Go packages"; \
 		exit 0; \
@@ -368,7 +375,7 @@ lint-changed: $(GOLANGCI_LINT)
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@"$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@GOFLAGS="$(LINT_READONLY_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)

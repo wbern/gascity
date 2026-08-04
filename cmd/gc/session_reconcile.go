@@ -310,7 +310,7 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		if isAgentEffectivelySuspendedWith(cfg, a, suspState) {
+		if isAgentEffectivelySuspendedWith(cfg, cityDir, a, suspState) {
 			continue
 		}
 		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
