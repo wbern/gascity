@@ -367,7 +367,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	}
 	resumeCommand := resolved.ResumeCommand
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
-		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+		if command, err := config.BuildProviderResumeCommand(s.state.CityPath(), resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
 			resumeCommand = command
 		}
 	}
@@ -490,7 +490,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	}
 	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
-		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+		if command, err := config.BuildProviderResumeCommand(s.state.CityPath(), resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
 			resumeCommand = command
 		}
 	}
