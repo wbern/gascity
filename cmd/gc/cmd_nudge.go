@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2344,6 +2345,27 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
 	if errors.Is(cause, errNudgeSessionFenceMismatch) {
+		item.DeadAt = now.UTC()
+		return item, true
+	}
+	// An unconfirmed submit is terminal, never retried. The keystrokes DID
+	// reach tmux — the error says so — and only the busy-state confirmation
+	// went unobserved, so re-sending can merely type the same text at the pane
+	// a second time. It cannot recover a message the agent never got, because
+	// the agent did get it. The two errors that genuinely warrant another pass
+	// are handled before this point: runtime.ErrSessionNotFound releases the
+	// claim, and a runtime that declines without an error leaves
+	// result.Delivered false and releases too.
+	//
+	// Without this, deploying ErrNudgeSubmitUnconfirmed (upstream #5012) turned
+	// every unconfirmable pane into defaultQueuedNudgeMaxAttempts copies of the
+	// same reminder, delivered 15s apart to an agent that already had it —
+	// including agents that were not idle, since a queued idle-mail reminder
+	// carries a frozen snapshot of its own text. Measured live on gc2
+	// 2026-08-06: four items at attempts 3-5, all bearing this error.
+	// tmux/adapter.go:1324 already applies the same reasoning to the startup
+	// nudge; the queued path was simply never given it.
+	if errors.Is(cause, sessiontmux.ErrNudgeSubmitUnconfirmed) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}
