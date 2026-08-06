@@ -100,10 +100,32 @@ func ResumeCommandWarnings(providers map[string]ProviderSpec) []string {
 	var warnings []string
 	for _, name := range names {
 		spec := providers[name]
-		if !ResumeCommandSwallowsAppendedArgs(spec.ResumeCommand) {
+		// Both tests must run against the RESOLVED provider, not the raw spec.
+		// A provider that inherits its resume_command via base= has an empty
+		// spec.ResumeCommand yet is fully affected, and the flags that actually
+		// get appended come from EffectiveDefaults — which layers schema
+		// defaults and inherited provider defaults on top of this spec's own
+		// OptionDefaults. Gating on the raw map skips providers whose only
+		// defaults are declared by their schema or inherited from a builtin
+		// base, and those are silently affected (gcw-84kg).
+		//
+		// completeResumeDefaults is deliberately FALSE. Resolution would
+		// otherwise append the flags before we inspect the command, and
+		// appending pushes the token count past the $0-placeholder heuristic in
+		// ResumeCommandSwallowsAppendedArgs — silently reclassifying the
+		// "$@"-without-$0 half-fix as safe. That half-fix is the most dangerous
+		// shape there is, because it looks like success while still eating the
+		// first flag.
+		resolved, err := resolveProviderChain(name, spec, providers, false)
+		if err != nil {
+			// An unresolvable chain is a config error surfaced by validation;
+			// this advisory stays quiet rather than double-reporting it.
 			continue
 		}
-		if len(spec.OptionDefaults) == 0 {
+		if !ResumeCommandSwallowsAppendedArgs(resolved.ResumeCommand) {
+			continue
+		}
+		if len(resolved.EffectiveDefaults) == 0 {
 			// Nothing would be appended, so nothing can be lost. Stay quiet:
 			// an advisory nobody can act on trains operators to ignore them.
 			continue
@@ -112,7 +134,7 @@ func ResumeCommandWarnings(providers map[string]ProviderSpec) []string {
 			"provider %q: resume_command is a shell wrapper that discards the option flags resolution appends to it, so resumed sessions silently lose %s. "+
 				"End the script with \"$@\" AND give the wrapper a $0 placeholder argument (e.g. ... {{.SessionKey}} \"$@\"' %s). "+
 				"Both are required: with \"$@\" but no $0 placeholder the FIRST flag is still consumed as the script name",
-			name, optionDefaultKeyList(spec.OptionDefaults), name))
+			name, optionDefaultKeyList(resolved.EffectiveDefaults), name))
 	}
 	return warnings
 }
