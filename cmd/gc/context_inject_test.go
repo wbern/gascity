@@ -234,7 +234,7 @@ func TestContextWindowTokensRecognizesCurrentModelFamilies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
-			if got := contextWindowTokens([]string{tt.model}); got != tt.want {
+			if got := contextWindowTokens([]string{tt.model}, 0); got != tt.want {
 				t.Errorf("contextWindowTokens(%q) = %d, want %d", tt.model, got, tt.want)
 			}
 		})

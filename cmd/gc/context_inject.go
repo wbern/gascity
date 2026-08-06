@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/modelwindow"
+	"github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Context-usage injection — the context-pressure sibling of clock_inject.go.
@@ -25,6 +26,22 @@ import (
 // last usage entry in the transcript, and injects ONE line of guidance —
 // folded into the same single provider payload as the clock (see
 // cmd_nudge.go), so JSON hook formats stay one valid document.
+//
+// TWO TRANSCRIPT DIALECTS. Claude records usage as message.usage; Codex records
+// it as event_msg entries of type token_count. The two share no usage entries,
+// so the injector simply tries Claude first and Codex second — no provider
+// detection, and no way for one family's transcript to be misread as the
+// other's. Codex usage is reached through internal/worker/transcript, the
+// worker-owned seam, because cmd/gc may not import internal/sessionlog.
+//
+// WINDOW RESOLUTION IS PROVIDER-FIRST for Codex. Codex reports
+// model_context_window per invocation; that beats any model-string lookup
+// because the model string sits in a turn_context entry that often falls
+// outside the tail read window (measured empty on ~1 in 5 real rollouts). A
+// model-only resolver would then floor to the conservative default and fire
+// advisories well below the true threshold — measured on a real 132383-token
+// rollout: 51% against the reported 258400 window, but 66% (a false urgent)
+// against a floored 200000.
 //
 // THRESHOLD-GATED BY DESIGN — not an always-on countdown. Model-provider
 // guidance (Anthropic, Claude Fable 5 migration notes) documents "context
@@ -43,9 +60,13 @@ import (
 // overrides the context-window size when model-string detection is wrong.
 // Fail-safe: any parse/read problem returns "" — never blocks a prompt.
 
-// hookStdinInput is the subset of the provider hook JSON we need.
+// hookStdinInput is the subset of the provider hook JSON we need. Claude
+// always supplies transcript_path; Codex types it nullable but always supplies
+// session_id and cwd, from which the rollout is discoverable.
 type hookStdinInput struct {
 	TranscriptPath string `json:"transcript_path"`
+	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd"`
 }
 
 // transcriptUsage is the usage block shape inside provider transcript entries.
@@ -64,14 +85,39 @@ func contextInjectLine(hookInput []byte) string {
 		return ""
 	}
 	var in hookStdinInput
-	if err := json.Unmarshal(hookInput, &in); err != nil || strings.TrimSpace(in.TranscriptPath) == "" {
+	if err := json.Unmarshal(hookInput, &in); err != nil {
 		return ""
 	}
-	tokens, models, ok := lastTranscriptUsage(in.TranscriptPath)
-	if !ok {
+	path := transcriptPathForHook(in)
+	if path == "" {
 		return ""
 	}
-	return contextUsageMessage(tokens, contextWindowTokens(models))
+	if tokens, models, ok := lastTranscriptUsage(path); ok {
+		return contextUsageMessage(tokens, contextWindowTokens(models, 0))
+	}
+	// Codex reports context through event_msg token_count entries instead of
+	// message.usage, so a Codex rollout yields nothing above. The two dialects
+	// share no usage entries, so trying both needs no provider detection and
+	// cannot change any Claude verdict.
+	if codex, ok := transcript.CodexTailContextFor(path); ok {
+		return contextUsageMessage(codex.Tokens, contextWindowTokens(codex.Models, codex.ProviderWindowTokens))
+	}
+	return ""
+}
+
+// transcriptPathForHook resolves the transcript to read for a hook payload,
+// falling back to Codex session-id discovery when the payload carries no
+// transcript path. Returns "" when nothing is resolvable.
+func transcriptPathForHook(in hookStdinInput) string {
+	if p := strings.TrimSpace(in.TranscriptPath); p != "" {
+		return p
+	}
+	sessionID := strings.TrimSpace(in.SessionID)
+	cwd := strings.TrimSpace(in.Cwd)
+	if sessionID == "" || cwd == "" {
+		return ""
+	}
+	return transcript.DiscoverCodexPathByID(nil, cwd, sessionID)
 }
 
 // lastTranscriptUsage reads the tail of a provider transcript (JSONL) and
@@ -133,11 +179,22 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 // floors to the conservative default. GC_CONTEXT_WINDOW_TOKENS overrides —
 // gc-managed deployments that know the launch model should pin it for
 // determinism.
-func contextWindowTokens(models []string) int {
+//
+// providerWindow is the window the provider reported for the invocation, or 0
+// when it reported none (always 0 on the Claude path, which has no such field).
+// It outranks the model table because a model string can be absent from the
+// read window entirely, and flooring to the conservative default in that case
+// understates the window and fires advisories far below the real threshold.
+// The env override still wins over everything: it is the operator's documented
+// last word when detection is wrong.
+func contextWindowTokens(models []string, providerWindow int) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+	}
+	if providerWindow > 0 {
+		return providerWindow
 	}
 	best := 0
 	for _, m := range models {
