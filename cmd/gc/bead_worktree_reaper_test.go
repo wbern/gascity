@@ -92,12 +92,12 @@ func TestIsStrictlyUnderDirPathTraversal(t *testing.T) {
 // worktree. The symlink is created here rather than relied upon from the
 // platform, so this reproduces on Linux too.
 func TestIsStrictlyUnderDirThroughSymlinkedRoot(t *testing.T) {
-	real := t.TempDir()
+	realRoot := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")
-	if err := os.Symlink(real, alias); err != nil {
+	if err := os.Symlink(realRoot, alias); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	child := filepath.Join(real, "worktrees", "mrig", "builder", "ga-abc123")
+	child := filepath.Join(realRoot, "worktrees", "mrig", "builder", "ga-abc123")
 	if err := os.MkdirAll(child, 0o755); err != nil {
 		t.Fatalf("mkdir child: %v", err)
 	}
@@ -109,12 +109,12 @@ func TestIsStrictlyUnderDirThroughSymlinkedRoot(t *testing.T) {
 	}
 	// And the reverse spelling.
 	aliasChild := filepath.Join(alias, "worktrees", "mrig", "builder", "ga-abc123")
-	if !isStrictlyUnderDir(real, aliasChild) {
-		t.Errorf("isStrictlyUnderDir(%q, %q) = false, want true", real, aliasChild)
+	if !isStrictlyUnderDir(realRoot, aliasChild) {
+		t.Errorf("isStrictlyUnderDir(%q, %q) = false, want true", realRoot, aliasChild)
 	}
 	// Aliased spellings of the SAME directory are still not strictly under it.
-	if isStrictlyUnderDir(alias, real) {
-		t.Errorf("isStrictlyUnderDir(%q, %q) = true, want false (same dir via alias)", alias, real)
+	if isStrictlyUnderDir(alias, realRoot) {
+		t.Errorf("isStrictlyUnderDir(%q, %q) = true, want false (same dir via alias)", alias, realRoot)
 	}
 }
 

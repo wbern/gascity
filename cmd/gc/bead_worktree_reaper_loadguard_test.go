@@ -58,7 +58,7 @@ func TestReapLoadGuard_RunsWhenLoadIsUnderCeiling(t *testing.T) {
 }
 
 // TestReapLoadGuard_UnreadableLoadProceeds is the fail-direction test and the
-// reason this guard cannot be modelled on the safety gates.
+// reason this guard cannot be modeled on the safety gates.
 func TestReapLoadGuard_UnreadableLoadProceeds(t *testing.T) {
 	cityPath, cfg, stores := reapThrottleFixture(t, 1, 0)
 	pct := 1 // a ceiling so low that any reading at all breaches it
@@ -77,7 +77,7 @@ func TestReapLoadGuard_UnreadableLoadProceeds(t *testing.T) {
 	}
 }
 
-// TestReapLoadGuard_ZeroPercentDisablesTheGuard keeps the default behaviour
+// TestReapLoadGuard_ZeroPercentDisablesTheGuard keeps the default behavior
 // reachable, and the default is 0 precisely because a busy host would otherwise
 // skip pass after pass.
 func TestReapLoadGuard_ZeroPercentDisablesTheGuard(t *testing.T) {
