@@ -951,7 +951,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// unoverridden defaults are preserved when replaceSchemaFlags strips all
 	// schema flags.
 	sessionOverrides := parseSessionTemplateOverridesForLaunch(candidate.info)
-	applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, sessionOverrides)
+	applySchemaOptionOverridesForLaunch(cityPath, &agentCfg, &tp, candidate.info.ID, sessionOverrides)
 
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
@@ -977,7 +977,7 @@ func buildPreparedStartWithWorkDirResolver(
 		for k, v := range sessionOverrides {
 			launchOverrides[k] = v
 		}
-		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, candidate.info.ID, launchOverrides)
+		applySchemaOptionOverridesForLaunch(cityPath, &agentCfg, &tp, candidate.info.ID, launchOverrides)
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
@@ -1211,7 +1211,7 @@ func parseSessionTemplateOverridesForLaunch(info sessionpkg.Info) map[string]str
 	return overrides
 }
 
-func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {
+func applySchemaOptionOverridesForLaunch(cityPath string, agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {
 	if agentCfg == nil || tp == nil || len(overrides) == 0 {
 		return
 	}
@@ -1237,7 +1237,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	if len(args) > 0 {
 		agentCfg.Command = replaceSchemaFlags(agentCfg.Command, resolved.OptionsSchema, args)
 	}
-	if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+	if command, err := config.BuildProviderResumeCommand(cityPath, resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
 		dup := *resolved
 		dup.ResumeCommand = command
 		tp.ResolvedProvider = &dup

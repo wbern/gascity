@@ -417,7 +417,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
+		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin(), hookFormat)
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra

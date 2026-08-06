@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // strayWorktree is one git checkout found under a managed root that is not
@@ -93,16 +94,34 @@ func classifyStrayWorktree(path string, probeFor func(string) gitProbe) strayWor
 	if gp.HasUncommittedWork() {
 		return strayWorktree{Path: path, Reason: "uncommitted changes"}
 	}
-	if unlanded, err := gp.HasUnlandedCommitsResult(); err != nil {
+	unlanded, err := gp.HasUnlandedCommitsResult()
+	if err != nil {
 		return strayWorktree{Path: path, Reason: "unlanded probe failed"}
-	} else if unlanded {
-		return strayWorktree{Path: path, Reason: "unlanded commits"}
 	}
-	warning := ""
+	unpreserved, err := gp.HasUnpreservedCommitsResult()
+	if err != nil {
+		return strayWorktree{Path: path, Reason: "preservation probe failed"}
+	}
+	// Unlanded alone is not a reason to keep a checkout: removal deletes the
+	// working files, never the branch that holds the commits. Only commits no
+	// ref carries are lost with the directory, so that is what blocks
+	// reclamation here — the same boundary the closed-bead reaper applies, so
+	// scan and reap cannot disagree about the same checkout.
+	if unlanded && unpreserved {
+		return strayWorktree{Path: path, Reason: "unlanded commits reachable from no ref"}
+	}
+	var warnings []string
+	if unlanded {
+		branch, _ := gp.CurrentBranch()
+		if branch == "" {
+			branch = "a ref other than HEAD"
+		}
+		warnings = append(warnings, "holds unlanded commits, preserved by "+branch+" (survives removal)")
+	}
 	if stashes, err := gp.HasStashesResult(); err != nil {
-		warning = "repo-wide stash probe failed: " + err.Error()
+		warnings = append(warnings, "repo-wide stash probe failed: "+err.Error())
 	} else if stashes {
-		warning = "repository holds stashed work (repo-wide; not owned by this checkout)"
+		warnings = append(warnings, "repository holds stashed work (repo-wide; not owned by this checkout)")
 	}
-	return strayWorktree{Path: path, Reclaimable: true, Warning: warning}
+	return strayWorktree{Path: path, Reclaimable: true, Warning: strings.Join(warnings, "; ")}
 }

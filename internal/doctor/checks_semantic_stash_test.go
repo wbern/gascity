@@ -60,7 +60,8 @@ func TestClassifyNested_RecordsRepoWideStashWarning(t *testing.T) {
 }
 
 // TestClassifyNested_StashProbeFailureIsOnlyAWarning is the deliberate
-// asymmetry. Doctor is right to fail closed on the uncommitted and unpushed
+// asymmetry. Doctor is right to fail closed on the uncommitted case and on
+// commits no ref carries, and wrong to fail closed on the merely unpushed
 // probes — those describe work inside the worktree. A stash probe describes
 // something removal cannot touch, so its failure must not make the worktree
 // permanently unsafe.
@@ -98,7 +99,7 @@ func TestClassifyNested_StillProtectsRealWork(t *testing.T) {
 		},
 		{
 			name:       "unlanded commits alongside a repo-wide stash",
-			probe:      &fakeGitWorktree{unpushed: map[string]bool{path: true}, stashed: map[string]bool{path: true}},
+			probe:      &fakeGitWorktree{unpushed: map[string]bool{path: true}, unpreserved: map[string]bool{path: true}, stashed: map[string]bool{path: true}},
 			wantReason: "unlanded",
 		},
 		{

@@ -146,28 +146,32 @@ const (
 	PartialRetryMetadataKey              = "gc.partial_retry"
 	PackMetadataKey                      = "gc.pack"
 	PackRootMetadataKey                  = "gc.pack_root"
-	PackWorkspaceMetadataKey             = "gc.pack_workspace"
-	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey               = "gc.ralph_step_id"
-	ReasoningMetadataKey                 = "gc.reasoning"
-	RequiredArtifactMetadataKey          = "gc.required_artifact"
-	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
-	RetryCountMetadataKey                = "gc.retry_count"
-	RetryFromMetadataKey                 = "gc.retry_from"
-	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
-	RetryStateMetadataKey                = "gc.retry_state"
-	RigRootMetadataKey                   = "gc.rig_root"
-	RootBeadIDMetadataKey                = "gc.root_bead_id"
-	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// PRNumberMetadataKey records the pull request a bead owns. The
+	// unprefixed "pr_number" is the legacy spelling still written by some
+	// callers; rejectSelfPRGate reads both.
+	PRNumberMetadataKey             = "gc.pr_number"
+	PackWorkspaceMetadataKey        = "gc.pack_workspace"
+	PerDispatchModelMetadataKey     = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey          = "gc.ralph_step_id"
+	ReasoningMetadataKey            = "gc.reasoning"
+	RequiredArtifactMetadataKey     = "gc.required_artifact"
+	RequiredArtifactsMetadataKey    = "gc.required_artifacts"
+	RetryCountMetadataKey           = "gc.retry_count"
+	RetryFromMetadataKey            = "gc.retry_from"
+	RetrySessionRecycledMetadataKey = "gc.retry_session_recycled"
+	RetryStateMetadataKey           = "gc.retry_state"
+	RigRootMetadataKey              = "gc.rig_root"
+	RootBeadIDMetadataKey           = "gc.root_bead_id"
+	RootStoreRefMetadataKey         = "gc.root_store_ref"
+	RoutedToMetadataKey             = "gc.routed_to"
+	RunTargetMetadataKey            = "gc.run_target"
+	RuntimeVarsMetadataKey          = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey            = "gc.scope_kind"
+	ScopeNameMetadataKey            = "gc.scope_name"
+	ScopeRefMetadataKey             = "gc.scope_ref"
+	ScopeRoleMetadataKey            = "gc.scope_role"
+	SessionAffinityMetadataKey      = "gc.session_affinity"
+	SessionIDMetadataKey            = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -387,6 +391,7 @@ var KnownMetadataKeys = []string{
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
+	PRNumberMetadataKey,
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,

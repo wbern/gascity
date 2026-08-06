@@ -582,7 +582,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil && strings.TrimSpace(resumeCommand) != "" {
 		resumeProvider := *resolved
 		resumeProvider.ResumeCommand = resumeCommand
-		if command, err := config.BuildProviderResumeCommand(&resumeProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+		if command, err := config.BuildProviderResumeCommand(cityPath, &resumeProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
 			resumeCommand = command
 		}
 	}

@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func countCallsWithTokens(calls [][]string, tokens ...string) int {
 // copy-mode. After `send-keys -X cancel` the identical nudge landed.
 func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 	t.Run("parked pane cancels copy-mode before the literal send", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "1", provider: "codex"}
+		fe := &nudgeRoutingExecutor{inMode: "1", provider: "codex", pane: "esc to interrupt"}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 		if err := tm.NudgeSession("sess", "hello"); err != nil {
@@ -100,7 +101,7 @@ func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 	})
 
 	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
+		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", pane: "esc to interrupt"}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 		if err := tm.NudgeSession("sess", "hello"); err != nil {
@@ -175,14 +176,23 @@ func TestSubmitVerifyEligibleCoversCodex(t *testing.T) {
 
 // TestNudgeSessionConfirmsSubmitForCodex proves the widened gate actually
 // engages the confirmation loop end to end: against a pane that never reports
-// busy, codex must now re-send Enter up to submitEnterMaxSends instead of
-// firing one unverified Enter and declaring success.
+// busy, codex must re-send Enter up to submitEnterMaxSends instead of firing
+// one unverified Enter and declaring success.
+//
+// It must ALSO surface the failure. This test originally asserted a nil error,
+// which encoded the very defect upstream #5012 (cherry-picked as f19fc0c85)
+// fixed: NudgeSession discarded the confirmed bool from submitEnterAndConfirm,
+// so an exhausted re-send budget still reported the nudge as delivered — a
+// silently lost nudge. Now the budget being exhausted yields
+// ErrNudgeSubmitUnconfirmed, and callers that genuinely cannot retry (the
+// startup nudge, adapter.go) opt into tolerating it explicitly.
 func TestNudgeSessionConfirmsSubmitForCodex(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", pane: "idle pane, no busy footer"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.NudgeSession("sess", "hello"); err != nil {
-		t.Fatalf("NudgeSession: %v", err)
+	err := tm.NudgeSession("sess", "hello")
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("NudgeSession err = %v, want ErrNudgeSubmitUnconfirmed (an unconfirmed submit must not report success)", err)
 	}
 
 	enters := countCallsWithTokens(fe.calls, "send-keys", "Enter")

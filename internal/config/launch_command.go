@@ -49,20 +49,52 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 }
 
 // BuildProviderResumeCommand applies schema-managed option overrides to a
-// provider's explicit resume_command template.
-func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[string]string) (string, error) {
+// provider's explicit resume_command template and appends the provider-owned
+// settings file, mirroring BuildProviderLaunchCommand.
+//
+// The settings half matters as much as the options half. .gc/settings.json is
+// the sole delivery route for the gc hooks (SessionStart priming,
+// UserPromptSubmit injection, and the PreCompact auto-handoff), so a resume
+// command that omits it resumes an agent with no hooks at all — including no
+// ability to hand itself off under context pressure. The completion that adds
+// schema flags lives in the deliberately cityPath-free config resolve layer
+// and therefore cannot do this; that is why it belongs here, next to the
+// launch builder that already takes cityPath. (gcw-0ut6)
+//
+// Nothing is appended when the template already names a settings file, when
+// the provider family owns none (only the claude family does), or when there
+// is no explicit resume_command — those providers resume off Info.Command,
+// which already carries --settings.
+func BuildProviderResumeCommand(cityPath string, resolved *ResolvedProvider, optionOverrides map[string]string) (string, error) {
 	if resolved == nil {
 		return "", fmt.Errorf("resolved provider is nil")
 	}
 	command := strings.TrimSpace(resolved.ResumeCommand)
-	if command == "" || len(resolved.OptionsSchema) == 0 || !hasSchemaOptionOverrides(optionOverrides) {
+	if command == "" {
 		return command, nil
 	}
-	mergedArgs, err := providerOptionArgs(resolved, optionOverrides)
-	if err != nil {
-		return "", err
+	if len(resolved.OptionsSchema) > 0 && hasSchemaOptionOverrides(optionOverrides) {
+		mergedArgs, err := providerOptionArgs(resolved, optionOverrides)
+		if err != nil {
+			return "", err
+		}
+		command = replaceResumeSchemaFlags(command, resolved.ResumeFlag, resolved.ResumeStyle, resolved.OptionsSchema, mergedArgs)
 	}
-	return replaceResumeSchemaFlags(command, resolved.ResumeFlag, resolved.ResumeStyle, resolved.OptionsSchema, mergedArgs), nil
+	return appendResumeProviderSettings(cityPath, resolved, command), nil
+}
+
+// appendResumeProviderSettings appends the provider-owned settings arg to an
+// explicit resume command, leaving it untouched when the provider owns no
+// settings file or the command already carries one.
+func appendResumeProviderSettings(cityPath string, resolved *ResolvedProvider, command string) string {
+	if strings.Contains(command, "--settings") {
+		return command
+	}
+	settingsPath, _ := ProviderSettingsSource(cityPath, providerSettingsFamily(resolved))
+	if settingsPath == "" {
+		return command
+	}
+	return command + " " + fmt.Sprintf("--settings %q", settingsPath)
 }
 
 // BuildProviderLaunchCommandWithoutOptions composes the transport-specific

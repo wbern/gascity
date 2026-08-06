@@ -1580,7 +1580,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			} else {
 				appendDefaultArgs()
 			}
-			if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+			if command, err := config.BuildProviderResumeCommand(cityPath, resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
 				resumeCommand = command
 			}
 		} else {

@@ -46,7 +46,14 @@ type BreakdownCopyEntry struct {
 // longer flips every agent's fingerprint into a fleet-wide config-drift drain.
 // The bump rebaselines existing v4 hashes silently instead of draining the
 // fleet once on rollout. (#3840)
-const FingerprintVersion = "v5"
+//
+// v6: provider hook files staged from a session workdir are fingerprinted over
+// the pack-overlay SOURCE that staging will write onto them, not over the
+// workdir copy that staging rewrites. Hashing the destination made starting a
+// session move its own fingerprint, so the next reconcile tick read config
+// drift and restarted it. Like v5, the bump rebaselines existing v5 hashes
+// silently instead of draining the fleet once on rollout. (gcw-0cv5)
+const FingerprintVersion = "v6"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate

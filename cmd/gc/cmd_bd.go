@@ -443,7 +443,7 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 func rejectSelfPRGate(target beads.Bead, gate bdshim.PRGateCreate) error {
 	ownedPR := strings.TrimSpace(target.Metadata["pr_number"])
 	if ownedPR == "" {
-		ownedPR = strings.TrimSpace(target.Metadata["gc.pr_number"])
+		ownedPR = strings.TrimSpace(target.Metadata[beadmeta.PRNumberMetadataKey])
 	}
 	if ownedPR == gate.PRNumber {
 		return fmt.Errorf(

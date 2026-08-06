@@ -431,6 +431,14 @@ type CopyEntry struct {
 	// fingerprint instead. When Probed is true but ContentHash is empty
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
 	// than falling back to path-based hashing.
+	//
+	// ContentHash does not always describe Src. For provider hook files staged
+	// from a session workdir, Src is the workdir copy (the bytes containers are
+	// given) while ContentHash covers the pack-overlay SOURCES that staging
+	// writes onto that copy — hashing Src there would make starting a session
+	// move its own fingerprint (gcw-0cv5). So `sha256 <Src>` need not match
+	// ContentHash, and drift diagnostics that print the two together are
+	// showing related but distinct files.
 	ContentHash string
 }
 

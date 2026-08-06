@@ -14,6 +14,11 @@ import (
 // TestReapClosedBeadWorktrees_FlagsUnlandedWork is the wiring guard for the
 // summary count. Without it the renderer could report a field production never
 // sets, and the count would read zero on a fleet full of stranded work.
+//
+// The flag describes the TREE ("its commits reached no trunk"), not the
+// decision, so it must be set whichever way the decision goes. Here the commit
+// sits on the worktree's branch, so removal cannot destroy it and the tree is
+// reaped — and the count must still see the unlanded work.
 func TestReapClosedBeadWorktrees_FlagsUnlandedWork(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-unl01")
@@ -28,10 +33,10 @@ func TestReapClosedBeadWorktrees_FlagsUnlandedWork(t *testing.T) {
 	var stderr bytes.Buffer
 	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
 
-	if len(report.Protected) != 1 {
-		t.Fatalf("Protected = %+v, want exactly 1", report.Protected)
+	if len(report.Reaped) != 1 {
+		t.Fatalf("Reaped = %+v, want exactly 1 (the branch preserves the commit)", report.Reaped)
 	}
-	if !report.Protected[0].HoldsUnlandedWork {
+	if !report.Reaped[0].HoldsUnlandedWork {
 		t.Errorf("HoldsUnlandedWork = false for a worktree whose commit no remote carries; the summary count would silently read zero")
 	}
 }

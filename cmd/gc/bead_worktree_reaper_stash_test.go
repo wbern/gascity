@@ -117,12 +117,21 @@ func TestReapClosedBeadWorktrees_ProtectsUncommittedWorkDespiteStashDowngrade(t 
 }
 
 // TestReapClosedBeadWorktrees_ProtectsUnpushedCommitsDespiteStashDowngrade is
-// the second over-correction guard: unpushed commits are worktree-local
-// history that removal would strand, so that gate must also survive.
+// the second over-correction guard: commits that removal would genuinely
+// strand must still protect the tree.
+//
+// "Would strand" is the load-bearing word, and it is narrower than "unpushed".
+// A worktree sitting on a branch is not stranded by removal at all: `git
+// worktree remove` deletes the working files and the worktree admin entry, and
+// never the branch, so the branch keeps every commit. The shape below —
+// committed on a DETACHED HEAD, reachable from no ref — is the one whose
+// history removal actually destroys, and therefore the one this gate exists
+// for.
 func TestReapClosedBeadWorktrees_ProtectsUnpushedCommitsDespiteStashDowngrade(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	stashRepoWide(t, rigRoot)
 	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-stsh04")
+	mustGit(t, wt, "checkout", "--detach")
 	if err := os.WriteFile(filepath.Join(wt, "done.txt"), []byte("finished\n"), 0o644); err != nil {
 		t.Fatalf("write file to commit: %v", err)
 	}
@@ -136,13 +145,62 @@ func TestReapClosedBeadWorktrees_ProtectsUnpushedCommitsDespiteStashDowngrade(t 
 	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
 
 	if len(report.Reaped) != 0 {
-		t.Fatalf("Reaped = %+v, want 0 for a worktree with unpushed commits", report.Reaped)
+		t.Fatalf("Reaped = %+v, want 0 for a worktree whose commits no ref carries", report.Reaped)
 	}
-	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unlanded=true") {
-		t.Fatalf("Protected = %+v, want 1 entry citing unlanded commits", report.Protected)
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "unpreserved=true") {
+		t.Fatalf("Protected = %+v, want 1 entry citing unpreserved commits", report.Protected)
 	}
 	if _, err := os.Stat(wt); err != nil {
-		t.Fatalf("worktree with unpushed commits was removed: %v", err)
+		t.Fatalf("worktree whose commits no ref carries was removed: %v", err)
+	}
+}
+
+// TestReapClosedBeadWorktrees_ReapsUnlandedWorkPreservedByItsBranch is the
+// other half of that boundary, and the defect this pair was written to close.
+//
+// Holding a worktree because its commits have not landed protects nothing when
+// a branch already holds those commits: removal cannot destroy them. Measured
+// on this fleet, that mistake held 51 worktrees whose work was fully merged
+// into main — the reaper had been armed and reaping for five days and released
+// none of them — and 44 of the 51 were branch-backed, so their commits were
+// never at risk in the first place. The tree is reaped; the unlanded work is
+// reported as a warning naming the branch that still holds it, which is the
+// visibility the protection used to provide.
+func TestReapClosedBeadWorktrees_ReapsUnlandedWorkPreservedByItsBranch(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-pres01")
+	if err := os.WriteFile(filepath.Join(wt, "done.txt"), []byte("finished\n"), 0o644); err != nil {
+		t.Fatalf("write file to commit: %v", err)
+	}
+	mustGit(t, wt, "add", ".")
+	mustGit(t, wt, "-c", "commit.gpgsign=false", "commit", "-m", "unpushed but branch-backed")
+	head := strings.TrimSpace(gitStdout(t, wt, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(gitStdout(t, wt, "rev-parse", "--abbrev-ref", "HEAD"))
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-pres01", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+
+	if len(report.Protected) != 0 {
+		t.Fatalf("Protected = %+v, want 0: the branch preserves this work", report.Protected)
+	}
+	if len(report.Reaped) != 1 {
+		t.Fatalf("Reaped = %+v, want exactly 1", report.Reaped)
+	}
+	if !report.Reaped[0].HoldsUnlandedWork {
+		t.Error("HoldsUnlandedWork = false on the reaped decision; the summary count would under-report unlanded work once it stops being a protection")
+	}
+	if !strings.Contains(report.Reaped[0].Warning, branch) {
+		t.Errorf("Warning = %q, want it to name the branch %q that still holds the work", report.Reaped[0].Warning, branch)
+	}
+	// The point of the whole change: the commit outlives the worktree.
+	if _, err := os.Stat(wt); err == nil {
+		t.Error("worktree still present, want removed")
+	}
+	if got := strings.TrimSpace(gitStdout(t, rigRoot, "rev-parse", branch)); got != head {
+		t.Errorf("branch %s = %s after reaping, want the preserved head %s", branch, got, head)
 	}
 }
 

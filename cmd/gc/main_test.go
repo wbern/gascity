@@ -7306,11 +7306,24 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
-	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
-base = "builtin:claude"`)
+// TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnacceptedFamily
+// drives the full doPrimeWithMode path to prove the hook-stdin session id is
+// rejected for a provider family that does not deliver its authoritative resume
+// id that way. providerAcceptsHookStdinSessionID admits only codex and claude;
+// everything else must leave session_key empty rather than persist an id whose
+// resume semantics were never verified for that provider.
+//
+// This test previously used "claude" as its unaccepted example and had been
+// failing since e0ff4684b, which deliberately widened the predicate to accept
+// claude (claude cannot be handed a session id up front, so its SessionStart
+// hook is the only capture point) without retargeting this case. The invariant
+// is unchanged; only the example provider had gone stale. Claude's positive
+// path is covered by TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinCaptured.
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnacceptedFamily(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
 	setPrimeHookStdinJSON(t, map[string]string{
-		"session_id":      "claude-provider-session",
+		"session_id":      "gemini-provider-session",
 		"hook_event_name": "SessionStart",
 		"source":          "startup",
 	})
@@ -7330,7 +7343,7 @@ base = "builtin:claude"`)
 		t.Fatal(err)
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty: gemini does not deliver its resume id on hook stdin", got)
 	}
 }
 
