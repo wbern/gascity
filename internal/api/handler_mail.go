@@ -341,14 +341,20 @@ func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, er
 	}); ok {
 		return counter.CountRecipients(recipients)
 	}
-	var totalAll, unreadAll int
-	for _, recipient := range recipients {
-		total, unread, err := mp.Count(recipient)
-		if err != nil {
-			return 0, 0, err
+	// Count whole messages rather than summing per-recipient counts: a message
+	// can be returned under more than one route, and per-route counts carry no
+	// identity to reconcile that. mailAllForRecipients already dedupes by ID.
+	messages, err := mailAllForRecipients(mp, recipients)
+	if err != nil {
+		return 0, 0, err
+	}
+	totalAll := 0
+	unreadAll := 0
+	for _, message := range messages {
+		totalAll++
+		if !message.Read {
+			unreadAll++
 		}
-		totalAll += total
-		unreadAll += unread
 	}
 	return totalAll, unreadAll, nil
 }
