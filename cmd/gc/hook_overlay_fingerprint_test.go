@@ -207,6 +207,81 @@ func TestStageHookFiles_UnreadableSourceYieldsSentinel(t *testing.T) {
 	}
 }
 
+// TestStageHookFiles_EmitsEntryForNotYetStagedOverlayFile pins gcw-u67z. A
+// mergeable hook file whose provider slot is absent from install_agent_hooks is
+// deliberately NOT created before fingerprinting (the pre-fingerprint
+// materializer skips mergeable paths so hooks.Install can own them), but
+// session start stages it with no such skip. If the CopyEntry is emitted only
+// when the destination already exists, the entry goes absent -> present across
+// staging and the CopyFiles field hash moves: config drift, and a restart.
+//
+// The entry must therefore be emitted whenever an overlay owns the path, even
+// though the destination does not exist yet.
+func TestStageHookFiles_EmitsEntryForNotYetStagedOverlayFile(t *testing.T) {
+	cityPath := t.TempDir()
+	overlayDir := filepath.Join(cityPath, "packs", "core", "overlay")
+	overlaySrc := filepath.Join(overlayDir, overlay.PerProviderDir, "gemini", ".gemini", "settings.json")
+	workDir := filepath.Join(cityPath, "worker")
+	if err := os.MkdirAll(filepath.Dir(overlaySrc), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(overlaySrc, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	providers := []string{"gemini"}
+	dirs := []string{overlayDir}
+	workCopy := filepath.Join(workDir, ".gemini", "settings.json")
+
+	// Destination does NOT exist yet — this is the pre-staging state.
+	if _, err := os.Stat(workCopy); !os.IsNotExist(err) {
+		t.Fatalf("fixture broken: destination should not exist yet (%v)", err)
+	}
+	before := geminiHookEntry(t, stageHookFiles(nil, cityPath, workDir, providers, dirs))
+	if before.ContentHash == "" {
+		t.Fatal("entry for a not-yet-staged overlay-owned hook file has no ContentHash")
+	}
+
+	// Simulate session start staging the overlay into the workdir.
+	if err := os.MkdirAll(filepath.Dir(workCopy), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(workCopy, []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	after := geminiHookEntry(t, stageHookFiles(nil, cityPath, workDir, providers, dirs))
+	if before.ContentHash != after.ContentHash {
+		t.Fatalf("ContentHash moved once staging created the file: before=%q after=%q", before.ContentHash, after.ContentHash)
+	}
+	if before.RelDst != after.RelDst || before.Probed != after.Probed || before.Src != after.Src {
+		t.Fatalf("entry shape changed across staging:\n before=%#v\n after=%#v", before, after)
+	}
+}
+
+// TestStageHookFiles_NoEntryWhenNeitherSideExists pins the negative: a hook
+// path that neither the workdir nor any overlay owns must stay unstaged.
+// Emitting an entry for it would fabricate a fingerprint input and, on
+// container runtimes, a copy of a file that does not exist anywhere.
+func TestStageHookFiles_NoEntryWhenNeitherSideExists(t *testing.T) {
+	cityPath := t.TempDir()
+	overlayDir := filepath.Join(cityPath, "packs", "core", "overlay")
+	workDir := filepath.Join(cityPath, "worker")
+	for _, d := range []string{overlayDir, workDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	got := stageHookFiles(nil, cityPath, workDir, []string{"gemini"}, []string{overlayDir})
+	for _, e := range got {
+		if e.RelDst == path.Join("worker", ".gemini", "settings.json") {
+			t.Fatalf("staged a hook entry with no workdir file and no overlay source: %#v", e)
+		}
+	}
+}
+
 // TestStageHookFiles_UniversalOverlaySourceIsHashed covers a hook file shipped
 // at the overlay root rather than in a per-provider slot.
 func TestStageHookFiles_UniversalOverlaySourceIsHashed(t *testing.T) {

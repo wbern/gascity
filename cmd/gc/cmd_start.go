@@ -1253,13 +1253,33 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 		}
 		for _, rel := range provider.relPaths {
 			abs := filepath.Join(workDir, rel)
-			if _, err := os.Stat(abs); err == nil {
-				copyFiles = append(copyFiles, runtime.CopyEntry{
-					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed:      true,
-					ContentHash: hookFileContentHash(overlayDirs, hookProviders, rel, abs),
-				})
+			// An overlay-owned hook file counts as staged even before it exists
+			// on disk. The pre-fingerprint materializer skips
+			// overlay.IsMergeablePath files so hooks.Install can be their sole
+			// writer, and hooks.Install only iterates install_agent_hooks — so
+			// for a provider slot outside that list nothing creates the file
+			// before the fingerprint is taken, while session start stages it
+			// with no such skip. Keying the entry purely on the destination
+			// existing therefore makes it go absent -> present across staging,
+			// which moves the CopyFiles field hash and reads as config drift
+			// (gcw-u67z). Emitting it from the overlay source keeps the entry —
+			// and its source-derived hash — identical on both sides.
+			//
+			// Src stays the workdir path even when it does not exist yet:
+			// stageCopyFiles skips entries whose Src and destination are the
+			// same file, which is what stops a plain copy from clobbering the
+			// JSON merge staging performs for mergeable paths. Local and
+			// container staging both apply overlays before CopyFiles, so the
+			// file is present by the time the entry is used.
+			_, statErr := os.Stat(abs)
+			if statErr != nil && len(hookOverlaySourcePaths(overlayDirs, hookProviders, rel)) == 0 {
+				continue
 			}
+			copyFiles = append(copyFiles, runtime.CopyEntry{
+				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				Probed:      true,
+				ContentHash: hookFileContentHash(overlayDirs, hookProviders, rel, abs),
+			})
 		}
 	}
 
