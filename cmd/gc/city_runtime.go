@@ -1875,6 +1875,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, w := range config.ReservedPrefixWarnings(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)) {
 		appendWarning(fmt.Sprintf("config reload: %s", w))
 	}
+	// Surfaced on reload as well as on start: a resume_command edit that
+	// discards its appended option flags must not go quiet until the next
+	// full restart (gcw-bdmt).
+	for _, w := range config.ResumeCommandWarnings(nextCfg.Providers) {
+		appendWarning(fmt.Sprintf("config reload: %s", w))
+	}
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {

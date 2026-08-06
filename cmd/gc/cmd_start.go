@@ -765,6 +765,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+	// A resume_command that discards its appended option flags starts fine and
+	// then runs without the permission mode / effort / model the operator
+	// declared. Non-fatal, but invisible otherwise (gcw-bdmt).
+	for _, w := range config.ResumeCommandWarnings(cfg.Providers) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
