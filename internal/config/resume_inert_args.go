@@ -125,7 +125,15 @@ func ResumeCommandWarnings(providers map[string]ProviderSpec) []string {
 		if !ResumeCommandSwallowsAppendedArgs(resolved.ResumeCommand) {
 			continue
 		}
-		if len(resolved.EffectiveDefaults) == 0 {
+		// Report only the options a resumed session GENUINELY loses. Gating on
+		// "has any effective default" is too coarse: a wrapper that bakes its
+		// flags into the script body loses nothing, and an option whose
+		// selected choice carries no FlagArgs contributes nothing. Warning in
+		// those cases sends the operator after a flag that is not missing, and
+		// acting on the advice would put a DUPLICATE flag on the real command
+		// line beside the hardcoded one.
+		lost := lostResumeOptionKeys(resolved.ResumeCommand, resolved.OptionsSchema, resolved.EffectiveDefaults)
+		if len(lost) == 0 {
 			// Nothing would be appended, so nothing can be lost. Stay quiet:
 			// an advisory nobody can act on trains operators to ignore them.
 			continue
@@ -134,17 +142,47 @@ func ResumeCommandWarnings(providers map[string]ProviderSpec) []string {
 			"provider %q: resume_command is a shell wrapper that discards the option flags resolution appends to it, so resumed sessions silently lose %s. "+
 				"End the script with \"$@\" AND give the wrapper a $0 placeholder argument (e.g. ... {{.SessionKey}} \"$@\"' %s). "+
 				"Both are required: with \"$@\" but no $0 placeholder the FIRST flag is still consumed as the script name",
-			name, optionDefaultKeyList(resolved.EffectiveDefaults), name))
+			name, strings.Join(lost, ", "), name))
 	}
 	return warnings
 }
 
-// optionDefaultKeyList renders the option keys at risk, sorted, for the warning.
-func optionDefaultKeyList(defaults map[string]string) string {
-	keys := make([]string, 0, len(defaults))
-	for k := range defaults {
-		keys = append(keys, k)
+// lostResumeOptionKeys returns the option keys whose flags would be appended to
+// an inert resume command AND are not already carried by the command itself, in
+// schema order. These are the options a resumed session genuinely loses.
+//
+// It deliberately asks a different question from missingDefaultArgsForCommand.
+// That helper decides what to APPEND, and it tokenizes with shellquote, so for
+// a wrapper like
+//
+//	/bin/sh -c 'exec launcher -- claude --resume KEY --dangerously-skip-permissions'
+//
+// the whole script body is ONE token and the hardcoded flag is invisible to it —
+// the appender re-appends a duplicate, which the shell then discards. Nothing is
+// lost in that case: the script applies the flag itself. Reporting it would send
+// an operator after a flag that is not missing, and acting on the advice would
+// put a duplicate on the real command line.
+//
+// So the marker is searched in the raw command STRING, quoted script body
+// included, rather than in its tokens.
+func lostResumeOptionKeys(command string, schema []ProviderOption, effectiveDefaults map[string]string) []string {
+	var lost []string
+	for _, opt := range schema {
+		value := effectiveDefaults[opt.Key]
+		if value == "" {
+			value = opt.Default
+		}
+		if value == "" {
+			continue
+		}
+		choice := findChoice(opt.Choices, value)
+		if choice == nil || len(choice.FlagArgs) == 0 {
+			continue
+		}
+		if strings.Contains(command, choice.FlagArgs[0]) {
+			continue
+		}
+		lost = append(lost, opt.Key)
 	}
-	sort.Strings(keys)
-	return strings.Join(keys, ", ")
+	return lost
 }

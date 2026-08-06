@@ -117,6 +117,66 @@ func TestResumeWarningsSilentWhenNothingWouldBeAppended(t *testing.T) {
 	}
 }
 
+// TestResumeWarningsQuietWhenScriptAlreadyCarriesTheFlags pins that the gate
+// asks the appender's exact question. A wrapper that bakes its flags into the
+// script body loses nothing: the appender skips options already present in the
+// command (commandContainsOption), so nothing is appended and nothing can be
+// discarded. Warning here is a false positive, and acting on the advice would
+// make a DUPLICATE flag reach the binary alongside the hardcoded one.
+func TestResumeWarningsQuietWhenScriptAlreadyCarriesTheFlags(t *testing.T) {
+	providers := map[string]ProviderSpec{
+		"baked-in": {
+			Command:       "claude",
+			ResumeCommand: `/bin/sh -c 'exec launcher -- claude --resume {{.SessionKey}} --dangerously-skip-permissions'`,
+			OptionsSchema: []ProviderOption{{
+				Key:     "permission_mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []OptionChoice{{Value: "unrestricted", FlagArgs: []string{"--dangerously-skip-permissions"}}},
+			}},
+		},
+	}
+	if w := ResumeCommandWarnings(providers); len(w) != 0 {
+		t.Errorf("warned about a wrapper that already carries its flags: %v", w)
+	}
+}
+
+// TestResumeWarningsNamesOnlyLostKeys pins that the message lists the keys that
+// are actually discarded, not every effective default. Naming a key the script
+// already applies sends the operator after a flag that is not missing.
+func TestResumeWarningsNamesOnlyLostKeys(t *testing.T) {
+	providers := map[string]ProviderSpec{
+		"partial": {
+			Command:       "claude",
+			ResumeCommand: `/bin/sh -c 'exec launcher -- claude --resume {{.SessionKey}} --dangerously-skip-permissions'`,
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Type:    "select",
+					Default: "unrestricted",
+					Choices: []OptionChoice{{Value: "unrestricted", FlagArgs: []string{"--dangerously-skip-permissions"}}},
+				},
+				{
+					Key:     "effort",
+					Type:    "select",
+					Default: "high",
+					Choices: []OptionChoice{{Value: "high", FlagArgs: []string{"--effort", "high"}}},
+				},
+			},
+		},
+	}
+	w := ResumeCommandWarnings(providers)
+	if len(w) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(w), w)
+	}
+	if !strings.Contains(w[0], "effort") {
+		t.Errorf("warning does not name the genuinely lost key %q: %s", "effort", w[0])
+	}
+	if strings.Contains(w[0], "permission_mode") {
+		t.Errorf("warning names %q, which the script already applies and does not lose: %s", "permission_mode", w[0])
+	}
+}
+
 // TestResumeWarningsFixedShapeStaysQuiet pins that a correctly fixed wrapper
 // produces no warning, for both the base and anything inheriting it.
 func TestResumeWarningsFixedShapeStaysQuiet(t *testing.T) {
