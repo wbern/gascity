@@ -28,11 +28,13 @@ import (
 // cmd_nudge.go), so JSON hook formats stay one valid document.
 //
 // TWO TRANSCRIPT DIALECTS. Claude records usage as message.usage; Codex records
-// it as event_msg entries of type token_count. The two share no usage entries,
-// so the injector simply tries Claude first and Codex second — no provider
-// detection, and no way for one family's transcript to be misread as the
-// other's. Codex usage is reached through internal/worker/transcript, the
-// worker-owned seam, because cmd/gc may not import internal/sessionlog.
+// it as event_msg entries of type token_count. Each reader structurally
+// requires fields the other never emits, so no transcript can be misread as the
+// wrong dialect. Every reader is therefore always attempted, and the hook's
+// --hook-format only decides the ORDER (see transcriptContextReaders for why it
+// is a hint and not a gate). Codex usage is reached through
+// internal/worker/transcript, the worker-owned seam, because cmd/gc may not
+// import internal/sessionlog.
 //
 // WINDOW RESOLUTION IS PROVIDER-FIRST for Codex. Codex reports
 // model_context_window per invocation; that beats any model-string lookup
@@ -76,10 +78,82 @@ type transcriptUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
+// transcriptContext is one dialect's answer for a session's live context size.
+type transcriptContext struct {
+	// Tokens is the prompt-side footprint of the newest usage entry.
+	Tokens int
+	// ProviderWindow is the context window the provider reported for that
+	// entry, or 0 when the dialect does not report one.
+	ProviderWindow int
+	// Models lists the model strings seen, for model-table window fallback.
+	Models []string
+}
+
+// transcriptContextReader extracts the live context size from one transcript
+// dialect. ok is false when the file is not in that dialect, or on any read or
+// parse failure — the caller cannot distinguish the two, and does not need to:
+// both mean "this reader has no answer".
+type transcriptContextReader func(path string) (transcriptContext, bool)
+
+// readClaudeTranscriptContext reads the Claude dialect (message.usage entries).
+func readClaudeTranscriptContext(path string) (transcriptContext, bool) {
+	tokens, models, ok := lastTranscriptUsage(path)
+	if !ok {
+		return transcriptContext{}, false
+	}
+	// Claude does not report a per-invocation context window; the window comes
+	// from the model table.
+	return transcriptContext{Tokens: tokens, Models: models}, true
+}
+
+// readCodexTranscriptContext reads the Codex dialect (event_msg token_count
+// entries) through the worker-owned seam.
+func readCodexTranscriptContext(path string) (transcriptContext, bool) {
+	c, ok := transcript.CodexTailContextFor(path)
+	if !ok {
+		return transcriptContext{}, false
+	}
+	return transcriptContext{Tokens: c.Tokens, ProviderWindow: c.ProviderWindowTokens, Models: c.Models}, true
+}
+
+// transcriptContextReaders orders the dialect readers for a hook invocation.
+//
+// EVERY reader is always attempted; hookFormat only decides which goes first.
+// That is deliberate, and the asymmetry of the signal is why: gc installs the
+// UserPromptSubmit hook with an explicit --hook-format for codex, gemini and
+// antigravity, but Claude's hook passes none. An empty hookFormat therefore
+// means "not one of the families that announce themselves" — NOT "Claude". So
+// hookFormat is sound as a hint and unsound as a gate.
+//
+// Gating on it would also fail in the worst possible direction. A provider
+// whose hook is installed without the flag would be routed to the wrong reader
+// and the injector would emit nothing — and silence is this feature's fail-safe
+// state, indistinguishable from "below threshold". That is exactly how Codex
+// went without a single advisory across 346 rollouts before anyone noticed.
+// Falling through costs one wasted tail scan (measured 1.9ms on an 18MB
+// rollout, against ~650ms already spent resolving the session in the same hook
+// invocation); guessing wrong costs the whole feature, silently.
+//
+// Trying both is safe because the dialects are disjoint by construction, not by
+// luck: each reader structurally requires fields the other never emits
+// (message.usage vs event_msg/token_count/info). Measured across 346 Codex and
+// 64 Claude transcripts, neither reader ever matched the other's file.
+func transcriptContextReaders(hookFormat string) []transcriptContextReader {
+	if strings.ToLower(strings.TrimSpace(hookFormat)) == hookOutputFormatCodex {
+		return []transcriptContextReader{readCodexTranscriptContext, readClaudeTranscriptContext}
+	}
+	return []transcriptContextReader{readClaudeTranscriptContext, readCodexTranscriptContext}
+}
+
 // contextInjectLine returns the context-usage guidance line for the session
 // whose hook input JSON is in hookInput, or "" when disabled, below the
 // advisory threshold, or on any error (fail-safe silent).
-func contextInjectLine(hookInput []byte) string {
+//
+// hookFormat is the provider hook-output format for this invocation; it only
+// orders the dialect readers (see transcriptContextReaders) and never gates
+// them, so an empty or unexpected value costs a wasted scan rather than an
+// answer.
+func contextInjectLine(hookInput []byte, hookFormat string) string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
 	case "0", "false", "off":
 		return ""
@@ -92,22 +166,24 @@ func contextInjectLine(hookInput []byte) string {
 	if path == "" {
 		return ""
 	}
-	if tokens, models, ok := lastTranscriptUsage(path); ok {
-		return contextUsageMessage(tokens, contextWindowTokens(models, 0))
-	}
-	// Codex reports context through event_msg token_count entries instead of
-	// message.usage, so a Codex rollout yields nothing above. The two dialects
-	// share no usage entries, so trying both needs no provider detection and
-	// cannot change any Claude verdict.
-	if codex, ok := transcript.CodexTailContextFor(path); ok {
-		return contextUsageMessage(codex.Tokens, contextWindowTokens(codex.Models, codex.ProviderWindowTokens))
+	for _, read := range transcriptContextReaders(hookFormat) {
+		if c, ok := read(path); ok {
+			return contextUsageMessage(c.Tokens, contextWindowTokens(c.Models, c.ProviderWindow))
+		}
 	}
 	return ""
 }
 
-// transcriptPathForHook resolves the transcript to read for a hook payload,
-// falling back to Codex session-id discovery when the payload carries no
-// transcript path. Returns "" when nothing is resolvable.
+// transcriptPathForHook resolves the transcript to read for a hook payload.
+//
+// The payload's transcript_path is authoritative when present. The fallback
+// exists for Codex alone because Codex types that field nullable while always
+// supplying session_id and cwd, and its rollout filename embeds the session id;
+// Claude always supplies a path and never reaches the fallback. Discovery is
+// not a guess: it requires the rollout's own session_meta cwd to match, so a
+// rollout belonging to another working directory is refused.
+//
+// Returns "" when nothing is resolvable, which the caller treats as silence.
 func transcriptPathForHook(in hookStdinInput) string {
 	if p := strings.TrimSpace(in.TranscriptPath); p != "" {
 		return p

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -12,8 +13,14 @@ import (
 // Claude message.usage shape, so these tests pin the second transcript dialect
 // the advisory has to understand. The two shapes are disjoint: a Codex rollout
 // carries no message.usage entry and a Claude transcript carries no
-// event_msg/token_count entry, which is why the injector can try both without
-// provider detection and without any risk of cross-family misreads.
+// event_msg/token_count entry, which is why every reader can be attempted
+// against every transcript with no risk of a cross-family misread.
+//
+// Except where a case is specifically about hookFormat, these tests pass an
+// EMPTY hookFormat on purpose. That is the pessimistic ordering for a Codex
+// fixture — Claude is tried first and misses — so it exercises the fallthrough
+// rather than the hinted fast path. It is also what a provider whose hook omits
+// --hook-format actually sends.
 
 // codexTurnContextLine renders the turn_context entry that names the model for
 // the token_count entries following it. Codex places this entry once per turn,
@@ -57,7 +64,7 @@ func TestContextInjectCodexUrgentBand(t *testing.T) {
 		codexTurnContextLine(),
 		codexTokenCountLine(250_000, 241_537, 120_000, 258_400),
 	)
-	got := contextInjectLine(hookInputFor(p))
+	got := contextInjectLine(hookInputFor(p), "")
 	if got == "" {
 		t.Fatal("codex rollout at 93.5% must produce an urgent advisory, got silence")
 	}
@@ -77,7 +84,7 @@ func TestContextInjectCodexAdvisoryBand(t *testing.T) {
 		codexTurnContextLine(),
 		codexTokenCountLine(190_000, 180_880, 90_000, 258_400),
 	)
-	got := contextInjectLine(hookInputFor(p))
+	got := contextInjectLine(hookInputFor(p), "")
 	if !strings.Contains(got, "~70%") || !strings.Contains(got, "clean seam") {
 		t.Errorf("advisory band line wrong: %q", got)
 	}
@@ -97,7 +104,7 @@ func TestContextInjectCodexSilentBelowAdvisory(t *testing.T) {
 		codexTurnContextLine(),
 		codexTokenCountLine(140_000, 132_383, 60_000, 258_400),
 	)
-	if got := contextInjectLine(hookInputFor(p)); got != "" {
+	if got := contextInjectLine(hookInputFor(p), ""); got != "" {
 		t.Errorf("51.2%% of the provider-reported window must be silent, got %q", got)
 	}
 }
@@ -109,7 +116,7 @@ func TestContextInjectCodexProviderWindowBeatsModelTable(t *testing.T) {
 	// measured at 21.5% of real rollouts). The provider-reported window must
 	// still be used rather than flooring to the conservative default.
 	p := writeCodexRollout(t, codexTokenCountLine(140_000, 132_383, 60_000, 258_400))
-	if got := contextInjectLine(hookInputFor(p)); got != "" {
+	if got := contextInjectLine(hookInputFor(p), ""); got != "" {
 		t.Errorf("provider window must be honored with no model string, got %q", got)
 	}
 }
@@ -123,7 +130,7 @@ func TestContextInjectCodexFallsBackToModelTableWithoutProviderWindow(t *testing
 		codexTurnContextLine(),
 		codexTokenCountLine(210_000, 200_000, 90_000, 0),
 	)
-	got := contextInjectLine(hookInputFor(p))
+	got := contextInjectLine(hookInputFor(p), "")
 	if !strings.Contains(got, "~78%") {
 		t.Errorf("model-table window (258000) should give ~78%%: %q", got)
 	}
@@ -141,7 +148,7 @@ func TestContextInjectCodexNoWindowAndNoModelFloorsToDefault(t *testing.T) {
 	// with no window evidence at all, erring toward an early handoff is safer
 	// than silence.
 	p := writeCodexRollout(t, codexTokenCountLine(200_000, 190_000, 90_000, 0))
-	if got := contextInjectLine(hookInputFor(p)); !strings.Contains(got, "HIGH") {
+	if got := contextInjectLine(hookInputFor(p), ""); !strings.Contains(got, "HIGH") {
 		t.Errorf("no window evidence should floor to the 200k default and fire: %q", got)
 	}
 }
@@ -155,19 +162,19 @@ func TestContextInjectCodexEnvWindowOverrideStillWins(t *testing.T) {
 		codexTurnContextLine(),
 		codexTokenCountLine(140_000, 132_383, 60_000, 258_400),
 	)
-	got := contextInjectLine(hookInputFor(p))
+	got := contextInjectLine(hookInputFor(p), "")
 	if !strings.Contains(got, "HIGH") {
 		t.Errorf("132383/150000 = 88%% must be urgent under the env override: %q", got)
 	}
 }
 
-func TestContextInjectCodexDisableEnvStillHonoured(t *testing.T) {
+func TestContextInjectCodexDisableEnvStillHonored(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "off")
 	p := writeCodexRollout(t,
 		codexTurnContextLine(),
 		codexTokenCountLine(250_000, 241_537, 120_000, 258_400),
 	)
-	if got := contextInjectLine(hookInputFor(p)); got != "" {
+	if got := contextInjectLine(hookInputFor(p), ""); got != "" {
 		t.Errorf("GC_INJECT_CONTEXT=off must silence codex too, got %q", got)
 	}
 }
@@ -183,7 +190,7 @@ func TestContextInjectCodexLastEntryWins(t *testing.T) {
 		codexTokenCountLine(250_000, 241_537, 120_000, 258_400),
 		codexTokenCountLine(30_000, 25_000, 10_000, 258_400),
 	)
-	if got := contextInjectLine(hookInputFor(p)); got != "" {
+	if got := contextInjectLine(hookInputFor(p), ""); got != "" {
 		t.Errorf("last codex entry (9.7%%) should win and be silent, got %q", got)
 	}
 }
@@ -194,7 +201,7 @@ func TestContextInjectClaudeTranscriptUnaffectedByCodexPath(t *testing.T) {
 	// Regression guard: adding the codex fallback must not change any Claude
 	// verdict. 900k of 1M stays urgent.
 	p := writeTranscript(t, usageLine("claude-opus-4-8[1m]", 50_000, 800_000, 50_000))
-	if got := contextInjectLine(hookInputFor(p)); !strings.Contains(got, "HIGH") {
+	if got := contextInjectLine(hookInputFor(p), ""); !strings.Contains(got, "HIGH") {
 		t.Errorf("claude urgent verdict must be unchanged: %q", got)
 	}
 }
@@ -223,7 +230,7 @@ func TestContextInjectCodexDiscoversTranscriptWhenPathOmitted(t *testing.T) {
 	}
 
 	payload := fmt.Sprintf(`{"transcript_path":null,"session_id":%q,"cwd":%q,"hook_event_name":"UserPromptSubmit"}`, sessionID, workDir)
-	got := contextInjectLine([]byte(payload))
+	got := contextInjectLine([]byte(payload), "")
 	if !strings.Contains(got, "HIGH") {
 		t.Errorf("discovered codex rollout at 93.5%% must be urgent, got %q", got)
 	}
@@ -231,10 +238,10 @@ func TestContextInjectCodexDiscoversTranscriptWhenPathOmitted(t *testing.T) {
 
 func TestContextInjectNoPathAndNoSessionIDStaysSilent(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
-	if got := contextInjectLine([]byte(`{"hook_event_name":"UserPromptSubmit"}`)); got != "" {
+	if got := contextInjectLine([]byte(`{"hook_event_name":"UserPromptSubmit"}`), ""); got != "" {
 		t.Errorf("nothing to resolve must stay silent, got %q", got)
 	}
-	if got := contextInjectLine([]byte(`{"transcript_path":null,"session_id":"abc"}`)); got != "" {
+	if got := contextInjectLine([]byte(`{"transcript_path":null,"session_id":"abc"}`), ""); got != "" {
 		t.Errorf("session id without cwd must stay silent, got %q", got)
 	}
 }
@@ -243,7 +250,85 @@ func TestContextInjectUnparseableTranscriptStaysSilent(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
 	// Neither dialect: fail-safe silence, never a panic or a bogus advisory.
 	p := writeCodexRollout(t, `{"not":"a transcript"}`, `garbage`)
-	if got := contextInjectLine(hookInputFor(p)); got != "" {
+	if got := contextInjectLine(hookInputFor(p), ""); got != "" {
 		t.Errorf("unparseable transcript must stay silent, got %q", got)
+	}
+}
+
+// TestTranscriptContextReadersOrdering pins that hookFormat reorders the
+// dialect readers without ever dropping one. The count assertion is the
+// load-bearing half: a future change that turns the hint into a gate would
+// shrink the slice, and that is the regression that would silently reintroduce
+// the Codex blind spot for any provider whose hook omits --hook-format.
+func TestTranscriptContextReadersOrdering(t *testing.T) {
+	claude := reflect.ValueOf(readClaudeTranscriptContext).Pointer()
+	codex := reflect.ValueOf(readCodexTranscriptContext).Pointer()
+
+	for _, tc := range []struct {
+		hookFormat string
+		wantFirst  uintptr
+		name       string
+	}{
+		{"", claude, "no hint falls back to claude-first"},
+		{hookOutputFormatCodex, codex, "codex hint puts codex first"},
+		{"CoDeX", codex, "hint match is case- and space-insensitive"},
+		{"  codex  ", codex, "hint match trims whitespace"},
+		{hookOutputFormatGemini, claude, "a non-codex hint does not reorder"},
+		{"totally-unknown", claude, "an unrecognized hint does not reorder"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readers := transcriptContextReaders(tc.hookFormat)
+			if len(readers) != 2 {
+				t.Fatalf("len(readers) = %d, want 2: every dialect must stay reachable, the hint only orders them", len(readers))
+			}
+			first := reflect.ValueOf(readers[0]).Pointer()
+			if first != tc.wantFirst {
+				t.Errorf("first reader is not the expected one for hookFormat %q", tc.hookFormat)
+			}
+			if reflect.ValueOf(readers[1]).Pointer() == first {
+				t.Error("the two readers must be distinct")
+			}
+		})
+	}
+}
+
+// TestContextInjectHookFormatNeverChangesTheVerdict is the safety property that
+// justifies treating hookFormat as a hint: whatever it says — including a wrong
+// or absent value — the emitted line must be identical, because both dialects
+// are always attempted. Only the order, and therefore the wasted work, differs.
+func TestContextInjectHookFormatNeverChangesTheVerdict(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "")
+
+	codexUrgent := writeCodexRollout(t,
+		codexTurnContextLine(),
+		codexTokenCountLine(250_000, 241_537, 120_000, 258_400),
+	)
+	codexSilent := writeCodexRollout(t,
+		codexTurnContextLine(),
+		codexTokenCountLine(140_000, 132_383, 60_000, 258_400),
+	)
+	claudeUrgent := writeTranscript(t, usageLine("claude-opus-4-8[1m]", 50_000, 800_000, 50_000))
+	claudeSilent := writeTranscript(t, usageLine("claude-fable-5", 1_000, 98_000, 1_000))
+
+	for _, fixture := range []struct {
+		name string
+		path string
+	}{
+		{"codex urgent", codexUrgent},
+		{"codex silent", codexSilent},
+		{"claude urgent", claudeUrgent},
+		{"claude silent", claudeSilent},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			// The empty hint is the baseline: it is what Claude's hook sends and
+			// what any provider that forgets the flag sends.
+			want := contextInjectLine(hookInputFor(fixture.path), "")
+			for _, hint := range []string{hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity, "nonsense"} {
+				if got := contextInjectLine(hookInputFor(fixture.path), hint); got != want {
+					t.Errorf("hookFormat %q changed the verdict\n got: %q\nwant: %q", hint, got, want)
+				}
+			}
+		})
 	}
 }
