@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -1231,7 +1233,7 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 // Claude's city-level .gc/settings.json is staged here because settingsArgs
 // points --settings at the city-root path. Workdir hook files are included
 // only when they match the resolved provider or requested install-hook slots.
-func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hookProviders []string) []runtime.CopyEntry {
+func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hookProviders []string, overlayDirs []string) []runtime.CopyEntry {
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
@@ -1254,7 +1256,8 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed:      true,
+					ContentHash: hookFileContentHash(overlayDirs, hookProviders, rel, abs),
 				})
 			}
 		}
@@ -1299,6 +1302,81 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 type workDirHookProvider struct {
 	name     string
 	relPaths []string
+}
+
+// hookOverlaySourcePaths returns the overlay source files that session staging
+// will write onto workDir/<rel>, in the order staging applies them: for each
+// overlay dir, the universal file first, then the per-provider slots in
+// provider order (mirroring overlay.CopyDirForProviders).
+func hookOverlaySourcePaths(overlayDirs, providers []string, rel string) []string {
+	var out []string
+	appendIfFile := func(p string) {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			out = append(out, p)
+		}
+	}
+	for _, od := range overlayDirs {
+		od = strings.TrimSpace(od)
+		if od == "" {
+			continue
+		}
+		appendIfFile(filepath.Join(od, rel))
+		for _, provider := range providers {
+			provider = strings.TrimSpace(provider)
+			if provider == "" {
+				continue
+			}
+			appendIfFile(filepath.Join(od, overlay.PerProviderDir, provider, rel))
+		}
+	}
+	return out
+}
+
+// hookFileContentHash returns the fingerprint content hash for a hook file
+// staged from workDir.
+//
+// It hashes the overlay SOURCES that session staging will write onto dst, not
+// dst itself. Hashing dst is a self-inflicted drift loop: stageHookFiles runs
+// before runtime.StageSessionWorkDir, which overwrites (or JSON-merges, for
+// overlay.IsMergeablePath files) that very path with the canonical overlay
+// content. The pre-staging and post-staging bytes differ for any hook file not
+// already in canonical/merged form, ContentHash feeds the core fingerprint, and
+// the difference reads as config drift — so starting a session was enough to
+// make the next reconcile tick restart it. This is the same hazard the
+// .claude/skills exclusion above documents.
+//
+// Hashing the sources keeps genuine hook-overlay edits restart-worthy (overlay
+// dir content is hashed nowhere else in the fingerprint — hashCoreFields hashes
+// only cfg.OverlayDir, the path string) while being invariant under staging.
+// Note the invariant is not that staging is a pure function of the sources — for
+// a mergeable path staging merges the source INTO dst, so dst also depends on
+// what hooks.Install wrote. It is the weaker and sufficient property that
+// staging never writes the sources themselves. A consequence: the hooks.Install
+// half of a mergeable dst is no longer fingerprinted, so a binary upgrade that
+// changes the embedded hook document does not move the fingerprint. That matches
+// the deliberate .gc/settings.json treatment in ga-zfm.
+//
+// When no overlay owns the path the file is user-authored and nothing rewrites
+// it, so dst is hashed directly as before. An owning source that cannot be read
+// yields "" — the stable HASH_UNAVAILABLE sentinel documented on CopyFiles
+// fingerprinting — rather than silently falling back to dst, which would flip
+// the entry between two unrelated hash values on a transient I/O error and
+// spend two restarts recovering.
+func hookFileContentHash(overlayDirs, providers []string, rel, dst string) string {
+	sources := hookOverlaySourcePaths(overlayDirs, providers, rel)
+	if len(sources) == 0 {
+		return runtime.HashPathContent(dst)
+	}
+	h := sha256.New()
+	for _, src := range sources {
+		srcHash := runtime.HashPathContent(src)
+		if srcHash == "" {
+			return ""
+		}
+		h.Write([]byte(srcHash)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 var orderedWorkDirHookProviders = []workDirHookProvider{

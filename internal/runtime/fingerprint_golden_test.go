@@ -123,8 +123,8 @@ func TestFingerprintVersionPin(t *testing.T) {
 	// The version namespaces stored hashes; an UNINTENTIONAL bump during the
 	// de-conflation rebaselines every session (mass restart). An intentional
 	// bump is a deliberate edit to this assertion + a golden regen.
-	if FingerprintVersion != "v5" {
-		t.Errorf("FingerprintVersion = %q, want v5", FingerprintVersion)
+	if FingerprintVersion != "v6" {
+		t.Errorf("FingerprintVersion = %q, want v6", FingerprintVersion)
 	}
 }
 

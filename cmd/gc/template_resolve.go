@@ -236,7 +236,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			ContentHash: runtime.HashPathContentExcluding(scriptsDir, isOperationalScript),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
+	// Hook-file fingerprints are taken over the overlay sources that session
+	// staging will write onto workDir, so the same overlay dirs staging uses
+	// (materializeProviderOverlaysBeforeFingerprint / StageSessionWorkDir) must
+	// be passed here. Hashing the workdir copies instead makes starting a
+	// session look like config drift and restart it (gcw-0cv5).
+	packDirsForHooks := effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName)
+	hookOverlayDirs := make([]string, 0, len(packDirsForHooks)+1)
+	hookOverlayDirs = append(hookOverlayDirs, packDirsForHooks...)
+	if overlayDir != "" {
+		hookOverlayDirs = append(hookOverlayDirs, overlayDir)
+	}
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers), hookOverlayDirs)
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
