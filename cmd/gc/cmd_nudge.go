@@ -2334,6 +2334,9 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		if markErr := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); markErr != nil && nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
 		}
+		if warning := unconfirmedDropWarning(item); warning != "" && nudgeWarningWriter != nil {
+			fmt.Fprintln(nudgeWarningWriter, warning) //nolint:errcheck // best-effort warning emission
+		}
 	}
 	return deadLettered, nil
 }
@@ -2700,4 +2703,29 @@ func withNudgePollerPIDLock(pidPath string, fn func() error) error {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
 	return fn()
+}
+
+// unconfirmedDropWarning returns an operator-facing line when a queued nudge is
+// dead-lettered because its submit could not be confirmed, and "" otherwise.
+//
+// e22aed815 made ErrNudgeSubmitUnconfirmed terminal so the queue stops re-typing
+// a message the agent already received (the keystrokes reached tmux; only the
+// busy-state confirmation went unobserved). That is right, but it made the
+// outcome invisible: if "unconfirmed" ever means the Enter genuinely did not
+// submit, the reminder is dropped and nothing says so. This is the counter an
+// operator can watch — a rising number here is the signal that the terminal
+// decision has started costing real deliveries, rather than an agent that
+// mysteriously never answered.
+//
+// Deliberately silent for every other dead-letter cause. A fence mismatch or an
+// exhausted retry budget is ordinary and already visible in `gc nudge status`;
+// warning about those too would train operators to ignore the line that matters.
+func unconfirmedDropWarning(item queuedNudge) string {
+	if !strings.Contains(item.LastError, sessiontmux.ErrNudgeSubmitUnconfirmed.Error()) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"gc nudge: WARNING: dropped queued nudge %q for %q — submit was delivered to tmux but not confirmed, so it was not retried. "+
+			"If the agent did not act on it, the message was lost (see gcw-os58).",
+		item.ID, item.Agent)
 }
