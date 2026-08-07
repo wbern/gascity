@@ -22,7 +22,7 @@ const hookFirewallManifest = `{"schema_version":"1","kind":"gc.output_firewall",
 // lone object into a one-element array. Before gcw-qap3.16 that produced a
 // phantom candidate with an empty ID instead of an error.
 func TestDecodeHookClaimBeadsRejectsFirewallManifest(t *testing.T) {
-	got, err := decodeHookClaimBeads(hookFirewallManifest + "\n")
+	got, _, err := decodeHookClaimBeads(hookFirewallManifest + "\n")
 	if err == nil {
 		t.Fatalf("decodeHookClaimBeads() = %#v, want a truncation error", got)
 	}
@@ -35,7 +35,7 @@ func TestDecodeHookClaimBeadsRejectsFirewallManifest(t *testing.T) {
 }
 
 func TestDecodeHookClaimBeadsKeepsRealPayloads(t *testing.T) {
-	got, err := decodeHookClaimBeads(`[{"id":"work-1","status":"open"}]`)
+	got, _, err := decodeHookClaimBeads(`[{"id":"work-1","status":"open"}]`)
 	if err != nil {
 		t.Fatalf("decodeHookClaimBeads(): %v", err)
 	}
