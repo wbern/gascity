@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,12 +43,48 @@ func logDisposition(verb string, args []string, disposition string, exit int, st
 	if err != nil {
 		return
 	}
+	rotateIfOversized(path)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close() //nolint:errcheck // best-effort log
 	_, _ = f.Write(append(enc, '\n'))
+}
+
+// defaultRouteLogMaxBytes caps the route log. It is written on EVERY bd
+// dispatch and had no bound at all: on gc2 it reached 73.5 MiB between
+// 2026-07-19 and 2026-08-08 and was still growing (gcw-yr0o.8).
+const defaultRouteLogMaxBytes = 32 << 20 // 32 MiB
+
+// rotateIfOversized renames path to path+".1" once it exceeds the cap, so the
+// live log restarts empty and at most one generation is kept. Best-effort, like
+// the rest of this file: every failure path simply leaves the log as it was
+// rather than risking a bd invocation.
+//
+// One generation, not N, on purpose — this is routing telemetry, not an audit
+// trail, and an unbounded ring of generations would reintroduce the growth this
+// fixes. Any earlier path+".1" is replaced; os.Rename overwrites on POSIX.
+//
+// Concurrency: many agents invoke bd at once, so two processes can decide to
+// rotate together. os.Rename is atomic, so the loser renames an already-rotated
+// (now short) file and at worst a few telemetry lines are lost. That is
+// acceptable for a best-effort log and is why this takes no lock — a lock here
+// would sit on the hot path of every bd call in the fleet.
+func rotateIfOversized(path string) {
+	maxBytes := int64(defaultRouteLogMaxBytes)
+	if v := strings.TrimSpace(os.Getenv("GC_BDSHIM_LOG_MAX_BYTES")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return // malformed or disabled: leave the log alone
+		}
+		maxBytes = n
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < maxBytes {
+		return
+	}
+	_ = os.Rename(path, path+".1")
 }
 
 // routeLogPath resolves the JSONL log path: the GC_BDSHIM_LOG override, else
