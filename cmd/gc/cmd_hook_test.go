@@ -1280,6 +1280,55 @@ func TestDoHookClaimTriggerTakenByAnotherDrainsWithoutGenericClaim(t *testing.T)
 	}
 }
 
+func TestDoHookClaimParkedTriggerFallsThroughToRoutedPoolWork(t *testing.T) {
+	// REGRESSION: the 5h First Line stall measured on GC3 2026-08-08 (crm-72mmp2).
+	// The trigger id is baked into the process env at spawn and never re-read, while
+	// the reconciler keeps re-pointing gc.trigger_bead_id as work arrives. When the
+	// trigger was legitimately PARKED (First Line parks awaiting a human with
+	// `--status blocked --assignee ""`), this path drained, so the worker reported
+	// "nothing to do" on every wake while two beads routed to it sat open and
+	// unassigned behind a pool at capacity 1.
+	//
+	// A parked trigger is nobody's work. The session must fall through to the
+	// route-scoped pool query instead of pinning itself to a bead that cannot move.
+	claimed := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[{"id":"waiting-routed","status":"open","metadata":{"gc.routed_to":"crm/firstline"}}]`, nil
+		},
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			// Parked: blocked, and crucially UNASSIGNED — nobody holds it.
+			return beads.Bead{ID: id, Status: "blocked", Metadata: map[string]string{"gc.routed_to": "crm/firstline"}}, true, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "crm/firstline"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "firstline-gc2-y0qp7",
+		IdentityCandidates: []string{"firstline-gc2-y0qp7"},
+		RouteTargets:       []string{"crm/firstline"},
+		TriggerBeadID:      "crm-907kq8",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(parked trigger) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimed != "waiting-routed" {
+		t.Fatalf("parked trigger did not fall through: claimed=%q, want \"waiting-routed\"; stderr=%s", claimed, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != "waiting-routed" {
+		t.Fatalf("unexpected result after falling through: %+v", result)
+	}
+}
+
 func TestDoHookClaimTriggerLostRaceEmitsRejected(t *testing.T) {
 	var rejected []string
 	ops := hookClaimOps{

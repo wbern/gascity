@@ -146,8 +146,15 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
+	triggerErrored := false
 	if triggerID := strings.TrimSpace(opts.TriggerBeadID); triggerID != "" {
-		return hookClaimResult{terminal: true, code: doHookTriggerClaim(triggerID, dir, *opts, *ops, stdout, stderr)}
+		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, stdout, stderr)
+		if res.terminal {
+			return res
+		}
+		// Trigger was not claimable. Do NOT drain: the pool query below is route
+		// scoped and may hold work this session can legitimately take.
+		triggerErrored = res.claimsErrored
 	}
 	if ops.Runner == nil {
 		fmt.Fprintln(stderr, "gc hook --claim: missing work query runner") //nolint:errcheck
@@ -177,7 +184,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintf(stderr, "gc hook --claim: bd ready returned %d routed candidate(s), %d claimable after readiness filter; stripped: %s\n", beforeN, afterN, strings.Join(stripped, ", ")) //nolint:errcheck
 	}
 	if !workQueryHasReadyWork(normalized) {
-		return hookClaimResult{}
+		return hookClaimResult{claimsErrored: triggerErrored}
 	}
 	candidates, err := decodeHookClaimBeads(normalized)
 	if err != nil {
@@ -185,7 +192,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	if len(candidates) == 0 {
-		return hookClaimResult{}
+		return hookClaimResult{claimsErrored: triggerErrored}
 	}
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
@@ -196,7 +203,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if readyResult.terminal {
 		return readyResult
 	}
-	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	eligible := claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	if !eligible.terminal && triggerErrored {
+		eligible.claimsErrored = true
+	}
+	return eligible
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -382,9 +393,27 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 
 // doHookTriggerClaim resolves the exact trigger bead in its owning store, runs
 // the same ownership/route checks as the generic claim path, and claims only
-// that bead. If the trigger is gone, taken, misrouted, or lost to a concurrent
-// claimant, the session drains instead of claiming unrelated generic work.
-func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+// that bead.
+//
+// WHEN THE TRIGGER IS UNCLAIMABLE IT NOW FALLS THROUGH to the generic pool query
+// instead of draining (gci-n1u2 / crm-72mmp2). It used to drain, which was safe in
+// isolation and starved a queue in practice: the trigger id is materialised into
+// the process env at SPAWN and never re-read, while the reconciler keeps
+// re-pointing gc.trigger_bead_id on the session bead as work arrives. A worker
+// whose trigger was legitimately parked therefore attempted one bead it could never
+// claim, drained, and reported "nothing to do" on every wake — for 5h on GC3
+// 2026-08-08, while two beads routed to it sat open and unassigned and the pool sat
+// at its capacity of 1.
+//
+// Falling through is SAFE, and narrower than it looks: the generic path is already
+// route-scoped (hookCandidateClaimable requires a gc.routed_to match) so a worker
+// still cannot pick up unrelated work. The isolation this path was protecting
+// (ga-80pen8) is about IdentityCandidates ADOPTING a named holder's in_progress
+// bead, which is a different mechanism and is untouched.
+//
+// A terminal result means the trigger was handled (claimed, adopted, or a hard
+// error). A non-terminal result means "not claimable — try the pool".
+func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
 	triggerDir := strings.TrimSpace(opts.TriggerStoreDir)
 	if triggerDir == "" {
 		triggerDir = dir
@@ -395,11 +424,11 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 	bead, found, err := ops.ResolveBead(ctx, triggerDir, opts.Env, triggerID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: resolving trigger bead %s: %v\n", triggerID, err) //nolint:errcheck
-		return 1
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not found; draining\n", triggerID) //nolint:errcheck
-		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not found; falling through to the pool\n", triggerID) //nolint:errcheck
+		return hookClaimResult{}
 	}
 
 	status := strings.ToLower(strings.TrimSpace(bead.Status))
@@ -422,32 +451,49 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 				Assignee:      bead.Assignee,
 				Route:         hookClaimRoute(bead),
 			}
-			return writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)
+			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)}
 		}
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but status=%q; draining\n", triggerID, status) //nolint:errcheck
-		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but status=%q; falling through to the pool\n", triggerID, status) //nolint:errcheck
+		return hookClaimResult{}
 	}
 
 	if strings.TrimSpace(bead.Assignee) != "" || status != "open" {
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not claimable (status=%q assignee=%q); draining\n", //nolint:errcheck
-			triggerID, strings.TrimSpace(bead.Status), strings.TrimSpace(bead.Assignee))
-		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
+		// A PEER HOLDING IT AND A PARK ARE NOT THE SAME EVENT, and only one of them
+		// should free this session to take other routed work.
+		//
+		//   assignee set   -> another worker claimed it. The demand that spawned this
+		//                     session is being served; going back to sleep is correct,
+		//                     and taking other pool work here would let a per-demand
+		//                     spawn drift onto work a different spawn exists for.
+		//   assignee empty -> the bead is PARKED (First Line parks awaiting a human
+		//                     with `--status blocked --assignee ""`). Nobody is working
+		//                     it and nobody will until a human replies, so draining
+		//                     pins this worker against a bead that cannot move while
+		//                     route-matched work waits. That is the 5h GC3 stall.
+		if strings.TrimSpace(bead.Assignee) != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not claimable (status=%q assignee=%q); draining\n", //nolint:errcheck
+				triggerID, strings.TrimSpace(bead.Status), strings.TrimSpace(bead.Assignee))
+			return hookClaimResult{terminal: true, code: writeHookClaimNoWork(opts, ops, false, stdout, stderr)}
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s is parked (status=%q, unassigned); falling through to the pool\n", //nolint:errcheck
+			triggerID, strings.TrimSpace(bead.Status))
+		return hookClaimResult{}
 	}
 	if !hookClaimMatchesRoute(bead, opts.RouteTargets) {
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s routed to %q not in this session's targets; draining\n", //nolint:errcheck
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s routed to %q not in this session's targets; falling through to the pool\n", //nolint:errcheck
 			triggerID, hookClaimRoute(bead))
-		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
+		return hookClaimResult{}
 	}
 
 	claimed, ok, err := ops.Claim(ctx, triggerDir, opts.Env, triggerID, opts.Assignee)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: claiming trigger %s: %v\n", triggerID, err) //nolint:errcheck
-		return 1
+		fmt.Fprintf(stderr, "gc hook --claim: claiming trigger %s: %v; falling through to the pool\n", triggerID, err) //nolint:errcheck
+		return hookClaimResult{claimsErrored: true}
 	}
 	if !ok {
 		reportHookClaimRejected(bead, claimed, opts, ops)
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s claimed by another session; draining\n", triggerID) //nolint:errcheck
-		return writeHookClaimNoWork(opts, ops, false, stdout, stderr)
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s claimed by another session; falling through to the pool\n", triggerID) //nolint:errcheck
+		return hookClaimResult{}
 	}
 	if claimed.Metadata == nil {
 		claimed.Metadata = bead.Metadata
@@ -468,7 +514,7 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 	if result.Assignee == "" {
 		result.Assignee = opts.Assignee
 	}
-	return writeHookClaimWorkResultForBead(result, claimed, opts, ops, triggerDir, stdout, stderr)
+	return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, triggerDir, stdout, stderr)}
 }
 
 // mergeHookClaimCandidateMetadata retains work-query metadata when bd update
