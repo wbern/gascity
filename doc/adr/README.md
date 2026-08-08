@@ -7,7 +7,7 @@ for why this exists and how it is enforced.
 | ADR | Status | Decision | Governs |
 | --- | --- | --- | --- |
 | [0001](0001-record-architectural-decisions-with-adr-lint.md) | accepted | Record decisions as ADRs under `doc/adr/`, linted by `adr-lint`, advisory, local-only | `doc/adr/**`, `.githooks/**` |
-| [0002](0002-bdshim-stays-gc-bd-does-not-become-standalone.md) | **proposed** | bdshim stays; `gc bd` reaches `bd` by exec, not in-process | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go` |
+| [0002](0002-bdshim-stays-gc-bd-does-not-become-standalone.md) | accepted | bdshim stays; `gc bd` reaches `bd` by exec, not in-process | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go` |
 | [0003](0003-worktree-removal-must-check-ignored-files.md) | accepted | Automated worktree removal must check ignored files; `git worktree remove` is not a backstop | the three `cmd/gc` worktree-removal paths, `internal/git/**` |
 | [0004](0004-assignee-holds-a-session-name-not-a-qualified-identity.md) | accepted | A bead's `assignee` holds a session name, not a qualified identity | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go` |
 
@@ -24,9 +24,11 @@ frontmatter field. The two that matter most:
   the diff, the model call is skipped entirely. Use it for ADRs that forbid
   specific symbols or libraries.
 
-Set `status: proposed` when the decision is not yours to make. ADR-0002 is
-`proposed` for exactly that reason — it records a choice already taken in code
-so it can be ratified or reversed explicitly, rather than remaining implicit.
+Set `status: proposed` when the decision is not yours to make. ADR-0002 was
+filed that way — it recorded a choice already taken in code so it could be
+ratified or reversed explicitly rather than remaining implicit. It was ratified
+the same day, which closed an epic that had been blocked for weeks on a
+decision nobody had written down.
 
 ## Superseding
 

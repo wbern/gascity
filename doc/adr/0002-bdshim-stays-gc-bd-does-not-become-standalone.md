@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-08
 applies_to:
   - "cmd/bdshim/**/*.go"
@@ -16,11 +16,11 @@ pre_filter:
 
 # 2. bdshim stays; `gc bd` does not become standalone
 
-**Status is `proposed` deliberately.** The decision below was already taken in
-code, by William, in `b38447716`. What is missing is the record, not the
-choice. This ADR states what the code now implies so it can be ratified or
-reversed explicitly. Accepting it costs one word; reversing it unblocks
-`gcw-yr0o`. Leaving it unrecorded is what produced the current deadlock.
+**Ratified by William on 2026-08-08.** The decision was already taken in code,
+in `b38447716`; what was missing was the record, not the choice. This ADR was
+filed as `proposed` so it could be ratified or reversed explicitly, and it was
+ratified — the epic `gcw-yr0o` had been blocked for weeks on a decision nobody
+had written down, not on any technical obstacle.
 
 ## Context
 
