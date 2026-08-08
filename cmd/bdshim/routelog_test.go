@@ -75,3 +75,56 @@ func TestLogDispositionRedactsUnknownVerb(t *testing.T) {
 		t.Fatalf("redacted record = %+v, want unknown/flags=none", got)
 	}
 }
+
+// The route log is written on every bd dispatch and had no size bound: measured
+// 2026-08-08 on gc2 it had reached 73.5 MiB since 2026-07-19 and was still
+// growing, with no rotated files and no rotation logic anywhere (gcw-yr0o.8).
+func TestLogDispositionRotatesWhenOversized(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bdshim.log")
+	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("GC_BDSHIM_LOG_MAX_BYTES", "200")
+
+	// Fill past the cap so the next write must rotate.
+	if err := os.WriteFile(path, make([]byte, 500), 0o644); err != nil {
+		t.Fatalf("seeding log: %v", err)
+	}
+	logDisposition("list", []string{"--json"}, "passthrough", 0, time.Now())
+
+	rotated := path + ".1"
+	if _, err := os.Stat(rotated); err != nil {
+		t.Fatalf("expected rotated file at %s: %v", rotated, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading live log: %v", err)
+	}
+	// The live log must now hold ONLY the new record, not the 500 seeded bytes.
+	if len(got) >= 500 {
+		t.Fatalf("live log was not truncated on rotation: %d bytes", len(got))
+	}
+	if !strings.Contains(string(got), `"disposition":"passthrough"`) {
+		t.Fatalf("new record missing after rotation: %q", string(got))
+	}
+	// Rotating must not lose the previous contents.
+	old, err := os.ReadFile(rotated)
+	if err != nil || len(old) != 500 {
+		t.Fatalf("rotated file should hold the prior 500 bytes, got %d (%v)", len(old), err)
+	}
+}
+
+// Control: under the cap, nothing rotates. Without this the test above could
+// pass because rotation happens unconditionally.
+func TestLogDispositionDoesNotRotateUnderCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bdshim.log")
+	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("GC_BDSHIM_LOG_MAX_BYTES", "1000000")
+
+	logDisposition("list", []string{"--json"}, "passthrough", 0, time.Now())
+	logDisposition("show", []string{"x"}, "route", 0, time.Now())
+
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("must not rotate under the cap (err=%v)", err)
+	}
+}
