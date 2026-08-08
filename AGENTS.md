@@ -289,6 +289,28 @@ the canonical route, not the legacy route.
   and startup hints — not a primitive. Do not reconstruct the
   `Agent` / `Handle` interfaces.
 
+## Architecture Decision Records
+
+**`doc/adr/` is the record of decisions that constrain code.** Read
+[`doc/adr/README.md`](doc/adr/README.md) for the index — it lists each decision
+and the files it governs. Note `doc/` (ADRs) is distinct from `docs/` (the
+Mintlify user site) and `engdocs/` (engineering notes).
+
+Before you conclude that something in this repo is a defect, check whether an
+ADR says it is deliberate. `gcw-2ozk` was filed as a P1 bug against behaviour
+that `internal/agent/session_name.go` documents as intended; ADR-0004 now
+records it, and reading it would have taken seconds.
+
+Reversing a recorded decision is legitimate — reversing one *silently* is not.
+Supersede the ADR in the same change. The mechanism exists because a decision
+recorded only in a script header was reversed the next day with no retraction,
+went unnoticed for five days, and nearly caused a repair that re-armed
+something a rig had deliberately disabled.
+
+`adr-lint` validates staged changes against the ADRs from
+`.githooks/pre-commit`. It is **advisory** — model-backed, non-deterministic,
+never blocks — and runs locally only, never in CI. See ADR-0001.
+
 ## Design decisions (settled)
 
 These decisions are final. Do not revisit them.

@@ -10,6 +10,29 @@ if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" 
   exit 0
 fi
 
+# ADR advisory check — see doc/adr/0001-record-architectural-decisions-with-adr-lint.md
+#
+# ADVISORY BY DESIGN, and deliberately not a gate: the analysis is
+# model-backed and therefore non-deterministic, so the same diff can pass
+# once and fail once. A blocking check that flakes trains people to bypass
+# it, and a bypassed check is worse than none because it still reads as
+# coverage. Runs locally only, never in CI (adr-lint's own ADR-0003:
+# CI would need someone's Claude Code subscription as a repo secret and
+# would burn that quota on every push).
+#
+# The skip is LOUD. A silent skip would be the same lying-status defect
+# this fork spent 2026-08-08 removing from `bd`.
+if command -v adr-lint >/dev/null 2>&1; then
+  if ! adr-lint; then
+    echo "warning: adr-lint reported ADR violations above — advisory, commit proceeds." >&2
+    echo "         Either bring the change into line, or supersede the ADR if the" >&2
+    echo "         decision has genuinely changed. Do not land a reversal silently." >&2
+  fi
+else
+  echo "notice: adr-lint not on PATH — ADR validation SKIPPED for this commit." >&2
+  echo "        go install github.com/wbern/adr-lint/go/cmd/adr-lint@latest" >&2
+fi
+
 if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add

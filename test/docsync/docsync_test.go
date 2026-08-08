@@ -34,7 +34,12 @@ var (
 // and should be link-checked. Update this list when adding or removing doc
 // directories. TestDocDirCoverage will fail if a new directory with markdown
 // appears that is not accounted for here or in docTreeIgnored.
-var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs"}
+// "doc" (singular) is the ADR tree and is deliberately distinct from "docs"
+// (the Mintlify user site) and "engdocs" (engineering notes). The path is not
+// a style choice: adr-lint hardcodes doc/adr/, and the crm rig uses the same
+// location, so a shared convention wins over local tidiness. See
+// doc/adr/0001-record-architectural-decisions-with-adr-lint.md.
+var docTreeDirs = []string{"contrib", "doc", "docs", "engdocs", "release-gates", "specs"}
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
