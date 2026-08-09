@@ -161,11 +161,13 @@ func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, 
 		// No agent config to resolve install-hooks/rig overlay scope against
 		// (e.g. a synthetic session). Still stage city pack overlays.
 		hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, "")
+		configureManagedHookConvergence(hints, cityPath)
 		return
 	}
 	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
 	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
 	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
+	configureManagedHookConvergence(hints, cityPath)
 }
 
 func resolvedRuntimeMCPServersWithConfig(

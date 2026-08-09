@@ -44,6 +44,11 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
+		if cfg.ConvergeManagedHooks != nil {
+			if err := cfg.ConvergeManagedHooks(cfg.WorkDir); err != nil {
+				return fmt.Errorf("converging managed hooks in %q: %w", cfg.WorkDir, err)
+			}
+		}
 	}
 	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
 }

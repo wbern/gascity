@@ -642,6 +642,11 @@ type Config struct {
 	// .gemini/settings.json for parallel tooling.
 	InstallAgentHooks []string
 
+	// ConvergeManagedHooks runs after provider overlays have been staged. The
+	// application supplies it for managed hook workdirs; standalone runtime
+	// callers leave it nil and retain staging as their sole hook writer.
+	ConvergeManagedHooks func(workDir string) error
+
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.

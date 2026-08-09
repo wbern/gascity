@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // seedCodexOverlay writes the real embedded core codex hooks overlay into a
@@ -107,6 +108,17 @@ const furiosaHybridCodexHooks = `{
           },
           {
             "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "echo user-authored-hook",
             "type": "command"
           }
         ],
@@ -254,6 +266,184 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	legacyMatchers := codexSessionStartMatchers(t, filepath.Join(legacyWork, ".codex", "hooks.json"))
 	if len(legacyMatchers) <= 1 {
 		t.Fatalf("expected legacy non-skip staging to re-drift the hybrid (>1 SessionStart entry) after re-staging, got %v; if this no longer reproduces, the dual-write may have been fixed elsewhere — re-verify the skip is still required", legacyMatchers)
+	}
+}
+
+// TestStageSessionWorkDirConvergesManagedCodexHooks covers the overlap that
+// remains after desired-state materialization: a configured persistent home is
+// also the runtime workdir. Runtime staging must not reintroduce the overlay's
+// unbound SessionStart entry after hooks.Install already converged the file.
+func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
+	overlaySrc := seedCodexOverlay(t)
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+	seedFuriosaHybrid(t, cityDir, workDir)
+	installCodex(t, cityDir, workDir)
+
+	cfg := runtime.Config{
+		WorkDir:           workDir,
+		ProviderName:      "codex",
+		InstallAgentHooks: []string{"codex"},
+		PackOverlayDirs:   []string{overlaySrc},
+	}
+	configureManagedHookConvergence(&cfg, cityDir)
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	hooksPath := filepath.Join(workDir, ".codex", "hooks.json")
+	matchers := codexSessionStartMatchers(t, hooksPath)
+	if len(matchers) != 1 || matchers[0] != "startup" {
+		data, _ := os.ReadFile(hooksPath)
+		t.Fatalf("SessionStart matchers = %v, want exactly [startup] after runtime staging\n%s", matchers, data)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read staged hooks: %v", err)
+	}
+	if !strings.Contains(string(data), "echo user-authored-hook") {
+		t.Fatalf("runtime hook convergence removed user-authored hook:\n%s", data)
+	}
+	first, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read first staged hooks: %v", err)
+	}
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("StageSessionWorkDir second pass: %v", err)
+	}
+	second, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read second staged hooks: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("repeated runtime staging changed hooks.json\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestBuildDesiredStateRuntimeStagingConvergesManagedCodexHooks verifies the
+// reconciler create path carries post-staging convergence into its runtime
+// configuration. It reproduces the persistent-workdir hybrid left by desired
+// state materialization, then stages the returned runtime Config as the
+// provider does for a live session.
+func TestBuildDesiredStateRuntimeStagingConvergesManagedCodexHooks(t *testing.T) {
+	overlaySrc := seedCodexOverlay(t)
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "persistent-worker")
+	seedFuriosaHybrid(t, cityDir, workDir)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+		Providers: map[string]config.ProviderSpec{
+			"test": {Command: "echo", PromptMode: "none"},
+		},
+		PackOverlayDirs: []string{overlaySrc},
+		Agents: []config.Agent{{
+			Name:              "persistent-worker",
+			WorkDir:           workDir,
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "echo 1",
+			InstallAgentHooks: []string{"codex"},
+		}},
+	}
+
+	desired := buildDesiredState("test-city", cityDir, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(desired.State) != 1 {
+		t.Fatalf("desired state size = %d, want 1", len(desired.State))
+	}
+	var params TemplateParams
+	for _, tp := range desired.State {
+		params = tp
+	}
+	runtimeCfg := templateParamsToConfig(params)
+	if runtimeCfg.ConvergeManagedHooks == nil {
+		t.Fatal("reconciler runtime config omitted managed-hook convergence")
+	}
+	if err := runtime.StageSessionWorkDir(runtimeCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	hooksPath := filepath.Join(workDir, ".codex", "hooks.json")
+	matchers := codexSessionStartMatchers(t, hooksPath)
+	if len(matchers) != 1 || matchers[0] != "startup" {
+		data, _ := os.ReadFile(hooksPath)
+		t.Fatalf("SessionStart matchers = %v, want exactly [startup] after reconciler runtime staging\n%s", matchers, data)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read staged hooks: %v", err)
+	}
+	for _, command := range []string{"echo user-authored-hook", "handoff", "mail check", "nudge drain"} {
+		if !strings.Contains(string(data), command) {
+			t.Fatalf("reconciler runtime staging dropped %q from hooks.json:\n%s", command, data)
+		}
+	}
+	first := string(data)
+	if err := runtime.StageSessionWorkDir(runtimeCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir second pass: %v", err)
+	}
+	second, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read second staged hooks: %v", err)
+	}
+	if first != string(second) {
+		t.Fatalf("repeated reconciler runtime staging changed hooks.json\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestResolvedWorkerRuntimeConvergesManagedCodexHooks verifies the CLI resume
+// path carries convergence through applyWorkerOverlayHints. It is deliberately
+// separate from the reconciler test above because resume builds its runtime
+// Config directly instead of routing through templateParamsToConfig.
+func TestResolvedWorkerRuntimeConvergesManagedCodexHooks(t *testing.T) {
+	overlaySrc := seedCodexOverlay(t)
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "persistent-worker")
+	seedFuriosaHybrid(t, cityDir, workDir)
+	installCodex(t, cityDir, workDir)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
+		Providers: map[string]config.ProviderSpec{
+			"test": {Command: "echo", PromptMode: "none"},
+		},
+		PackOverlayDirs: []string{overlaySrc},
+		Agents: []config.Agent{{
+			Name:              "persistent-worker",
+			Provider:          "test",
+			WorkDir:           workDir,
+			InstallAgentHooks: []string{"codex"},
+		}},
+	}
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "persistent-worker",
+		Command:  "echo",
+		WorkDir:  workDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if runtimeCfg.Hints.ConvergeManagedHooks == nil {
+		t.Fatal("resume runtime config omitted managed-hook convergence")
+	}
+	if err := runtime.StageSessionWorkDir(runtimeCfg.Hints); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	hooksPath := filepath.Join(workDir, ".codex", "hooks.json")
+	matchers := codexSessionStartMatchers(t, hooksPath)
+	if len(matchers) != 1 || matchers[0] != "startup" {
+		data, _ := os.ReadFile(hooksPath)
+		t.Fatalf("SessionStart matchers = %v, want exactly [startup] after resume runtime staging\n%s", matchers, data)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read staged hooks: %v", err)
+	}
+	for _, command := range []string{"echo user-authored-hook", "handoff", "mail check", "nudge drain"} {
+		if !strings.Contains(string(data), command) {
+			t.Fatalf("resume runtime staging dropped %q from hooks.json:\n%s", command, data)
+		}
 	}
 }
 

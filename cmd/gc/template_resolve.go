@@ -52,6 +52,8 @@ func resolvedProviderName(r *config.ResolvedProvider) string {
 // TemplateParams holds all resolved values needed to start a session.
 // This is a pure data type — no side effects, no provider references.
 type TemplateParams struct {
+	// CityPath identifies the city that owns managed provider hooks.
+	CityPath string
 	// Command is the resolved provider command string.
 	Command string
 	// Prompt is the fully rendered prompt (with beacon).
@@ -706,6 +708,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	params := TemplateParams{
+		CityPath:         p.cityPath,
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
@@ -899,6 +902,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
+	configureManagedHookConvergence(&cfg, tp.CityPath)
 	// Prompt delivery may prepend the startup prompt to the configured nudge.
 	cfg.Nudge = nudge
 	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
