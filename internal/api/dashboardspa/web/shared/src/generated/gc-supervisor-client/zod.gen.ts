@@ -3001,7 +3001,8 @@ export const zSubmitIntent = z.enum([
 
 export const zSessionSubmitInputBody = z.object({
     intent: zSubmitIntent.optional(),
-    message: z.string().min(1).regex(/\S/)
+    message: z.string().min(1).regex(/\S/),
+    replace_key: z.string().max(128).regex(/^[^\x00-\x1F\x7F]*$/).optional()
 });
 
 export const zSupervisorCitiesOutputBody = z.object({

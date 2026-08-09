@@ -702,6 +702,9 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
+	if err := session.ValidateReplaceKey(input.Body.ReplaceKey); err != nil {
+		return nil, apierr.InvalidRequest.Msg(err.Error())
+	}
 
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
@@ -712,6 +715,7 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 		return nil, apierr.Internal.Msg(cursorErr.Error())
 	}
 	message := input.Body.Message
+	replaceKey := input.Body.ReplaceKey
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
@@ -720,7 +724,7 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent)
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, replaceKey)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
 		} else {

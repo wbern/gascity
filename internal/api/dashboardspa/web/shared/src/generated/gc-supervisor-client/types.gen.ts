@@ -4409,6 +4409,10 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
+    /**
+     * Optional key that replaces an equivalent pending deferred submit.
+     */
+    replace_key?: string;
 };
 
 export type SessionSubmitSucceededPayload = {

@@ -92,7 +92,7 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Queue Me")
 
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up","replace_key":"campaign:daily:v1"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -125,6 +125,9 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 	}
 	if item.Message != "later please" {
 		t.Fatalf("Message = %q, want %q", item.Message, "later please")
+	}
+	if item.Reference == nil || item.Reference.Kind != "session-submit" || item.Reference.ID != "campaign:daily:v1" {
+		t.Fatalf("Reference = %#v, want session-submit campaign key", item.Reference)
 	}
 }
 

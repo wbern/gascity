@@ -478,6 +478,84 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+func TestSubmitFollowUpReplaceKeyCoalescesPendingMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for i := range 16 {
+		message := fmt.Sprintf("campaign tick %d", i)
+		outcome, err := mgr.Submit(context.Background(), info.ID, message, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, "campaign:daily:v1")
+		if err != nil {
+			t.Fatalf("Submit(%d): %v", i, err)
+		}
+		if !outcome.Queued {
+			t.Fatalf("Submit(%d) was not queued", i)
+		}
+	}
+
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if got := state.Pending[0].Message; got != "campaign tick 15" {
+		t.Errorf("pending message = %q, want newest message", got)
+	}
+	if got := state.Pending[0].Reference; got == nil || got.Kind != "session-submit" || got.ID != "campaign:daily:v1" {
+		t.Errorf("pending reference = %#v, want session-submit campaign key", got)
+	}
+	if len(state.Dead) != 15 {
+		t.Fatalf("superseded audit entries = %d, want 15", len(state.Dead))
+	}
+}
+
+func TestSubmitFollowUpReplaceKeyPreservesDistinctAndInFlightItems(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	submit := func(message, key string) {
+		t.Helper()
+		if _, err := mgr.Submit(context.Background(), info.ID, message, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, key); err != nil {
+			t.Fatalf("Submit(%q, %q): %v", message, key, err)
+		}
+	}
+	submit("key one", "one")
+	submit("key two", "two")
+	submit("no key one", "")
+	submit("no key two", "")
+	if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
+		state.InFlight = append(state.InFlight, state.Pending[0])
+		state.Pending = state.Pending[1:]
+		return nil
+	}); err != nil {
+		t.Fatalf("make item in flight: %v", err)
+	}
+	submit("new key one", "one")
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 4 {
+		t.Fatalf("pending items = %d, want 4", len(state.Pending))
+	}
+	if len(state.InFlight) != 1 {
+		t.Fatalf("in-flight items = %d, want 1", len(state.InFlight))
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")

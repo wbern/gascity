@@ -639,19 +639,27 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, replaceKeys ...string) (session.SubmitOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
 	result, err := handle.Message(ctx, worker.MessageRequest{
-		Text:     message,
-		Delivery: workerDeliveryIntent(intent),
+		Text:       message,
+		Delivery:   workerDeliveryIntent(intent),
+		ReplaceKey: firstReplaceKey(replaceKeys),
 	})
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
 	return session.SubmitOutcome{Queued: result.Queued}, nil
+}
+
+func firstReplaceKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics

@@ -1467,11 +1467,14 @@ func (c *Client) SendSessionMessage(id, message string) error {
 // SubmitSession sends a semantic submit request to a session. The id may
 // be either a bead ID or a resolvable session alias/name. Internally
 // handles the async protocol: POST → 202 + request_id → SSE event.
-func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
+func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent, replaceKeys ...string) (SessionSubmitResponse, error) {
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
 	body := genclient.SubmitSessionJSONRequestBody{Message: message}
+	if len(replaceKeys) > 0 {
+		body.ReplaceKey = &replaceKeys[0]
+	}
 	if intent != "" {
 		i := genclient.SubmitIntent(intent)
 		body.Intent = &i

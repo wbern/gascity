@@ -136,8 +136,9 @@ const (
 
 // MessageRequest submits a user turn to the worker.
 type MessageRequest struct {
-	Text     string         `json:"text"`
-	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	Text       string         `json:"text"`
+	Delivery   DeliveryIntent `json:"delivery,omitempty"`
+	ReplaceKey string         `json:"replace_key,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.

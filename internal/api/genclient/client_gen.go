@@ -4615,6 +4615,9 @@ type SessionSubmitInputBody struct {
 
 	// Message Message text to submit.
 	Message string `json:"message"`
+
+	// ReplaceKey Optional key that replaces an equivalent pending deferred submit.
+	ReplaceKey *string `json:"replace_key,omitempty"`
 }
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.

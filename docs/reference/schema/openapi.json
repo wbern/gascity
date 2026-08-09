@@ -10608,6 +10608,12 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "replace_key": {
+            "description": "Optional key that replaces an equivalent pending deferred submit.",
+            "maxLength": 128,
+            "pattern": "^[^\\x00-\\x1F\\x7F]*$",
+            "type": "string"
           }
         },
         "required": [

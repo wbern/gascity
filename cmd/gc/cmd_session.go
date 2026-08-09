@@ -76,6 +76,7 @@ continuity.`,
 
 func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var intent string
+	var replaceKey string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "submit <id-or-alias> <message...>",
@@ -94,7 +95,7 @@ according to the selected semantic intent.`,
 				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr, replaceKey) != 0 {
 				return errExit
 			}
 			return nil
@@ -102,6 +103,7 @@ according to the selected semantic intent.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
+	cmd.Flags().StringVar(&replaceKey, "replace-key", "", "replace an equivalent pending deferred submit")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
@@ -2541,7 +2543,7 @@ type sessionSubmitJSON struct {
 	Outcome       string `json:"outcome"`
 }
 
-func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput bool, stdout, stderr io.Writer, replaceKeys ...string) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -2552,7 +2554,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	}
 
 	if c := apiClient(cityPath); c != nil {
-		resp, err := c.SubmitSession(target, message, intent)
+		resp, err := c.SubmitSession(target, message, intent, firstSessionSubmitReplaceKey(replaceKeys))
 		if err == nil {
 			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
@@ -2593,14 +2595,22 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		return 1
 	}
 	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
-		Text:     message,
-		Delivery: workerDeliveryIntentForSubmitIntent(intent),
+		Text:       message,
+		Delivery:   workerDeliveryIntentForSubmitIntent(intent),
+		ReplaceKey: firstSessionSubmitReplaceKey(replaceKeys),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput)
+}
+
+func firstSessionSubmitReplaceKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
 }
 
 func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) int {

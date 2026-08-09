@@ -885,8 +885,9 @@ func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
 
 func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	var gotBody struct {
-		Message string `json:"message"`
-		Intent  string `json:"intent"`
+		Message    string `json:"message"`
+		Intent     string `json:"intent"`
+		ReplaceKey string `json:"replace_key"`
 	}
 	var sawPost bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -919,7 +920,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	resp, err := c.SubmitSession("sess-123", "take this now", session.SubmitIntentInterruptNow)
+	resp, err := c.SubmitSession("sess-123", "take this now", session.SubmitIntentInterruptNow, "campaign:daily:v1")
 	if err != nil {
 		t.Fatalf("SubmitSession: %v", err)
 	}
@@ -928,6 +929,9 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	}
 	if gotBody.Intent != string(session.SubmitIntentInterruptNow) {
 		t.Fatalf("intent = %q, want %q", gotBody.Intent, session.SubmitIntentInterruptNow)
+	}
+	if gotBody.ReplaceKey != "campaign:daily:v1" {
+		t.Fatalf("replace_key = %q, want campaign:daily:v1", gotBody.ReplaceKey)
 	}
 	if resp.Status != "accepted" || resp.ID != "sess-123" || !resp.Queued || resp.Intent != session.SubmitIntentInterruptNow {
 		t.Fatalf("response = %#v, want accepted queued interrupt_now for sess-123", resp)

@@ -154,8 +154,9 @@ type SessionSubmitInput struct {
 	CityScope
 	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Body struct {
-		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
-		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		Message    string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
+		Intent     session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		ReplaceKey string               `json:"replace_key,omitempty" maxLength:"128" pattern:"^[^\\x00-\\x1F\\x7F]*$" doc:"Optional key that replaces an equivalent pending deferred submit."`
 	}
 }
 

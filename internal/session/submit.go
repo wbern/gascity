@@ -82,16 +82,26 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 }
 
 // Submit delivers a user message according to the requested semantic intent.
-func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, replaceKeys ...string) (SubmitOutcome, error) {
 	switch intent {
 	case "", SubmitIntentDefault, SubmitIntentFollowUp, SubmitIntentInterruptNow:
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent)
+	if len(replaceKeys) > 1 {
+		return SubmitOutcome{}, errors.New("at most one replace key is allowed")
+	}
+	replaceKey := ""
+	if len(replaceKeys) == 1 {
+		replaceKey = replaceKeys[0]
+	}
+	if err := ValidateReplaceKey(replaceKey); err != nil {
+		return SubmitOutcome{}, err
+	}
+	return m.submit(ctx, id, message, resumeCommand, hints, intent, replaceKey)
 }
 
-func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, replaceKey string) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -109,7 +119,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
 			}
-			if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+			if err := m.enqueueDeferredSubmitLocked(b, sessName, message, replaceKey); err != nil {
 				return err
 			}
 			outcome.Queued = true
@@ -122,7 +132,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		default:
 			running := m.sp.IsRunning(sessName)
 			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
-				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message, replaceKey); err != nil {
 					return err
 				}
 				outcome.Queued = true
@@ -540,7 +550,7 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
-func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, replaceKey string) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
@@ -556,7 +566,23 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
+	if replaceKey != "" {
+		item.Reference = &nudgequeue.Reference{Kind: "session-submit", ID: replaceKey}
+	}
 	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
+		if item.Reference != nil {
+			remaining := state.Pending[:0]
+			for _, pending := range state.Pending {
+				if pending.SessionID == item.SessionID && pending.ContinuationEpoch == item.ContinuationEpoch && pending.Source == item.Source && pending.Reference != nil && pending.Reference.Kind == item.Reference.Kind && pending.Reference.ID == item.Reference.ID {
+					pending.DeadAt = now
+					pending.LastError = "superseded by newer deferred session submit"
+					state.Dead = append(state.Dead, pending)
+					continue
+				}
+				remaining = append(remaining, pending)
+			}
+			state.Pending = remaining
+		}
 		state.Pending = append(state.Pending, item)
 		nudgequeue.SortState(state)
 		return nil
@@ -565,6 +591,21 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}
 	if m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+	}
+	return nil
+}
+
+const maxReplaceKeyLength = 128
+
+// ValidateReplaceKey verifies a replacement key is safe to persist and send.
+func ValidateReplaceKey(key string) error {
+	if len(key) > maxReplaceKeyLength {
+		return fmt.Errorf("replace key exceeds %d bytes", maxReplaceKeyLength)
+	}
+	for _, r := range key {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("replace key contains a control character")
+		}
 	}
 	return nil
 }
