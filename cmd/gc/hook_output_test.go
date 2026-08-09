@@ -121,6 +121,57 @@ func TestWriteProviderHookContextCodexDefaultsSessionStartFromEnv(t *testing.T) 
 	}
 }
 
+// codexPreCompactCommandOutputWire mirrors Codex 0.146's
+// PreCompactCommandOutputWire: only universal output fields are accepted and
+// unknown fields are rejected. Decoding with DisallowUnknownFields reproduces
+// the rejection of hookSpecificOutput.
+type codexPreCompactCommandOutputWire struct {
+	Continue       *bool   `json:"continue"`
+	StopReason     *string `json:"stopReason"`
+	SuppressOutput *bool   `json:"suppressOutput"`
+	SystemMessage  *string `json:"systemMessage"`
+}
+
+func TestWriteProviderHookContextCodexPreCompactUniversalOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		eventName string
+		envEvent  string
+	}{
+		{name: "explicit event", eventName: "PreCompact"},
+		{name: "event from environment", envEvent: "PreCompact"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOOK_EVENT_NAME", tc.envEvent)
+
+			var out bytes.Buffer
+			err := writeProviderHookContextForEvent(&out, "codex", tc.eventName, "Handoff: sent auto mail gc-abc12 (restart skipped).\n")
+			if err != nil {
+				t.Fatalf("writeProviderHookContextForEvent: %v", err)
+			}
+
+			dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
+			dec.DisallowUnknownFields()
+			var payload codexPreCompactCommandOutputWire
+			if err := dec.Decode(&payload); err != nil {
+				t.Fatalf("PreCompact output rejected by Codex wire contract: %v\n%s", err, out.String())
+			}
+			if payload.SystemMessage == nil {
+				t.Fatalf("systemMessage missing; handoff reference not preserved:\n%s", out.String())
+			}
+			if got, want := *payload.SystemMessage, "Handoff: sent auto mail gc-abc12 (restart skipped)."; got != want {
+				t.Fatalf("systemMessage = %q, want %q", got, want)
+			}
+			if payload.Continue != nil && !*payload.Continue {
+				t.Fatalf("PreCompact output set continue=false:\n%s", out.String())
+			}
+			if payload.StopReason != nil {
+				t.Fatalf("PreCompact output set stopReason:\n%s", out.String())
+			}
+		})
+	}
+}
+
 func TestWriteProviderHookContextPlain(t *testing.T) {
 	var out bytes.Buffer
 	err := writeProviderHookContextForEvent(&out, "", "", "<system-reminder>\nhello\n</system-reminder>\n")
