@@ -1,15 +1,52 @@
 package t3bridge
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
-func TestAllowThreadReuse_NamedFreshStillReusesThread(t *testing.T) {
-	if !allowThreadReuse(AgentKindNamed, "fresh") {
-		t.Fatal("named fresh sessions should still reuse their T3 thread")
+func TestBuildStartupEnvelope_ThreadReuseFollowsWakeMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wakeMode  string
+		wantReuse bool
+	}{
+		{name: "fresh", wakeMode: "fresh", wantReuse: false},
+		{name: "resume", wakeMode: "resume", wantReuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := BuildStartupEnvelope(Intent{
+				AgentKind: AgentKindNamed,
+				WakeMode:  tc.wakeMode,
+			})
+			if err != nil {
+				t.Fatalf("BuildStartupEnvelope: %v", err)
+			}
+			var envelope StartupEnvelope
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if envelope.Resume.AllowThreadReuse != tc.wantReuse {
+				t.Fatalf("allowThreadReuse = %v, want %v", envelope.Resume.AllowThreadReuse, tc.wantReuse)
+			}
+		})
+	}
+}
+
+func TestAllowThreadReuse_NamedFreshRecreatesThread(t *testing.T) {
+	if AllowThreadReuse(AgentKindNamed, "fresh") {
+		t.Fatal("named fresh sessions must recreate their T3 thread")
+	}
+}
+
+func TestAllowThreadReuse_NamedResumeReusesThread(t *testing.T) {
+	if !AllowThreadReuse(AgentKindNamed, "resume") {
+		t.Fatal("named resume sessions should reuse their T3 thread")
 	}
 }
 
 func TestAllowThreadReuse_PoolDoesNotReuseThread(t *testing.T) {
-	if allowThreadReuse(AgentKindPool, "sticky") {
+	if AllowThreadReuse(AgentKindPool, "sticky") {
 		t.Fatal("pool sessions should not reuse one shared T3 thread")
 	}
 }

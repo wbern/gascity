@@ -324,6 +324,90 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 	}
 }
 
+func TestStart_FreshEnvelopeArchivesOldThreadBeforeCreatingAndNudgesReplacement(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{
+			map[string]interface{}{"id": "project-1", "workspaceRoot": "/tmp/mayor"},
+		},
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id": "thread-old", "projectId": "project-1", "title": "mayor · mayor",
+				"customMetadata": map[string]interface{}{
+					"gc.agent": "mayor", "gc.sessionName": "mayor", "gc.startupTemplate": "mayor",
+					"gc.startupWorkDir": "/tmp/mayor", "gc.runtimeProvider": "codex", "gc.startupModel": "gpt-5.4",
+				},
+				"session": map[string]interface{}{"status": "ready"},
+			},
+		},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+	envelope, err := BuildStartupEnvelope(Intent{
+		AgentKind: AgentKindNamed,
+		WakeMode:  "fresh",
+		GC:        GCSection{Agent: "mayor", Template: "mayor", SessionName: "mayor"},
+		Runtime:   RuntimeSection{Provider: "codex", Model: "gpt-5.4", WorkDir: "/tmp/mayor"},
+	})
+	if err != nil {
+		t.Fatalf("BuildStartupEnvelope: %v", err)
+	}
+	cfg := runtime.Config{WorkDir: "/tmp/mayor", Command: "codex", Env: map[string]string{
+		"GC_CITY_PATH": "/tmp/gc", "GC_ALIAS": "mayor", "GC_TEMPLATE": "mayor", "GC_PROVIDER": "codex", "GC_MODEL": "gpt-5.4", "GC_STARTUP_ENVELOPE": string(envelope),
+	}}
+	if err := p.Start(context.Background(), "mayor", cfg); err != nil {
+		t.Fatalf("Start(fresh): %v", err)
+	}
+
+	payloads := server.commandPayloadsCopy()
+	indices := map[string]int{}
+	newThreadID := ""
+	for i, payload := range payloads {
+		typ, _ := payload["type"].(string)
+		if typ == "thread.session.stop" || typ == "thread.archive" || typ == "thread.create" {
+			indices[typ] = i
+		}
+		if typ == "thread.create" {
+			newThreadID, _ = payload["threadId"].(string)
+		}
+	}
+	if newThreadID == "" {
+		t.Fatalf("fresh start did not create a replacement thread: commands=%v", server.commandTypes())
+	}
+	if indices["thread.session.stop"] >= indices["thread.archive"] || indices["thread.archive"] >= indices["thread.create"] {
+		t.Fatalf("old thread was not stopped and archived before replacement creation: commands=%v", server.commandTypes())
+	}
+
+	server.mu.Lock()
+	server.snapshot["threads"] = []interface{}{map[string]interface{}{
+		"id": newThreadID, "projectId": "project-1",
+		"customMetadata": map[string]interface{}{
+			"gc.agent": "mayor", "gc.sessionName": "mayor", "gc.runtimeProvider": "codex", "gc.startupModel": "gpt-5.4",
+		},
+		"session": map[string]interface{}{"status": "ready"},
+	}}
+	server.mu.Unlock()
+	if err := p.Nudge("mayor", runtime.TextContent("next work")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+
+	payloads = server.commandPayloadsCopy()
+	nudgeThreadID := ""
+	for _, payload := range payloads {
+		if typ, _ := payload["type"].(string); typ == "thread.turn.start" {
+			message, _ := payload["message"].(map[string]interface{})
+			if message != nil && message["text"] == "next work" {
+				nudgeThreadID, _ = payload["threadId"].(string)
+			}
+		}
+	}
+	if nudgeThreadID != newThreadID {
+		t.Fatalf("nudge thread = %q, want replacement %q", nudgeThreadID, newThreadID)
+	}
+}
+
 func TestBuildThreadEnv_DropsStartupEnvelopeAndDoltliteServerEnv(t *testing.T) {
 	env := buildThreadEnv(map[string]string{
 		"GC_STARTUP_ENVELOPE":      `{"runtime":{"provider":"claudeAgent","model":"claude-sonnet-4-6"}}`,
@@ -785,6 +869,12 @@ func (ts *t3BridgeTestServer) commandTypes() []string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return append([]string(nil), ts.commands...)
+}
+
+func (ts *t3BridgeTestServer) commandPayloadsCopy() []map[string]interface{} {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return append([]map[string]interface{}(nil), ts.commandPayloads...)
 }
 
 func (ts *t3BridgeTestServer) activityPayloads(kind string) []map[string]interface{} {

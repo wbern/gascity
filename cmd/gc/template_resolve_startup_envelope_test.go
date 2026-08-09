@@ -139,3 +139,41 @@ func TestBuildT3BridgeStartupEnvelope_NamedSessionPublishesTemplatePatchIdentity
 		t.Fatalf("gc.template = %#v, want crew", got)
 	}
 }
+
+func TestBuildT3BridgeStartupEnvelope_ThreadReuseFollowsWakeMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wakeMode  string
+		wantReuse bool
+	}{
+		{name: "fresh", wakeMode: "fresh", wantReuse: false},
+		{name: "resume", wakeMode: "resume", wantReuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := TemplateParams{
+				TemplateName:             "worker",
+				SessionName:              "worker-1",
+				EffectiveSessionProvider: "t3bridge",
+				WorkDir:                  "/tmp/work",
+				Command:                  "codex",
+				WakeMode:                 tc.wakeMode,
+				Env: map[string]string{
+					"GC_CITY_PATH": "/tmp/city",
+					"GC_PROVIDER":  "codex",
+				},
+			}
+
+			var envelope struct {
+				Resume struct {
+					AllowThreadReuse bool `json:"allowThreadReuse"`
+				} `json:"resume"`
+			}
+			if err := json.Unmarshal(buildT3BridgeStartupEnvelope(tp, "prime"), &envelope); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if envelope.Resume.AllowThreadReuse != tc.wantReuse {
+				t.Fatalf("allowThreadReuse = %v, want %v", envelope.Resume.AllowThreadReuse, tc.wantReuse)
+			}
+		})
+	}
+}

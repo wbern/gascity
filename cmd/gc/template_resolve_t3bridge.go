@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime/t3bridge"
 )
 
 func applyT3BridgeRuntimeConfig(tp TemplateParams, env map[string]string) {
@@ -107,7 +109,7 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 		},
 		"resume": map[string]any{
 			"policy":                 "match-or-recreate",
-			"allowThreadReuse":       true,
+			"allowThreadReuse":       t3bridge.AllowThreadReuse(t3bridge.AgentKindNamed, tp.WakeMode),
 			"requiredThreadProvider": provider,
 			"requiredThreadModel":    t3BridgeStartupEnvelopeModel(provider, tp),
 		},

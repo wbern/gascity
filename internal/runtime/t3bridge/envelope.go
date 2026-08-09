@@ -110,14 +110,10 @@ type Intent struct {
 	RequiredModel      string
 }
 
-func allowThreadReuse(kind AgentKind, wakeMode string) bool {
-	if kind != AgentKindNamed {
-		return false
-	}
-	// Named sessions should keep one durable T3 thread even if the runtime
-	// prefers a fresh process on wake.
-	_ = wakeMode
-	return true
+// AllowThreadReuse reports whether a session may resume its existing T3
+// conversation. A fresh wake always starts a new provider conversation.
+func AllowThreadReuse(kind AgentKind, wakeMode string) bool {
+	return kind == AgentKindNamed && strings.TrimSpace(wakeMode) != "fresh"
 }
 
 // legacyNamedThreadReuse reports whether an envelope whose resume policy has not
@@ -155,7 +151,7 @@ func BuildStartupEnvelope(intent Intent) (json.RawMessage, error) {
 		Context:    intent.Context,
 		Resume: ResumeSection{
 			Policy:                 policy,
-			AllowThreadReuse:       allowThreadReuse(intent.AgentKind, intent.WakeMode),
+			AllowThreadReuse:       AllowThreadReuse(intent.AgentKind, intent.WakeMode),
 			AllowRuntimeRebind:     intent.AllowRuntimeRebind,
 			RequiredThreadProvider: intent.RequiredProvider,
 			RequiredThreadModel:    intent.RequiredModel,
