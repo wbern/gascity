@@ -3780,7 +3780,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// restart-handoff machinery as `gc runtime request-restart`.
 			// See #1893 (controller: alive on_demand session ignores
 			// bd update --assignee).
-			if decision.RequiresFreshCycle && info.WakeMode == "fresh" {
+			if decision.RequiresFreshCycle && info.WakeMode == "fresh" && target.tp.ConfiguredNamedMode != "always" {
 				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace, rec); ran {
 					if fold != nil {
 						tick.apply(target.info.ID, fold)

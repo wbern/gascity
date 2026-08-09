@@ -28,9 +28,10 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 	}
 	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
 	env.desiredState[sessionName] = TemplateParams{
-		Command:      "true",
-		SessionName:  sessionName,
-		TemplateName: "witness",
+		Command:             "true",
+		SessionName:         sessionName,
+		TemplateName:        "witness",
+		ConfiguredNamedMode: "on_demand",
 		ResolvedProvider: &config.ResolvedProvider{
 			SessionIDFlag: "--session-id",
 		},
@@ -103,6 +104,118 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 		if payload.InstanceTokenFingerprint == "" || payload.InstanceTokenFingerprint == "test-token" {
 			t.Fatalf("event %d fingerprint = %q", index, payload.InstanceTokenFingerprint)
 		}
+	}
+}
+
+// TestReconcileSessionBeads_AliveAlwaysFreshModeReassignKeepsConversation
+// verifies that configured always sessions keep their active conversation when
+// a new bead becomes their work anchor. Unlike on-demand sessions, they are
+// already attended and must not be reset solely to refresh the assignment.
+func TestReconcileSessionBeads_AliveAlwaysFreshModeReassignKeepsConversation(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	rec := &continuationObservationRecorder{}
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:             "true",
+		SessionName:         sessionName,
+		TemplateName:        "witness",
+		ConfiguredNamedMode: "always",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "always",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		"session_key":                "conversation-A",
+		"continuation_epoch":         "3",
+		"generation":                 "7",
+		sessionpkg.CurrentBeadIDKey:  "wb-A",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	workBead := beads.Bead{ID: "wb-B", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("always fresh session should remain running on reassignment")
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata[sessionpkg.CurrentBeadIDKey] != "wb-B" {
+		t.Fatalf("%s = %q, want wb-B", sessionpkg.CurrentBeadIDKey, got.Metadata[sessionpkg.CurrentBeadIDKey])
+	}
+	if got.Metadata["session_key"] != "conversation-A" {
+		t.Fatalf("session_key = %q, want conversation-A preserved", got.Metadata["session_key"])
+	}
+	if got.Metadata["generation"] != "7" {
+		t.Fatalf("generation = %q, want 7 preserved", got.Metadata["generation"])
+	}
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatal("continuation_reset_pending = true, want no reset")
+	}
+	if len(rec.recorded) != 0 {
+		t.Fatalf("recorded %d continuation events, want none", len(rec.recorded))
+	}
+}
+
+// TestReconcileSessionBeads_AliveUnconfiguredFreshModeReassignCyclesConversation
+// verifies that the always-session exception does not change fresh-cycle
+// behavior for sessions without a configured named-session mode.
+func TestReconcileSessionBeads_AliveUnconfiguredFreshModeReassignCyclesConversation(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		"template":                  "witness",
+		"state":                     "active",
+		"wake_mode":                 "fresh",
+		"session_key":               "conversation-A",
+		sessionpkg.CurrentBeadIDKey: "wb-A",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	workBead := beads.Bead{ID: "wb-B", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("unconfigured fresh session should still be cycled on reassignment")
 	}
 }
 
