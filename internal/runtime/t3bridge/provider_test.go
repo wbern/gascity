@@ -40,6 +40,86 @@ func TestResolveProviderModel_PrefersCurrentConfigOverStoredEnvelope(t *testing.
 	}
 }
 
+func TestStoredEnvelopeFromThreadDecodesSessionFlags(t *testing.T) {
+	thread := map[string]interface{}{
+		"id":        "thread-1",
+		"projectId": "project-1",
+		"customMetadata": map[string]interface{}{
+			"gc.agent":           "crew",
+			"gc.sessionName":     "crew",
+			"gc.startupTemplate": "crew",
+			"gc.startupWorkDir":  "/tmp/crew",
+			"gc.runtimeProvider": "codex",
+			"gc.startupModel":    "gpt-5.4",
+		},
+		"sessionFlags": map[string]interface{}{
+			"version":  float64(runtime.CodexSessionFlagsVersion),
+			"provider": runtime.CodexSessionFlagsProvider,
+			"config": map[string]interface{}{
+				"features.hooks":    true,
+				"bypass_hook_trust": true,
+			},
+		},
+	}
+
+	envelope, err := storedEnvelopeFromThread(thread)
+	if err != nil {
+		t.Fatalf("storedEnvelopeFromThread: %v", err)
+	}
+	if envelope == nil || envelope.SessionFlags == nil {
+		t.Fatalf("storedEnvelopeFromThread session flags = %#v, want typed payload", envelope)
+	}
+	if err := envelope.SessionFlags.Validate(); err != nil {
+		t.Fatalf("stored session flags validation: %v", err)
+	}
+}
+
+func TestStoredEnvelopeFromThreadRejectsInvalidSessionFlags(t *testing.T) {
+	thread := map[string]interface{}{
+		"customMetadata": map[string]interface{}{
+			"gc.agent":           "crew",
+			"gc.startupTemplate": "crew",
+			"gc.startupWorkDir":  "/tmp/crew",
+			"gc.runtimeProvider": "codex",
+			"gc.startupModel":    "gpt-5.4",
+		},
+		"sessionFlags": map[string]interface{}{
+			"version":  float64(runtime.CodexSessionFlagsVersion + 1),
+			"provider": runtime.CodexSessionFlagsProvider,
+			"config":   map[string]interface{}{},
+		},
+	}
+
+	if _, err := storedEnvelopeFromThread(thread); err == nil || !strings.Contains(err.Error(), "unsupported session flags version") {
+		t.Fatalf("storedEnvelopeFromThread error = %v, want unsupported-version error", err)
+	}
+}
+
+func TestStart_RejectsUnsupportedSessionFlagsVersionBeforeRPC(t *testing.T) {
+	payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{})
+	payload.Version++
+	envelope, err := json.Marshal(StartupEnvelope{
+		Runtime:      RuntimeSection{Provider: "codex", Model: "gpt-5.4", WorkDir: "/tmp/crew"},
+		SessionFlags: &payload,
+	})
+	if err != nil {
+		t.Fatalf("marshal startup envelope: %v", err)
+	}
+
+	p := &Provider{watchers: make(map[string]context.CancelFunc), recentStarts: make(map[string]time.Time)}
+	err = p.Start(context.Background(), "crew", runtime.Config{
+		WorkDir: "/tmp/crew",
+		Command: "codex",
+		Env: map[string]string{
+			"GC_PROVIDER":         "codex",
+			"GC_STARTUP_ENVELOPE": string(envelope),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported session flags version") {
+		t.Fatalf("Start error = %v, want actionable unsupported-version error", err)
+	}
+}
+
 func TestResolveProviderModel_NormalizesClaudeProviderName(t *testing.T) {
 	cfg := runtime.Config{
 		Env: map[string]string{
@@ -324,6 +404,170 @@ func TestStart_ReusedThreadDoesNotInjectStartupTurns(t *testing.T) {
 	}
 }
 
+func TestStart_FreshCodexCarriesVersionedSessionFlagsInThreadCreate(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{
+			map[string]interface{}{
+				"id":            "project-1",
+				"workspaceRoot": "/tmp/crew",
+			},
+		},
+		"threads": []interface{}{},
+	})
+	defer server.Close()
+
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	cfg := runtime.Config{
+		WorkDir: "/tmp/crew",
+		Command: "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH": "/tmp/gc",
+			"GC_ALIAS":     "crew",
+			"GC_TEMPLATE":  "crew",
+			"GC_PROVIDER":  "codex",
+			"GC_MODEL":     "gpt-5.4",
+		},
+		CodexSessionFlags: func() *runtime.CodexSessionFlagsPayload {
+			payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{
+				FeaturesHooks:   true,
+				BypassHookTrust: true,
+				SessionStart: []runtime.CodexHookEntry{{
+					Matcher: "startup",
+					Hooks:   []runtime.CodexCommandHook{{Type: "command", Command: "gc prime --hook --hook-format codex"}},
+				}},
+				PreCompact: []runtime.CodexHookEntry{{
+					Matcher: "compact",
+					Hooks:   []runtime.CodexCommandHook{{Type: "command", Command: "gc handoff --auto --hook-format codex"}},
+				}},
+				UserPromptSubmit: []runtime.CodexHookEntry{{
+					Matcher: "prompt",
+					Hooks: []runtime.CodexCommandHook{
+						{Type: "command", Command: "gc nudge drain --inject --hook-format codex"},
+						{Type: "command", Command: "gc mail check --inject --hook-format codex"},
+					},
+				}},
+			})
+			return &payload
+		}(),
+	}
+
+	if err := p.Start(context.Background(), "crew", cfg); err != nil {
+		t.Fatalf("Start(fresh Codex): %v", err)
+	}
+
+	var create map[string]interface{}
+	for _, payload := range server.commandPayloadsCopy() {
+		if payload["type"] == "thread.create" {
+			create = payload
+			break
+		}
+	}
+	if create == nil {
+		t.Fatalf("missing thread.create: commands=%v", server.commandTypes())
+	}
+	got, ok := create["sessionFlags"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("thread.create sessionFlags = %#v, want typed object", create["sessionFlags"])
+	}
+	if got["version"] != float64(1) || got["provider"] != "codex" {
+		t.Fatalf("sessionFlags gate = version:%#v provider:%#v, want 1/codex", got["version"], got["provider"])
+	}
+	config, ok := got["config"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("sessionFlags config = %#v, want object", got["config"])
+	}
+	for key, want := range map[string]int{
+		"hooks.SessionStart":     1,
+		"hooks.PreCompact":       1,
+		"hooks.UserPromptSubmit": 1,
+	} {
+		entries, ok := config[key].([]interface{})
+		if !ok || len(entries) != want {
+			t.Errorf("sessionFlags config[%q] = %#v, want %d entry", key, config[key], want)
+		}
+	}
+	metadata, _ := create["customMetadata"].(map[string]interface{})
+	if _, exists := metadata["sessionFlags"]; exists {
+		t.Fatalf("session flags leaked into generic customMetadata: %#v", metadata)
+	}
+}
+
+func TestStart_PreservesCodexSessionFlagsFromPrebuiltEnvelope(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{},
+		"threads":  []interface{}{},
+	})
+	defer server.Close()
+
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+
+	payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{
+		FeaturesHooks:   true,
+		BypassHookTrust: true,
+	})
+	envelope, err := BuildStartupEnvelope(Intent{
+		AgentKind: AgentKindNamed,
+		WakeMode:  "fresh",
+		GC: GCSection{
+			CityName:    "gc",
+			CityPath:    "/tmp/gc",
+			Agent:       "crew",
+			Template:    "crew",
+			SessionName: "crew",
+		},
+		Runtime: RuntimeSection{
+			Provider: "codex",
+			Model:    "gpt-5.4",
+			WorkDir:  "/tmp/crew",
+		},
+		SessionFlags: &payload,
+	})
+	if err != nil {
+		t.Fatalf("BuildStartupEnvelope: %v", err)
+	}
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	cfg := runtime.Config{
+		WorkDir: "/tmp/crew",
+		Command: "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH":        "/tmp/gc",
+			"GC_PROVIDER":         "codex",
+			"GC_MODEL":            "gpt-5.4",
+			"GC_STARTUP_ENVELOPE": string(envelope),
+		},
+	}
+
+	if err := p.Start(context.Background(), "crew", cfg); err != nil {
+		t.Fatalf("Start(prebuilt envelope): %v", err)
+	}
+
+	for _, command := range server.commandPayloadsCopy() {
+		if command["type"] != "thread.create" {
+			continue
+		}
+		got, ok := command["sessionFlags"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("thread.create sessionFlags = %#v, want typed object", command["sessionFlags"])
+		}
+		if got["version"] != float64(runtime.CodexSessionFlagsVersion) || got["provider"] != runtime.CodexSessionFlagsProvider {
+			t.Fatalf("sessionFlags gate = version:%#v provider:%#v", got["version"], got["provider"])
+		}
+		return
+	}
+	t.Fatalf("missing thread.create: commands=%v", server.commandTypes())
+}
+
 func TestStart_FreshEnvelopeArchivesOldThreadBeforeCreatingAndNudgesReplacement(t *testing.T) {
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"projects": []interface{}{
@@ -371,6 +615,9 @@ func TestStart_FreshEnvelopeArchivesOldThreadBeforeCreatingAndNudgesReplacement(
 		}
 		if typ == "thread.create" {
 			newThreadID, _ = payload["threadId"].(string)
+			if _, exists := payload["sessionFlags"]; exists {
+				t.Fatalf("thread.create unexpectedly carried sessionFlags: %#v", payload["sessionFlags"])
+			}
 		}
 	}
 	if newThreadID == "" {

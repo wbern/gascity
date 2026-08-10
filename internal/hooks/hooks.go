@@ -884,6 +884,37 @@ func codexHookCommandLooksManaged(event, command string) bool {
 	}
 }
 
+// codexManagedBehavior classifies the semantic Gas City behavior implemented
+// by a recognized managed Codex command. Keep this in sync with the pure
+// classifier reviewed in upstream PR #4996.
+func codexManagedBehavior(event, command string) string {
+	if !codexHookCommandLooksManaged(event, command) {
+		return ""
+	}
+	switch event {
+	case "SessionStart":
+		return "session-start"
+	case "PreCompact":
+		return "pre-compact"
+	case "UserPromptSubmit":
+		_, _, args, ok := parseManagedGCCommand(command)
+		if !ok {
+			return ""
+		}
+		target, ok := codexManagedPromptTargetArgs(args, "codex")
+		if !ok {
+			return ""
+		}
+		switch {
+		case strings.HasPrefix(target, "nudge drain --inject"):
+			return "nudge"
+		case strings.HasPrefix(target, "mail check --inject"):
+			return "mail"
+		}
+	}
+	return ""
+}
+
 func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 	prefix, env, args, ok := parseManagedGCCommand(command)
 	if !ok {

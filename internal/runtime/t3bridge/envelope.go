@@ -3,6 +3,8 @@ package t3bridge
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // AgentKind distinguishes a durable named session from an interchangeable
@@ -93,6 +95,8 @@ type StartupEnvelope struct {
 	Context    ContextSection    `json:"context,omitempty"`
 	Resume     ResumeSection     `json:"resume"`
 	Worktree   *WorktreeSection  `json:"worktree,omitempty"`
+	// SessionFlags carries versioned provider-specific app-server overrides.
+	SessionFlags *runtime.CodexSessionFlagsPayload `json:"sessionFlags,omitempty"`
 }
 
 // Intent is the high-level input used to build a StartupEnvelope.
@@ -108,6 +112,7 @@ type Intent struct {
 	AllowRuntimeRebind bool
 	RequiredProvider   string
 	RequiredModel      string
+	SessionFlags       *runtime.CodexSessionFlagsPayload
 }
 
 // AllowThreadReuse reports whether a session may resume its existing T3
@@ -143,12 +148,13 @@ func BuildStartupEnvelope(intent Intent) (json.RawMessage, error) {
 		policy = "match-or-recreate"
 	}
 	envelope := StartupEnvelope{
-		Version:    1,
-		GC:         intent.GC,
-		Runtime:    intent.Runtime,
-		Startup:    intent.Startup,
-		Assignment: intent.Assignment,
-		Context:    intent.Context,
+		Version:      1,
+		GC:           intent.GC,
+		Runtime:      intent.Runtime,
+		Startup:      intent.Startup,
+		Assignment:   intent.Assignment,
+		Context:      intent.Context,
+		SessionFlags: intent.SessionFlags,
 		Resume: ResumeSection{
 			Policy:                 policy,
 			AllowThreadReuse:       AllowThreadReuse(intent.AgentKind, intent.WakeMode),

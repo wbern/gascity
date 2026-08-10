@@ -48,6 +48,8 @@ func DecideThreadReuse(input ReuseCheck) ReuseResult {
 		return ReuseResult{Decision: ReuseDecisionRecreate, Reason: "agent-mismatch"}
 	case stored.GC.Template != input.Desired.GC.Template:
 		return ReuseResult{Decision: ReuseDecisionRecreate, Reason: "template-mismatch"}
+	case !stored.SessionFlags.Equal(input.Desired.SessionFlags):
+		return ReuseResult{Decision: ReuseDecisionRecreate, Reason: "session-flags-mismatch"}
 	}
 
 	providerChanged := stored.Runtime.Provider != input.Desired.Runtime.Provider

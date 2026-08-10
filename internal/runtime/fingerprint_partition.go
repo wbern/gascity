@@ -28,7 +28,7 @@ import (
 //
 //	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
 //	                  OverlayDir, OverlayProviders, CopyFiles.
-//	LAUNCH (agent):   Command, Lifecycle, Upstream, MCPServers,
+//	LAUNCH (agent):   Command, Lifecycle, Upstream, MCPServers, CodexSessionFlags,
 //	                  AcceptStartupDialogs, MouseOn, SessionSetup,
 //	                  SessionSetupScript.
 //
@@ -108,6 +108,7 @@ func hashLaunchFields(h hash.Hash, cfg Config) {
 	h.Write([]byte{0})             //nolint:errcheck // hash.Write never errors
 
 	hashMCPServers(h, cfg.MCPServers)
+	hashCodexSessionFlags(h, cfg.CodexSessionFlags)
 	hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
 	hashBool(h, "mouse_on", cfg.MouseOn)
 

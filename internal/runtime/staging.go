@@ -35,12 +35,12 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 	if cfg.WorkDir != "" {
 		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := stageSessionOverlayDir(od, cfg.WorkDir, overlayProviders, cfg.CodexSessionFlags != nil, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := stageSessionOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, cfg.CodexSessionFlags != nil, warnings); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
@@ -50,7 +50,37 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 			}
 		}
 	}
-	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+	copyFiles := cfg.CopyFiles
+	if cfg.CodexSessionFlags != nil {
+		copyFiles = copyFilesWithoutCodexHooks(copyFiles)
+	}
+	return stageCopyFiles(cfg.WorkDir, copyFiles)
+}
+
+func stageSessionOverlayDir(srcDir, dstDir string, providers []string, skipCodexHooks bool, warnings io.Writer) error {
+	if !skipCodexHooks {
+		return StageProviderOverlayDir(srcDir, dstDir, providers, warnings)
+	}
+	skip := func(relPath string, isDir bool) bool {
+		return !isDir && filepath.Clean(relPath) == filepath.Join(".codex", "hooks.json")
+	}
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings)
+}
+
+func copyFilesWithoutCodexHooks(entries []CopyEntry) []CopyEntry {
+	out := make([]CopyEntry, 0, len(entries))
+	for _, entry := range entries {
+		if isCodexHooksPath(entry.Src) || isCodexHooksPath(entry.RelDst) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isCodexHooksPath(value string) bool {
+	clean := filepath.ToSlash(filepath.Clean(value))
+	return clean == ".codex/hooks.json" || strings.HasSuffix(clean, "/.codex/hooks.json")
 }
 
 // EffectiveOverlayProviderNames returns the provider overlay slots to stage for

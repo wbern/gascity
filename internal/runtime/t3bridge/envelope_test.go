@@ -3,6 +3,8 @@ package t3bridge
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestBuildStartupEnvelope_ThreadReuseFollowsWakeMode(t *testing.T) {
@@ -30,6 +32,33 @@ func TestBuildStartupEnvelope_ThreadReuseFollowsWakeMode(t *testing.T) {
 				t.Fatalf("allowThreadReuse = %v, want %v", envelope.Resume.AllowThreadReuse, tc.wantReuse)
 			}
 		})
+	}
+}
+
+func TestBuildStartupEnvelope_CarriesTypedCodexSessionFlags(t *testing.T) {
+	payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{
+		FeaturesHooks:   true,
+		BypassHookTrust: true,
+	})
+	raw, err := BuildStartupEnvelope(Intent{
+		AgentKind:    AgentKindNamed,
+		SessionFlags: &payload,
+	})
+	if err != nil {
+		t.Fatalf("BuildStartupEnvelope: %v", err)
+	}
+
+	var envelope StartupEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if envelope.SessionFlags == nil {
+		t.Fatal("startup envelope missing typed session flags")
+	}
+	if envelope.SessionFlags.Version != runtime.CodexSessionFlagsVersion || envelope.SessionFlags.Provider != runtime.CodexSessionFlagsProvider {
+		t.Fatalf("session flags gate = version:%d provider:%q, want %d/%q",
+			envelope.SessionFlags.Version, envelope.SessionFlags.Provider,
+			runtime.CodexSessionFlagsVersion, runtime.CodexSessionFlagsProvider)
 	}
 }
 

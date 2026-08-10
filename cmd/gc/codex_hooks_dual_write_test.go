@@ -513,3 +513,72 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
 	}
 }
+
+func TestPrepareTemplateResolution_T3CodexGeneratedHooksLeavesHookFileByteIdentical(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "crew")
+	hooksDir := filepath.Join(workDir, ".codex")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.codex): %v", err)
+	}
+	original := []byte(strings.ReplaceAll(furiosaHybridCodexHooks, "__CITY__", cityDir))
+	hooksPath := filepath.Join(hooksDir, "hooks.json")
+	if err := os.WriteFile(hooksPath, original, 0o644); err != nil {
+		t.Fatalf("write existing hooks: %v", err)
+	}
+
+	overlaySrc := seedCodexOverlay(t)
+	codexBase := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:              "test-city",
+			InstallAgentHooks: []string{"codex"},
+		},
+		Session: config.SessionConfig{Provider: "t3bridge"},
+		Providers: map[string]config.ProviderSpec{
+			"codex": {
+				Base:          &codexBase,
+				Command:       "/bin/echo",
+				ResumeCommand: "/bin/echo resume {{.SessionKey}}",
+			},
+		},
+		PackOverlayDirs: []string{overlaySrc},
+		Agents: []config.Agent{{
+			Name:     "crew",
+			Provider: "codex",
+			WorkDir:  workDir,
+		}},
+	}
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	resolved, err := config.ResolveProvider(&cfg.Agents[0], bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		t.Fatalf("ResolveProvider precondition: %v", err)
+	}
+	if family := resolvedProviderLaunchFamily(resolved); family != "codex" {
+		t.Fatalf("resolved provider family = %q, want codex", family)
+	}
+	resolvedWorkDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, "crew", &cfg.Agents[0], bp.rigs)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir precondition: %v", err)
+	}
+	if resolvedWorkDir != workDir {
+		t.Fatalf("resolved workdir = %q, want %q", resolvedWorkDir, workDir)
+	}
+
+	prepareTemplateResolution(bp, &cfg.Agents[0], "crew", io.Discard)
+	installAgentSideEffects(bp, &cfg.Agents[0], TemplateParams{
+		WorkDir:                  workDir,
+		TemplateName:             "crew",
+		InstanceName:             "crew",
+		ResolvedProvider:         resolved,
+		EffectiveSessionProvider: "t3bridge",
+	}, io.Discard)
+
+	got, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read existing hooks after generated-mode preparation: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("generated T3 Codex preparation mutated .codex/hooks.json\nbefore:\n%s\nafter:\n%s", original, got)
+	}
+}

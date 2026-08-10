@@ -129,6 +129,9 @@ type TemplateParams struct {
 	// MCPServers is the effective ACP session/new MCP server set for this
 	// concrete session context.
 	MCPServers []runtime.MCPServerConfig
+	// CodexSessionFlags is generated session-scoped hook configuration for a
+	// Codex session launched through the T3 bridge.
+	CodexSessionFlags *runtime.CodexSessionFlagsPayload
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -191,6 +194,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
 	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
+	generatedCodexHooks := usesGeneratedCodexSessionHooks(effectiveSessionProvider(cfgAgent.Session, p.sessionProvider), resolved)
+	if generatedCodexHooks {
+		installHooks = withoutCodexHookFamily(installHooks, p.providers)
+	}
 	if providerFamily == "kimi" && installHooksIncludeFamily(installHooks, "kimi", p.providers) {
 		command = appendKimiHookConfigArg(command)
 	}
@@ -249,7 +256,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if overlayDir != "" {
 		hookOverlayDirs = append(hookOverlayDirs, overlayDir)
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers), hookOverlayDirs)
+	hookFileProviders := hookFileProvidersForResolved(resolved, installHooks, p.providers)
+	if generatedCodexHooks {
+		hookFileProviders = withoutCodexHookFamily(hookFileProviders, p.providers)
+	}
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProviders, hookOverlayDirs)
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -730,6 +741,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	if err := resolveT3BridgeSessionFlags(&params); err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
 	return params, nil
 }
 
@@ -897,6 +911,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.PromptSuffix = promptSuffix
 	cfg.PromptFlag = promptFlag
 	cfg.Env = env
+	cfg.CodexSessionFlags = tp.CodexSessionFlags
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
 	}

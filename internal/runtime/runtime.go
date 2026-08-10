@@ -582,6 +582,12 @@ type Config struct {
 	// the T3 bridge path. It is excluded from the core fingerprint.
 	StartupEnvelope json.RawMessage
 
+	// CodexSessionFlags carries generated, session-scoped Codex hook config to
+	// runtimes that can forward typed app-server thread configuration. It is a
+	// launch fingerprint input so changes relaunch the agent without rebuilding
+	// its provisioned workspace.
+	CodexSessionFlags *CodexSessionFlagsPayload
+
 	// Startup reliability hints (all optional — zero values skip).
 
 	// ReadyPromptPrefix is the prompt prefix for readiness detection (e.g. "> ").

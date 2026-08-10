@@ -1,6 +1,10 @@
 package t3bridge
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 func TestDecideThreadReuse_ExactMatch(t *testing.T) {
 	env := baseEnvelope()
@@ -58,6 +62,35 @@ func TestDecideThreadReuse_ProviderMismatch_RebindAllowed(t *testing.T) {
 	})
 	if result.Decision != ReuseDecisionRebind || result.Reason != "provider-rebind" {
 		t.Errorf("expected rebind/provider-rebind, got %s/%s", result.Decision, result.Reason)
+	}
+}
+
+func TestDecideThreadReuse_SessionFlagsMustMatch(t *testing.T) {
+	desired := baseEnvelope()
+	payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{FeaturesHooks: true, BypassHookTrust: true})
+	desired.SessionFlags = &payload
+
+	missing := baseEnvelope()
+	result := DecideThreadReuse(ReuseCheck{
+		Desired:       desired,
+		Stored:        &missing,
+		ThreadActive:  true,
+		ProjectActive: true,
+	})
+	if result.Decision != ReuseDecisionRecreate || result.Reason != "session-flags-mismatch" {
+		t.Fatalf("missing flags result = %s/%s, want recreate/session-flags-mismatch", result.Decision, result.Reason)
+	}
+
+	matching := baseEnvelope()
+	matching.SessionFlags = payload.Clone()
+	result = DecideThreadReuse(ReuseCheck{
+		Desired:       desired,
+		Stored:        &matching,
+		ThreadActive:  true,
+		ProjectActive: true,
+	})
+	if result.Decision != ReuseDecisionReuse {
+		t.Fatalf("matching flags result = %s/%s, want reuse", result.Decision, result.Reason)
 	}
 }
 

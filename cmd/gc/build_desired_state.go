@@ -5140,9 +5140,13 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
 	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
+	installHooks := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	if usesGeneratedCodexSessionHooks(effectiveSessionProvider(cfgAgent.Session, bp.sessionProvider), resolved) {
+		installHooks = withoutCodexHookFamily(installHooks, bp.providers)
+	}
+	if len(installHooks) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
-		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
+		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, installHooks, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
 		}
 	}
@@ -5244,10 +5248,15 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 	// the resolved provider family IS claude, ensureClaudeSettingsArgs
 	// already projected the settings upstream in resolveTemplate, so
 	// drop the explicit "claude" entry here to avoid duplicating the
-	// filesystem write on every reconciler tick.
+	// filesystem write on every reconciler tick. Generated T3 Codex sessions
+	// likewise carry hooks in the session envelope, so they must never run the
+	// Codex filesystem installer here.
 	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
 	if tp.ResolvedProvider != nil {
 		family := resolvedProviderLaunchFamily(tp.ResolvedProvider)
+		if usesGeneratedCodexSessionHooks(tp.EffectiveSessionProvider, tp.ResolvedProvider) {
+			ih = withoutCodexHookFamily(ih, bp.providers)
+		}
 		if family == "claude" || tp.ResolvedProvider.Name == "claude" {
 			ih = hooksWithoutClaude(ih)
 		}

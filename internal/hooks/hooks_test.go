@@ -515,6 +515,85 @@ func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
 	}
 }
 
+func TestManagedCodexSessionFlagsRendersExactlyOneCityBoundBehavior(t *testing.T) {
+	flags, err := ManagedCodexSessionFlags("/city with spaces")
+	if err != nil {
+		t.Fatalf("ManagedCodexSessionFlags: %v", err)
+	}
+
+	if err := flags.Validate(); err != nil {
+		t.Fatalf("validate session flags payload: %v", err)
+	}
+	data, err := json.Marshal(flags.Config)
+	if err != nil {
+		t.Fatalf("marshal session flags: %v", err)
+	}
+	var got struct {
+		FeaturesHooks    bool              `json:"features.hooks"`
+		BypassHookTrust  bool              `json:"bypass_hook_trust"`
+		SessionStart     []claudeHookEntry `json:"hooks.SessionStart"`
+		PreCompact       []claudeHookEntry `json:"hooks.PreCompact"`
+		UserPromptSubmit []claudeHookEntry `json:"hooks.UserPromptSubmit"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal session flags: %v", err)
+	}
+
+	if !got.FeaturesHooks || !got.BypassHookTrust {
+		t.Fatalf("hook activation flags = features:%v trust:%v, want both true", got.FeaturesHooks, got.BypassHookTrust)
+	}
+	if len(got.SessionStart) != 1 || len(got.SessionStart[0].Hooks) != 1 {
+		t.Fatalf("SessionStart shape = %#v, want one entry with one command", got.SessionStart)
+	}
+	if len(got.PreCompact) != 1 || len(got.PreCompact[0].Hooks) != 1 {
+		t.Fatalf("PreCompact shape = %#v, want one entry with one command", got.PreCompact)
+	}
+	if len(got.UserPromptSubmit) != 1 || len(got.UserPromptSubmit[0].Hooks) != 2 {
+		t.Fatalf("UserPromptSubmit shape = %#v, want one entry with nudge and mail commands", got.UserPromptSubmit)
+	}
+
+	wantCity := `--city ` + shellquote.Quote("/city with spaces")
+	commands := map[string]string{
+		"session-start": got.SessionStart[0].Hooks[0].Command,
+		"pre-compact":   got.PreCompact[0].Hooks[0].Command,
+		"nudge":         got.UserPromptSubmit[0].Hooks[0].Command,
+		"mail":          got.UserPromptSubmit[0].Hooks[1].Command,
+	}
+	for behavior, command := range commands {
+		if !strings.Contains(command, wantCity) {
+			t.Errorf("%s command missing explicit city binding %q: %s", behavior, wantCity, command)
+		}
+		if !strings.Contains(command, "--hook-format codex") {
+			t.Errorf("%s command missing Codex hook format: %s", behavior, command)
+		}
+	}
+	if !strings.Contains(commands["session-start"], "GC_MANAGED_SESSION_HOOK=1") {
+		t.Errorf("SessionStart command missing managed marker: %s", commands["session-start"])
+	}
+	if !strings.Contains(commands["pre-compact"], "handoff --auto") {
+		t.Errorf("PreCompact command missing automatic handoff: %s", commands["pre-compact"])
+	}
+	if !strings.Contains(commands["nudge"], "nudge drain --inject") {
+		t.Errorf("nudge command has wrong target: %s", commands["nudge"])
+	}
+	if !strings.Contains(commands["mail"], "mail check --inject") {
+		t.Errorf("mail command has wrong target: %s", commands["mail"])
+	}
+}
+
+func TestValidateManagedCodexSessionFlagsRejectsDuplicateBehavior(t *testing.T) {
+	payload, err := ManagedCodexSessionFlags("/city")
+	if err != nil {
+		t.Fatalf("ManagedCodexSessionFlags: %v", err)
+	}
+	payload.Config.SessionStart = append(payload.Config.SessionStart, payload.Config.SessionStart[0])
+
+	err = validateManagedCodexSessionFlags(payload)
+	if err == nil || !strings.Contains(err.Error(), "session-start") {
+		t.Fatalf("validate duplicate session-start error = %v, want behavior-specific error", err)
+	}
+}
+
 func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
 	staleManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
 	if !CodexHooksMissingManagedPreCompact(staleManaged) {

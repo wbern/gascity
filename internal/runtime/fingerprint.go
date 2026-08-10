@@ -7,6 +7,7 @@ import (
 	"hash"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -61,7 +62,8 @@ const FingerprintVersion = "v6"
 //
 // Included: Command, Lifecycle, Env, FingerprintExtra (pool config, etc.),
 // PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
-// overlay slots, CopyFiles, AcceptStartupDialogs, MouseOn, SessionLive.
+// overlay slots, CopyFiles, CodexSessionFlags, AcceptStartupDialogs, MouseOn,
+// SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
 // ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
@@ -232,6 +234,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
 	hashMCPServers(h, cfg.MCPServers)
+	hashCodexSessionFlags(h, cfg.CodexSessionFlags)
 
 	// FingerprintExtra carries additional identity fields (pool config, etc.)
 	// that aren't part of the session command but should
@@ -298,6 +301,42 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// so a credential rotation moves no fingerprint. Optional/conditional, so an
 	// unset Upstream leaves every existing config's fingerprint byte-identical.
 	hashOptionalString(h, "upstream", cfg.Upstream)
+}
+
+func hashCodexSessionFlags(h hash.Hash, payload *CodexSessionFlagsPayload) {
+	if payload == nil {
+		return
+	}
+	h.Write([]byte("codex_session_flags"))         //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                             //nolint:errcheck // hash.Write never errors
+	h.Write([]byte(strconv.Itoa(payload.Version))) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                             //nolint:errcheck // hash.Write never errors
+	h.Write([]byte(payload.Provider))              //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                             //nolint:errcheck // hash.Write never errors
+	hashBool(h, "features.hooks", payload.Config.FeaturesHooks)
+	hashBool(h, "bypass_hook_trust", payload.Config.BypassHookTrust)
+	hashCodexHookEntries(h, "SessionStart", payload.Config.SessionStart)
+	hashCodexHookEntries(h, "PreCompact", payload.Config.PreCompact)
+	hashCodexHookEntries(h, "UserPromptSubmit", payload.Config.UserPromptSubmit)
+}
+
+func hashCodexHookEntries(h hash.Hash, event string, entries []CodexHookEntry) {
+	h.Write([]byte(event))                      //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                          //nolint:errcheck // hash.Write never errors
+	h.Write([]byte(strconv.Itoa(len(entries)))) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                          //nolint:errcheck // hash.Write never errors
+	for _, entry := range entries {
+		h.Write([]byte(entry.Matcher))                  //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                              //nolint:errcheck // hash.Write never errors
+		h.Write([]byte(strconv.Itoa(len(entry.Hooks)))) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})                              //nolint:errcheck // hash.Write never errors
+		for _, hook := range entry.Hooks {
+			h.Write([]byte(hook.Type))    //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})            //nolint:errcheck // hash.Write never errors
+			h.Write([]byte(hook.Command)) //nolint:errcheck // hash.Write never errors
+			h.Write([]byte{0})            //nolint:errcheck // hash.Write never errors
+		}
+	}
 }
 
 // hashOptionalString contributes name+value to the hash only when value is
@@ -445,6 +484,9 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		}),
 		"MCPServers": fieldHash(func(h hash.Hash) {
 			hashMCPServers(h, cfg.MCPServers)
+		}),
+		"CodexSessionFlags": fieldHash(func(h hash.Hash) {
+			hashCodexSessionFlags(h, cfg.CodexSessionFlags)
 		}),
 		"FPExtra": fieldHash(func(h hash.Hash) {
 			if len(cfg.FingerprintExtra) > 0 {

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -145,11 +146,12 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 // overlay (e.g. core/overlay/per-provider/pi/.pi/extensions/gc-hooks.js for a
 // custom base="builtin:pi" provider) is never staged, the harness never signals
 // ready, and the controller churns into a fall-back-to-claude loop (gc-6bw8o).
-// Best-effort: a missing cfg/resolved (CLI direct-start fallback) leaves the
-// config untouched rather than failing the start.
-func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) {
+// A missing cfg/resolved (CLI direct-start fallback) leaves the config
+// untouched. Rendering errors are returned because silently dropping generated
+// session flags would start Codex without its managed lifecycle hooks.
+func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) error {
 	if hints == nil || cfg == nil || resolved == nil {
-		return
+		return nil
 	}
 	// ProviderName is the launch family (BuiltinAncestor, e.g. "pi" for a
 	// base="builtin:pi" provider); ProviderOverlayName is the concrete provider
@@ -157,17 +159,34 @@ func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, 
 	hints.ProviderName = resolvedProviderLaunchFamily(resolved)
 	hints.ProviderOverlayName = strings.TrimSpace(resolved.Name)
 	agentCfg := findAgentByTemplate(cfg, template)
+	sessionProvider := strings.TrimSpace(cfg.Session.Provider)
+	if agentCfg != nil {
+		sessionProvider = effectiveSessionProvider(agentCfg.Session, sessionProvider)
+	}
+	generatedCodexHooks := usesGeneratedCodexSessionHooks(sessionProvider, resolved)
+	if generatedCodexHooks {
+		flags, err := hooks.ManagedCodexSessionFlags(cityPath)
+		if err != nil {
+			return fmt.Errorf("rendering Codex session hooks for worker %q: %w", template, err)
+		}
+		hints.CodexSessionFlags = &flags
+		hints.InstallAgentHooks = withoutCodexHookFamily(hints.InstallAgentHooks, cfg.Providers)
+	}
 	if agentCfg == nil {
 		// No agent config to resolve install-hooks/rig overlay scope against
 		// (e.g. a synthetic session). Still stage city pack overlays.
 		hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, "")
 		configureManagedHookConvergence(hints, cityPath)
-		return
+		return nil
 	}
 	hints.InstallAgentHooks = config.ResolveInstallHooks(agentCfg, &cfg.Workspace)
+	if generatedCodexHooks {
+		hints.InstallAgentHooks = withoutCodexHookFamily(hints.InstallAgentHooks, cfg.Providers)
+	}
 	rigName := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), firstNonEmptyGCString(agentCfg.QualifiedName(), template), agentCfg, cfg.Rigs).Rig
 	hints.PackOverlayDirs = effectiveOverlayDirs(cfg.PackOverlayDirs, cfg.RigOverlayDirs, rigName)
 	configureManagedHookConvergence(hints, cityPath)
+	return nil
 }
 
 func resolvedRuntimeMCPServersWithConfig(
@@ -295,7 +314,9 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
 	// (gc-6bw8o).
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
+	if err := applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved); err != nil {
+		return nil, err
+	}
 	return factory.SessionForResolvedRuntime(sessionCfg)
 }
 
@@ -639,7 +660,9 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Stage provider-overlay hooks on resume the same way the reconciler create
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
-	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	if err := applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved); err != nil {
+		return nil, err
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

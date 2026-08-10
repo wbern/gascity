@@ -2,11 +2,34 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime/t3bridge"
 )
+
+func resolveT3BridgeSessionFlags(tp *TemplateParams) error {
+	if tp == nil || !templateParamsUseT3Bridge(*tp) {
+		return nil
+	}
+	providerFamily := resolvedProviderLaunchFamily(tp.ResolvedProvider)
+	if providerFamily == "" {
+		providerFamily = strings.TrimSpace(tp.Env["GC_PROVIDER"])
+	}
+	if providerFamily != "codex" {
+		tp.CodexSessionFlags = nil
+		return nil
+	}
+	flags, err := hooks.ManagedCodexSessionFlags(tp.CityPath)
+	if err != nil {
+		return fmt.Errorf("rendering Codex session hooks: %w", err)
+	}
+	tp.CodexSessionFlags = &flags
+	return nil
+}
 
 func applyT3BridgeRuntimeConfig(tp TemplateParams, env map[string]string) {
 	if !templateParamsUseT3Bridge(tp) {
@@ -126,6 +149,11 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 	if sessionProvider == "" {
 		sessionProvider = strings.TrimSpace(tp.SessionOverride)
 	}
+	return sessionProviderUsesT3Bridge(sessionProvider)
+}
+
+func sessionProviderUsesT3Bridge(sessionProvider string) bool {
+	sessionProvider = strings.TrimSpace(sessionProvider)
 	if sessionProvider == "t3bridge" {
 		return true
 	}
@@ -133,6 +161,21 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 		return isLegacyT3BridgeExecScript(strings.TrimPrefix(sessionProvider, "exec:"))
 	}
 	return false
+}
+
+func usesGeneratedCodexSessionHooks(sessionProvider string, resolved *config.ResolvedProvider) bool {
+	return sessionProviderUsesT3Bridge(sessionProvider) && resolvedProviderLaunchFamily(resolved) == "codex"
+}
+
+func withoutCodexHookFamily(providers []string, specs map[string]config.ProviderSpec) []string {
+	out := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if provider == "codex" || config.BuiltinFamily(provider, specs) == "codex" {
+			continue
+		}
+		out = append(out, provider)
+	}
+	return out
 }
 
 func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {

@@ -10,7 +10,11 @@ import (
 // runtime overlay staging. This keeps provider task worktrees hook-enabled
 // while normalizing managed entries to the city's canonical form.
 func configureManagedHookConvergence(cfg *runtime.Config, cityPath string) {
-	if cfg == nil || cityPath == "" || len(cfg.InstallAgentHooks) == 0 {
+	if cfg == nil {
+		return
+	}
+	cfg.ConvergeManagedHooks = nil
+	if cityPath == "" || len(cfg.InstallAgentHooks) == 0 {
 		return
 	}
 	providers := append([]string(nil), cfg.InstallAgentHooks...)
