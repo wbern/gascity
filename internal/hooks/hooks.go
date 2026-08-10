@@ -15,11 +15,13 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/codexhooks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -702,6 +704,146 @@ func CodexHooksNeedManagedUpgrade(data []byte, cityDir string) bool {
 		return false
 	}
 	return applyCodexManagedHookUpgrade(root, nil, cityDir)
+}
+
+// CodexHooksAudit describes the handler and recognized Gas City behavior
+// cardinality in one Codex hook document.
+type CodexHooksAudit struct {
+	EventHandlerCounts    map[string]int
+	ManagedBehaviorCounts map[string]int
+}
+
+// AuditCodexHooks classifies Codex hook handlers without changing the input.
+func AuditCodexHooks(data []byte) (CodexHooksAudit, error) {
+	doc, err := codexhooks.ParseDocument(data, "Codex hooks")
+	if err != nil {
+		return CodexHooksAudit{}, err
+	}
+	hooksMap, _ := doc["hooks"].(map[string]any)
+	audit := CodexHooksAudit{
+		EventHandlerCounts:    map[string]int{},
+		ManagedBehaviorCounts: map[string]int{},
+	}
+	for event, entriesValue := range hooksMap {
+		entries, ok := entriesValue.([]any)
+		if !ok {
+			return CodexHooksAudit{}, fmt.Errorf("codex hooks event %s must be an array", event)
+		}
+		for _, entryValue := range entries {
+			entry, ok := entryValue.(map[string]any)
+			if !ok {
+				return CodexHooksAudit{}, fmt.Errorf("codex hooks event %s contains a non-object entry", event)
+			}
+			if command, ok := entry["command"].(string); ok {
+				audit.EventHandlerCounts[event]++
+				if behavior := codexManagedBehavior(event, command); behavior != "" {
+					audit.ManagedBehaviorCounts[behavior]++
+				}
+			}
+			if handlers, ok := entry["hooks"].([]any); ok {
+				for _, handlerValue := range handlers {
+					handler, ok := handlerValue.(map[string]any)
+					if !ok {
+						return CodexHooksAudit{}, fmt.Errorf("codex hooks event %s contains a non-object handler", event)
+					}
+					audit.EventHandlerCounts[event]++
+					if command, ok := handler["command"].(string); ok {
+						if behavior := codexManagedBehavior(event, command); behavior != "" {
+							audit.ManagedBehaviorCounts[behavior]++
+						}
+					}
+				}
+			}
+		}
+	}
+	return audit, nil
+}
+
+// RemoveManagedCodexHooks removes only recognized Gas City command handlers
+// from a Codex hook document. Custom handlers and unknown fields on retained
+// objects are preserved. An unchanged document is returned byte-for-byte.
+func RemoveManagedCodexHooks(data []byte) ([]byte, bool, error) {
+	doc, err := codexhooks.ParseDocument(data, "Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	hooksMap, _ := doc["hooks"].(map[string]any)
+	changed := false
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		keptEntries := make([]any, 0, len(entries))
+		for _, entryValue := range entries {
+			entry := entryValue.(map[string]any)
+			if command, ok := entry["command"].(string); ok && codexManagedBehavior(event, command) != "" {
+				if key, found := firstUnknownCodexHookField(entry, "matcher", "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
+					return nil, false, fmt.Errorf("refusing to remove managed Codex %s entry with inseparable field %q", event, key)
+				}
+				changed = true
+				continue
+			}
+			if handlers, ok := entry["hooks"].([]any); ok {
+				keptHandlers := make([]any, 0, len(handlers))
+				for _, handlerValue := range handlers {
+					handler := handlerValue.(map[string]any)
+					command, _ := handler["command"].(string)
+					if codexManagedBehavior(event, command) != "" {
+						if key, found := firstUnknownCodexHookField(handler, "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
+							return nil, false, fmt.Errorf("refusing to remove managed Codex %s handler with inseparable field %q", event, key)
+						}
+						changed = true
+						continue
+					}
+					keptHandlers = append(keptHandlers, handlerValue)
+				}
+				if len(keptHandlers) == 0 {
+					if len(handlers) > 0 {
+						if key, found := firstUnknownCodexHookField(entry, "matcher", "hooks"); found {
+							return nil, false, fmt.Errorf("refusing to remove managed Codex %s wrapper with inseparable field %q", event, key)
+						}
+						changed = true
+					}
+					continue
+				}
+				entry["hooks"] = keptHandlers
+			}
+			keptEntries = append(keptEntries, entryValue)
+		}
+		if len(keptEntries) != len(entries) {
+			hooksMap[event] = keptEntries
+		}
+	}
+	if !changed {
+		return data, false, nil
+	}
+	candidate, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		return nil, false, fmt.Errorf("encoding migrated Codex hooks: %w", err)
+	}
+	if err := codexhooks.ValidateDocument(candidate, "migrated Codex hooks"); err != nil {
+		return nil, false, err
+	}
+	return candidate, true, nil
+}
+
+func firstUnknownCodexHookField(object map[string]any, allowed ...string) (string, bool) {
+	allowedFields := make(map[string]bool, len(allowed))
+	for _, field := range allowed {
+		allowedFields[field] = true
+	}
+	unknown := make([]string, 0, len(object))
+	for field := range object {
+		if !allowedFields[field] {
+			unknown = append(unknown, field)
+		}
+	}
+	if len(unknown) == 0 {
+		return "", false
+	}
+	sort.Strings(unknown)
+	return unknown[0], true
 }
 
 func applyCodexManagedHookUpgrade(root any, desired []byte, cityDir string) bool {

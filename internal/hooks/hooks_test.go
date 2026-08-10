@@ -97,6 +97,32 @@ func TestValidateRejectsUnsupported(t *testing.T) {
 	}
 }
 
+func TestRemoveManagedCodexHooksRejectsMetadataOnRemovedWrapper(t *testing.T) {
+	data := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","customMetadata":{"keep":true},"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
+
+	_, changed, err := RemoveManagedCodexHooks(data)
+
+	if err == nil || !strings.Contains(err.Error(), "customMetadata") {
+		t.Fatalf("RemoveManagedCodexHooks error = %v, want inseparable customMetadata refusal", err)
+	}
+	if changed {
+		t.Fatal("RemoveManagedCodexHooks reported a change after refusing custom metadata")
+	}
+}
+
+func TestRemoveManagedCodexHooksRejectsMetadataOnRemovedHandler(t *testing.T) {
+	data := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc prime --hook --hook-format codex","customMetadata":{"keep":true}},{"type":"command","command":"printf custom"}]}]}}`)
+
+	_, changed, err := RemoveManagedCodexHooks(data)
+
+	if err == nil || !strings.Contains(err.Error(), "customMetadata") {
+		t.Fatalf("RemoveManagedCodexHooks error = %v, want inseparable customMetadata refusal", err)
+	}
+	if changed {
+		t.Fatal("RemoveManagedCodexHooks reported a change after refusing custom metadata")
+	}
+}
+
 func TestValidateEmpty(t *testing.T) {
 	if err := Validate(nil); err != nil {
 		t.Errorf("Validate(nil) = %v, want nil", err)
