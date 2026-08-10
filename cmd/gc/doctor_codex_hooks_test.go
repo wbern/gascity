@@ -117,6 +117,32 @@ func TestCodexHooksDriftCheckReportsDuplicateOnlyCanonicalHandlers(t *testing.T)
 	}
 }
 
+func TestCodexHooksDriftCheckWarnsForDuplicateActiveFilesystemSources(t *testing.T) {
+	cityDir := t.TempDir()
+	userDir := filepath.Join(t.TempDir(), "user")
+	rootDir := filepath.Join(t.TempDir(), "root")
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	city := shellquote.Quote(cityDir)
+	current := fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc --city %s prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"gc --city %s handoff --auto --hook-format codex \"context cycle\""}]}]}}`, city, city)
+	writeCodexHooksForDoctorTest(t, userDir, current)
+	writeCodexHooksForDoctorTest(t, rootDir, current)
+
+	check := newCodexHooksDriftCheck(cityDir, []string{linkedDir})
+	check.userHooksPath = filepath.Join(userDir, ".codex", "hooks.json")
+	check.resolveProjectRoot = func(string) (string, error) { return rootDir, nil }
+	check.ownership = codexHookOwnership{fileSourcesActive: true, filesystemOwned: true}
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status == doctor.StatusOK {
+		t.Fatalf("status = OK, want duplicate active source warning; message=%s details=%v", result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{check.userHooksPath, filepath.Join(rootDir, ".codex", "hooks.json"), "session-start:2"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("duplicate report missing %q:\n%s", want, details)
+		}
+	}
+}
+
 func TestCodexHooksDriftCheckAuditsUserRootSessionFlagsAndInertLinkedWorktree(t *testing.T) {
 	cityDir := t.TempDir()
 	rootDir := filepath.Join(cityDir, "root")

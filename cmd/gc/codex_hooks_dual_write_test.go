@@ -320,11 +320,7 @@ func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
 	}
 }
 
-// TestStageSessionWorkDirConvergesCanonicalCodexProjectHooksForLinkedWorktree
-// covers Codex's project hook source when a session runs from a linked git
-// worktree. The runtime workdir receives staging, but Codex loads the primary
-// worktree's project hooks, so convergence must reach that distinct file too.
-func TestStageSessionWorkDirConvergesCanonicalCodexProjectHooksForLinkedWorktree(t *testing.T) {
+func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) {
 	mainWorktree := filepath.Join(t.TempDir(), "main")
 	if err := os.MkdirAll(mainWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir main worktree: %v", err)
@@ -339,6 +335,12 @@ func TestStageSessionWorkDirConvergesCanonicalCodexProjectHooksForLinkedWorktree
 	cityDir := t.TempDir()
 	overlaySrc := seedCodexOverlay(t)
 	seedFuriosaHybrid(t, cityDir, mainWorktree)
+	seedFuriosaHybrid(t, cityDir, linkedWorktree)
+	canonicalHooks := filepath.Join(mainWorktree, ".codex", "hooks.json")
+	canonicalBefore, err := os.ReadFile(canonicalHooks)
+	if err != nil {
+		t.Fatalf("read canonical project hooks before staging: %v", err)
+	}
 
 	cfg := runtime.Config{
 		WorkDir:           linkedWorktree,
@@ -351,52 +353,46 @@ func TestStageSessionWorkDirConvergesCanonicalCodexProjectHooksForLinkedWorktree
 		t.Fatalf("StageSessionWorkDir: %v", err)
 	}
 
-	canonicalHooks := filepath.Join(mainWorktree, ".codex", "hooks.json")
-	matchers := codexSessionStartMatchers(t, canonicalHooks)
+	linkedHooks := filepath.Join(linkedWorktree, ".codex", "hooks.json")
+	matchers := codexSessionStartMatchers(t, linkedHooks)
 	if len(matchers) != 1 || matchers[0] != "startup" {
-		data, _ := os.ReadFile(canonicalHooks)
-		t.Fatalf("canonical project SessionStart matchers = %v, want exactly [startup] after linked-worktree staging\n%s", matchers, data)
+		data, _ := os.ReadFile(linkedHooks)
+		t.Fatalf("linked session SessionStart matchers = %v, want exactly [startup] after staging\n%s", matchers, data)
 	}
-	data, err := os.ReadFile(canonicalHooks)
+	data, err := os.ReadFile(linkedHooks)
 	if err != nil {
-		t.Fatalf("read canonical project hooks: %v", err)
+		t.Fatalf("read linked session hooks: %v", err)
 	}
 	for _, command := range []string{"echo user-authored-hook", "handoff", "mail check", "nudge drain"} {
 		if !strings.Contains(string(data), command) {
-			t.Fatalf("canonical project hooks dropped %q:\n%s", command, data)
+			t.Fatalf("linked session hooks dropped %q:\n%s", command, data)
 		}
 	}
-	first := string(data)
+	linkedFirst := string(data)
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		t.Fatalf("StageSessionWorkDir second pass: %v", err)
 	}
-	second, err := os.ReadFile(canonicalHooks)
+	canonicalAfter, err := os.ReadFile(canonicalHooks)
 	if err != nil {
 		t.Fatalf("read canonical project hooks after second pass: %v", err)
 	}
-	if first != string(second) {
-		t.Fatalf("repeated linked-worktree staging changed canonical hooks.json\nfirst:\n%s\nsecond:\n%s", first, second)
+	if string(canonicalBefore) != string(canonicalAfter) {
+		t.Fatalf("normal staging mutated canonical project hooks\nbefore:\n%s\nafter:\n%s", canonicalBefore, canonicalAfter)
+	}
+	linkedSecond, err := os.ReadFile(linkedHooks)
+	if err != nil {
+		t.Fatalf("read linked session hooks after second pass: %v", err)
+	}
+	if linkedFirst != string(linkedSecond) {
+		t.Fatalf("repeated linked-worktree staging changed owner hooks.json\nfirst:\n%s\nsecond:\n%s", linkedFirst, linkedSecond)
 	}
 }
 
-func TestManagedHookWorkDirsLeavesMainAndNonGitWorkDirsAlone(t *testing.T) {
-	mainWorktree := filepath.Join(t.TempDir(), "main")
-	if err := os.MkdirAll(mainWorktree, 0o755); err != nil {
-		t.Fatalf("mkdir main worktree: %v", err)
-	}
-	runGit(t, mainWorktree, "init", "--initial-branch=main")
-	runGit(t, mainWorktree, "config", "user.email", "test@example.com")
-	runGit(t, mainWorktree, "config", "user.name", "Gas City Test")
-	runGit(t, mainWorktree, "commit", "--allow-empty", "-m", "init")
-
-	for _, workDir := range []string{mainWorktree, t.TempDir()} {
-		workDirs, err := managedHookWorkDirs(workDir, []string{"codex"})
-		if err != nil {
-			t.Fatalf("managedHookWorkDirs(%q): %v", workDir, err)
-		}
-		if len(workDirs) != 1 || filepath.Clean(workDirs[0]) != filepath.Clean(workDir) {
-			t.Fatalf("managedHookWorkDirs(%q) = %v, want [%q]", workDir, workDirs, workDir)
-		}
+func TestConfigureManagedHookConvergenceArmsCodexProviderWithoutInstallList(t *testing.T) {
+	cfg := runtime.Config{ProviderName: "codex"}
+	configureManagedHookConvergence(&cfg, t.TempDir())
+	if cfg.ConvergeManagedHooks == nil {
+		t.Fatal("Codex provider omitted managed-hook convergence without install_agent_hooks")
 	}
 }
 

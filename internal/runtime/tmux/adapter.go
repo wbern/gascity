@@ -131,6 +131,11 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 		}
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
+	if cfg.ConvergeManagedHooks != nil && cfg.WorkDir != "" {
+		if err := cfg.ConvergeManagedHooks(cfg.WorkDir); err != nil {
+			return fmt.Errorf("converging managed hooks in %q: %w", cfg.WorkDir, err)
+		}
+	}
 	return nil
 }
 

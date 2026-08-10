@@ -496,6 +496,12 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			Details:  details,
 		}
 	}
+	if duplicates := duplicateCodexManagedBehaviors(activeManaged); len(duplicates) > 0 {
+		return warnCheck(c.Name(),
+			fmt.Sprintf("active Codex hook sources duplicate managed behavior: %s", strings.Join(duplicates, ", ")),
+			"run `gc doctor --fix` only after confirming that the reported non-owner sources are eligible for migration",
+			details)
+	}
 	if managedFileSources == 0 {
 		result := okCheck(c.Name(), "Codex additive hook sources contain no legacy Gas City handlers")
 		result.Details = details
@@ -516,6 +522,17 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	result := okCheck(c.Name(), "Codex filesystem hook sources match the active provider ownership policy")
 	result.Details = details
 	return result
+}
+
+func duplicateCodexManagedBehaviors(counts map[string]int) []string {
+	keys := []string{"session-start", "pre-compact", "mail", "nudge"}
+	duplicates := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if count := counts[key]; count > 1 {
+			duplicates = append(duplicates, fmt.Sprintf("%s:%d", key, count))
+		}
+	}
+	return duplicates
 }
 
 func addCodexHookCounts(total, counts map[string]int) {
