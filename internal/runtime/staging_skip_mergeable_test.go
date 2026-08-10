@@ -90,3 +90,42 @@ func TestStageSessionWorkDirStagesFunctionalCodexHooks(t *testing.T) {
 		t.Fatalf("staged codex hooks not functional, want SessionStart: %s", data)
 	}
 }
+
+func TestStageSessionWorkDirGeneratedCodexFlagsLeavesHookFileByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	src := codexHooksOverlaySrc(t)
+	workDir := t.TempDir()
+	hooksDir := filepath.Join(workDir, ".codex")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir .codex: %v", err)
+	}
+	hooksPath := filepath.Join(hooksDir, "hooks.json")
+	original := []byte(`{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"echo custom"}]}]}}`)
+	if err := os.WriteFile(hooksPath, original, 0o644); err != nil {
+		t.Fatalf("write existing hooks: %v", err)
+	}
+
+	if err := StageSessionWorkDir(Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{src},
+		CodexSessionFlags: func() *CodexSessionFlagsPayload {
+			payload := NewCodexSessionFlagsPayload(CodexSessionConfig{FeaturesHooks: true, BypassHookTrust: true})
+			return &payload
+		}(),
+	}); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	got, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read existing hooks: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("generated-mode runtime staging changed .codex/hooks.json\nbefore: %s\nafter:  %s", original, got)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("generated-mode runtime staging dropped non-hook Codex sibling: %v", err)
+	}
+}

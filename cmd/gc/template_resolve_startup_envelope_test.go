@@ -177,3 +177,57 @@ func TestBuildT3BridgeStartupEnvelope_ThreadReuseFollowsWakeMode(t *testing.T) {
 		})
 	}
 }
+
+func TestTemplateParamsToConfigCarriesManagedCodexSessionFlagsForT3Bridge(t *testing.T) {
+	tp := TemplateParams{
+		CityPath:                 "/city with spaces",
+		EffectiveSessionProvider: "t3bridge",
+		Env: map[string]string{
+			"GC_CITY_PATH": "/city with spaces",
+			"GC_PROVIDER":  "codex",
+		},
+	}
+	if err := resolveT3BridgeSessionFlags(&tp); err != nil {
+		t.Fatalf("resolveT3BridgeSessionFlags: %v", err)
+	}
+
+	flags := templateParamsToConfig(tp).CodexSessionFlags
+	if flags == nil {
+		t.Fatal("runtime config missing managed Codex session flags")
+	}
+	if err := flags.Validate(); err != nil {
+		t.Fatalf("validate session flags payload: %v", err)
+	}
+	if !flags.Config.FeaturesHooks || !flags.Config.BypassHookTrust {
+		t.Fatalf("hook activation flags = features:%v trust:%v, want both true", flags.Config.FeaturesHooks, flags.Config.BypassHookTrust)
+	}
+	if len(flags.Config.SessionStart) != 1 || len(flags.Config.PreCompact) != 1 || len(flags.Config.UserPromptSubmit) != 1 {
+		t.Fatalf("managed hook cardinality = SessionStart:%d PreCompact:%d UserPromptSubmit:%d, want 1/1/1",
+			len(flags.Config.SessionStart), len(flags.Config.PreCompact), len(flags.Config.UserPromptSubmit))
+	}
+}
+
+func TestResolveT3BridgeSessionFlagsAbsentOutsideT3Codex(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		sessionProvider string
+		provider        string
+	}{
+		{name: "non-T3 Codex", sessionProvider: "tmux", provider: "codex"},
+		{name: "T3 non-Codex", sessionProvider: "t3bridge", provider: "claudeAgent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := TemplateParams{
+				CityPath:                 "/city",
+				EffectiveSessionProvider: tc.sessionProvider,
+				Env:                      map[string]string{"GC_PROVIDER": tc.provider},
+			}
+			if err := resolveT3BridgeSessionFlags(&tp); err != nil {
+				t.Fatalf("resolveT3BridgeSessionFlags: %v", err)
+			}
+			if tp.CodexSessionFlags != nil {
+				t.Fatalf("CodexSessionFlags = %#v, want nil", tp.CodexSessionFlags)
+			}
+		})
+	}
+}

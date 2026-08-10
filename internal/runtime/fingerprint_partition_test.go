@@ -22,6 +22,13 @@ var partitionHalfCases = []struct {
 	{"MCPServers", "launch", func(c *Config) {
 		c.MCPServers = []MCPServerConfig{{Name: "mail", Transport: MCPTransport("stdio"), Command: "different-mcp"}}
 	}},
+	{"CodexSessionFlags", "launch", func(c *Config) {
+		flags := NewCodexSessionFlagsPayload(CodexSessionConfig{
+			FeaturesHooks:   true,
+			BypassHookTrust: true,
+		})
+		c.CodexSessionFlags = &flags
+	}},
 	{"AcceptStartupDialogs", "launch", func(c *Config) { b := false; c.AcceptStartupDialogs = &b }},
 	{"MouseOn", "launch", func(c *Config) { c.MouseOn = !c.MouseOn }},
 	// SessionSetup/SessionSetupScript are LAUNCH-half (B2): the carriers replay
@@ -96,6 +103,7 @@ var coreFieldHalf = map[string]string{
 	"Lifecycle":            "launch",
 	"Upstream":             "launch",
 	"MCPServers":           "launch",
+	"CodexSessionFlags":    "launch",
 	"AcceptStartupDialogs": "launch",
 	"MouseOn":              "launch",
 	"SessionSetup":         "launch",
@@ -202,6 +210,19 @@ func TestFingerprintPartitionStableAndVersioned(t *testing.T) {
 	// The two halves are distinct hashes (not accidentally the same function).
 	if ProvisionFingerprint(cfg) == LaunchFingerprint(cfg) {
 		t.Error("ProvisionFingerprint and LaunchFingerprint produced identical hashes for the comprehensive fixture")
+	}
+}
+
+func TestCodexSessionFlagsDriftIsDiagnosable(t *testing.T) {
+	base := Config{}
+	flags := NewCodexSessionFlagsPayload(CodexSessionConfig{
+		FeaturesHooks:   true,
+		BypassHookTrust: true,
+	})
+	withFlags := Config{CodexSessionFlags: &flags}
+
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(base), withFlags); len(got) != 1 || got[0] != "CodexSessionFlags" {
+		t.Fatalf("drift fields = %v, want [CodexSessionFlags]", got)
 	}
 }
 

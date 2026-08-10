@@ -784,13 +784,13 @@ func snapshotThreadBinding(thread map[string]interface{}) *threadBinding {
 	}
 }
 
-func storedEnvelopeFromThread(thread map[string]interface{}) *StartupEnvelope {
+func storedEnvelopeFromThread(thread map[string]interface{}) (*StartupEnvelope, error) {
 	if thread == nil {
-		return nil
+		return nil, nil
 	}
 	meta := threadCustomMetadata(thread)
 	if meta == nil {
-		return nil
+		return nil, nil
 	}
 	agent := meta["gc.agent"]
 	template := meta["gc.startupTemplate"]
@@ -798,7 +798,11 @@ func storedEnvelopeFromThread(thread map[string]interface{}) *StartupEnvelope {
 	provider := meta["gc.runtimeProvider"]
 	model := meta["gc.startupModel"]
 	if agent == "" || template == "" || workDir == "" || provider == "" || model == "" {
-		return nil
+		return nil, nil
+	}
+	sessionFlags, err := sessionFlagsFromThread(thread)
+	if err != nil {
+		return nil, err
 	}
 	return &StartupEnvelope{
 		GC: GCSection{
@@ -810,7 +814,27 @@ func storedEnvelopeFromThread(thread map[string]interface{}) *StartupEnvelope {
 			Provider: provider,
 			Model:    model,
 		},
+		SessionFlags: sessionFlags,
+	}, nil
+}
+
+func sessionFlagsFromThread(thread map[string]interface{}) (*runtime.CodexSessionFlagsPayload, error) {
+	value, exists := thread["sessionFlags"]
+	if !exists || value == nil {
+		return nil, nil
 	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encoding stored session flags: %w", err)
+	}
+	var payload runtime.CodexSessionFlagsPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decoding stored session flags: %w", err)
+	}
+	if err := payload.Validate(); err != nil {
+		return nil, fmt.Errorf("validating stored session flags: %w", err)
+	}
+	return &payload, nil
 }
 
 func worktreeBaseFromThread(thread map[string]interface{}) string {
@@ -1139,6 +1163,7 @@ func (p *Provider) dispatchThreadCreate(
 	model,
 	branch,
 	worktreePath string,
+	sessionFlags *runtime.CodexSessionFlagsPayload,
 	customMetadata map[string]interface{},
 ) error {
 	command := map[string]interface{}{
@@ -1159,6 +1184,9 @@ func (p *Provider) dispatchThreadCreate(
 	}
 	if worktreePath != "" {
 		command["worktreePath"] = worktreePath
+	}
+	if sessionFlags != nil {
+		command["sessionFlags"] = sessionFlags
 	}
 	if customMetadata != nil {
 		command["customMetadata"] = customMetadata
@@ -2100,6 +2128,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 
 	providerName, modelName := resolveProviderModel(cfg, envelope)
+	if cfg.CodexSessionFlags != nil {
+		envelope.SessionFlags = cfg.CodexSessionFlags.Clone()
+	}
+	if envelope.SessionFlags != nil {
+		if err := envelope.SessionFlags.Validate(); err != nil {
+			return fmt.Errorf("t3bridge: invalid session flags: %w", err)
+		}
+		if providerName != envelope.SessionFlags.Provider {
+			return fmt.Errorf("t3bridge: session flags for provider %q cannot launch provider %q", envelope.SessionFlags.Provider, providerName)
+		}
+	}
 	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) resolved provider=%s model=%s workdir=%s projectRoot=%s agent=%s template=%s\n", //nolint:errcheck
 		name, providerName, modelName, cfg.WorkDir, deriveProjectWorkspaceRoot(cfg.WorkDir, envelope), envelope.GC.Agent, envelope.GC.Template)
 	if envelope.Runtime.Provider == "" {
@@ -2174,9 +2213,13 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	if existingBinding != nil {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) found existing binding thread=%s project=%s\n", name, existingBinding.ThreadID, existingBinding.ProjectID) //nolint:errcheck
+		storedEnvelope, err := storedEnvelopeFromThread(existingThread)
+		if err != nil {
+			return fail(fmt.Errorf("t3bridge: decode existing thread configuration: %w", err))
+		}
 		reuse := DecideThreadReuse(ReuseCheck{
 			Desired:       envelope,
-			Stored:        storedEnvelopeFromThread(existingThread),
+			Stored:        storedEnvelope,
 			ThreadActive:  threadIsActive(snapshot, existingBinding.ThreadID),
 			ProjectActive: projectIsActive(snapshot, existingBinding.ProjectID),
 		})
@@ -2256,6 +2299,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		modelName,
 		createBranch,
 		createWorktreePath,
+		envelope.SessionFlags,
 		initialGCMetadata,
 	); err != nil {
 		return fail(err)

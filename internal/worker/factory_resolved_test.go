@@ -38,6 +38,15 @@ func TestSessionSpecForResolvedRuntimeDerivesProviderAndCopiesFields(t *testing.
 				ReadyPromptPrefix: "stub-ready>",
 				ReadyDelayMs:      250,
 				Env:               map[string]string{"HINT_ENV": "present"},
+				CodexSessionFlags: func() *runtime.CodexSessionFlagsPayload {
+					payload := runtime.NewCodexSessionFlagsPayload(runtime.CodexSessionConfig{
+						SessionStart: []runtime.CodexHookEntry{{
+							Matcher: "startup",
+							Hooks:   []runtime.CodexCommandHook{{Type: "command", Command: "original"}},
+						}},
+					})
+					return &payload
+				}(),
 			},
 		},
 	}
@@ -70,12 +79,16 @@ func TestSessionSpecForResolvedRuntimeDerivesProviderAndCopiesFields(t *testing.
 
 	input.Runtime.SessionEnv["STUB_ENV"] = "changed"
 	input.Runtime.Hints.Env["HINT_ENV"] = "changed"
+	input.Runtime.Hints.CodexSessionFlags.Config.SessionStart[0].Hooks[0].Command = "changed"
 	input.Metadata["kind"] = "changed"
 	if spec.Env["STUB_ENV"] != "present" {
 		t.Fatalf("Env copy mutated to %q, want present", spec.Env["STUB_ENV"])
 	}
 	if spec.Hints.Env["HINT_ENV"] != "present" {
 		t.Fatalf("Hints.Env copy mutated to %q, want present", spec.Hints.Env["HINT_ENV"])
+	}
+	if got := spec.Hints.CodexSessionFlags.Config.SessionStart[0].Hooks[0].Command; got != "original" {
+		t.Fatalf("Codex session flags copy mutated to %q, want original", got)
 	}
 	if spec.Metadata["kind"] != "named" {
 		t.Fatalf("Metadata copy mutated to %q, want named", spec.Metadata["kind"])

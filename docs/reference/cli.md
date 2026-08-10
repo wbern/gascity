@@ -4089,6 +4089,7 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 |------|------|---------|-------------|
 | `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 | `--json` | bool |  | JSON output |
+| `--replace-key` | string |  | replace an equivalent pending deferred submit |
 
 ## gc session suspend
 

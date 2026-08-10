@@ -2490,7 +2490,9 @@ func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t 
 
 	// Apply the overlay hints exactly as
 	// newWorkerSessionHandleForResolvedRuntimeWithConfig does before the factory call.
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved)
+	if err := applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved); err != nil {
+		t.Fatalf("applyWorkerOverlayHints: %v", err)
+	}
 
 	if got := strings.TrimSpace(sessionCfg.Runtime.Hints.ProviderOverlayName); got != "pi-vllm" {
 		t.Fatalf("create Hints.ProviderOverlayName = %q, want %q", got, "pi-vllm")
@@ -2500,5 +2502,51 @@ func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t 
 	}
 	if slots := runtime.OverlayProviderNames(sessionCfg.Runtime.Hints); len(slots) == 0 {
 		t.Fatal("runtime.OverlayProviderNames(create Hints) is empty; per-provider overlay would never stage")
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfig_T3CodexResumeCarriesGeneratedSessionFlags(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := filepath.Join(cityDir, "crew")
+	codexBase := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:              "test-city",
+			InstallAgentHooks: []string{"codex"},
+		},
+		Session: config.SessionConfig{Provider: "t3bridge"},
+		Providers: map[string]config.ProviderSpec{
+			"codex": {
+				Base:          &codexBase,
+				Command:       "/bin/echo",
+				ResumeCommand: "/bin/echo resume {{.SessionKey}}",
+			},
+		},
+		Agents: []config.Agent{{
+			Name:     "crew",
+			Provider: "codex",
+			WorkDir:  workDir,
+		}},
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:    "crew",
+		SessionName: "crew",
+		WorkDir:     workDir,
+		Provider:    "codex",
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig returned nil")
+	}
+	if resolved.Hints.CodexSessionFlags == nil {
+		t.Fatal("resume runtime missing generated Codex session flags")
+	}
+	for _, provider := range resolved.Hints.InstallAgentHooks {
+		if provider == "codex" {
+			t.Fatalf("resume runtime retained file-hook installer in generated mode: %v", resolved.Hints.InstallAgentHooks)
+		}
 	}
 }

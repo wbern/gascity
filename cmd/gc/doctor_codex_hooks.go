@@ -1,31 +1,162 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/codexhooks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type codexHooksDriftCheck struct {
-	cityPath string
-	dirs     []string
+	cityPath             string
+	dirs                 []string
+	userHooksPath        string
+	resolveProjectRoot   func(string) (string, error)
+	preflightReplacement func(string) error
+	ownership            codexHookOwnership
 }
 
-func newCodexHooksDriftCheck(cityPath string, dirs []string) *codexHooksDriftCheck {
+type codexHookOwnership struct {
+	fileSourcesActive  bool
+	sessionFlagsActive bool
+	filesystemOwned    bool
+}
+
+func (o codexHookOwnership) migrationEligible() bool {
+	return o.sessionFlagsActive && !o.filesystemOwned
+}
+
+func newCodexHooksDriftCheck(cityPath string, dirs []string, configs ...*config.City) *codexHooksDriftCheck {
 	cityPath = strings.TrimSpace(cityPath)
 	if cityPath != "" {
 		cityPath = filepath.Clean(cityPath)
 	}
-	return &codexHooksDriftCheck{cityPath: cityPath, dirs: cleanCodexHookDirs(dirs)}
+	ownership := codexHookOwnership{fileSourcesActive: true, sessionFlagsActive: true}
+	if len(configs) > 0 {
+		ownership = codexHookOwnershipForCity(cityPath, configs[0])
+	}
+	userHooksPath := codexUserHooksPath()
+	return &codexHooksDriftCheck{
+		cityPath:           cityPath,
+		dirs:               cleanCodexHookDirs(dirs),
+		userHooksPath:      userHooksPath,
+		resolveProjectRoot: resolveCodexProjectRoot,
+		preflightReplacement: func(cityPath string) error {
+			_, err := hooks.ManagedCodexSessionFlags(cityPath)
+			return err
+		},
+		ownership: ownership,
+	}
+}
+
+func codexUserHooksPath() string {
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		return filepath.Join(filepath.Clean(codexHome), "hooks.json")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".codex", "hooks.json")
+	}
+	return ""
+}
+
+func codexHookOwnershipForCity(cityPath string, cfg *config.City) codexHookOwnership {
+	var ownership codexHookOwnership
+	if cfg == nil {
+		return ownership
+	}
+	cityState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if effectiveCitySuspended(cfg, cityState) {
+		return ownership
+	}
+	suspendedRigPaths := codexHookSuspendedRigPaths(cityPath, cfg)
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || agentInSuspendedRig(cityPath, agent, cfg.Rigs, suspendedRigPaths) {
+			continue
+		}
+		launchesCodex := agent.StartCommand == "" && codexHookProviderName(codexHookEffectiveAgentProvider(cfg, agent), cfg.Providers)
+		usesSessionFlags := launchesCodex && sessionProviderUsesT3Bridge(effectiveSessionProvider(agent.Session, cfg.Session.Provider))
+		if launchesCodex {
+			ownership.fileSourcesActive = true
+			if usesSessionFlags {
+				ownership.sessionFlagsActive = true
+			} else {
+				ownership.filesystemOwned = true
+			}
+		}
+		for _, provider := range config.ResolveInstallHooks(agent, &cfg.Workspace) {
+			if codexHookProviderName(provider, cfg.Providers) && !usesSessionFlags {
+				ownership.fileSourcesActive = true
+				ownership.filesystemOwned = true
+			}
+		}
+	}
+	return ownership
+}
+
+func resolveCodexProjectRoot(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Lstat(gitPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return dir, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspecting %s: %w", gitPath, err)
+	}
+	if info.IsDir() {
+		return dir, nil
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("inspecting %s: expected a regular gitdir pointer", gitPath)
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", gitPath, err)
+	}
+	const prefix = "gitdir: "
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, prefix) || strings.TrimSpace(strings.TrimPrefix(line, prefix)) == "" {
+		return "", fmt.Errorf("parsing %s: malformed gitdir pointer", gitPath)
+	}
+	adminDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if !filepath.IsAbs(adminDir) {
+		adminDir = filepath.Join(dir, adminDir)
+	}
+	adminDir = filepath.Clean(adminDir)
+	commonData, err := os.ReadFile(filepath.Join(adminDir, "commondir"))
+	if errors.Is(err, os.ErrNotExist) {
+		if _, gitdirErr := os.Lstat(filepath.Join(adminDir, "gitdir")); errors.Is(gitdirErr, os.ErrNotExist) {
+			return dir, nil
+		} else if gitdirErr != nil {
+			return "", fmt.Errorf("inspecting linked-worktree marker for %s: %w", dir, gitdirErr)
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading linked-worktree common dir for %s: %w", dir, err)
+	}
+	commonDir := strings.TrimSpace(string(commonData))
+	if commonDir == "" {
+		return "", fmt.Errorf("parsing linked-worktree common dir for %s: empty path", dir)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(adminDir, commonDir)
+	}
+	return filepath.Dir(filepath.Clean(commonDir)), nil
 }
 
 func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
@@ -34,15 +165,11 @@ func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
 	if cfg == nil {
 		return dirs
 	}
-	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
-	suspendedRigPaths := map[string]bool{}
+	suspendedRigPaths := codexHookSuspendedRigPaths(cityPath, cfg)
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
-		suspended := suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
+		suspended := suspendedRigPaths[filepath.Clean(rig.Path)]
 		if suspended || strings.TrimSpace(rig.Path) == "" {
-			if suspended && strings.TrimSpace(rig.Path) != "" {
-				suspendedRigPaths[filepath.Clean(rig.Path)] = true
-			}
 			continue
 		}
 		addCodexHookDir(&dirs, rig.Path)
@@ -58,6 +185,21 @@ func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
 		addCodexHookAgentWorkDirs(&dirs, cityPath, cfg, agent)
 	}
 	return dirs
+}
+
+func codexHookSuspendedRigPaths(cityPath string, cfg *config.City) map[string]bool {
+	paths := map[string]bool{}
+	if cfg == nil {
+		return paths
+	}
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		if strings.TrimSpace(rig.Path) != "" && suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
+			paths[filepath.Clean(rig.Path)] = true
+		}
+	}
+	return paths
 }
 
 func cleanCodexHookDirs(dirs []string) []string {
@@ -184,49 +326,314 @@ func codexHookPoolSlots(agent *config.Agent) []int {
 
 func (c *codexHooksDriftCheck) Name() string { return "codex-hooks-drift" }
 
-func (c *codexHooksDriftCheck) CanFix() bool { return true }
+func (c *codexHooksDriftCheck) CanFix() bool { return c.ownership.migrationEligible() }
 
 func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
-	for _, dir := range c.dirs {
-		if !codexHooksNeedUpgrade(filepath.Join(dir, ".codex", "hooks.json"), c.cityPath) {
+	if !c.ownership.migrationEligible() {
+		return errors.New("codex hook migration is unavailable while filesystem hooks remain authoritative")
+	}
+	if err := c.preflightReplacement(c.cityPath); err != nil {
+		return fmt.Errorf("preflighting replacement Codex session flags: %w", err)
+	}
+	type migration struct {
+		source     codexHookSource
+		original   []byte
+		migrated   []byte
+		mode       os.FileMode
+		backupPath string
+	}
+	var migrations []migration
+	for _, source := range c.codexHookSources() {
+		if source.err != nil {
+			return fmt.Errorf("resolving Codex project hook source for %s: %w", source.path, source.err)
+		}
+		data, info, err := readRegularCodexHookFile(source.path)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err := hooks.Install(fsys.OSFS{}, c.cityPath, dir, []string{"codex"}); err != nil {
-			return fmt.Errorf("upgrading Codex hooks in %s: %w", dir, err)
+		if err != nil {
+			return fmt.Errorf("reading Codex hook source %s: %w", source.path, err)
 		}
+		migrated, changed, err := hooks.RemoveManagedCodexHooks(data)
+		if err != nil {
+			return fmt.Errorf("migrating Codex hook source %s: %w", source.path, err)
+		}
+		if !changed {
+			continue
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256(data))
+		migrations = append(migrations, migration{
+			source:     source,
+			original:   data,
+			migrated:   migrated,
+			mode:       info.Mode(),
+			backupPath: source.path + ".gc-backup-" + digest,
+		})
+	}
+	filesystem := fsys.OSFS{}
+	sort.Slice(migrations, func(i, j int) bool { return migrations[i].source.path < migrations[j].source.path })
+	var migrateLocked func(int) error
+	migrateLocked = func(index int) error {
+		if index < len(migrations) {
+			return codexhooks.WithPathLock(filesystem, migrations[index].source.path, func() error {
+				return migrateLocked(index + 1)
+			})
+		}
+		for _, migration := range migrations {
+			current, currentInfo, err := readRegularCodexHookFile(migration.source.path)
+			if err != nil {
+				return fmt.Errorf("re-reading Codex hook source %s before migration: %w", migration.source.path, err)
+			}
+			if !bytes.Equal(current, migration.original) || fsys.ComparableMode(currentInfo.Mode()) != fsys.ComparableMode(migration.mode) {
+				return fmt.Errorf("codex hook source %s changed during migration", migration.source.path)
+			}
+		}
+		for _, migration := range migrations {
+			if err := writeCodexHookBackup(migration.backupPath, migration.original, migration.mode); err != nil {
+				return err
+			}
+		}
+		for _, migration := range migrations {
+			if err := codexhooks.WriteFileAtomicNoFollow(filesystem, migration.source.path, migration.migrated, fsys.ComparableMode(migration.mode)); err != nil {
+				return fmt.Errorf("writing migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err)
+			}
+			written, writtenInfo, err := readRegularCodexHookFile(migration.source.path)
+			if err != nil {
+				return fmt.Errorf("verifying migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err)
+			}
+			if !bytes.Equal(written, migration.migrated) || fsys.ComparableMode(writtenInfo.Mode()) != fsys.ComparableMode(migration.mode) {
+				return fmt.Errorf("verifying migrated Codex hook source %s: content or mode mismatch; original bytes remain in %s", migration.source.path, migration.backupPath)
+			}
+		}
+		return nil
+	}
+	return migrateLocked(0)
+}
+
+func readRegularCodexHookFile(path string) ([]byte, os.FileInfo, error) {
+	return fsys.ReadRegularFileStable(fsys.OSFS{}, path)
+}
+
+func writeCodexHookBackup(backupPath string, data []byte, mode os.FileMode) error {
+	existing, _, err := readRegularCodexHookFile(backupPath)
+	if err == nil {
+		if !bytes.Equal(existing, data) {
+			return fmt.Errorf("refusing to overwrite non-matching Codex hook backup %s", backupPath)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspecting Codex hook backup %s: %w", backupPath, err)
+	}
+	if err := codexhooks.WriteFileAtomicNoFollow(fsys.OSFS{}, backupPath, data, fsys.ComparableMode(mode)); err != nil {
+		return fmt.Errorf("writing Codex hook backup %s: %w", backupPath, err)
+	}
+	verified, _, err := readRegularCodexHookFile(backupPath)
+	if err != nil {
+		return fmt.Errorf("verifying Codex hook backup %s: %w", backupPath, err)
+	}
+	if !bytes.Equal(verified, data) {
+		return fmt.Errorf("verifying Codex hook backup %s: content mismatch", backupPath)
 	}
 	return nil
 }
 
 func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	var stale []string
-	for _, dir := range c.dirs {
-		path := filepath.Join(dir, ".codex", "hooks.json")
-		if codexHooksNeedUpgrade(path, c.cityPath) {
-			stale = append(stale, path)
+	sessionDetail, sessionAudit, sessionErr := codexSessionFlagsAudit(c.cityPath, c.ownership.sessionFlagsActive)
+	details := []string{sessionDetail}
+	activeHandlers := map[string]int{}
+	activeManaged := map[string]int{}
+	managedFileSources := 0
+	invalidSources := 0
+	if sessionErr != nil {
+		invalidSources++
+	} else {
+		addCodexHookCounts(activeHandlers, sessionAudit.EventHandlerCounts)
+		addCodexHookCounts(activeManaged, sessionAudit.ManagedBehaviorCounts)
+	}
+	for _, source := range c.codexHookSources() {
+		if source.err != nil {
+			invalidSources++
+			details = append(details, formatCodexHookSourceError(source, "unresolved", source.err))
+			continue
+		}
+		data, _, err := readRegularCodexHookFile(source.path)
+		if errors.Is(err, os.ErrNotExist) {
+			details = append(details, fmt.Sprintf("source=%s active=%t path=%s state=missing", source.kind, source.active, source.path))
+			continue
+		}
+		if err != nil {
+			invalidSources++
+			details = append(details, formatCodexHookSourceError(source, "unreadable", err))
+			continue
+		}
+		audit, err := hooks.AuditCodexHooks(data)
+		if err != nil {
+			invalidSources++
+			details = append(details, formatCodexHookSourceError(source, "malformed", err))
+			continue
+		}
+		details = append(details, formatCodexHookAuditDetail(source.kind, source.path, source.active, data, audit))
+		if source.active {
+			addCodexHookCounts(activeHandlers, audit.EventHandlerCounts)
+			addCodexHookCounts(activeManaged, audit.ManagedBehaviorCounts)
+		}
+		if len(audit.ManagedBehaviorCounts) > 0 {
+			managedFileSources++
 		}
 	}
-	if len(stale) == 0 {
-		return okCheck(c.Name(), "Codex hooks are current or user-owned")
+	details = append(details, fmt.Sprintf("source=active-total active=%t managed=%s handlers=%s",
+		c.ownership.fileSourcesActive || c.ownership.sessionFlagsActive,
+		formatCodexHookCounts(activeManaged, []string{"mail", "nudge", "pre-compact", "session-start"}),
+		formatCodexHookCounts(activeHandlers, []string{"SessionStart", "PreCompact", "UserPromptSubmit"})))
+	if invalidSources > 0 {
+		return &doctor.CheckResult{
+			Name:     c.Name(),
+			Status:   doctor.StatusError,
+			Severity: doctor.SeverityAdvisory,
+			Message:  fmt.Sprintf("%d Codex hook source(s) could not be audited safely", invalidSources),
+			FixHint:  "repair the reported source or restore valid JSON before running `gc doctor --fix`",
+			Details:  details,
+		}
 	}
-	return warnCheck(c.Name(),
-		fmt.Sprintf("%d managed Codex hook file(s) need upgrade", len(stale)),
-		"run `gc doctor --fix` or restart the city to upgrade managed Codex hooks",
-		stale)
+	if managedFileSources == 0 {
+		result := okCheck(c.Name(), "Codex additive hook sources contain no legacy Gas City handlers")
+		result.Details = details
+		return result
+	}
+	if c.ownership.migrationEligible() {
+		return warnCheck(c.Name(),
+			fmt.Sprintf("%d Codex hook source(s) contain legacy Gas City handlers", managedFileSources),
+			"run `gc doctor --fix` to back up the files and remove only legacy Gas City handlers",
+			details)
+	}
+	if c.ownership.sessionFlagsActive && c.ownership.filesystemOwned {
+		return warnCheck(c.Name(),
+			fmt.Sprintf("%d Codex hook source(s) overlap under mixed Codex hook ownership", managedFileSources),
+			"keep filesystem handlers while non-T3 Codex consumers remain; align every Codex consumer before migrating",
+			details)
+	}
+	result := okCheck(c.Name(), "Codex filesystem hook sources match the active provider ownership policy")
+	result.Details = details
+	return result
 }
 
-func codexHooksNeedUpgrade(path, cityPath string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+func addCodexHookCounts(total, counts map[string]int) {
+	for key, count := range counts {
+		total[key] += count
 	}
-	return hooks.CodexHooksNeedManagedUpgrade(data, cityPath)
 }
 
-func codexHooksMissingPreCompact(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+func formatCodexHookSourceError(source codexHookSource, state string, err error) string {
+	return fmt.Sprintf("source=%s active=%t path=%s state=%s error=%q", source.kind, source.active, source.path, state, err)
+}
+
+type codexHookSource struct {
+	kind   string
+	path   string
+	active bool
+	err    error
+}
+
+func (c *codexHooksDriftCheck) codexHookSources() []codexHookSource {
+	var sources []codexHookSource
+	seen := map[string]int{}
+	add := func(source codexHookSource) {
+		source.path = filepath.Clean(source.path)
+		if source.path == "." || source.path == "" {
+			return
+		}
+		if index, ok := seen[source.path]; ok {
+			if source.active && !sources[index].active {
+				sources[index] = source
+			} else if source.kind == "project-root" && sources[index].kind == "project" {
+				sources[index].kind = source.kind
+			}
+			return
+		}
+		seen[source.path] = len(sources)
+		sources = append(sources, source)
 	}
-	return hooks.CodexHooksMissingManagedPreCompact(data)
+	if strings.TrimSpace(c.userHooksPath) != "" {
+		add(codexHookSource{kind: "user", path: c.userHooksPath, active: c.ownership.fileSourcesActive})
+	}
+	for _, dir := range c.dirs {
+		root := dir
+		if c.resolveProjectRoot != nil {
+			resolved, err := c.resolveProjectRoot(dir)
+			if err != nil {
+				add(codexHookSource{kind: "project-resolution", path: dir, err: err})
+				continue
+			}
+			if strings.TrimSpace(resolved) != "" {
+				root = resolved
+			}
+		}
+		if filepath.Clean(root) == filepath.Clean(dir) {
+			add(codexHookSource{kind: "project", path: filepath.Join(root, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
+			continue
+		}
+		add(codexHookSource{kind: "project-root", path: filepath.Join(root, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
+		add(codexHookSource{kind: "inert-worktree", path: filepath.Join(dir, ".codex", "hooks.json"), active: false})
+	}
+	return sources
+}
+
+func codexSessionFlagsAudit(cityPath string, active bool) (string, hooks.CodexHooksAudit, error) {
+	if !active {
+		return "source=sessionFlags active=false state=inactive", hooks.CodexHooksAudit{}, nil
+	}
+	payload, err := hooks.ManagedCodexSessionFlags(cityPath)
+	if err != nil {
+		return fmt.Sprintf("source=sessionFlags active=true state=malformed error=%q", err), hooks.CodexHooksAudit{}, err
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("source=sessionFlags active=true state=malformed error=%q", err), hooks.CodexHooksAudit{}, err
+	}
+	document := struct {
+		Hooks struct {
+			SessionStart     []runtime.CodexHookEntry `json:"SessionStart"`
+			PreCompact       []runtime.CodexHookEntry `json:"PreCompact"`
+			UserPromptSubmit []runtime.CodexHookEntry `json:"UserPromptSubmit"`
+		} `json:"hooks"`
+	}{}
+	document.Hooks.SessionStart = payload.Config.SessionStart
+	document.Hooks.PreCompact = payload.Config.PreCompact
+	document.Hooks.UserPromptSubmit = payload.Config.UserPromptSubmit
+	documentData, err := json.Marshal(document)
+	if err != nil {
+		return fmt.Sprintf("source=sessionFlags active=true state=malformed error=%q", err), hooks.CodexHooksAudit{}, err
+	}
+	audit, err := hooks.AuditCodexHooks(documentData)
+	if err != nil {
+		return fmt.Sprintf("source=sessionFlags active=true state=malformed error=%q", err), hooks.CodexHooksAudit{}, err
+	}
+	return formatCodexHookAuditDetail("sessionFlags", "", true, data, audit), audit, nil
+}
+
+func formatCodexHookAuditDetail(source, path string, active bool, data []byte, audit hooks.CodexHooksAudit) string {
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	parts := []string{fmt.Sprintf("source=%s", source), fmt.Sprintf("active=%t", active)}
+	if path != "" {
+		parts = append(parts, "path="+path)
+	}
+	parts = append(parts, "sha256="+hash)
+	if handlers := formatCodexHookCounts(audit.EventHandlerCounts, []string{"SessionStart", "PreCompact", "UserPromptSubmit"}); handlers != "" {
+		parts = append(parts, "handlers="+handlers)
+	}
+	if managed := formatCodexHookCounts(audit.ManagedBehaviorCounts, []string{"mail", "nudge", "pre-compact", "session-start"}); managed != "" {
+		parts = append(parts, "managed="+managed)
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatCodexHookCounts(counts map[string]int, keys []string) string {
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if count := counts[key]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", key, count))
+		}
+	}
+	return strings.Join(parts, ",")
 }
