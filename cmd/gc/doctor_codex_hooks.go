@@ -7,16 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/codexhooks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -29,6 +33,15 @@ type codexHooksDriftCheck struct {
 	preflightReplacement func(string) error
 	writeFileAtomic      func(string, []byte, os.FileMode) error
 	ownership            codexHookOwnership
+	activeConsumers      func() ([]codexHookConsumer, error)
+}
+
+// codexHookConsumer is one runtime-active consumer of Codex's additive hook
+// sources. Multiple sessions may share a project root and are intentionally
+// checked as one consumer while retaining their identities for diagnostics.
+type codexHookConsumer struct {
+	workDir     string
+	sessionName string
 }
 
 type codexHookOwnership struct {
@@ -51,7 +64,7 @@ func newCodexHooksDriftCheck(cityPath string, dirs []string, configs ...*config.
 		ownership = codexHookOwnershipForCity(cityPath, configs[0])
 	}
 	userHooksPath := codexUserHooksPath()
-	return &codexHooksDriftCheck{
+	check := &codexHooksDriftCheck{
 		cityPath:           cityPath,
 		dirs:               cleanCodexHookDirs(dirs),
 		userHooksPath:      userHooksPath,
@@ -64,6 +77,59 @@ func newCodexHooksDriftCheck(cityPath string, dirs []string, configs ...*config.
 			return codexhooks.WriteFileAtomicNoFollow(fsys.OSFS{}, path, data, mode)
 		},
 		ownership: ownership,
+	}
+	// Tests and the legacy no-config construction retain the supplied dirs as
+	// consumers. A real configured city must instead derive consumers from the
+	// open, live session inventory; configured scale-to-zero slots are dormant.
+	check.activeConsumers = func() ([]codexHookConsumer, error) {
+		consumers := make([]codexHookConsumer, 0, len(check.dirs))
+		for _, dir := range check.dirs {
+			consumers = append(consumers, codexHookConsumer{workDir: dir})
+		}
+		return consumers, nil
+	}
+	if len(configs) > 0 && configs[0] != nil {
+		check.activeConsumers = codexHookRuntimeConsumers(cityPath, configs[0])
+	}
+	return check
+}
+
+// codexHookRuntimeConsumers returns only sessions that are both persisted as
+// active and presently live in the runtime. Filesystem hooks are consumed at
+// execution time, so configured-but-unprovisioned pool slots cannot be owners.
+func codexHookRuntimeConsumers(cityPath string, cfg *config.City) func() ([]codexHookConsumer, error) {
+	return func() ([]codexHookConsumer, error) {
+		store, err := openSessionProviderStore(cityPath)
+		if err != nil {
+			return nil, fmt.Errorf("opening session inventory: %w", err)
+		}
+		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		if err != nil {
+			return nil, fmt.Errorf("listing open sessions: %w", err)
+		}
+		sp, err := newStatusSessionProviderForCity(cfg, cityPath)
+		if err != nil {
+			return nil, fmt.Errorf("constructing runtime liveness observer: %w", err)
+		}
+		var consumers []codexHookConsumer
+		for _, info := range infos {
+			if info.Closed || info.State != session.StateActive || strings.TrimSpace(info.WorkDir) == "" {
+				continue
+			}
+			agent := findAgentByTemplate(cfg, info.Template)
+			if !codexHookProviderName(info.Provider, cfg.Providers) && !agentUsesCodexHookSurface(cfg, agent) {
+				continue
+			}
+			processNames := []string(nil)
+			if agent != nil {
+				processNames = config.AgentProcessNames(cfg, *agent, exec.LookPath)
+			}
+			if !runtime.ObserveLiveness(sp, info.SessionName, processNames).Running {
+				continue
+			}
+			consumers = append(consumers, codexHookConsumer{workDir: info.WorkDir, sessionName: info.SessionName})
+		}
+		return consumers, nil
 	}
 }
 
@@ -532,12 +598,36 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			details)
 	}
 	if c.ownership.filesystemOwned {
+		consumers, err := c.activeConsumers()
+		if err != nil {
+			return warnCheck(c.Name(), fmt.Sprintf("cannot enumerate runtime-active Codex consumers: %v", err), "repair session inventory or runtime observation before trusting Codex hook ownership", details)
+		}
+		grouped, err := c.groupActiveCodexConsumers(consumers)
+		if err != nil {
+			return warnCheck(c.Name(), fmt.Sprintf("cannot resolve runtime-active Codex consumer: %v", err), "repair the reported runtime workdir before trusting Codex hook ownership", details)
+		}
+		activeRoots := make(map[string]bool, len(grouped))
+		for _, consumer := range grouped {
+			activeRoots[consumer.workDir] = true
+		}
 		for _, dir := range c.dirs {
+			root := filepath.Clean(dir)
+			if c.resolveProjectRoot != nil {
+				if resolved, resolveErr := c.resolveProjectRoot(root); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+					root = filepath.Clean(resolved)
+				}
+			}
+			if !activeRoots[root] {
+				details = append(details, fmt.Sprintf("consumer=configured-dormant workdir=%s", dir))
+			}
+		}
+		for _, consumer := range grouped {
+			dir := consumer.workDir
 			counts, paths, ownerConverged, err := c.codexConsumerManagedCounts(dir)
 			if err != nil {
 				return warnCheck(c.Name(), fmt.Sprintf("cannot audit Codex consumer=%s: %v", dir, err), "repair the reported source manually; automatic filesystem migration is unavailable", details)
 			}
-			details = append(details, fmt.Sprintf("consumer=%s managed=%s paths=%s", dir, formatCodexHookCounts(counts, []string{"mail", "nudge", "pre-compact", "session-start"}), strings.Join(paths, ",")))
+			details = append(details, fmt.Sprintf("consumer=runtime-active workdir=%s sessions=%s managed=%s paths=%s", dir, strings.Join(consumer.sessions, ","), formatCodexHookCounts(counts, []string{"mail", "nudge", "pre-compact", "session-start"}), strings.Join(paths, ",")))
 			if !ownerConverged {
 				return warnCheck(c.Name(), fmt.Sprintf("Codex consumer=%s canonical project hooks are not the exact current-city owner", dir), "restart the managed tmux session to converge its canonical project hooks; inspect global hooks manually if the warning remains", details)
 			}
@@ -560,6 +650,48 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	result := okCheck(c.Name(), "Codex filesystem hook sources match the active provider ownership policy")
 	result.Details = details
 	return result
+}
+
+type groupedCodexHookConsumer struct {
+	workDir  string
+	sessions []string
+}
+
+func (c *codexHooksDriftCheck) groupActiveCodexConsumers(consumers []codexHookConsumer) ([]groupedCodexHookConsumer, error) {
+	byRoot := map[string]*groupedCodexHookConsumer{}
+	for _, consumer := range consumers {
+		workDir := filepath.Clean(consumer.workDir)
+		if c.resolveProjectRoot != nil {
+			root, err := c.resolveProjectRoot(workDir)
+			if err != nil {
+				return nil, fmt.Errorf("resolving %s: %w", workDir, err)
+			}
+			if strings.TrimSpace(root) != "" {
+				workDir = filepath.Clean(root)
+			}
+		}
+		group := byRoot[workDir]
+		if group == nil {
+			group = &groupedCodexHookConsumer{workDir: workDir}
+			byRoot[workDir] = group
+		}
+		if name := strings.TrimSpace(consumer.sessionName); name != "" {
+			group.sessions = append(group.sessions, name)
+		}
+	}
+	keys := make([]string, 0, len(byRoot))
+	for root := range byRoot {
+		keys = append(keys, root)
+	}
+	sort.Strings(keys)
+	grouped := make([]groupedCodexHookConsumer, 0, len(keys))
+	for _, root := range keys {
+		group := byRoot[root]
+		sort.Strings(group.sessions)
+		group.sessions = slices.Compact(group.sessions)
+		grouped = append(grouped, *group)
+	}
+	return grouped, nil
 }
 
 func (c *codexHooksDriftCheck) codexConsumerManagedCounts(dir string) (map[string]int, []string, bool, error) {
