@@ -94,6 +94,9 @@ func TestWriteManagedReadJSONUsesBudgetOnlyWhenManaged(t *testing.T) {
 
 func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod spill dir: %v", err)
+	}
 	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
 	dirInfo, err := os.Lstat(dir)
 	if err != nil {
@@ -153,6 +156,9 @@ func TestCleanupOutputFirewallSpillRemovesOnlyExpiredOwnedFiles(t *testing.T) {
 
 func TestWriteOutputFirewallSpillConcurrentArtifactsAreDistinct(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod spill dir: %v", err)
+	}
 	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
 	paths := make(chan string, 8)
 	for i := 0; i < cap(paths); i++ {
@@ -169,6 +175,19 @@ func TestWriteOutputFirewallSpillConcurrentArtifactsAreDistinct(t *testing.T) {
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("spill %q unsafe: %v mode=%v", path, err, info.Mode())
 		}
+	}
+}
+
+func TestWriteOutputFirewallSpillRejectsSymlinkDirectory(t *testing.T) {
+	parent := t.TempDir()
+	target := t.TempDir()
+	dir := filepath.Join(parent, "output")
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	if got := writeOutputFirewallSpill([]byte("secret")); got != "" {
+		t.Fatalf("spill through symlink = %q, want empty", got)
 	}
 }
 

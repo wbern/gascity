@@ -9,7 +9,9 @@ package bddispatch
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -908,41 +910,48 @@ func writeOutputFirewallSpill(payload []byte) string {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return ""
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
 		return ""
 	}
-	info, err = os.Lstat(dir)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	defer root.Close() //nolint:errcheck // no useful recovery after a completed spill
+	rootInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, rootInfo) || info.Mode().Perm()&0o077 != 0 {
 		return ""
 	}
 	// The temporary file is deliberately not an artifact name: no manifest can
 	// reference it, and a reader can only discover the completed file after the
 	// atomic rename below.
-	f, err := os.CreateTemp(dir, ".output-*.tmp")
-	if err != nil {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
 		return ""
 	}
-	name := f.Name()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(name)
+	suffix := hex.EncodeToString(random)
+	temporary := ".output-" + suffix + ".tmp"
+	finalName := "output-" + suffix
+	f, err := root.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return ""
 	}
 	if _, err := f.Write(payload); err != nil {
 		_ = f.Close()
-		_ = os.Remove(name)
+		_ = root.Remove(temporary)
 		return ""
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
+		_ = root.Remove(temporary)
 		return ""
 	}
-	final := filepath.Join(dir, "output-"+strings.TrimSuffix(strings.TrimPrefix(filepath.Base(name), ".output-"), ".tmp"))
-	if err := os.Rename(name, final); err != nil {
-		_ = os.Remove(name)
+	if err := root.Rename(temporary, finalName); err != nil {
+		_ = root.Remove(temporary)
 		return ""
 	}
-	return final
+	current, err := os.Lstat(dir)
+	if err != nil || !os.SameFile(rootInfo, current) {
+		_ = root.Remove(finalName)
+		return ""
+	}
+	return filepath.Join(dir, finalName)
 }
 
 // cleanupOutputFirewallSpill removes expired regular artifacts created by this
