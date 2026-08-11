@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
@@ -75,6 +77,31 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("spill mode = %o, want 600", got)
+	}
+}
+
+func TestCleanupOutputFirewallSpillRemovesOnlyExpiredOwnedFiles(t *testing.T) {
+	dir := t.TempDir()
+	expired := filepath.Join(dir, "output-expired")
+	if err := os.WriteFile(expired, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write expired artifact: %v", err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(expired, old, old); err != nil {
+		t.Fatalf("age artifact: %v", err)
+	}
+	keep := filepath.Join(dir, "other-file")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
+	}
+
+	cleanupOutputFirewallSpill(dir, 24*time.Hour)
+
+	if _, err := os.Stat(expired); !os.IsNotExist(err) {
+		t.Fatalf("expired owned artifact remains: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("unrelated artifact was removed: %v", err)
 	}
 }
 

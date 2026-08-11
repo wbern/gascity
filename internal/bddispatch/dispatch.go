@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
@@ -29,6 +30,7 @@ const managedReadOutputBudget = 32 << 10
 const (
 	managedOutputFirewallEnv         = "GC_MANAGED_OUTPUT_FIREWALL"
 	managedOutputFirewallSpillDirEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
+	managedOutputFirewallRetention   = 24 * time.Hour
 )
 
 // DispatchViaAPI serves a routed bd verb by calling the controller's HTTP API
@@ -876,6 +878,7 @@ func writeOutputFirewallSpill(payload []byte) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ""
 	}
+	cleanupOutputFirewallSpill(dir, managedOutputFirewallRetention)
 	info, err := os.Lstat(dir)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return ""
@@ -907,4 +910,24 @@ func writeOutputFirewallSpill(payload []byte) string {
 		return ""
 	}
 	return name
+}
+
+// cleanupOutputFirewallSpill removes expired regular artifacts created by this
+// package. It deliberately ignores unknown names, directories, and symlinks.
+func cleanupOutputFirewallSpill(dir string, retention time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || retention <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-retention)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "output-") || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
