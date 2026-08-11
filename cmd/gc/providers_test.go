@@ -1437,6 +1437,7 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 	tests := map[string]struct {
 		build      func() (runtime.Provider, error)
 		wantStatus bool
+		wantDoctor bool
 	}{
 		"default": {
 			build: newSessionProvider,
@@ -1451,6 +1452,10 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 				return newStatusSessionProviderForCity(cfg, "")
 			},
 			wantStatus: true,
+		},
+		"doctor": {
+			build:      func() (runtime.Provider, error) { return newDoctorSessionProviderForCity(cfg, "") },
+			wantStatus: true, wantDoctor: true,
 		},
 		"status with snapshot": {
 			build: func() (runtime.Provider, error) {
@@ -1473,6 +1478,9 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 				}
 				if bounded.base != base {
 					t.Fatalf("status provider base = %T, want injected provider %T", bounded.base, base)
+				}
+				if tt.wantDoctor && bounded.timeout != doctorLivenessObservationTimeout {
+					t.Fatalf("doctor timeout = %v, want %v", bounded.timeout, doctorLivenessObservationTimeout)
 				}
 				return
 			}
@@ -1515,6 +1523,9 @@ func TestErrorReturningSessionProviderFactoriesReturnContextualErrors(t *testing
 		},
 		"status": func() (runtime.Provider, error) {
 			return newStatusSessionProviderForCity(cfg, "")
+		},
+		"doctor": func() (runtime.Provider, error) {
+			return newDoctorSessionProviderForCity(cfg, "")
 		},
 		"status with snapshot": func() (runtime.Provider, error) {
 			return newStatusSessionProviderForCityWithSnapshot(cfg, "", nil)
