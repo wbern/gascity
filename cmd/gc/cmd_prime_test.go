@@ -943,6 +943,59 @@ provider = "exec:/not-used-by-auto-handoff"
 	}
 }
 
+func TestSessionStartAutoHandoffArchivesOnlyRepresentedOversizedMail(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"gastown\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	created := make([]beads.Bead, 0, mailInjectMaxMessages)
+	for i := 0; i < mailInjectMaxMessages; i++ {
+		message, err := store.Create(beads.Bead{
+			Title:       strings.Repeat("s", 241),
+			Description: strings.Repeat("b", 241),
+			Type:        "message",
+			Assignee:    sessionID,
+			From:        strings.Repeat("f", 129),
+			Labels:      []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, message)
+	}
+
+	injection, ids := sessionStartAutoHandoffInjection(io.Discard)
+	if len(injection.text) > mailInjectionFullMaxBytes || !strings.Contains(injection.text, "truncated") {
+		t.Fatalf("SessionStart output = %d bytes: %q", len(injection.text), injection.text)
+	}
+	if len(ids) == 0 || len(ids) >= len(created) {
+		t.Fatalf("SessionStart represented ids = %d, want a strict bounded subset of %d", len(ids), len(created))
+	}
+	injection.afterDelivery()
+	for _, message := range created {
+		_, err := store.Get(message.ID)
+		if ids[message.ID] {
+			if !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("represented auto-handoff %q should be archived, err=%v", message.ID, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("unrepresented auto-handoff %q must remain retrievable: %v", message.ID, err)
+		}
+	}
+}
+
 // TestDoPrimeWithHook_SessionStartDedupsAutoHandoffAndKeepsOrdinaryMailOpen is
 // the beadmail-backed counterpart to
 // TestDoPrimeWithHook_DeliveredStartupPromptKeepsStepReminder: with no [mail]

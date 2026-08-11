@@ -752,17 +752,16 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
+			detailedText, archiveMessages := formatInjectOutputWithMessages(messages)
 			coordinator := mailInjectionStateCoordinator{load: mailInjectionStateLoader}
 			text, persist, stateErr := coordinator.prepare(messages)
 			stateFailed := stateErr != nil
 			if stateErr != nil {
 				fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
 			}
-			text = boundedMailInjectionPayload(text)
-			// Archive the SAME messages that were injected: priority-sort
-			// before the clamp so the archived set matches formatInjectOutput's
-			// displayed set (a priority:1 handoff that floats into the window is
-			// injected AND archived, never injected-but-not-archived).
+			// Keep continuation observations on the priority-sorted display window.
+			// Archiving below is narrower: only complete IDs represented in the
+			// detailed hook output are retrieval-safe after delivery.
 			injectedMessages := sortMailByPriority(messages)
 			if len(injectedMessages) > mailInjectMaxMessages {
 				injectedMessages = injectedMessages[:mailInjectMaxMessages]
@@ -782,7 +781,9 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 					observation.fail(continuationErrorMailState)
 				}
 			}
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			if text == detailedText {
+				archiveInjectedAutoHandoffMessages(mp, archiveMessages, stderr)
+			}
 		} else if _, persist, stateErr := (mailInjectionStateCoordinator{load: mailInjectionStateLoader}).prepare(nil); stateErr != nil {
 			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
 			observation.fail(continuationErrorMailState)
@@ -850,61 +851,99 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
 // priority unread first.
 func formatInjectOutput(messages []mail.Message) string {
+	text, _ := formatInjectOutputWithMessages(messages)
+	return text
+}
+
+// formatInjectOutputWithMessages returns a bounded detailed reminder and the
+// exact messages whose complete IDs appear in it. Only that returned set is
+// safe to archive after hook delivery: the retrieval instruction can address
+// every archived message.
+func formatInjectOutputWithMessages(messages []mail.Message) (string, []mail.Message) {
 	messages = sortMailByPriority(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
 	limit := len(messages)
+	truncated := false
 	if limit > mailInjectMaxMessages {
 		limit = mailInjectMaxMessages
-		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+		truncated = true
 	}
+	const retrieval = "\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n"
+	const truncation = "\n[Mail preview truncated; run 'gc mail inbox' for all unread mail.]\n"
+	const closing = "</system-reminder>\n"
+	rendered := make([]mail.Message, 0, limit)
 	for _, m := range messages[:limit] {
-		// Sanitize attacker-controllable fields (sender identity, subject,
-		// body) before interpolating into the <system-reminder> block.
-		// Without this, a sender can inject </system-reminder> sequences
-		// and break out of the reminder. See gastownhall/gascity#2195.
-		rawID, idTruncated := mailInjectTextPreview(m.ID, mailInjectIdentityPreviewSize)
-		id := extmsg.SanitizeForSystemReminder(rawID)
-		rawFrom, fromTruncated := mailInjectTextPreview(m.From, mailInjectIdentityPreviewSize)
-		from := extmsg.SanitizeForSystemReminder(rawFrom)
-		rawSubject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
-		subject := extmsg.SanitizeForSystemReminder(rawSubject)
-		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
-		body := extmsg.SanitizeForSystemReminder(rawBody)
-		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s", id)
-			if idTruncated {
-				sb.WriteString(" ... [id truncated]")
-			}
-			fmt.Fprintf(&sb, " from %s", from)
-			if fromTruncated {
-				sb.WriteString(" ... [sender truncated]")
-			}
-			fmt.Fprintf(&sb, " [%s", subject)
-			if subjectTruncated {
-				sb.WriteString(" ... [subject truncated]")
-			}
-			fmt.Fprintf(&sb, "]: %s", body)
-		} else {
-			fmt.Fprintf(&sb, "- %s", id)
-			if idTruncated {
-				sb.WriteString(" ... [id truncated]")
-			}
-			fmt.Fprintf(&sb, " from %s", from)
-			if fromTruncated {
-				sb.WriteString(" ... [sender truncated]")
-			}
-			fmt.Fprintf(&sb, ": %s", body)
+		line, completeID := formatInjectMessage(m)
+		remaining := len(retrieval) + len(closing)
+		if truncated || len(rendered) < limit-1 {
+			remaining += len(truncation)
 		}
-		if bodyTruncated {
-			sb.WriteString(" ... [preview truncated]")
+		if sb.Len()+len(line)+remaining > mailInjectionFullMaxBytes {
+			truncated = true
+			break
 		}
-		sb.WriteByte('\n')
+		sb.WriteString(line)
+		if completeID {
+			rendered = append(rendered, m)
+		}
 	}
-	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
-	sb.WriteString("</system-reminder>\n")
-	return boundedMailInjectionPayload(sb.String())
+	if len(rendered) < limit {
+		truncated = true
+	}
+	if truncated {
+		sb.WriteString(truncation)
+	}
+	sb.WriteString(retrieval)
+	sb.WriteString(closing)
+	return sb.String(), rendered
+}
+
+func formatInjectMessage(m mail.Message) (string, bool) {
+	var sb strings.Builder
+	// Sanitize attacker-controllable fields (sender identity, subject,
+	// body) before interpolating into the <system-reminder> block.
+	// Without this, a sender can inject </system-reminder> sequences
+	// and break out of the reminder. See gastownhall/gascity#2195.
+	rawID, idTruncated := mailInjectTextPreview(m.ID, mailInjectIdentityPreviewSize)
+	id := extmsg.SanitizeForSystemReminder(rawID)
+	rawFrom, fromTruncated := mailInjectTextPreview(m.From, mailInjectIdentityPreviewSize)
+	from := extmsg.SanitizeForSystemReminder(rawFrom)
+	rawSubject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
+	subject := extmsg.SanitizeForSystemReminder(rawSubject)
+	rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
+	body := extmsg.SanitizeForSystemReminder(rawBody)
+	if subject != "" && subject != body {
+		fmt.Fprintf(&sb, "- %s", id)
+		if idTruncated {
+			sb.WriteString(" ... [id truncated]")
+		}
+		fmt.Fprintf(&sb, " from %s", from)
+		if fromTruncated {
+			sb.WriteString(" ... [sender truncated]")
+		}
+		fmt.Fprintf(&sb, " [%s", subject)
+		if subjectTruncated {
+			sb.WriteString(" ... [subject truncated]")
+		}
+		fmt.Fprintf(&sb, "]: %s", body)
+	} else {
+		fmt.Fprintf(&sb, "- %s", id)
+		if idTruncated {
+			sb.WriteString(" ... [id truncated]")
+		}
+		fmt.Fprintf(&sb, " from %s", from)
+		if fromTruncated {
+			sb.WriteString(" ... [sender truncated]")
+		}
+		fmt.Fprintf(&sb, ": %s", body)
+	}
+	if bodyTruncated {
+		sb.WriteString(" ... [preview truncated]")
+	}
+	sb.WriteByte('\n')
+	return sb.String(), !idTruncated && id == m.ID
 }
 
 func mailInjectSubjectPreview(subject string) (string, bool) {
