@@ -752,13 +752,11 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			text := formatInjectOutput(messages)
-			var persist func() error
-			if previous, writeState, enabled, stateErr := currentMailInjectionState(); stateErr != nil {
+			coordinator := mailInjectionStateCoordinator{load: mailInjectionStateLoader}
+			text, persist, stateErr := coordinator.prepare(messages)
+			stateFailed := stateErr != nil
+			if stateErr != nil {
 				fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
-			} else if enabled {
-				text, previous = gateMailInjection(messages, previous)
-				persist = func() error { return writeState(previous) }
 			}
 			text = boundedMailInjectionPayload(text)
 			// Archive the SAME messages that were injected: priority-sort
@@ -770,6 +768,9 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				injectedMessages = injectedMessages[:mailInjectMaxMessages]
 			}
 			observation.injected(injectedMessages, text)
+			if stateFailed {
+				observation.fail(continuationErrorMailState)
+			}
 			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", text); err != nil {
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				observation.fail(continuationErrorHookOutput)
@@ -778,14 +779,17 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 			if persist != nil {
 				if err := persist(); err != nil {
 					fmt.Fprintf(stderr, "gc mail check: persisting mail injection state: %v\n", err) //nolint:errcheck // a later hook fails open with full detail
+					observation.fail(continuationErrorMailState)
 				}
 			}
 			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
-		} else if _, writeState, enabled, stateErr := currentMailInjectionState(); stateErr != nil {
+		} else if _, persist, stateErr := (mailInjectionStateCoordinator{load: mailInjectionStateLoader}).prepare(nil); stateErr != nil {
 			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
-		} else if enabled {
-			if err := writeState(mailInjectionState{}); err != nil {
+			observation.fail(continuationErrorMailState)
+		} else if persist != nil {
+			if err := persist(); err != nil {
 				fmt.Fprintf(stderr, "gc mail check: clearing mail injection state: %v\n", err) //nolint:errcheck // fail-visible; a later delivery fails open
+				observation.fail(continuationErrorMailState)
 			}
 		}
 		return 0 // --inject always exits 0

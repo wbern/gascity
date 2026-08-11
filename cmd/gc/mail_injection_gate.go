@@ -26,6 +26,22 @@ type mailInjectionState struct {
 	fingerprint string
 }
 
+type mailInjectionStateCoordinator struct {
+	load func() (mailInjectionState, func(mailInjectionState) error, bool, error)
+}
+
+var mailInjectionStateLoader = currentMailInjectionState
+
+func (c mailInjectionStateCoordinator) prepare(messages []mail.Message) (string, func() error, error) {
+	text := formatInjectOutput(messages)
+	previous, persist, enabled, err := c.load()
+	if err != nil || !enabled {
+		return text, nil, err
+	}
+	text, next := gateMailInjection(messages, previous)
+	return text, func() error { return persist(next) }, nil
+}
+
 // gateMailInjection returns full mail detail when the unread set changed and a
 // small retrieval pointer when it did not. Message priority is part of the
 // fingerprint because a priority change must be visible on the next prompt.
@@ -63,14 +79,6 @@ func mailInjectionFingerprint(messages []mail.Message) string {
 }
 
 func boundedMailInjectionReminder(messages []mail.Message) string {
-	ids := make([]string, 0, len(messages))
-	for _, message := range sortMailByPriority(messages) {
-		ids = append(ids, message.ID)
-	}
-	text := "<system-reminder>\nUnread mail is unchanged (" + strings.Join(ids, ", ") + "). Run 'gc mail inbox' or 'gc mail read <id>' for details.\n</system-reminder>\n"
-	if len(text) <= mailInjectionReminderMaxBytes {
-		return text
-	}
 	return "<system-reminder>\nUnread mail is unchanged. Run 'gc mail inbox' for details.\n</system-reminder>\n"
 }
 
@@ -81,7 +89,7 @@ func currentMailInjectionState() (mailInjectionState, func(mailInjectionState) e
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	token := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	epoch := strings.TrimSpace(os.Getenv("GC_CONTINUATION_EPOCH"))
-	if sessionID == "" || token == "" {
+	if sessionID == "" || token == "" || epoch == "" {
 		return mailInjectionState{}, nil, false, nil
 	}
 	cityPath, err := resolveCity()
