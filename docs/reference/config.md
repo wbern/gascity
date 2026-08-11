@@ -28,6 +28,7 @@ City is the top-level configuration for a Gas City instance.
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `bd_guard` | BdGuardConfig |  |  | BdGuard configures operator-owned positive authorization for managed agents to route gc bd commands to the city bead store. When enabled, managed agents not explicitly authorized remain rig-scoped. Packs cannot author this section. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
+| `output_firewall` | OutputFirewallConfig |  |  | OutputFirewall configures bounded output for managed-session known reads. It is operator-owned city policy; direct CLI output is unaffected. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
 | `usage` | UsageConfig |  |  | Usage configures the usage-fact sink backend. |
@@ -614,6 +615,19 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
+
+## OutputFirewallConfig
+
+OutputFirewallConfig is the operator-owned policy applied to managed read output.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  |  |
+| `byte_budget` | integer |  |  |  |
+| `read_verbs` | []string |  |  |  |
+| `spill_mode` | string |  |  |  |
+| `spill_path` | string |  |  |  |
+| `retention_ttl` | string |  |  |  |
 
 ## PackDefaults
 

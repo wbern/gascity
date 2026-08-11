@@ -1190,6 +1190,10 @@
           "$ref": "#/$defs/SessionConfig",
           "description": "Session configures the session provider backend."
         },
+        "output_firewall": {
+          "$ref": "#/$defs/OutputFirewallConfig",
+          "description": "OutputFirewall configures bounded output for managed-session known reads.\nIt is operator-owned city policy; direct CLI output is unaffected."
+        },
         "mail": {
           "$ref": "#/$defs/MailConfig",
           "description": "Mail configures the mail provider backend."
@@ -2159,6 +2163,34 @@
       "additionalProperties": false,
       "type": "object",
       "description": "OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers)."
+    },
+    "OutputFirewallConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "byte_budget": {
+          "type": "integer"
+        },
+        "read_verbs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "spill_mode": {
+          "type": "string"
+        },
+        "spill_path": {
+          "type": "string"
+        },
+        "retention_ttl": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OutputFirewallConfig is the operator-owned policy applied to managed read output."
     },
     "PackDefaults": {
       "properties": {
