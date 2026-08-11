@@ -151,6 +151,27 @@ func TestCleanupOutputFirewallSpillRemovesOnlyExpiredOwnedFiles(t *testing.T) {
 	}
 }
 
+func TestWriteOutputFirewallSpillConcurrentArtifactsAreDistinct(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	paths := make(chan string, 8)
+	for i := 0; i < cap(paths); i++ {
+		go func() { paths <- writeOutputFirewallSpill([]byte(strings.Repeat("payload", 100))) }()
+	}
+	seen := map[string]bool{}
+	for i := 0; i < cap(paths); i++ {
+		path := <-paths
+		if path == "" || seen[path] {
+			t.Fatalf("invalid or duplicate spill path %q", path)
+		}
+		seen[path] = true
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("spill %q unsafe: %v mode=%v", path, err, info.Mode())
+		}
+	}
+}
+
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
 // parsed fields and renders the created bead id like raw bd.
 func TestDispatchViaAPICreate(t *testing.T) {
