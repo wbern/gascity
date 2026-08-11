@@ -29,6 +29,8 @@ import (
 
 const managedReadOutputBudget = 32 << 10
 
+var marshalOutputJSON = json.Marshal
+
 const (
 	managedOutputFirewallEnv          = "GC_MANAGED_OUTPUT_FIREWALL"
 	managedOutputFirewallBudgetEnv    = "GC_MANAGED_OUTPUT_FIREWALL_BUDGET"
@@ -840,7 +842,7 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 	if out == nil {
 		out = []beads.Bead{}
 	}
-	payload, err := json.Marshal(out)
+	payload, err := marshalOutputJSON(out)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd-shim: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -876,7 +878,7 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 			SHA256:          fmt.Sprintf("%x", digest),
 			Spill:           spill,
 		}
-		payload, err = json.Marshal(manifest)
+		payload, err = marshalOutputJSON(manifest)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: encoding output firewall manifest: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

@@ -3,6 +3,7 @@ package bddispatch
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,8 +18,6 @@ import (
 )
 
 func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing.T) {
-	t.Parallel()
-
 	var stdout, stderr bytes.Buffer
 	beadsOut := []beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("secret-value", 64)}}
 
@@ -59,6 +58,30 @@ func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing
 	}
 	if manifest.Spill.Mode == "" || manifest.Spill.ExpiresAt == "" {
 		t.Fatalf("spill manifest is incomplete: %#v", manifest.Spill)
+	}
+}
+
+func TestWriteReadyJSONWithBudgetGiantSingleFieldNeverReachesStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	giant := strings.Repeat("giant-secret", managedReadOutputBudget)
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg-giant", Description: giant}}, &stdout, &stderr, managedReadOutputBudget); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() > managedReadOutputBudget || strings.Contains(stdout.String(), "giant-secret") || !json.Valid(stdout.Bytes()) {
+		t.Fatalf("giant field escaped firewall: %d bytes", stdout.Len())
+	}
+}
+
+func TestWriteReadyJSONWithBudgetEncodeFailureWritesNoPartialOutput(t *testing.T) {
+	original := marshalOutputJSON
+	marshalOutputJSON = func(any) ([]byte, error) { return nil, errors.New("encode failed") }
+	t.Cleanup(func() { marshalOutputJSON = original })
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg"}}, &stdout, &stderr, 512); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "encoding") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -283,6 +306,7 @@ func TestWriteOutputFirewallSpillRejectsSymlinkDirectory(t *testing.T) {
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
 // parsed fields and renders the created bead id like raw bd.
 func TestDispatchViaAPICreate(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
 	var gotMethod, gotPath string
 	var gotBody map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
