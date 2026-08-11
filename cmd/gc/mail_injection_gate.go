@@ -49,7 +49,7 @@ func gateMailInjection(messages []mail.Message, previous mailInjectionState) (st
 	fingerprint := mailInjectionFingerprint(messages)
 	next := mailInjectionState{fingerprint: fingerprint}
 	if fingerprint == previous.fingerprint && fingerprint != "" {
-		return boundedMailInjectionReminder(messages), next
+		return boundedMailInjectionReminder(), next
 	}
 	return formatInjectOutput(messages), next
 }
@@ -78,7 +78,7 @@ func mailInjectionFingerprint(messages []mail.Message) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func boundedMailInjectionReminder(messages []mail.Message) string {
+func boundedMailInjectionReminder() string {
 	return "<system-reminder>\nUnread mail is unchanged. Run 'gc mail inbox' for details.\n</system-reminder>\n"
 }
 
