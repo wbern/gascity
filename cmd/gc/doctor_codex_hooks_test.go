@@ -877,6 +877,9 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 	}
 	check := newCodexHooksDriftCheck(dir, []string{dir}, cfg)
 	check.userHooksPath = ""
+	check.activeConsumers = func() ([]codexHookConsumer, error) {
+		return []codexHookConsumer{{workDir: dir, sessionName: "live-worker"}}, nil
+	}
 
 	result := check.Run(&doctor.CheckContext{})
 
@@ -888,6 +891,7 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 		"source=sessionFlags active=false",
 		"source=project active=true",
 		"managed=session-start:1",
+		"consumer=runtime-active workdir=" + dir + " sessions=live-worker",
 	} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details missing %q:\n%s", want, details)
@@ -908,6 +912,26 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatal("refused fix changed filesystem-owned Codex hooks")
+	}
+}
+
+func TestCodexHooksDriftCheckTreatsNonT3CodexWithoutRuntimeAsDormant(t *testing.T) {
+	dir := t.TempDir()
+	writeCodexHooksForDoctorTest(t, dir, `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents:  []config.Agent{{Name: "worker", Provider: "codex"}},
+	}
+	check := newCodexHooksDriftCheck(dir, []string{dir}, cfg)
+	check.userHooksPath = ""
+	check.activeConsumers = func() ([]codexHookConsumer, error) { return nil, nil }
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK for dormant non-T3 consumer; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=configured-dormant workdir="+dir) {
+		t.Fatalf("dormant non-T3 consumer missing from details:\n%s", details)
 	}
 }
 
