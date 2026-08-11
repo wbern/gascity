@@ -115,6 +115,66 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	}
 }
 
+func TestMergeSettingsJSON_MergeMatchedHookContentsUnionsSameMatcherCommands(t *testing.T) {
+	base := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"printf custom"}]}]}}`
+	over := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc mail check --inject"}]}]}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over), WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	entries := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("UserPromptSubmit entries = %d, want 1", len(entries))
+	}
+	handlers := entries[0].(map[string]any)["hooks"].([]any)
+	if len(handlers) != 2 {
+		t.Fatalf("UserPromptSubmit handlers = %d, want 2: %s", len(handlers), result)
+	}
+	for i, want := range []string{"printf custom", "gc mail check --inject"} {
+		if got := handlers[i].(map[string]any)["command"]; got != want {
+			t.Errorf("handler[%d] command = %v, want %q", i, got, want)
+		}
+	}
+}
+
+func TestMergeSettingsJSON_MergeMatchedHookContentsPreservesDuplicateWrappersIdempotently(t *testing.T) {
+	base := `{"hooks":{"UserPromptSubmit":[{"matcher":"","label":"first","hooks":[{"type":"command","command":"printf first"}]},{"matcher":"","label":"second","hooks":[{"type":"command","command":"printf second"}]}]}}`
+	over := `{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc mail check --inject"}]}]}}`
+
+	first, err := MergeSettingsJSON([]byte(base), []byte(over), WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("first MergeSettingsJSON: %v", err)
+	}
+	second, err := MergeSettingsJSON(first, []byte(over), WithMergeMatchedHookContents())
+	if err != nil {
+		t.Fatalf("second MergeSettingsJSON: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("repeated matched-content merge changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(second, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	entries := doc["hooks"].(map[string]any)["UserPromptSubmit"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("UserPromptSubmit entries = %d, want both duplicate base wrappers", len(entries))
+	}
+	if got := entries[0].(map[string]any)["label"]; got != "first" {
+		t.Errorf("first wrapper label = %v, want first", got)
+	}
+	if got := entries[1].(map[string]any)["label"]; got != "second" {
+		t.Errorf("second wrapper label = %v, want second", got)
+	}
+}
+
 func TestMergeSettingsJSON_AppendNewMatcher(t *testing.T) {
 	// Witness scenario: overlay adds PreToolUse guards to base that has none.
 	base := `{
@@ -175,6 +235,18 @@ func TestMergeSettingsJSON_NonHookKeysOverride(t *testing.T) {
 	}
 	if doc["newKey"] != true {
 		t.Errorf("newKey = %v, want true", doc["newKey"])
+	}
+}
+
+func TestMergeSettingsJSON_PreservesLargeIntegerMetadata(t *testing.T) {
+	base := `{"metadata":{"sequence":9007199254740993}}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if !bytes.Contains(result, []byte(`9007199254740993`)) {
+		t.Fatalf("large integer metadata changed during merge:\n%s", result)
 	}
 }
 
@@ -294,6 +366,23 @@ func TestMergeSettingsJSON_InvalidOverlay(t *testing.T) {
 	_, err := MergeSettingsJSON([]byte(`{}`), []byte(`not json`))
 	if err == nil {
 		t.Error("expected error for invalid overlay JSON")
+	}
+}
+
+func TestMergeSettingsJSON_RejectsTrailingJSONValue(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		base    string
+		overlay string
+	}{
+		{name: "base", base: `{} {}`, overlay: `{}`},
+		{name: "overlay", base: `{}`, overlay: `{} {}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := MergeSettingsJSON([]byte(test.base), []byte(test.overlay)); err == nil {
+				t.Fatal("MergeSettingsJSON accepted multiple JSON values")
+			}
+		})
 	}
 }
 

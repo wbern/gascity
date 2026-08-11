@@ -274,6 +274,7 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 // also the runtime workdir. Runtime staging must not reintroduce the overlay's
 // unbound SessionStart entry after hooks.Install already converged the file.
 func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
@@ -326,6 +327,7 @@ func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
 // session workdir with only a custom overlay hook must end with that hook plus
 // exactly one city-bound managed behavior set.
 func TestStageSessionWorkDirComposesOverlayOnlyCustomCodexHooks(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
 	overlayDir := t.TempDir()
@@ -370,7 +372,8 @@ func TestStageSessionWorkDirComposesOverlayOnlyCustomCodexHooks(t *testing.T) {
 	}
 }
 
-func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) {
+func TestStageSessionWorkDirConvergesCanonicalOwnerAndStripsLinkedManagedHooks(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
 	mainWorktree := filepath.Join(t.TempDir(), "main")
 	if err := os.MkdirAll(mainWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir main worktree: %v", err)
@@ -387,11 +390,6 @@ func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) 
 	seedFuriosaHybrid(t, cityDir, mainWorktree)
 	seedFuriosaHybrid(t, cityDir, linkedWorktree)
 	canonicalHooks := filepath.Join(mainWorktree, ".codex", "hooks.json")
-	canonicalBefore, err := os.ReadFile(canonicalHooks)
-	if err != nil {
-		t.Fatalf("read canonical project hooks before staging: %v", err)
-	}
-
 	cfg := runtime.Config{
 		WorkDir:           linkedWorktree,
 		ProviderName:      "codex",
@@ -403,22 +401,46 @@ func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) 
 		t.Fatalf("StageSessionWorkDir: %v", err)
 	}
 
-	linkedHooks := filepath.Join(linkedWorktree, ".codex", "hooks.json")
-	matchers := codexSessionStartMatchers(t, linkedHooks)
+	matchers := codexSessionStartMatchers(t, canonicalHooks)
 	if len(matchers) != 1 || matchers[0] != "startup" {
-		data, _ := os.ReadFile(linkedHooks)
-		t.Fatalf("linked session SessionStart matchers = %v, want exactly [startup] after staging\n%s", matchers, data)
+		data, _ := os.ReadFile(canonicalHooks)
+		t.Fatalf("canonical SessionStart matchers = %v, want exactly [startup] after staging\n%s", matchers, data)
 	}
-	data, err := os.ReadFile(linkedHooks)
+	canonicalData, err := os.ReadFile(canonicalHooks)
 	if err != nil {
-		t.Fatalf("read linked session hooks: %v", err)
+		t.Fatalf("read canonical hooks: %v", err)
 	}
 	for _, command := range []string{"echo user-authored-hook", "handoff", "mail check", "nudge drain"} {
-		if !strings.Contains(string(data), command) {
-			t.Fatalf("linked session hooks dropped %q:\n%s", command, data)
+		if !strings.Contains(string(canonicalData), command) {
+			t.Fatalf("canonical owner hooks dropped %q:\n%s", command, canonicalData)
 		}
 	}
-	linkedFirst := string(data)
+	if !hooks.CodexHooksAreConverged(canonicalData, cityDir) {
+		t.Fatalf("canonical owner is not exact-one/current-city converged:\n%s", canonicalData)
+	}
+
+	linkedHooks := filepath.Join(linkedWorktree, ".codex", "hooks.json")
+	linkedData, err := os.ReadFile(linkedHooks)
+	if err != nil {
+		t.Fatalf("read linked hooks: %v", err)
+	}
+	if !strings.Contains(string(linkedData), "echo user-authored-hook") {
+		t.Fatalf("linked non-owner lost custom hook:\n%s", linkedData)
+	}
+	linkedAudit, err := hooks.AuditCodexHooks(linkedData)
+	if err != nil {
+		t.Fatalf("audit linked non-owner: %v", err)
+	}
+	if len(linkedAudit.ManagedBehaviorCounts) == 0 {
+		t.Fatalf("fixture no longer retains the inert unbound legacy handlers needed to prove conservative cleanup:\n%s", linkedData)
+	}
+	if _, changed, err := hooks.RemoveManagedCodexHooksForCity(linkedData, cityDir); err != nil {
+		t.Fatalf("recheck linked current-city ownership: %v", err)
+	} else if changed {
+		t.Fatalf("linked non-owner retained current-city managed behavior:\n%s", linkedData)
+	}
+	canonicalFirst := string(canonicalData)
+	linkedFirst := string(linkedData)
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		t.Fatalf("StageSessionWorkDir second pass: %v", err)
 	}
@@ -426,15 +448,43 @@ func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read canonical project hooks after second pass: %v", err)
 	}
-	if string(canonicalBefore) != string(canonicalAfter) {
-		t.Fatalf("normal staging mutated canonical project hooks\nbefore:\n%s\nafter:\n%s", canonicalBefore, canonicalAfter)
+	if canonicalFirst != string(canonicalAfter) {
+		t.Fatalf("repeated staging changed canonical owner hooks\nfirst:\n%s\nsecond:\n%s", canonicalFirst, canonicalAfter)
 	}
 	linkedSecond, err := os.ReadFile(linkedHooks)
 	if err != nil {
 		t.Fatalf("read linked session hooks after second pass: %v", err)
 	}
 	if linkedFirst != string(linkedSecond) {
-		t.Fatalf("repeated linked-worktree staging changed owner hooks.json\nfirst:\n%s\nsecond:\n%s", linkedFirst, linkedSecond)
+		t.Fatalf("repeated staging changed linked non-owner hooks\nfirst:\n%s\nsecond:\n%s", linkedFirst, linkedSecond)
+	}
+}
+
+func TestStageSessionWorkDirRejectsManagedGlobalCodexHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	seedWorkDir := t.TempDir()
+	installCodex(t, cityDir, seedWorkDir)
+	data, err := os.ReadFile(filepath.Join(seedWorkDir, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read managed global fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), data, 0o644); err != nil {
+		t.Fatalf("write global hooks: %v", err)
+	}
+
+	cfg := runtime.Config{WorkDir: workDir, ProviderName: "codex"}
+	configureManagedHookConvergence(&cfg, cityDir)
+	err = runtime.StageSessionWorkDir(cfg)
+	if err == nil {
+		t.Fatal("StageSessionWorkDir succeeded with active global managed hooks")
+	}
+	for _, want := range []string{"global", filepath.Join(codexHome, "hooks.json"), "remove the redundant managed handlers"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
 	}
 }
 

@@ -27,6 +27,7 @@ type codexHooksDriftCheck struct {
 	userHooksPath        string
 	resolveProjectRoot   func(string) (string, error)
 	preflightReplacement func(string) error
+	writeFileAtomic      func(string, []byte, os.FileMode) error
 	ownership            codexHookOwnership
 }
 
@@ -58,6 +59,9 @@ func newCodexHooksDriftCheck(cityPath string, dirs []string, configs ...*config.
 		preflightReplacement: func(cityPath string) error {
 			_, err := hooks.ManagedCodexSessionFlags(cityPath)
 			return err
+		},
+		writeFileAtomic: func(path string, data []byte, mode os.FileMode) error {
+			return codexhooks.WriteFileAtomicNoFollow(fsys.OSFS{}, path, data, mode)
 		},
 		ownership: ownership,
 	}
@@ -354,9 +358,16 @@ func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
 		if err != nil {
 			return fmt.Errorf("reading Codex hook source %s: %w", source.path, err)
 		}
-		migrated, changed, err := hooks.RemoveManagedCodexHooks(data)
+		migrated, changed, err := hooks.RemoveManagedCodexHooksForCity(data, c.cityPath)
 		if err != nil {
 			return fmt.Errorf("migrating Codex hook source %s: %w", source.path, err)
+		}
+		remaining, err := hooks.AuditCodexHooks(migrated)
+		if err != nil {
+			return fmt.Errorf("auditing migrated Codex hook source %s: %w", source.path, err)
+		}
+		if len(remaining.ManagedBehaviorCounts) > 0 {
+			return fmt.Errorf("refusing to migrate Codex hook source %s: managed-looking handlers without proven current-city ownership remain (%s)", source.path, formatCodexHookCounts(remaining.ManagedBehaviorCounts, []string{"mail", "nudge", "pre-compact", "session-start"}))
 		}
 		if !changed {
 			continue
@@ -393,16 +404,34 @@ func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
 				return err
 			}
 		}
-		for _, migration := range migrations {
-			if err := codexhooks.WriteFileAtomicNoFollow(filesystem, migration.source.path, migration.migrated, fsys.ComparableMode(migration.mode)); err != nil {
-				return fmt.Errorf("writing migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err)
+		rollback := func(count int, cause error) error {
+			errs := []error{cause}
+			for index := count - 1; index >= 0; index-- {
+				migration := migrations[index]
+				if err := c.writeFileAtomic(migration.source.path, migration.original, fsys.ComparableMode(migration.mode)); err != nil {
+					errs = append(errs, fmt.Errorf("rolling back Codex hook source %s: %w", migration.source.path, err))
+					continue
+				}
+				restored, restoredInfo, err := readRegularCodexHookFile(migration.source.path)
+				if err != nil || !bytes.Equal(restored, migration.original) || fsys.ComparableMode(restoredInfo.Mode()) != fsys.ComparableMode(migration.mode) {
+					if err == nil {
+						err = errors.New("content or mode mismatch")
+					}
+					errs = append(errs, fmt.Errorf("verifying rollback of Codex hook source %s: %w", migration.source.path, err))
+				}
+			}
+			return errors.Join(errs...)
+		}
+		for index, migration := range migrations {
+			if err := c.writeFileAtomic(migration.source.path, migration.migrated, fsys.ComparableMode(migration.mode)); err != nil {
+				return rollback(index+1, fmt.Errorf("writing migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err))
 			}
 			written, writtenInfo, err := readRegularCodexHookFile(migration.source.path)
 			if err != nil {
-				return fmt.Errorf("verifying migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err)
+				return rollback(index+1, fmt.Errorf("verifying migrated Codex hook source %s (backup %s): %w", migration.source.path, migration.backupPath, err))
 			}
 			if !bytes.Equal(written, migration.migrated) || fsys.ComparableMode(writtenInfo.Mode()) != fsys.ComparableMode(migration.mode) {
-				return fmt.Errorf("verifying migrated Codex hook source %s: content or mode mismatch; original bytes remain in %s", migration.source.path, migration.backupPath)
+				return rollback(index+1, fmt.Errorf("verifying migrated Codex hook source %s: content or mode mismatch; original bytes remain in %s", migration.source.path, migration.backupPath))
 			}
 		}
 		return nil
@@ -504,13 +533,16 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	}
 	if c.ownership.filesystemOwned {
 		for _, dir := range c.dirs {
-			counts, paths, err := c.codexConsumerManagedCounts(dir)
+			counts, paths, ownerConverged, err := c.codexConsumerManagedCounts(dir)
 			if err != nil {
-				return warnCheck(c.Name(), fmt.Sprintf("cannot audit Codex consumer=%s: %v", dir, err), "repair the reported source before running `gc doctor --fix`", details)
+				return warnCheck(c.Name(), fmt.Sprintf("cannot audit Codex consumer=%s: %v", dir, err), "repair the reported source manually; automatic filesystem migration is unavailable", details)
 			}
 			details = append(details, fmt.Sprintf("consumer=%s managed=%s paths=%s", dir, formatCodexHookCounts(counts, []string{"mail", "nudge", "pre-compact", "session-start"}), strings.Join(paths, ",")))
+			if !ownerConverged {
+				return warnCheck(c.Name(), fmt.Sprintf("Codex consumer=%s canonical project hooks are not the exact current-city owner", dir), "restart the managed tmux session to converge its canonical project hooks; inspect global hooks manually if the warning remains", details)
+			}
 			if invalid := invalidCodexManagedBehaviors(counts, true); len(invalid) > 0 {
-				return warnCheck(c.Name(), fmt.Sprintf("Codex consumer=%s has invalid managed behavior cardinality: %s", dir, strings.Join(invalid, ", ")), "run `gc doctor --fix` only after confirming that the reported non-owner sources are eligible for migration", details)
+				return warnCheck(c.Name(), fmt.Sprintf("Codex consumer=%s has invalid managed behavior cardinality: %s", dir, strings.Join(invalid, ", ")), "remove redundant managed handlers from the reported active non-owner manually; automatic filesystem migration is unavailable", details)
 			}
 		}
 	}
@@ -530,22 +562,24 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	return result
 }
 
-func (c *codexHooksDriftCheck) codexConsumerManagedCounts(dir string) (map[string]int, []string, error) {
+func (c *codexHooksDriftCheck) codexConsumerManagedCounts(dir string) (map[string]int, []string, bool, error) {
 	paths := []string{c.userHooksPath}
 	root := dir
 	if c.resolveProjectRoot != nil {
 		resolved, err := c.resolveProjectRoot(dir)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if resolved != "" {
 			root = resolved
 		}
 	}
-	paths = append(paths, filepath.Join(root, ".codex", "hooks.json"), filepath.Join(dir, ".codex", "hooks.json"))
+	ownerPath := filepath.Clean(filepath.Join(root, ".codex", "hooks.json"))
+	paths = append(paths, ownerPath)
 	counts := map[string]int{}
 	seen := map[string]bool{}
 	used := []string{}
+	ownerConverged := false
 	for _, path := range paths {
 		path = filepath.Clean(path)
 		if path == "." || seen[path] {
@@ -557,16 +591,19 @@ func (c *codexHooksDriftCheck) codexConsumerManagedCounts(dir string) (map[strin
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		audit, err := hooks.AuditCodexHooks(data)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		addCodexHookCounts(counts, audit.ManagedBehaviorCounts)
 		used = append(used, path)
+		if path == ownerPath {
+			ownerConverged = hooks.CodexHooksAreConverged(data, c.cityPath)
+		}
 	}
-	return counts, used, nil
+	return counts, used, ownerConverged, nil
 }
 
 func invalidCodexManagedBehaviors(counts map[string]int, requireComplete bool) []string {
@@ -636,7 +673,7 @@ func (c *codexHooksDriftCheck) codexHookSources() []codexHookSource {
 			continue
 		}
 		add(codexHookSource{kind: "project-root", path: filepath.Join(root, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
-		add(codexHookSource{kind: "session-workdir", path: filepath.Join(dir, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
+		add(codexHookSource{kind: "inert-worktree", path: filepath.Join(dir, ".codex", "hooks.json"), active: false})
 	}
 	return sources
 }

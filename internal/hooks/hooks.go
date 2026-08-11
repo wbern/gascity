@@ -923,7 +923,7 @@ func composeCodexHooks(existing []byte, cityDir string, configuredLayers [][]byt
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := overlay.MergeSettingsJSON(custom, desired)
+	candidate, err := overlay.MergeSettingsJSON(custom, desired, overlay.WithMergeMatchedHookContents())
 	if err != nil {
 		return nil, fmt.Errorf("merging Codex hooks: %w", err)
 	}
@@ -934,12 +934,12 @@ func composeCodexHooks(existing []byte, cityDir string, configuredLayers [][]byt
 	if err != nil {
 		return nil, fmt.Errorf("removing managed commands from fixed-point Codex hooks: %w", err)
 	}
-	second, err := overlay.MergeSettingsJSON(secondCustom, desired)
+	second, err := overlay.MergeSettingsJSON(secondCustom, desired, overlay.WithMergeMatchedHookContents())
 	if err != nil {
 		return nil, fmt.Errorf("verifying Codex hook fixed point: %w", err)
 	}
 	if !bytes.Equal(candidate, second) {
-		return nil, errors.New("Codex hooks composition is not byte-stable")
+		return nil, errors.New("codex hooks composition is not byte-stable")
 	}
 	return candidate, nil
 }
@@ -959,12 +959,12 @@ func desiredCodexHookData(cityDir string, configuredLayers [][]byte) ([]byte, er
 		if err != nil {
 			return nil, fmt.Errorf("removing managed commands from configured Codex hook layer %d: %w", i, err)
 		}
-		desired, err = overlay.MergeSettingsJSON(desired, customLayer)
+		desired, err = overlay.MergeSettingsJSON(desired, customLayer, overlay.WithMergeMatchedHookContents())
 		if err != nil {
 			return nil, fmt.Errorf("merging configured Codex hook layer %d: %w", i, err)
 		}
 	}
-	desired, err = overlay.MergeSettingsJSON(desired, managedCore)
+	desired, err = overlay.MergeSettingsJSON(desired, managedCore, overlay.WithMergeMatchedHookContents())
 	if err != nil {
 		return nil, fmt.Errorf("merging embedded Codex hooks: %w", err)
 	}
@@ -1000,6 +1000,112 @@ func visitCodexHookCommands(root map[string]any, visit func(event string, entryI
 	}
 }
 
+// RemoveManagedCodexHooksForCity removes exact current managed handlers owned
+// by cityDir while preserving legacy, unbound, and differently bound handlers.
+func RemoveManagedCodexHooksForCity(data []byte, cityDir string) ([]byte, bool, error) {
+	if strings.TrimSpace(cityDir) == "" {
+		return data, false, nil
+	}
+	doc, err := codexhooks.ParseDocument(data, "Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	desired, err := desiredCodexHookData(cityDir, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	desiredDoc, err := codexhooks.ParseDocument(desired, "managed Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	exactHandlers := map[string]map[string]string{}
+	visitCodexHookCommands(desiredDoc, func(event string, _ int, _ map[string]any, handler map[string]any, nested bool, command string) {
+		if !nested {
+			return
+		}
+		canonical, marshalErr := overlay.MarshalCanonicalJSON(handler)
+		if marshalErr != nil {
+			return
+		}
+		if exactHandlers[event] == nil {
+			exactHandlers[event] = map[string]string{}
+		}
+		exactHandlers[event][command] = string(canonical)
+	})
+
+	hooksMap, _ := doc["hooks"].(map[string]any)
+	changed := false
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		keptEntries := make([]any, 0, len(entries))
+		for _, entryValue := range entries {
+			entry := entryValue.(map[string]any)
+			handlers, wrapped := entry["hooks"].([]any)
+			if !wrapped {
+				keptEntries = append(keptEntries, entryValue)
+				continue
+			}
+			wantMatcher := ""
+			if event == "SessionStart" {
+				wantMatcher = "startup"
+			}
+			matcher, matcherOK := entry["matcher"].(string)
+			if !matcherOK || matcher != wantMatcher {
+				keptEntries = append(keptEntries, entryValue)
+				continue
+			}
+			keptHandlers := make([]any, 0, len(handlers))
+			for _, handlerValue := range handlers {
+				handler := handlerValue.(map[string]any)
+				command, _ := handler["command"].(string)
+				wantCanonical, exactCommand := exactHandlers[event][command]
+				eligible := exactCommand
+				if exactCommand {
+					canonical, marshalErr := overlay.MarshalCanonicalJSON(handler)
+					eligible = marshalErr == nil && string(canonical) == wantCanonical
+					if !eligible {
+						if key, found := firstUnknownCodexHookField(handler, "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
+							return nil, false, fmt.Errorf("refusing to remove managed Codex %s handler with inseparable field %q", event, key)
+						}
+					}
+				}
+				if eligible {
+					changed = true
+					continue
+				}
+				keptHandlers = append(keptHandlers, handlerValue)
+			}
+			if len(keptHandlers) == 0 {
+				if len(handlers) > 0 {
+					if key, found := firstUnknownCodexHookField(entry, "matcher", "hooks"); found {
+						return nil, false, fmt.Errorf("refusing to remove managed Codex %s wrapper with inseparable field %q", event, key)
+					}
+				}
+				continue
+			}
+			entry["hooks"] = keptHandlers
+			keptEntries = append(keptEntries, entryValue)
+		}
+		if len(keptEntries) != len(entries) {
+			hooksMap[event] = keptEntries
+		}
+	}
+	if !changed {
+		return data, false, nil
+	}
+	candidate, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		return nil, false, fmt.Errorf("encoding migrated Codex hooks: %w", err)
+	}
+	if err := codexhooks.ValidateDocument(candidate, "migrated Codex hooks"); err != nil {
+		return nil, false, err
+	}
+	return candidate, true, nil
+}
+
 // RemoveManagedCodexHooks removes only recognized Gas City command handlers
 // from a Codex hook document. Custom handlers and unknown fields on retained
 // objects are preserved. An unchanged document is returned byte-for-byte.
@@ -1019,7 +1125,7 @@ func RemoveManagedCodexHooks(data []byte) ([]byte, bool, error) {
 		for _, entryValue := range entries {
 			entry, ok := entryValue.(map[string]any)
 			if !ok {
-				return nil, false, fmt.Errorf("Codex hooks event %s contains a non-object entry", event)
+				return nil, false, fmt.Errorf("codex hooks event %s contains a non-object entry", event)
 			}
 			if command, ok := entry["command"].(string); ok && codexManagedBehavior(event, command) != "" {
 				if key, found := firstUnknownCodexHookField(entry, "matcher", "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
@@ -1033,7 +1139,7 @@ func RemoveManagedCodexHooks(data []byte) ([]byte, bool, error) {
 				for _, handlerValue := range handlers {
 					handler, ok := handlerValue.(map[string]any)
 					if !ok {
-						return nil, false, fmt.Errorf("Codex hooks event %s contains a non-object handler", event)
+						return nil, false, fmt.Errorf("codex hooks event %s contains a non-object handler", event)
 					}
 					command, _ := handler["command"].(string)
 					if codexManagedBehavior(event, command) != "" {
