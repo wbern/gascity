@@ -34,6 +34,7 @@ type nudgeFunc func(recipient string) error
 const (
 	mailInjectMaxMessages          = 3
 	mailInjectBodyPreviewSize      = 240
+	mailInjectIdentityPreviewSize  = 128
 	mailInjectPreviewScanSize      = 4096
 	mailCheckDegradedNotice        = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
 	mailCheckPartialDegradedNotice = "[mail check degraded — partial provider read; run 'gc mail inbox' after the provider recovers]"
@@ -859,19 +860,38 @@ func formatInjectOutput(messages []mail.Message) string {
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
 		// and break out of the reminder. See gastownhall/gascity#2195.
-		from := extmsg.SanitizeForSystemReminder(m.From)
+		rawID, idTruncated := mailInjectTextPreview(m.ID, mailInjectIdentityPreviewSize)
+		id := extmsg.SanitizeForSystemReminder(rawID)
+		rawFrom, fromTruncated := mailInjectTextPreview(m.From, mailInjectIdentityPreviewSize)
+		from := extmsg.SanitizeForSystemReminder(rawFrom)
 		rawSubject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
+			fmt.Fprintf(&sb, "- %s", id)
+			if idTruncated {
+				sb.WriteString(" ... [id truncated]")
+			}
+			fmt.Fprintf(&sb, " from %s", from)
+			if fromTruncated {
+				sb.WriteString(" ... [sender truncated]")
+			}
+			fmt.Fprintf(&sb, " [%s", subject)
 			if subjectTruncated {
 				sb.WriteString(" ... [subject truncated]")
 			}
 			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, from, body)
+			fmt.Fprintf(&sb, "- %s", id)
+			if idTruncated {
+				sb.WriteString(" ... [id truncated]")
+			}
+			fmt.Fprintf(&sb, " from %s", from)
+			if fromTruncated {
+				sb.WriteString(" ... [sender truncated]")
+			}
+			fmt.Fprintf(&sb, ": %s", body)
 		}
 		if bodyTruncated {
 			sb.WriteString(" ... [preview truncated]")
