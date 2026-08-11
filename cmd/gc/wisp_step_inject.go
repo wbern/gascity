@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -297,10 +298,14 @@ func resolveBeadWithDescription(store beads.Store, assignees []string) (*beads.B
 func formatWispStepReminder(b *beads.Bead) string {
 	title := boundedReminderField(b.Title, 120)
 	status := boundedReminderField(b.Status, 40)
-	hold := boundedReminderField(b.Metadata["hold"], 40)
 	state := "Status: " + status
-	if hold != "" {
-		state += " (hold: " + hold + ")"
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		for _, label := range b.Labels {
+			if label == hold {
+				state += " (" + hold + ")"
+				break
+			}
+		}
 	}
 	return fmt.Sprintf(
 		"<system-reminder>\nActive assignment: %s (%s)\n%s\nRetrieve full assignment: gc bd show %s\n</system-reminder>\n",
@@ -324,5 +329,9 @@ func boundedReminderField(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	return strings.TrimSpace(value[:limit-3]) + "..."
+	end := limit - len("...")
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return strings.TrimSpace(value[:end]) + "..."
 }

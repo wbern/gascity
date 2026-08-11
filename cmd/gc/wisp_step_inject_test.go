@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -324,22 +325,63 @@ func TestFormatWispStepReminder_BoundsRecurringAssignmentContext(t *testing.T) {
 		Title:       "Fix the bug",
 		Description: strings.Repeat("long assignment detail ", 100),
 		Status:      "in_progress",
-		Metadata: map[string]string{
-			"hold": "mayor",
-		},
+		Labels:      []string{beadmeta.HoldMayorLabel},
 	}
 
 	out := formatWispStepReminder(b)
 	if len(out) > 384 {
 		t.Fatalf("recurring assignment context = %d bytes, want at most 384", len(out))
 	}
-	for _, want := range []string{"gcy-abc", "Fix the bug", "in_progress", "mayor", "gc bd show gcy-abc"} {
+	for _, want := range []string{"gcy-abc", "Fix the bug", "in_progress", beadmeta.HoldMayorLabel, "gc bd show gcy-abc"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, b.Description) {
 		t.Fatalf("recurring assignment context contains the full description")
+	}
+}
+
+func TestBoundedReminderField_PreservesUTF8WhenTruncated(t *testing.T) {
+	got := boundedReminderField(strings.Repeat("é", 100), 120)
+	if !utf8.ValidString(got) {
+		t.Fatalf("bounded reminder contains invalid UTF-8: %q", got)
+	}
+	if len(got) > 120 {
+		t.Fatalf("bounded reminder = %d bytes, want at most 120", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("bounded reminder = %q, want truncation suffix", got)
+	}
+}
+
+func TestFormatWispStepReminder_ReportsCanonicalHoldLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{name: "mayor hold", labels: []string{beadmeta.HoldMayorLabel}, want: beadmeta.HoldMayorLabel},
+		{name: "external hold", labels: []string{beadmeta.HoldExternalLabel}, want: beadmeta.HoldExternalLabel},
+		{name: "irrelevant label", labels: []string{"priority:high"}},
+		{name: "no labels"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := formatWispStepReminder(&beads.Bead{
+				ID:     "gcy-abc",
+				Title:  "Fix the bug",
+				Status: "in_progress",
+				Labels: tt.labels,
+			})
+			if tt.want == "" && strings.Contains(out, "hold:") {
+				t.Fatalf("unexpected hold signal in %q", out)
+			}
+			if tt.want != "" && !strings.Contains(out, tt.want) {
+				t.Fatalf("hold signal missing %q from %q", tt.want, out)
+			}
+		})
 	}
 }
 
