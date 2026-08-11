@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	mailInjectionReminderMaxBytes = 384
+	mailInjectionReminderMaxBytes = 128
 	mailInjectionFullMaxBytes     = 2048
 	mailInjectionFingerprintKey   = "mail_injection_fingerprint"
 	mailInjectionFenceKey         = "mail_injection_fence"
@@ -38,9 +39,19 @@ func gateMailInjection(messages []mail.Message, previous mailInjectionState) (st
 }
 
 func mailInjectionFingerprint(messages []mail.Message) string {
-	messages = sortMailByPriority(messages)
+	if len(messages) == 0 {
+		return ""
+	}
+	canonical := make([]mail.Message, len(messages))
+	copy(canonical, messages)
+	sort.Slice(canonical, func(i, j int) bool {
+		if canonical[i].Priority != canonical[j].Priority {
+			return canonical[i].Priority > canonical[j].Priority
+		}
+		return canonical[i].ID < canonical[j].ID
+	})
 	h := sha256.New()
-	for _, message := range messages {
+	for _, message := range canonical {
 		_, _ = io.WriteString(h, strconv.Itoa(len(message.ID)))
 		_, _ = io.WriteString(h, ":")
 		_, _ = io.WriteString(h, message.ID)

@@ -18,8 +18,11 @@ func TestMailInjectionGateSuppressesUnchangedUnreadDetail(t *testing.T) {
 	state := mailInjectionState{}
 
 	first, state := gateMailInjection(messages, state)
-	if !strings.Contains(first, messages[0].Body) {
-		t.Fatalf("first injection omitted mail detail: %q", first)
+	if !strings.Contains(first, "detail") || !strings.Contains(first, "[preview truncated]") {
+		t.Fatalf("first injection omitted the bounded mail preview: %q", first)
+	}
+	if len(first) > mailInjectionFullMaxBytes {
+		t.Fatalf("first injection length = %d, want at most %d", len(first), mailInjectionFullMaxBytes)
 	}
 
 	second, _ := gateMailInjection(messages, state)
@@ -86,6 +89,35 @@ func TestMailInjectionGateReportsNewIDAndPriorityChange(t *testing.T) {
 		if strings.Contains(got, "Unread mail is unchanged") {
 			t.Fatalf("changed unread set was suppressed: %q", got)
 		}
+	}
+}
+
+func TestMailInjectionFingerprintIgnoresProviderOrder(t *testing.T) {
+	first := []mail.Message{{ID: "gc-1", Priority: 0}, {ID: "gc-2", Priority: 0}}
+	reordered := []mail.Message{{ID: "gc-2", Priority: 0}, {ID: "gc-1", Priority: 0}}
+
+	if got, want := mailInjectionFingerprint(reordered), mailInjectionFingerprint(first); got != want {
+		t.Fatalf("reordered fingerprint = %q, want %q", got, want)
+	}
+}
+
+func TestBoundedMailInjectionReminderIsAtMost128Bytes(t *testing.T) {
+	messages := []mail.Message{
+		{ID: strings.Repeat("a", 80)},
+		{ID: strings.Repeat("b", 80)},
+	}
+
+	if got := boundedMailInjectionReminder(messages); len(got) > 128 {
+		t.Fatalf("reminder length = %d, want at most 128", len(got))
+	}
+}
+
+func TestMailInjectionGateClearsStateWhenUnreadIsEmpty(t *testing.T) {
+	_, state := gateMailInjection([]mail.Message{{ID: "gc-1"}}, mailInjectionState{})
+	_, cleared := gateMailInjection(nil, state)
+
+	if cleared.fingerprint != "" {
+		t.Fatalf("empty unread fingerprint = %q, want empty", cleared.fingerprint)
 	}
 }
 
