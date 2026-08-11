@@ -7,7 +7,7 @@ func TestValidateOutputFirewallRejectsUnsafePolicy(t *testing.T) {
 		name string
 		cfg  OutputFirewallConfig
 	}{
-		{"small budget", OutputFirewallConfig{ByteBudget: 1}},
+		{"small budget", OutputFirewallConfig{ByteBudget: intPtr(1)}},
 		{"mutation verb", OutputFirewallConfig{ReadVerbs: []string{"update"}}},
 		{"absolute spill", OutputFirewallConfig{SpillPath: "/tmp/output"}},
 		{"bad retention", OutputFirewallConfig{RetentionTTL: "0s"}},
@@ -21,8 +21,10 @@ func TestValidateOutputFirewallRejectsUnsafePolicy(t *testing.T) {
 }
 
 func TestValidateOutputFirewallAcceptsKnownReadPolicy(t *testing.T) {
-	cfg := OutputFirewallConfig{ByteBudget: 32768, ReadVerbs: []string{"show", "ready", "list"}, SpillMode: "secure", SpillPath: ".gc/evidence/output", RetentionTTL: "24h"}
+	cfg := OutputFirewallConfig{ByteBudget: intPtr(32768), ReadVerbs: []string{"show", "ready", "list"}, SpillMode: "secure", SpillPath: ".gc/evidence/output", RetentionTTL: "24h"}
 	if err := ValidateOutputFirewall(&City{OutputFirewall: cfg}); err != nil {
 		t.Fatalf("ValidateOutputFirewall() = %v", err)
 	}
 }
+
+func intPtr(v int) *int { return &v }

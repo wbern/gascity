@@ -10,7 +10,7 @@ import (
 // OutputFirewallConfig is the operator-owned policy applied to managed read output.
 type OutputFirewallConfig struct {
 	Enabled      *bool    `toml:"enabled,omitempty"`
-	ByteBudget   int      `toml:"byte_budget,omitempty"`
+	ByteBudget   *int     `toml:"byte_budget,omitempty"`
 	ReadVerbs    []string `toml:"read_verbs,omitempty"`
 	SpillMode    string   `toml:"spill_mode,omitempty"`
 	SpillPath    string   `toml:"spill_path,omitempty"`
@@ -19,10 +19,10 @@ type OutputFirewallConfig struct {
 
 // EffectiveByteBudget returns the managed-output budget.
 func (c OutputFirewallConfig) EffectiveByteBudget() int {
-	if c.ByteBudget == 0 {
+	if c.ByteBudget == nil {
 		return 32 << 10
 	}
-	return c.ByteBudget
+	return *c.ByteBudget
 }
 
 // EnabledForManagedSessions reports whether managed known reads are protected.
@@ -61,10 +61,10 @@ func ValidateOutputFirewall(cfg *City) error {
 		return nil
 	}
 	c := cfg.OutputFirewall
-	if c.ByteBudget < 0 {
+	if c.ByteBudget != nil && *c.ByteBudget < 0 {
 		return fmt.Errorf("output_firewall.byte_budget must be positive")
 	}
-	if c.ByteBudget != 0 && c.ByteBudget < 512 {
+	if c.ByteBudget != nil && *c.ByteBudget < 512 {
 		return fmt.Errorf("output_firewall.byte_budget must be at least 512")
 	}
 	if c.SpillMode != "" && c.SpillMode != "secure" && c.SpillMode != "disabled" && c.SpillMode != "required" {
