@@ -106,8 +106,8 @@ func TestMailInjectionGateReportsNewIDAndPriorityChange(t *testing.T) {
 		{{ID: "gc-1", Priority: 1, Body: "first detail"}},
 	} {
 		got, _ := gateMailInjection(changed, state)
-		if strings.Contains(got, "Unread mail is unchanged") {
-			t.Fatalf("changed unread set was suppressed: %q", got)
+		if strings.Contains(got, "Unread mail is unchanged") || !strings.Contains(got, "first detail") {
+			t.Fatalf("changed unread set omitted bounded detail: %q", got)
 		}
 	}
 }
@@ -179,9 +179,9 @@ func TestMailInjectionCoordinatorPersistsEmptyReset(t *testing.T) {
 	if err := persist(); err != nil {
 		t.Fatal(err)
 	}
-	unchanged, _, err := coordinator.prepare(messages)
-	if err != nil || !strings.Contains(unchanged, "unchanged") {
-		t.Fatalf("unchanged prepare = %q, err=%v", unchanged, err)
+	unchanged, unchangedPersist, err := coordinator.prepare(messages)
+	if err != nil || !strings.Contains(unchanged, "unchanged") || unchangedPersist != nil {
+		t.Fatalf("unchanged prepare = %q, persist=%v, err=%v", unchanged, unchangedPersist != nil, err)
 	}
 	_, clearState, err := coordinator.prepare(nil)
 	if err != nil || clearState == nil {
@@ -190,10 +190,112 @@ func TestMailInjectionCoordinatorPersistsEmptyReset(t *testing.T) {
 	if err := clearState(); err != nil {
 		t.Fatal(err)
 	}
+	_, emptyPersist, err := coordinator.prepare(nil)
+	if err != nil || emptyPersist != nil {
+		t.Fatalf("unchanged empty prepare persist=%v, err=%v", emptyPersist != nil, err)
+	}
 	again, _, err := coordinator.prepare(messages)
 	if err != nil || !strings.Contains(again, "detail") {
 		t.Fatalf("post-empty prepare = %q, err=%v", again, err)
 	}
+}
+
+func TestDetailedMailInjectionArchivesOnlyRenderedMessages(t *testing.T) {
+	messages := []mail.Message{
+		{ID: strings.Repeat("i", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+		{ID: strings.Repeat("j", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+		{ID: strings.Repeat("k", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+	}
+
+	text, rendered := formatInjectOutputWithMessages(messages)
+	if len(text) > mailInjectionFullMaxBytes || !strings.Contains(text, "truncated") {
+		t.Fatalf("bounded detailed output = %d bytes: %q", len(text), text)
+	}
+	if len(rendered) == 0 || len(rendered) >= len(messages) {
+		t.Fatalf("represented messages = %d, want a strict bounded subset of %d", len(rendered), len(messages))
+	}
+	for _, message := range rendered {
+		if !strings.Contains(text, message.ID) {
+			t.Fatalf("rendered message %q is not retrievable from %q", message.ID, text)
+		}
+	}
+}
+
+func TestDetailedMailInjectionDoesNotArchiveSanitizedIDs(t *testing.T) {
+	message := mail.Message{ID: "gc-1\nnot-retrievable", From: "sender", Body: "detail"}
+	text, rendered := formatInjectOutputWithMessages([]mail.Message{message})
+	if !strings.Contains(text, "gc-1 not-retrievable") {
+		t.Fatalf("sanitized output = %q", text)
+	}
+	if len(rendered) != 0 {
+		t.Fatalf("sanitized ID must not be archive-eligible: %#v", rendered)
+	}
+}
+
+func TestOversizedMailInjectionLeavesFailedArchiveMessagesRetrievable(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := &failingMailInjectionArchiver{Provider: beadmail.New(store)}
+	for i := 0; i < mailInjectMaxMessages; i++ {
+		_, err := provider.Send("sender", "recipient", "subject", "body")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider.transform = func(messages []mail.Message) []mail.Message {
+		for i := range messages {
+			messages[i].From = strings.Repeat("f", 129)
+			messages[i].Subject = strings.Repeat("s", 241)
+			messages[i].Body = strings.Repeat("b", 241)
+		}
+		return messages
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailCheckTargetWithFormat(provider, resolvedMailTarget{display: "recipient", recipients: []string{"recipient"}}, true, "", &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if len(stdout.String()) > mailInjectionFullMaxBytes || len(provider.archived) == 0 || !strings.Contains(stderr.String(), "archiving injected auto handoff mail") {
+		t.Fatalf("stdout=%d bytes archived=%v stderr=%q", len(stdout.String()), provider.archived, stderr.String())
+	}
+	for _, id := range provider.archived {
+		if !strings.Contains(stdout.String(), id) {
+			t.Fatalf("archived id %q is absent from bounded output %q", id, stdout.String())
+		}
+		if _, err := provider.Get(id); err != nil {
+			t.Fatalf("failed archive hid %q: %v", id, err)
+		}
+	}
+}
+
+func TestOversizedSessionStartMailInjectionRemainsDetailedAndBounded(t *testing.T) {
+	messages := []mail.Message{
+		{ID: strings.Repeat("i", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+		{ID: strings.Repeat("j", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+		{ID: strings.Repeat("k", 128), From: strings.Repeat("f", 129), Subject: strings.Repeat("s", 241), Body: strings.Repeat("b", 241)},
+	}
+	got := formatInjectOutput(messages)
+	if len(got) > mailInjectionFullMaxBytes || strings.Contains(got, "Unread mail is available.") || !strings.Contains(got, "truncated") {
+		t.Fatalf("SessionStart output = %d bytes: %q", len(got), got)
+	}
+}
+
+type failingMailInjectionArchiver struct {
+	*beadmail.Provider
+	archived  []string
+	transform func([]mail.Message) []mail.Message
+}
+
+func (p *failingMailInjectionArchiver) Check(recipient string) ([]mail.Message, error) {
+	messages, err := p.Provider.Check(recipient)
+	if err != nil || p.transform == nil {
+		return messages, err
+	}
+	return p.transform(messages), nil
+}
+
+func (p *failingMailInjectionArchiver) ArchiveInjectedAutoHandoffs(ids []string) error {
+	p.archived = append(p.archived, ids...)
+	return errors.New("archive unavailable")
 }
 
 func TestMailInjectionCoordinatorFailsOpenOnStateLoadFailure(t *testing.T) {

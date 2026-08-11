@@ -39,6 +39,9 @@ func (c mailInjectionStateCoordinator) prepare(messages []mail.Message) (string,
 		return text, nil, err
 	}
 	text, next := gateMailInjection(messages, previous)
+	if next == previous {
+		return text, nil, nil
+	}
 	return text, func() error { return persist(next) }, nil
 }
 
@@ -132,11 +135,4 @@ func currentMailInjectionState() (mailInjectionState, func(mailInjectionState) e
 		return err
 	}
 	return state, persist, true, nil
-}
-
-func boundedMailInjectionPayload(text string) string {
-	if len(text) <= mailInjectionFullMaxBytes {
-		return text
-	}
-	return "<system-reminder>\nUnread mail is available. Run 'gc mail inbox' for the bounded message list.\n</system-reminder>\n"
 }
