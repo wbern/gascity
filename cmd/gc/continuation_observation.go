@@ -48,6 +48,7 @@ const (
 	continuationErrorHandoffMail    = "handoff_mail_failed"
 	continuationErrorMailCheck      = "mail_check_failed"
 	continuationErrorMailDegraded   = "mail_read_degraded"
+	continuationErrorMailState      = "mail_state_failed"
 )
 
 type continuationObservation struct {

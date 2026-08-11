@@ -34,6 +34,7 @@ type nudgeFunc func(recipient string) error
 const (
 	mailInjectMaxMessages          = 3
 	mailInjectBodyPreviewSize      = 240
+	mailInjectIdentityPreviewSize  = 128
 	mailInjectPreviewScanSize      = 4096
 	mailCheckDegradedNotice        = "[mail check degraded — store slow; run 'gc mail inbox' when the factory load drops]"
 	mailCheckPartialDegradedNotice = "[mail check degraded — partial provider read; run 'gc mail inbox' after the provider recovers]"
@@ -751,7 +752,13 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 
 	if inject {
 		if len(messages) > 0 {
-			text := formatInjectOutput(messages)
+			coordinator := mailInjectionStateCoordinator{load: mailInjectionStateLoader}
+			text, persist, stateErr := coordinator.prepare(messages)
+			stateFailed := stateErr != nil
+			if stateErr != nil {
+				fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
+			}
+			text = boundedMailInjectionPayload(text)
 			// Archive the SAME messages that were injected: priority-sort
 			// before the clamp so the archived set matches formatInjectOutput's
 			// displayed set (a priority:1 handoff that floats into the window is
@@ -761,12 +768,29 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				injectedMessages = injectedMessages[:mailInjectMaxMessages]
 			}
 			observation.injected(injectedMessages, text)
+			if stateFailed {
+				observation.fail(continuationErrorMailState)
+			}
 			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", text); err != nil {
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				observation.fail(continuationErrorHookOutput)
 				return 0
 			}
+			if persist != nil {
+				if err := persist(); err != nil {
+					fmt.Fprintf(stderr, "gc mail check: persisting mail injection state: %v\n", err) //nolint:errcheck // a later hook fails open with full detail
+					observation.fail(continuationErrorMailState)
+				}
+			}
 			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+		} else if _, persist, stateErr := (mailInjectionStateCoordinator{load: mailInjectionStateLoader}).prepare(nil); stateErr != nil {
+			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
+			observation.fail(continuationErrorMailState)
+		} else if persist != nil {
+			if err := persist(); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: clearing mail injection state: %v\n", err) //nolint:errcheck // fail-visible; a later delivery fails open
+				observation.fail(continuationErrorMailState)
+			}
 		}
 		return 0 // --inject always exits 0
 	}
@@ -840,19 +864,38 @@ func formatInjectOutput(messages []mail.Message) string {
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
 		// and break out of the reminder. See gastownhall/gascity#2195.
-		from := extmsg.SanitizeForSystemReminder(m.From)
+		rawID, idTruncated := mailInjectTextPreview(m.ID, mailInjectIdentityPreviewSize)
+		id := extmsg.SanitizeForSystemReminder(rawID)
+		rawFrom, fromTruncated := mailInjectTextPreview(m.From, mailInjectIdentityPreviewSize)
+		from := extmsg.SanitizeForSystemReminder(rawFrom)
 		rawSubject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
 		subject := extmsg.SanitizeForSystemReminder(rawSubject)
 		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
 		body := extmsg.SanitizeForSystemReminder(rawBody)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
+			fmt.Fprintf(&sb, "- %s", id)
+			if idTruncated {
+				sb.WriteString(" ... [id truncated]")
+			}
+			fmt.Fprintf(&sb, " from %s", from)
+			if fromTruncated {
+				sb.WriteString(" ... [sender truncated]")
+			}
+			fmt.Fprintf(&sb, " [%s", subject)
 			if subjectTruncated {
 				sb.WriteString(" ... [subject truncated]")
 			}
 			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, from, body)
+			fmt.Fprintf(&sb, "- %s", id)
+			if idTruncated {
+				sb.WriteString(" ... [id truncated]")
+			}
+			fmt.Fprintf(&sb, " from %s", from)
+			if fromTruncated {
+				sb.WriteString(" ... [sender truncated]")
+			}
+			fmt.Fprintf(&sb, ": %s", body)
 		}
 		if bodyTruncated {
 			sb.WriteString(" ... [preview truncated]")
@@ -861,7 +904,7 @@ func formatInjectOutput(messages []mail.Message) string {
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
-	return sb.String()
+	return boundedMailInjectionPayload(sb.String())
 }
 
 func mailInjectSubjectPreview(subject string) (string, bool) {
