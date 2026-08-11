@@ -908,7 +908,10 @@ func writeOutputFirewallSpill(payload []byte) string {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return ""
 	}
-	f, err := os.CreateTemp(dir, "output-")
+	// The temporary file is deliberately not an artifact name: no manifest can
+	// reference it, and a reader can only discover the completed file after the
+	// atomic rename below.
+	f, err := os.CreateTemp(dir, ".output-*.tmp")
 	if err != nil {
 		return ""
 	}
@@ -927,7 +930,12 @@ func writeOutputFirewallSpill(payload []byte) string {
 		_ = os.Remove(name)
 		return ""
 	}
-	return name
+	final := filepath.Join(dir, "output-"+strings.TrimSuffix(strings.TrimPrefix(filepath.Base(name), ".output-"), ".tmp"))
+	if err := os.Rename(name, final); err != nil {
+		_ = os.Remove(name)
+		return ""
+	}
+	return final
 }
 
 // cleanupOutputFirewallSpill removes expired regular artifacts created by this
