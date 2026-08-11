@@ -237,10 +237,13 @@ func TestCmdNudgeDrainInjectStepInSingleJSONDocument(t *testing.T) {
 			if !ok {
 				t.Fatalf("missing additionalContext string, got %#v", hook)
 			}
-			for _, want := range []string{"Current time:", "check hook output", "<system-reminder>", step.Title, step.ID, "Write the widget code"} {
+			for _, want := range []string{"Current time:", "check hook output", "<system-reminder>", step.Title, step.ID, "Status: in_progress", "gc bd show " + step.ID} {
 				if !strings.Contains(ctx, want) {
 					t.Errorf("additionalContext missing %q, got %q", want, ctx)
 				}
+			}
+			if strings.Contains(ctx, step.Description) {
+				t.Errorf("additionalContext repeats the full step description: %q", ctx)
 			}
 		})
 	}

@@ -26,7 +26,7 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
+	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath, true)}
 	if primeHookSessionStart(hookContext) {
 		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text

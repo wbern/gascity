@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -13,13 +14,15 @@ import (
 
 // wispStepInjectionContent resolves the agent's current in-progress formula
 // step bead and returns it formatted as a <system-reminder> block, or "" if
-// none is found or any error occurs. Designed for best-effort use in hook
-// injection paths — callers must never fail hard on an empty return.
+// none is found or any error occurs. Full detail is reserved for SessionStart;
+// prompt-submit hooks receive the bounded retrieval pointer. Designed for
+// best-effort use in hook injection paths — callers must never fail hard on an
+// empty return.
 //
 // Store priority: if GC_RIG_ROOT is set the rig store is queried (where
 // rig-scoped polecat work beads live), otherwise the city store at cityPath.
 // When cityPath is empty the function falls back to GC_CITY from the env.
-func wispStepInjectionContent(cityPath string) string {
+func wispStepInjectionContent(cityPath string, fullDetail bool) string {
 	effective := cityPath
 	if effective == "" {
 		effective = strings.TrimSpace(os.Getenv("GC_CITY"))
@@ -35,6 +38,9 @@ func wispStepInjectionContent(cityPath string) string {
 	b, err := resolveActiveWispStep(store, assignees)
 	if err != nil || b == nil {
 		return ""
+	}
+	if fullDetail {
+		return formatWispStepStartupReminder(b)
 	}
 	return formatWispStepReminder(b)
 }
@@ -287,13 +293,45 @@ func resolveBeadWithDescription(store beads.Store, assignees []string) (*beads.B
 	return nil, nil
 }
 
-// formatWispStepReminder formats a formula step bead as a <system-reminder>
-// block for injection into agent context.
+// formatWispStepReminder formats the bounded recurring assignment pointer for
+// prompt-submit hooks.
 func formatWispStepReminder(b *beads.Bead) string {
+	title := boundedReminderField(b.Title, 120)
+	status := boundedReminderField(b.Status, 40)
+	state := "Status: " + status
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		for _, label := range b.Labels {
+			if label == hold {
+				state += " (" + hold + ")"
+				break
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"<system-reminder>\nActive assignment: %s (%s)\n%s\nRetrieve full assignment: gc bd show %s\n</system-reminder>\n",
+		title, b.ID, state, b.ID,
+	)
+}
+
+// formatWispStepStartupReminder formats full assignment continuity for the
+// SessionStart prime hook, which runs once per session rather than per prompt.
+func formatWispStepStartupReminder(b *beads.Bead) string {
 	title := extmsg.SanitizeForSystemReminder(strings.TrimSpace(b.Title))
 	desc := extmsg.SanitizeForSystemReminder(strings.TrimSpace(b.Description))
 	return fmt.Sprintf(
 		"<system-reminder>\nYour current active work assignment:\n\n## %s (%s)\n\n%s\n</system-reminder>\n",
 		title, b.ID, desc,
 	)
+}
+
+func boundedReminderField(value string, limit int) string {
+	value = extmsg.SanitizeForSystemReminder(strings.TrimSpace(value))
+	if len(value) <= limit {
+		return value
+	}
+	end := limit - len("...")
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return strings.TrimSpace(value[:end]) + "..."
 }
