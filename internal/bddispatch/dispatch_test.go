@@ -22,11 +22,11 @@ func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing
 	var stdout, stderr bytes.Buffer
 	beadsOut := []beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("secret-value", 64)}}
 
-	if code := WriteReadyJSONWithBudget(beadsOut, &stdout, &stderr, 256); code != 0 {
+	if code := WriteReadyJSONWithBudget(beadsOut, &stdout, &stderr, 512); code != 0 {
 		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
 	}
-	if got := stdout.Len(); got > 256 {
-		t.Fatalf("stdout is %d bytes, want at most 256", got)
+	if got := stdout.Len(); got > 512 {
+		t.Fatalf("stdout is %d bytes, want at most 512", got)
 	}
 	if !json.Valid(stdout.Bytes()) {
 		t.Fatalf("stdout is not valid JSON: %q", stdout.String())
@@ -35,20 +35,60 @@ func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing
 		t.Fatalf("stdout leaked withheld content: %q", stdout.String())
 	}
 	var manifest struct {
+		SchemaVersion   string `json:"schema_version"`
 		Kind            string `json:"kind"`
 		Reason          string `json:"reason"`
+		CommandClass    string `json:"command_class"`
 		BudgetBytes     int    `json:"budget_bytes"`
 		SerializedBytes int    `json:"serialized_bytes"`
 		SHA256          string `json:"sha256"`
+		Spill           struct {
+			Mode      string `json:"mode"`
+			Path      string `json:"path"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"spill"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
-	if manifest.Kind != "gc.output_firewall" || manifest.Reason != "byte_budget_exceeded" {
+	if manifest.SchemaVersion != "1" || manifest.Kind != "gc.output_firewall" || manifest.Reason != "byte_budget_exceeded" || manifest.CommandClass != "managed_bd_read" {
 		t.Fatalf("manifest = %#v", manifest)
 	}
-	if manifest.BudgetBytes != 256 || manifest.SerializedBytes <= manifest.BudgetBytes || manifest.SHA256 == "" {
+	if manifest.BudgetBytes != 512 || manifest.SerializedBytes <= manifest.BudgetBytes || manifest.SHA256 == "" {
 		t.Fatalf("manifest = %#v", manifest)
+	}
+	if manifest.Spill.Mode == "" || manifest.Spill.ExpiresAt == "" {
+		t.Fatalf("spill manifest is incomplete: %#v", manifest.Spill)
+	}
+}
+
+func TestWriteReadyJSONPreservesDirectUserOutput(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	beadsOut := []beads.Bead{{ID: "gcg-direct", Description: strings.Repeat("direct-user-body", 3000)}}
+	if code := WriteReadyJSON(beadsOut, &stdout, &stderr); code != 0 {
+		t.Fatalf("WriteReadyJSON() = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "direct-user-body") {
+		t.Fatal("direct compatibility writer replaced the body")
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("direct output is not valid JSON: %q", stdout.String())
+	}
+}
+
+func TestWriteManagedReadJSONUsesBudgetOnlyWhenManaged(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallSpillDirEnv, "")
+
+	var stdout, stderr bytes.Buffer
+	beadsOut := []beads.Bead{{ID: "gcg-managed", Description: strings.Repeat("managed-secret", 4000)}}
+	if code := WriteManagedReadJSON(beadsOut, &stdout, &stderr); code != 0 {
+		t.Fatalf("WriteManagedReadJSON() = %d, stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() > managedReadOutputBudget || strings.Contains(stdout.String(), "managed-secret") {
+		t.Fatalf("managed output leaked body or exceeded budget (%d bytes)", stdout.Len())
 	}
 }
 
@@ -66,14 +106,20 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
 	}
 	var manifest struct {
-		Spill string `json:"spill"`
+		Spill struct {
+			Mode string `json:"mode"`
+			Path string `json:"path"`
+		} `json:"spill"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
-	info, err := os.Stat(manifest.Spill)
+	if manifest.Spill.Mode != "secure" || manifest.Spill.Path == "" {
+		t.Fatalf("spill manifest = %#v", manifest.Spill)
+	}
+	info, err := os.Stat(manifest.Spill.Path)
 	if err != nil {
-		t.Fatalf("stat spill %q: %v; stdout=%q", manifest.Spill, err, stdout.String())
+		t.Fatalf("stat spill %q: %v; stdout=%q", manifest.Spill.Path, err, stdout.String())
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("spill mode = %o, want 600", got)

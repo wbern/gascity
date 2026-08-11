@@ -33,6 +33,12 @@ const (
 	managedOutputFirewallRetention   = 24 * time.Hour
 )
 
+type outputFirewallSpillManifest struct {
+	Mode      string `json:"mode"`
+	Path      string `json:"path,omitempty"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 // DispatchViaAPI serves a routed bd verb by calling the controller's HTTP API
 // (the pure-HTTP redirect: the controller owns the store, every worker is a
 // thin client). Reads render the same JSON raw bd emits; mutations map onto the
@@ -833,17 +839,29 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 	payload = append(payload, '\n')
 	if budget > 0 && len(payload) > budget {
 		digest := sha256.Sum256(payload)
-		spill := writeOutputFirewallSpill(payload)
+		spillPath := writeOutputFirewallSpill(payload)
+		spill := outputFirewallSpillManifest{
+			Mode:      "unavailable",
+			ExpiresAt: time.Now().Add(managedOutputFirewallRetention).UTC().Format(time.RFC3339),
+		}
+		if spillPath != "" {
+			spill.Mode = "secure"
+			spill.Path = spillPath
+		}
 		manifest := struct {
-			Kind            string `json:"kind"`
-			Reason          string `json:"reason"`
-			BudgetBytes     int    `json:"budget_bytes"`
-			SerializedBytes int    `json:"serialized_bytes"`
-			SHA256          string `json:"sha256"`
-			Spill           string `json:"spill,omitempty"`
+			SchemaVersion   string                      `json:"schema_version"`
+			Kind            string                      `json:"kind"`
+			Reason          string                      `json:"reason"`
+			CommandClass    string                      `json:"command_class"`
+			BudgetBytes     int                         `json:"budget_bytes"`
+			SerializedBytes int                         `json:"serialized_bytes"`
+			SHA256          string                      `json:"sha256"`
+			Spill           outputFirewallSpillManifest `json:"spill"`
 		}{
+			SchemaVersion:   "1",
 			Kind:            "gc.output_firewall",
 			Reason:          "byte_budget_exceeded",
+			CommandClass:    "managed_bd_read",
 			BudgetBytes:     budget,
 			SerializedBytes: len(payload),
 			SHA256:          fmt.Sprintf("%x", digest),
