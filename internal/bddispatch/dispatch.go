@@ -898,6 +898,9 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 // supplied directory. A configured-but-unsafe directory degrades to a
 // no-spill manifest rather than risking an arbitrary write.
 func writeOutputFirewallSpill(payload []byte) string {
+	if os.Getenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE") == "disabled" {
+		return ""
+	}
 	dir := os.Getenv(managedOutputFirewallSpillDirEnv)
 	if dir == "" || !filepath.IsAbs(dir) {
 		return ""

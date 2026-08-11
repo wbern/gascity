@@ -92,6 +92,56 @@ func TestWriteManagedReadJSONUsesBudgetOnlyWhenManaged(t *testing.T) {
 	}
 }
 
+func TestWriteReadyJSONWithBudgetCountsEscapedUTF8AndManyRows(t *testing.T) {
+	cases := []struct {
+		name string
+		out  []beads.Bead
+	}{
+		{"escaped utf8", []beads.Bead{{ID: "gcg-utf8", Description: strings.Repeat("\"\\漢", 80)}}},
+		{"many rows", func() []beads.Bead {
+			out := make([]beads.Bead, 80)
+			for i := range out {
+				out[i] = beads.Bead{ID: "gcg-row", Title: strings.Repeat("row", 20)}
+			}
+			return out
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := WriteReadyJSONWithBudget(tc.out, &stdout, &stderr, 512); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) {
+				t.Fatalf("invalid bounded output: %d bytes %q", stdout.Len(), stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "gc.output_firewall") {
+				t.Fatalf("want manifest, got %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestWriteReadyJSONWithBudgetDisabledSpillDoesNotCreateArtifact(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("disabled spill created %d artifacts", len(entries))
+	}
+}
+
 func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
