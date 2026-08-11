@@ -142,6 +142,45 @@ func TestWriteReadyJSONWithBudgetDisabledSpillDoesNotCreateArtifact(t *testing.T
 	}
 }
 
+func TestWriteReadyJSONWithBudgetUnavailableSpillReturnsNoSpillManifest(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managedOutputFirewallSpillDirEnv, blocked)
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	var manifest struct {
+		Spill struct{ Mode, Path string } `json:"spill"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Spill.Mode != "unavailable" || manifest.Spill.Path != "" {
+		t.Fatalf("spill=%#v", manifest.Spill)
+	}
+}
+
+type failingOutputWriter struct{ writes int }
+
+func (w *failingOutputWriter) Write([]byte) (int, error) { w.writes++; return 0, os.ErrClosed }
+
+func TestWriteReadyJSONWithBudgetWriteFailureDoesNotRetryOrLeakPayload(t *testing.T) {
+	w := &failingOutputWriter{}
+	var stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("secret", 1000)}}, w, &stderr, 512); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes=%d, want one final publish attempt", w.writes)
+	}
+	if strings.Contains(stderr.String(), "secret") {
+		t.Fatalf("stderr leaked payload: %q", stderr.String())
+	}
+}
+
 func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
