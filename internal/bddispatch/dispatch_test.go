@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,6 +13,70 @@ import (
 	"github.com/gastownhall/gascity/internal/beadclient"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	beadsOut := []beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("secret-value", 64)}}
+
+	if code := WriteReadyJSONWithBudget(beadsOut, &stdout, &stderr, 256); code != 0 {
+		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stdout.Len(); got > 256 {
+		t.Fatalf("stdout is %d bytes, want at most 256", got)
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("stdout is not valid JSON: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "secret-value") {
+		t.Fatalf("stdout leaked withheld content: %q", stdout.String())
+	}
+	var manifest struct {
+		Kind            string `json:"kind"`
+		Reason          string `json:"reason"`
+		BudgetBytes     int    `json:"budget_bytes"`
+		SerializedBytes int    `json:"serialized_bytes"`
+		SHA256          string `json:"sha256"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if manifest.Kind != "gc.output_firewall" || manifest.Reason != "byte_budget_exceeded" {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+	if manifest.BudgetBytes != 256 || manifest.SerializedBytes <= manifest.BudgetBytes || manifest.SHA256 == "" {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+}
+
+func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("stat temp dir: %v", err)
+	}
+	t.Logf("spill dir mode=%o", dirInfo.Mode().Perm())
+
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
+	}
+	var manifest struct {
+		Spill string `json:"spill"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	info, err := os.Stat(manifest.Spill)
+	if err != nil {
+		t.Fatalf("stat spill %q: %v; stdout=%q", manifest.Spill, err, stdout.String())
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("spill mode = %o, want 600", got)
+	}
+}
 
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
 // parsed fields and renders the created bead id like raw bd.

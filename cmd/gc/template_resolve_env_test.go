@@ -56,6 +56,26 @@ func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateMarksManagedSessionsForOutputFirewall(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	params := &agentBuildParams{
+		cityName: "city", cityPath: cityPath,
+		workspace: &config.Workspace{Provider: "test"},
+		providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:  func(string) (string, error) { return "/bin/echo", nil },
+		fs:        fsys.OSFS{}, beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &config.Agent{Name: "runner"}, "runner", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL"]; got != "1" {
+		t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL = %q, want 1", got)
+	}
+}
+
 func TestResolveTemplatePrependsGCBinDirToConfiguredAgentPATH(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")

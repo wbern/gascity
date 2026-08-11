@@ -38,6 +38,7 @@ import (
 const (
 	startupPromptDeliveredEnv = "GC_STARTUP_PROMPT_DELIVERED"
 	managedSessionHookEnv     = "GC_MANAGED_SESSION_HOOK"
+	managedOutputFirewallEnv  = "GC_MANAGED_OUTPUT_FIREWALL"
 )
 
 // resolvedProviderName returns the resolved harness/provider name, nil-safe (for
@@ -328,7 +329,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// to $GT_ROOT/.beads/formulas when agents run outside the city/rig repo
 		// roots (for example under .gc/agents/... or .gc/worktrees/...).
 		// Rig-scoped agents override the rig-specific keys below.
-		"GT_ROOT": p.cityPath,
+		"GT_ROOT":                              p.cityPath,
+		managedOutputFirewallEnv:               "1",
+		"GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR": filepath.Join(p.cityPath, ".gc", "evidence", "output"),
 	}
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
