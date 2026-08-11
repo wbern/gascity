@@ -329,9 +329,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// to $GT_ROOT/.beads/formulas when agents run outside the city/rig repo
 		// roots (for example under .gc/agents/... or .gc/worktrees/...).
 		// Rig-scoped agents override the rig-specific keys below.
-		"GT_ROOT":                              p.cityPath,
-		managedOutputFirewallEnv:               "1",
-		"GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR": filepath.Join(p.cityPath, ".gc", "evidence", "output"),
+		"GT_ROOT": p.cityPath,
+	}
+	if p.city == nil || p.city.OutputFirewall.EnabledForManagedSessions() {
+		firewall := config.OutputFirewallConfig{}
+		if p.city != nil {
+			firewall = p.city.OutputFirewall
+		}
+		agentEnv[managedOutputFirewallEnv] = "1"
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"] = fmt.Sprintf("%d", firewall.EffectiveByteBudget())
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE"] = firewall.EffectiveSpillMode()
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"] = filepath.Join(p.cityPath, firewall.EffectiveSpillPath())
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_RETENTION"] = firewall.EffectiveRetentionTTL().String()
 	}
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value

@@ -25,6 +25,27 @@ func (c OutputFirewallConfig) EffectiveByteBudget() int {
 	return c.ByteBudget
 }
 
+// EnabledForManagedSessions reports whether managed known reads are protected.
+func (c OutputFirewallConfig) EnabledForManagedSessions() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveSpillMode returns the configured spill mode with its safe default.
+func (c OutputFirewallConfig) EffectiveSpillMode() string {
+	if c.SpillMode == "" {
+		return "secure"
+	}
+	return c.SpillMode
+}
+
+// EffectiveSpillPath returns the city-relative artifact directory.
+func (c OutputFirewallConfig) EffectiveSpillPath() string {
+	if c.SpillPath == "" {
+		return ".gc/evidence/output"
+	}
+	return c.SpillPath
+}
+
 // EffectiveRetentionTTL returns the artifact retention duration.
 func (c OutputFirewallConfig) EffectiveRetentionTTL() time.Duration {
 	if c.RetentionTTL == "" {

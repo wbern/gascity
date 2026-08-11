@@ -28,9 +28,11 @@ import (
 const managedReadOutputBudget = 32 << 10
 
 const (
-	managedOutputFirewallEnv         = "GC_MANAGED_OUTPUT_FIREWALL"
-	managedOutputFirewallSpillDirEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
-	managedOutputFirewallRetention   = 24 * time.Hour
+	managedOutputFirewallEnv          = "GC_MANAGED_OUTPUT_FIREWALL"
+	managedOutputFirewallBudgetEnv    = "GC_MANAGED_OUTPUT_FIREWALL_BUDGET"
+	managedOutputFirewallSpillDirEnv  = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
+	managedOutputFirewallRetentionEnv = "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"
+	managedOutputFirewallRetention    = 24 * time.Hour
 )
 
 type outputFirewallSpillManifest struct {
@@ -819,6 +821,11 @@ func WriteManagedReadJSON(out []beads.Bead, stdout, stderr io.Writer) int {
 	budget := 0
 	if os.Getenv(managedOutputFirewallEnv) == "1" {
 		budget = managedReadOutputBudget
+		if raw := os.Getenv(managedOutputFirewallBudgetEnv); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 512 {
+				budget = parsed
+			}
+		}
 	}
 	return WriteReadyJSONWithBudget(out, stdout, stderr, budget)
 }
