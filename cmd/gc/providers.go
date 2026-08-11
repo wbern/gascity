@@ -196,6 +196,17 @@ func newStatusSessionProviderForCity(cfg *config.City, cityPath string) (runtime
 	return newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
 }
 
+// newDoctorSessionProviderForCity keeps Doctor liveness observations bounded
+// without inheriting the interactive status command's short probe budget.
+func newDoctorSessionProviderForCity(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, nil))
+	if err != nil {
+		return nil, err
+	}
+	return newBoundedStatusProviderWithTimeout(sp, doctorLivenessObservationTimeout), nil
+}
+
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))

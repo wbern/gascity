@@ -20,6 +20,7 @@ var (
 
 type statusProvider struct {
 	base     runtime.Provider
+	timeout  time.Duration
 	warnOnce sync.Once
 	partial  atomic.Bool
 }
@@ -45,11 +46,15 @@ func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
 		return sp
 	}
-	return &statusProvider{base: base}
+	return newBoundedStatusProviderWithTimeout(base, statusProviderCallTimeout)
+}
+
+func newBoundedStatusProviderWithTimeout(base runtime.Provider, timeout time.Duration) runtime.Provider {
+	return &statusProvider{base: base, timeout: timeout}
 }
 
 func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
-	if statusProviderCallTimeout <= 0 {
+	if p.timeout <= 0 {
 		return fn()
 	}
 	resultCh := make(chan T, 1)
@@ -59,7 +64,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	select {
 	case result := <-resultCh:
 		return result
-	case <-time.After(statusProviderCallTimeout):
+	case <-time.After(p.timeout):
 		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback

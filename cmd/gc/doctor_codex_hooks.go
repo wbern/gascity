@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/codexhooks"
@@ -24,6 +25,10 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
+
+// doctorLivenessObservationTimeout exceeds tmux's 3s hard refresh while
+// remaining bounded so an incomplete runtime observation still fails closed.
+const doctorLivenessObservationTimeout = 4 * time.Second
 
 type codexHooksDriftCheck struct {
 	cityPath             string
@@ -107,7 +112,7 @@ func codexHookRuntimeConsumers(cityPath string, cfg *config.City) func() ([]code
 		if err != nil {
 			return nil, fmt.Errorf("listing open sessions: %w", err)
 		}
-		sp, err := newStatusSessionProviderForCity(cfg, cityPath)
+		sp, err := newDoctorSessionProviderForCity(cfg, cityPath)
 		if err != nil {
 			return nil, fmt.Errorf("constructing runtime liveness observer: %w", err)
 		}
