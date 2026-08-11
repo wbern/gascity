@@ -111,26 +111,44 @@ func codexHookRuntimeConsumers(cityPath string, cfg *config.City) func() ([]code
 		if err != nil {
 			return nil, fmt.Errorf("constructing runtime liveness observer: %w", err)
 		}
-		var consumers []codexHookConsumer
-		for _, info := range infos {
-			if info.Closed || info.State != session.StateActive || strings.TrimSpace(info.WorkDir) == "" {
-				continue
+		return codexHookConsumersFromSessionInfos(cfg, infos, func(name string, processNames []string) (runtime.Liveness, error) {
+			liveness := runtime.ObserveLiveness(sp, name, processNames)
+			if statusProviderPartial(sp) {
+				return runtime.Liveness{}, errors.New("runtime liveness observation was incomplete")
 			}
-			agent := findAgentByTemplate(cfg, info.Template)
-			if !codexHookProviderName(info.Provider, cfg.Providers) && !agentUsesCodexHookSurface(cfg, agent) {
-				continue
-			}
-			processNames := []string(nil)
-			if agent != nil {
-				processNames = config.AgentProcessNames(cfg, *agent, exec.LookPath)
-			}
-			if !runtime.ObserveLiveness(sp, info.SessionName, processNames).Running {
-				continue
-			}
-			consumers = append(consumers, codexHookConsumer{workDir: info.WorkDir, sessionName: info.SessionName})
-		}
-		return consumers, nil
+			return liveness, nil
+		})
 	}
+}
+
+// codexHookConsumersFromSessionInfos derives the filesystem-hook consumers
+// from persisted sessions only when their runtime is presently live. The
+// observer error is deliberately distinct from a non-running observation: a
+// failed observation cannot safely make an active session appear dormant.
+func codexHookConsumersFromSessionInfos(cfg *config.City, infos []session.Info, observe func(string, []string) (runtime.Liveness, error)) ([]codexHookConsumer, error) {
+	var consumers []codexHookConsumer
+	for _, info := range infos {
+		if info.Closed || info.State != session.StateActive || strings.TrimSpace(info.WorkDir) == "" {
+			continue
+		}
+		agent := findAgentByTemplate(cfg, info.Template)
+		if !codexHookProviderName(info.Provider, cfg.Providers) && !agentUsesCodexHookSurface(cfg, agent) {
+			continue
+		}
+		processNames := []string(nil)
+		if agent != nil {
+			processNames = config.AgentProcessNames(cfg, *agent, exec.LookPath)
+		}
+		liveness, err := observe(info.SessionName, processNames)
+		if err != nil {
+			return nil, fmt.Errorf("observing %s: %w", info.SessionName, err)
+		}
+		if !liveness.Running {
+			continue
+		}
+		consumers = append(consumers, codexHookConsumer{workDir: info.WorkDir, sessionName: info.SessionName})
+	}
+	return consumers, nil
 }
 
 func codexUserHooksPath() string {
