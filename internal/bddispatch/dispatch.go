@@ -34,6 +34,7 @@ var marshalOutputJSON = json.Marshal
 const (
 	managedOutputFirewallEnv          = "GC_MANAGED_OUTPUT_FIREWALL"
 	managedOutputFirewallBudgetEnv    = "GC_MANAGED_OUTPUT_FIREWALL_BUDGET"
+	managedOutputFirewallReadVerbsEnv = "GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"
 	managedOutputFirewallSpillDirEnv  = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
 	managedOutputFirewallRetentionEnv = "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"
 	managedOutputFirewallRetention    = 24 * time.Hour
@@ -115,12 +116,12 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			if isAPINotFound(err) {
 				// Raw bd prints an empty array (exit 0) for an unknown id; a
 				// `bd show ... --json | jq '.[0]'` consumer reads that as absent.
-				return WriteManagedReadJSON(nil, stdout, stderr)
+				return WriteManagedReadJSONForVerb("show", nil, stdout, stderr)
 			}
 			fmt.Fprintf(stderr, "gc bd-shim: show %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON([]beads.Bead{read.Body}, stdout, stderr)
+		return WriteManagedReadJSONForVerb("show", []beads.Bead{read.Body}, stdout, stderr)
 	case "ready":
 		p, err := ParseReadyParams(args)
 		if err != nil {
@@ -134,7 +135,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		}
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
-		return WriteManagedReadJSON(applyReadyParams(read.Body, p), stdout, stderr)
+		return WriteManagedReadJSONForVerb("ready", applyReadyParams(read.Body, p), stdout, stderr)
 	case "list":
 		opts, err := ParseListOpts(args)
 		if err != nil {
@@ -146,7 +147,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON(read.Body, stdout, stderr)
+		return WriteManagedReadJSONForVerb("list", read.Body, stdout, stderr)
 	case "query":
 		opts, ok := ParseQueryEphemeral(args)
 		if !ok {
@@ -158,7 +159,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			fmt.Fprintf(stderr, "gc bd-shim: query via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON(read.Body, stdout, stderr)
+		return WriteManagedReadJSONForVerb("query", read.Body, stdout, stderr)
 	case "mol":
 		sub, id, jsonOut, ok := bdshim.MolRoutable(args)
 		if !ok {
@@ -367,7 +368,7 @@ func isBareBdQueryValue(v string) bool {
 func renderBdMol(sub string, g beadclient.BeadGraph, jsonOut bool, stdout, stderr io.Writer) int {
 	steps := molSteps(g)
 	if jsonOut {
-		return WriteManagedReadJSON(steps, stdout, stderr)
+		return WriteManagedReadJSONForVerb("mol", steps, stdout, stderr)
 	}
 	done := 0
 	for _, b := range steps {
@@ -739,7 +740,7 @@ func DispatchListMetadataGuarded(client *beadclient.Client, args []string, stdou
 		fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	return WriteManagedReadJSON(applyListMetadataFilter(read.Body, f), stdout, stderr), true
+	return WriteManagedReadJSONForVerb("list", applyListMetadataFilter(read.Body, f), stdout, stderr), true
 }
 
 // ParseUpdateOpts maps the routable `bd update` flags onto a beads.UpdateOpts.
@@ -822,16 +823,61 @@ func WriteReadyJSON(out []beads.Bead, stdout, stderr io.Writer) int {
 // read responses. Mutation acknowledgements intentionally retain their native
 // behavior so a successful write is never reported as a post-write failure.
 func WriteManagedReadJSON(out []beads.Bead, stdout, stderr io.Writer) int {
-	budget := 0
-	if os.Getenv(managedOutputFirewallEnv) == "1" {
-		budget = managedReadOutputBudget
-		if raw := os.Getenv(managedOutputFirewallBudgetEnv); raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 512 {
-				budget = parsed
-			}
+	return WriteManagedReadJSONForVerb("", out, stdout, stderr)
+}
+
+// WriteManagedReadJSONForVerb writes one routed read response under the
+// managed-session policy when its verb is within the configured read scope.
+func WriteManagedReadJSONForVerb(verb string, out []beads.Bead, stdout, stderr io.Writer) int {
+	return WriteManagedJSON(context.Background(), "managed_bd_read", verb, out, stdout, stderr)
+}
+
+// WriteManagedJSON serializes a known managed read entirely before it reaches
+// stdout. A canceled context never publishes staged bytes.
+func WriteManagedJSON(ctx context.Context, commandClass, verb string, value any, stdout, stderr io.Writer) int {
+	budget := managedOutputBudgetForVerb(verb)
+	return writeJSONWithBudget(ctx, commandClass, value, stdout, stderr, budget)
+}
+
+// ManagedOutputFirewallActive reports whether a managed read verb is subject
+// to the explicitly injected output policy.
+func ManagedOutputFirewallActive(verb string) bool {
+	return managedOutputBudgetForVerb(verb) > 0
+}
+
+func managedOutputBudgetForVerb(verb string) int {
+	if os.Getenv(managedOutputFirewallEnv) != "1" || !managedOutputVerbEnabled(verb) {
+		return 0
+	}
+	budget := managedReadOutputBudget
+	if raw := os.Getenv(managedOutputFirewallBudgetEnv); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 512 {
+			budget = parsed
 		}
 	}
-	return WriteReadyJSONWithBudget(out, stdout, stderr, budget)
+	return budget
+}
+
+func managedOutputVerbEnabled(verb string) bool {
+	scope := strings.TrimSpace(os.Getenv(managedOutputFirewallReadVerbsEnv))
+	if scope == "" || verb == "" {
+		return true
+	}
+	for _, configured := range strings.Split(scope, ",") {
+		if strings.TrimSpace(configured) == verb {
+			return true
+		}
+	}
+	return false
+}
+
+func managedOutputRetention() time.Duration {
+	if raw := os.Getenv(managedOutputFirewallRetentionEnv); raw != "" {
+		if retention, err := time.ParseDuration(raw); err == nil && retention > 0 {
+			return retention
+		}
+	}
+	return managedOutputFirewallRetention
 }
 
 // WriteReadyJSONWithBudget writes a complete bead result when it fits within
@@ -842,18 +888,31 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 	if out == nil {
 		out = []beads.Bead{}
 	}
-	payload, err := marshalOutputJSON(out)
+	return writeJSONWithBudget(context.Background(), "managed_bd_read", out, stdout, stderr, budget)
+}
+
+func writeJSONWithBudget(ctx context.Context, commandClass string, value any, stdout, stderr io.Writer, budget int) int {
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	payload, err := marshalOutputJSON(value)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc bd-shim: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc output firewall: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	payload = append(payload, '\n')
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if budget > 0 && len(payload) > budget {
 		digest := sha256.Sum256(payload)
 		spillPath := writeOutputFirewallSpill(payload)
+		retention := managedOutputRetention()
 		spill := outputFirewallSpillManifest{
 			Mode:      "unavailable",
-			ExpiresAt: time.Now().Add(managedOutputFirewallRetention).UTC().Format(time.RFC3339),
+			ExpiresAt: time.Now().Add(retention).UTC().Format(time.RFC3339),
 		}
 		if spillPath != "" {
 			spill.Mode = "secure"
@@ -872,7 +931,7 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 			SchemaVersion:   "1",
 			Kind:            "gc.output_firewall",
 			Reason:          "byte_budget_exceeded",
-			CommandClass:    "managed_bd_read",
+			CommandClass:    commandClass,
 			BudgetBytes:     budget,
 			SerializedBytes: len(payload),
 			SHA256:          fmt.Sprintf("%x", digest),
@@ -880,17 +939,21 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 		}
 		payload, err = marshalOutputJSON(manifest)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: encoding output firewall manifest: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc output firewall: encoding manifest: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		payload = append(payload, '\n')
 		if len(payload) > budget {
-			fmt.Fprintln(stderr, "gc bd-shim: output budget too small for firewall manifest") //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "gc output firewall: output budget too small for firewall manifest") //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if _, err := stdout.Write(payload); err != nil {
-		fmt.Fprintf(stderr, "gc bd-shim: writing output: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc output firewall: writing output: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
@@ -910,7 +973,7 @@ func writeOutputFirewallSpill(payload []byte) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ""
 	}
-	cleanupOutputFirewallSpill(dir, managedOutputFirewallRetention)
+	cleanupOutputFirewallSpill(dir, managedOutputRetention())
 	info, err := os.Lstat(dir)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return ""

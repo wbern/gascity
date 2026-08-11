@@ -2,6 +2,7 @@ package bddispatch
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -238,6 +239,62 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("spill mode = %o, want 600", got)
+	}
+}
+
+func TestWriteReadyJSONWithBudgetUsesConfiguredRetentionTTL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	t.Setenv(managedOutputFirewallRetentionEnv, "1h")
+	before := time.Now().UTC()
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	var manifest struct {
+		Spill struct {
+			ExpiresAt string `json:"expires_at"`
+		} `json:"spill"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, manifest.Spill.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := expiresAt.Sub(before); got < 59*time.Minute || got > 61*time.Minute {
+		t.Fatalf("expires_at interval = %s, want about 1h", got)
+	}
+}
+
+func TestWriteManagedJSONCancelledBeforePublishWritesNoOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedJSON(ctx, "managed_hook_claim", "hook", []string{strings.Repeat("secret", 1000)}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "canceled") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "512")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "ready")
+	var stdout, stderr bytes.Buffer
+	body := strings.Repeat("show-body", 200)
+	if code := WriteManagedReadJSONForVerb("show", []beads.Bead{{ID: "gcg", Description: body}}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), body) {
+		t.Fatalf("out-of-scope show was firewalled: %q", stdout.String())
 	}
 }
 

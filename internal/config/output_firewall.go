@@ -38,6 +38,14 @@ func (c OutputFirewallConfig) EffectiveSpillMode() string {
 	return c.SpillMode
 }
 
+// EffectiveReadVerbs returns the closed managed-read allowlist.
+func (c OutputFirewallConfig) EffectiveReadVerbs() []string {
+	if len(c.ReadVerbs) == 0 {
+		return []string{"show", "ready", "list", "query", "mol", "hook"}
+	}
+	return append([]string(nil), c.ReadVerbs...)
+}
+
 // EffectiveSpillPath returns the city-relative artifact directory.
 func (c OutputFirewallConfig) EffectiveSpillPath() string {
 	if c.SpillPath == "" {

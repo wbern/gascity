@@ -74,6 +74,15 @@ func TestResolveTemplateMarksManagedSessionsForOutputFirewall(t *testing.T) {
 	if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL"]; got != "1" {
 		t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL = %q, want 1", got)
 	}
+	if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"]; got != "32768" {
+		t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL_BUDGET = %q, want 32768", got)
+	}
+	if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"]; got != "show,ready,list,query,mol,hook" {
+		t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS = %q", got)
+	}
+	if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL_RETENTION"]; got != "24h0m0s" {
+		t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL_RETENTION = %q, want 24h0m0s", got)
+	}
 }
 
 func TestResolveTemplatePrependsGCBinDirToConfiguredAgentPATH(t *testing.T) {
