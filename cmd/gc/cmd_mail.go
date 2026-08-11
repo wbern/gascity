@@ -752,6 +752,14 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	if inject {
 		if len(messages) > 0 {
 			text := formatInjectOutput(messages)
+			var persist func() error
+			if previous, writeState, enabled, stateErr := currentMailInjectionState(); stateErr != nil {
+				fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
+			} else if enabled {
+				text, previous = gateMailInjection(messages, previous)
+				persist = func() error { return writeState(previous) }
+			}
+			text = boundedMailInjectionPayload(text)
 			// Archive the SAME messages that were injected: priority-sort
 			// before the clamp so the archived set matches formatInjectOutput's
 			// displayed set (a priority:1 handoff that floats into the window is
@@ -766,7 +774,18 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				observation.fail(continuationErrorHookOutput)
 				return 0
 			}
+			if persist != nil {
+				if err := persist(); err != nil {
+					fmt.Fprintf(stderr, "gc mail check: persisting mail injection state: %v\n", err) //nolint:errcheck // a later hook fails open with full detail
+				}
+			}
 			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+		} else if _, writeState, enabled, stateErr := currentMailInjectionState(); stateErr != nil {
+			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
+		} else if enabled {
+			if err := writeState(mailInjectionState{}); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: clearing mail injection state: %v\n", err) //nolint:errcheck // fail-visible; a later delivery fails open
+			}
 		}
 		return 0 // --inject always exits 0
 	}
@@ -861,7 +880,7 @@ func formatInjectOutput(messages []mail.Message) string {
 	}
 	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	sb.WriteString("</system-reminder>\n")
-	return sb.String()
+	return boundedMailInjectionPayload(sb.String())
 }
 
 func mailInjectSubjectPreview(subject string) (string, bool) {
