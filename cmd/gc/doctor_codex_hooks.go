@@ -496,11 +496,23 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			Details:  details,
 		}
 	}
-	if duplicates := duplicateCodexManagedBehaviors(activeManaged); len(duplicates) > 0 {
+	if c.ownership.sessionFlagsActive && c.ownership.filesystemOwned {
 		return warnCheck(c.Name(),
-			fmt.Sprintf("active Codex hook sources duplicate managed behavior: %s", strings.Join(duplicates, ", ")),
-			"run `gc doctor --fix` only after confirming that the reported non-owner sources are eligible for migration",
+			fmt.Sprintf("%d Codex hook source(s) overlap under mixed Codex hook ownership", managedFileSources),
+			"keep filesystem handlers while non-T3 Codex consumers remain; align every Codex consumer before migrating",
 			details)
+	}
+	if c.ownership.filesystemOwned {
+		for _, dir := range c.dirs {
+			counts, paths, err := c.codexConsumerManagedCounts(dir)
+			if err != nil {
+				return warnCheck(c.Name(), fmt.Sprintf("cannot audit Codex consumer=%s: %v", dir, err), "repair the reported source before running `gc doctor --fix`", details)
+			}
+			details = append(details, fmt.Sprintf("consumer=%s managed=%s paths=%s", dir, formatCodexHookCounts(counts, []string{"mail", "nudge", "pre-compact", "session-start"}), strings.Join(paths, ",")))
+			if invalid := invalidCodexManagedBehaviors(counts, true); len(invalid) > 0 {
+				return warnCheck(c.Name(), fmt.Sprintf("Codex consumer=%s has invalid managed behavior cardinality: %s", dir, strings.Join(invalid, ", ")), "run `gc doctor --fix` only after confirming that the reported non-owner sources are eligible for migration", details)
+			}
+		}
 	}
 	if managedFileSources == 0 {
 		result := okCheck(c.Name(), "Codex additive hook sources contain no legacy Gas City handlers")
@@ -513,22 +525,55 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			"run `gc doctor --fix` to back up the files and remove only legacy Gas City handlers",
 			details)
 	}
-	if c.ownership.sessionFlagsActive && c.ownership.filesystemOwned {
-		return warnCheck(c.Name(),
-			fmt.Sprintf("%d Codex hook source(s) overlap under mixed Codex hook ownership", managedFileSources),
-			"keep filesystem handlers while non-T3 Codex consumers remain; align every Codex consumer before migrating",
-			details)
-	}
 	result := okCheck(c.Name(), "Codex filesystem hook sources match the active provider ownership policy")
 	result.Details = details
 	return result
 }
 
-func duplicateCodexManagedBehaviors(counts map[string]int) []string {
+func (c *codexHooksDriftCheck) codexConsumerManagedCounts(dir string) (map[string]int, []string, error) {
+	paths := []string{c.userHooksPath}
+	root := dir
+	if c.resolveProjectRoot != nil {
+		resolved, err := c.resolveProjectRoot(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		if resolved != "" {
+			root = resolved
+		}
+	}
+	paths = append(paths, filepath.Join(root, ".codex", "hooks.json"), filepath.Join(dir, ".codex", "hooks.json"))
+	counts := map[string]int{}
+	seen := map[string]bool{}
+	used := []string{}
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		if path == "." || seen[path] {
+			continue
+		}
+		seen[path] = true
+		data, _, err := readRegularCodexHookFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		audit, err := hooks.AuditCodexHooks(data)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCodexHookCounts(counts, audit.ManagedBehaviorCounts)
+		used = append(used, path)
+	}
+	return counts, used, nil
+}
+
+func invalidCodexManagedBehaviors(counts map[string]int, requireComplete bool) []string {
 	keys := []string{"session-start", "pre-compact", "mail", "nudge"}
 	duplicates := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if count := counts[key]; count > 1 {
+		if count := counts[key]; count > 1 || (requireComplete && count == 0) {
 			duplicates = append(duplicates, fmt.Sprintf("%s:%d", key, count))
 		}
 	}
@@ -591,7 +636,7 @@ func (c *codexHooksDriftCheck) codexHookSources() []codexHookSource {
 			continue
 		}
 		add(codexHookSource{kind: "project-root", path: filepath.Join(root, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
-		add(codexHookSource{kind: "inert-worktree", path: filepath.Join(dir, ".codex", "hooks.json"), active: false})
+		add(codexHookSource{kind: "session-workdir", path: filepath.Join(dir, ".codex", "hooks.json"), active: c.ownership.fileSourcesActive})
 	}
 	return sources
 }

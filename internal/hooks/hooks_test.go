@@ -123,6 +123,23 @@ func TestRemoveManagedCodexHooksRejectsMetadataOnRemovedHandler(t *testing.T) {
 	}
 }
 
+func TestRemoveManagedCodexHooksRejectsMalformedHandlerShape(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"entry":   []byte(`{"hooks":{"SessionStart":["not-an-entry"]}}`),
+		"handler": []byte(`{"hooks":{"SessionStart":[{"hooks":["not-a-handler"]}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, changed, err := RemoveManagedCodexHooks(data)
+			if err == nil {
+				t.Fatal("RemoveManagedCodexHooks succeeded for malformed hook shape")
+			}
+			if changed {
+				t.Fatal("RemoveManagedCodexHooks reported a change after malformed hook shape")
+			}
+		})
+	}
+}
+
 func TestValidateEmpty(t *testing.T) {
 	if err := Validate(nil); err != nil {
 		t.Errorf("Validate(nil) = %v, want nil", err)
@@ -458,6 +475,16 @@ func TestInstallCodexDedupesManagedSessionStartDrift(t *testing.T) {
 	if strings.Contains(string(fs.Files["/work/.codex/hooks.json"]), "gc hook run --timeout 15s --timeout-exit-code 0 -- prime --hook") {
 		t.Fatalf("legacy hook-run prime SessionStart survived:\n%s", string(fs.Files["/work/.codex/hooks.json"]))
 	}
+	first := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	if !CodexHooksAreConverged(first, "/city") {
+		t.Fatalf("deduped document is not semantically exact-one:\n%s", first)
+	}
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if second := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(first, second) {
+		t.Fatalf("second convergence changed hooks.json\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
 }
 
 func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
@@ -658,17 +685,22 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 	}
 }
 
-func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
+func TestInstallCodexComposesManagedHooksWithCustomOnlyDocument(t *testing.T) {
 	fs := fsys.NewFake()
-	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command","customField":"keep"},{"command":"bd custom-hook","type":"command"}]}]}}`)
 	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
 
 	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	got := fs.Files["/work/.codex/hooks.json"]
-	if !bytes.Equal(custom, got) {
-		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
+	for _, want := range []string{"custom-codex-hook", "bd custom-hook", "customField", "SessionStart", "PreCompact", "mail check", "nudge drain"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Fatalf("composed Codex hooks missing %q:\n%s", want, got)
+		}
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("composed Codex hooks are not semantically converged:\n%s", got)
 	}
 }
 
@@ -777,7 +809,7 @@ func TestInstallCodexRebindsManagedHooksToCurrentCity(t *testing.T) {
 	}
 }
 
-func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
+func TestInstallCodexComposesFullyCustomHooksWithManagedBehavior(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{
   "hooks": {
@@ -795,12 +827,16 @@ func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
-		t.Fatalf("fully custom codex hooks were overwritten:\n%s", got)
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Contains(got, []byte("printf custom-codex-hook")) {
+		t.Fatalf("fully custom codex hook was lost:\n%s", got)
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("custom document was not converged to exact-one managed behavior:\n%s", got)
 	}
 }
 
-func TestInstallCodexPreservesEnvPrefixedManagedLookingCustomHooks(t *testing.T) {
+func TestInstallCodexPreservesEnvPrefixedCustomHooksWhileConverging(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{
   "hooks": {
@@ -818,12 +854,16 @@ func TestInstallCodexPreservesEnvPrefixedManagedLookingCustomHooks(t *testing.T)
 		t.Fatalf("Install: %v", err)
 	}
 
-	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
-		t.Fatalf("env-prefixed custom codex hooks were rewritten:\n%s", got)
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Contains(got, []byte("FOO=1 gc mail check --inject --hook-format codex")) {
+		t.Fatalf("env-prefixed custom Codex hook was lost:\n%s", got)
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("custom document was not converged to exact-one managed behavior:\n%s", got)
 	}
 }
 
-func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
+func TestInstallCodexNormalizesExtraEnvOnManagedHooks(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/work/.codex/hooks.json"] = []byte(`{
   "hooks": {
@@ -841,8 +881,8 @@ func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`) {
-		t.Fatalf("managed codex hook lost extra env prefix:\n%s", got)
+	if strings.Contains(got, "FOO=1") {
+		t.Fatalf("stale managed extra environment survived normalization:\n%s", got)
 	}
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Fatalf("managed codex hook with extra env missing PreCompact:\n%s", got)
@@ -927,8 +967,8 @@ func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 		_ = os.Chmod(hookPath, 0o644)
 	})
 
-	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
+	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err == nil {
+		t.Fatal("Install succeeded for unreadable Codex hooks")
 	}
 
 	if err := os.Chmod(hookPath, 0o644); err != nil {
@@ -939,7 +979,7 @@ func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 		t.Fatalf("read hooks: %v", err)
 	}
 	if string(got) != string(custom) {
-		t.Fatalf("unreadable codex hooks were overwritten:\n%s", string(got))
+		t.Fatalf("unreadable Codex hooks were changed after failure:\n%s", string(got))
 	}
 }
 

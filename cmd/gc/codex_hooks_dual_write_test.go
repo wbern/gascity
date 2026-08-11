@@ -320,6 +320,56 @@ func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
 	}
 }
 
+// TestStageSessionWorkDirComposesOverlayOnlyCustomCodexHooks proves the
+// normal-start path does not rely on a pre-existing managed document. Tmux
+// stages configured overlays before its final convergence callback, so a fresh
+// session workdir with only a custom overlay hook must end with that hook plus
+// exactly one city-bound managed behavior set.
+func TestStageSessionWorkDirComposesOverlayOnlyCustomCodexHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+	overlayDir := t.TempDir()
+	overlayHooks := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll overlay hooks: %v", err)
+	}
+	if err := os.WriteFile(overlayHooks, []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"bd overlay-custom-hook"}]}]}}`), 0o644); err != nil {
+		t.Fatalf("write overlay hooks: %v", err)
+	}
+
+	cfg := runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{overlayDir},
+	}
+	configureManagedHookConvergence(&cfg, cityDir)
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+
+	hookPath := filepath.Join(workDir, ".codex", "hooks.json")
+	first, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read converged hooks: %v", err)
+	}
+	if !strings.Contains(string(first), "bd overlay-custom-hook") {
+		t.Fatalf("overlay-only custom hook was lost:\n%s", first)
+	}
+	if !hooks.CodexHooksAreConverged(first, cityDir) {
+		t.Fatalf("fresh overlay-only document is not exact-one converged:\n%s", first)
+	}
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("second StageSessionWorkDir: %v", err)
+	}
+	second, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read second converged hooks: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("fresh overlay-only convergence was not byte-stable:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
 func TestStageSessionWorkDirConvergesOnlyTheLinkedSessionWorktree(t *testing.T) {
 	mainWorktree := filepath.Join(t.TempDir(), "main")
 	if err := os.MkdirAll(mainWorktree, 0o755); err != nil {

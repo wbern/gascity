@@ -143,7 +143,22 @@ func TestCodexHooksDriftCheckWarnsForDuplicateActiveFilesystemSources(t *testing
 	}
 }
 
-func TestCodexHooksDriftCheckAuditsUserRootSessionFlagsAndInertLinkedWorktree(t *testing.T) {
+func TestCodexHooksDriftCheckKeepsIndependentConsumersSeparate(t *testing.T) {
+	cityDir := t.TempDir()
+	first, second := filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")
+	current := fmt.Sprintf(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"gc --city %s prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc --city %s handoff --auto --hook-format codex context-cycle"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"gc --city %s hook run -- nudge drain --inject --hook-format codex"},{"type":"command","command":"gc --city %s hook run -- mail check --inject --hook-format codex"}]}]}}`, shellquote.Quote(cityDir), shellquote.Quote(cityDir), shellquote.Quote(cityDir), shellquote.Quote(cityDir))
+	writeCodexHooksForDoctorTest(t, first, current)
+	writeCodexHooksForDoctorTest(t, second, current)
+	check := newCodexHooksDriftCheck(cityDir, []string{first, second})
+	check.userHooksPath = ""
+	check.ownership = codexHookOwnership{fileSourcesActive: true, filesystemOwned: true}
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK for independent exact-one consumers; message=%s details=%v", result.Status, result.Message, result.Details)
+	}
+}
+
+func TestCodexHooksDriftCheckAuditsUserRootSessionFlagsAndActiveLinkedWorktree(t *testing.T) {
 	cityDir := t.TempDir()
 	rootDir := filepath.Join(cityDir, "root")
 	linkedDir := filepath.Join(cityDir, "linked")
@@ -189,8 +204,8 @@ func TestCodexHooksDriftCheckAuditsUserRootSessionFlagsAndInertLinkedWorktree(t 
 		"source=sessionFlags active=true",
 		"source=user active=true path=" + userPath,
 		"source=project-root active=true path=" + filepath.Join(rootDir, ".codex", "hooks.json"),
-		"source=inert-worktree active=false path=" + filepath.Join(linkedDir, ".codex", "hooks.json"),
-		"source=active-total active=true managed=mail:1,nudge:1,pre-compact:1,session-start:2",
+		"source=session-workdir active=true path=" + filepath.Join(linkedDir, ".codex", "hooks.json"),
+		"source=active-total active=true managed=mail:1,nudge:1,pre-compact:2,session-start:2",
 	} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details missing %q:\n%s", want, details)
@@ -680,14 +695,15 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 
 	result := check.Run(&doctor.CheckContext{})
 
-	if result.Status != doctor.StatusOK {
-		t.Fatalf("status = %v, want ok for filesystem-owned hooks; message=%q details=%v", result.Status, result.Message, result.Details)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for incomplete filesystem-owned hooks; message=%q details=%v", result.Status, result.Message, result.Details)
 	}
 	details := strings.Join(result.Details, "\n")
 	for _, want := range []string{
 		"source=sessionFlags active=false",
 		"source=project active=true",
 		"managed=session-start:1",
+		"pre-compact:0, mail:0, nudge:0",
 	} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details missing %q:\n%s", want, details)
