@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,39 @@ func TestStageStartFilesKeepsScaffoldOutOfSpawnerCWD(t *testing.T) {
 		t.Fatalf("shared cwd contains stray bead-slug scaffold directory %q; scaffold must stay under %q", leakedWorkDir, workDir)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat leaked workdir %q: %v", leakedWorkDir, err)
+	}
+}
+
+func TestStageStartFilesRunsManagedHookConvergenceAfterOverlays(t *testing.T) {
+	workDir := t.TempDir()
+	overlayDir := t.TempDir()
+	writeTmuxScaffoldFixture(t, filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.json"), `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"custom-overlay-hook"}]}]}}`)
+
+	called := false
+	err := stageStartFiles(runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{overlayDir},
+		ConvergeManagedHooks: func(gotWorkDir string) error {
+			called = true
+			if gotWorkDir != workDir {
+				t.Fatalf("convergence workdir = %q, want %q", gotWorkDir, workDir)
+			}
+			data, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json"))
+			if err != nil {
+				t.Fatalf("read staged hooks before convergence: %v", err)
+			}
+			if !strings.Contains(string(data), "custom-overlay-hook") {
+				t.Fatalf("configured overlay hook missing before convergence: %s", data)
+			}
+			return nil
+		},
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("stageStartFiles: %v", err)
+	}
+	if !called {
+		t.Fatal("managed hook convergence was not called")
 	}
 }
 

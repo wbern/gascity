@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -120,6 +121,103 @@ func TestRemoveManagedCodexHooksRejectsMetadataOnRemovedHandler(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("RemoveManagedCodexHooks reported a change after refusing custom metadata")
+	}
+}
+
+func TestRemoveManagedCodexHooksRejectsMalformedHandlerShape(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"entry":   []byte(`{"hooks":{"SessionStart":["not-an-entry"]}}`),
+		"handler": []byte(`{"hooks":{"SessionStart":[{"hooks":["not-a-handler"]}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, changed, err := RemoveManagedCodexHooks(data)
+			if err == nil {
+				t.Fatal("RemoveManagedCodexHooks succeeded for malformed hook shape")
+			}
+			if changed {
+				t.Fatal("RemoveManagedCodexHooks reported a change after malformed hook shape")
+			}
+		})
+	}
+}
+
+func TestRemoveManagedCodexHooksForCityRemovesOnlyExactCurrentCityHandlers(t *testing.T) {
+	current, err := desiredCodexHookData("/city", nil)
+	if err != nil {
+		t.Fatalf("desiredCodexHookData: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(current, &doc); err != nil {
+		t.Fatalf("unmarshal current Codex hooks: %v", err)
+	}
+	hooksMap := doc["hooks"].(map[string]any)
+	sessionEntry := hooksMap["SessionStart"].([]any)[0].(map[string]any)
+	sessionHandlers := sessionEntry["hooks"].([]any)
+	currentCommand := sessionHandlers[0].(map[string]any)["command"].(string)
+	wrongCity := strings.Replace(currentCommand, "--city '/city'", "--city '/other-city'", 1)
+	unboundLegacy := strings.Replace(currentCommand, "--city '/city' ", "", 1)
+	sessionEntry["hooks"] = append(sessionHandlers,
+		map[string]any{"type": "command", "command": wrongCity},
+		map[string]any{"type": "command", "command": unboundLegacy},
+		map[string]any{"type": "command", "command": "bd codex-hook session-start"},
+	)
+	seeded, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("marshal mixed ownership hooks: %v", err)
+	}
+
+	got, changed, err := RemoveManagedCodexHooksForCity(seeded, "/city")
+	if err != nil {
+		t.Fatalf("RemoveManagedCodexHooksForCity: %v", err)
+	}
+	if !changed {
+		t.Fatal("RemoveManagedCodexHooksForCity reported no change for exact current-city handlers")
+	}
+	var gotDoc map[string]any
+	if err := json.Unmarshal(got, &gotDoc); err != nil {
+		t.Fatalf("unmarshal migrated Codex hooks: %v", err)
+	}
+	commands := map[string]bool{}
+	visitCodexHookCommands(gotDoc, func(_ string, _ int, _ map[string]any, _ map[string]any, _ bool, command string) {
+		commands[command] = true
+	})
+	if commands[currentCommand] {
+		t.Fatalf("exact current-city managed handler survived:\n%s", got)
+	}
+	for _, preserved := range []string{wrongCity, unboundLegacy, "bd codex-hook session-start"} {
+		if !commands[preserved] {
+			t.Errorf("conservative removal lost %q:\n%s", preserved, got)
+		}
+	}
+}
+
+func TestRemoveManagedCodexHooksForCityPreservesNoEligibleDocumentByteForByte(t *testing.T) {
+	data := []byte("{\n  \"customTop\": 9007199254740993,\n  \"hooks\": {\n    \"SessionStart\": [{\"matcher\":\"startup\",\"hooks\":[\n      {\"type\":\"command\",\"command\":\"gc --city /other-city prime --hook --hook-format codex\"},\n      {\"type\":\"command\",\"command\":\"gc prime --hook --hook-format codex\"},\n      {\"type\":\"command\",\"command\":\"bd codex-hook session-start\"}\n    ]}]\n  }\n}\n")
+
+	got, changed, err := RemoveManagedCodexHooksForCity(data, "/city")
+	if err != nil {
+		t.Fatalf("RemoveManagedCodexHooksForCity: %v", err)
+	}
+	if changed {
+		t.Fatal("RemoveManagedCodexHooksForCity reported a change without an exact current-city handler")
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("no-op removal changed bytes:\nbefore:\n%s\nafter:\n%s", data, got)
+	}
+}
+
+func TestRemoveManagedCodexHooksForCityRejectsMetadataOnExactManagedHandler(t *testing.T) {
+	data := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex","customMetadata":{"keep":true}}]}]}}`)
+
+	got, changed, err := RemoveManagedCodexHooksForCity(data, "/city")
+	if err == nil || !strings.Contains(err.Error(), "customMetadata") {
+		t.Fatalf("RemoveManagedCodexHooksForCity error = %v, want inseparable customMetadata refusal", err)
+	}
+	if changed {
+		t.Fatal("RemoveManagedCodexHooksForCity reported a change after refusing custom metadata")
+	}
+	if got != nil {
+		t.Fatalf("RemoveManagedCodexHooksForCity returned candidate after refusal: %s", got)
 	}
 }
 
@@ -458,6 +556,16 @@ func TestInstallCodexDedupesManagedSessionStartDrift(t *testing.T) {
 	if strings.Contains(string(fs.Files["/work/.codex/hooks.json"]), "gc hook run --timeout 15s --timeout-exit-code 0 -- prime --hook") {
 		t.Fatalf("legacy hook-run prime SessionStart survived:\n%s", string(fs.Files["/work/.codex/hooks.json"]))
 	}
+	first := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	if !CodexHooksAreConverged(first, "/city") {
+		t.Fatalf("deduped document is not semantically exact-one:\n%s", first)
+	}
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if second := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(first, second) {
+		t.Fatalf("second convergence changed hooks.json\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
 }
 
 func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
@@ -658,17 +766,121 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 	}
 }
 
-func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
+func TestInstallCodexComposesManagedHooksWithCustomOnlyDocument(t *testing.T) {
 	fs := fsys.NewFake()
-	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command","customField":"keep"},{"command":"bd custom-hook","type":"command"}]}]}}`)
 	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
 
 	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	got := fs.Files["/work/.codex/hooks.json"]
-	if !bytes.Equal(custom, got) {
-		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
+	for _, want := range []string{"custom-codex-hook", "bd custom-hook", "customField", "SessionStart", "PreCompact", "mail check", "nudge drain"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Fatalf("composed Codex hooks missing %q:\n%s", want, got)
+		}
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("composed Codex hooks are not semantically converged:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesCustomHandlersInMatchedManagedWrappers(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("seed managed Codex hooks: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(fs.Files["/work/.codex/hooks.json"], &doc); err != nil {
+		t.Fatalf("unmarshal managed Codex hooks: %v", err)
+	}
+	hooksMap := doc["hooks"].(map[string]any)
+	for event, command := range map[string]string{
+		"SessionStart":     "bd codex-hook session-start",
+		"PreCompact":       "printf custom-pre-compact",
+		"UserPromptSubmit": "bd codex-hook prompt-submit",
+	} {
+		entries := hooksMap[event].([]any)
+		entry := entries[0].(map[string]any)
+		handlers := entry["hooks"].([]any)
+		entry["hooks"] = append(handlers, map[string]any{"type": "command", "command": command})
+	}
+	seeded, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("marshal hooks with custom handlers: %v", err)
+	}
+	fs.Files["/work/.codex/hooks.json"] = seeded
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	for _, command := range []string{"bd codex-hook session-start", "printf custom-pre-compact", "bd codex-hook prompt-submit"} {
+		if !bytes.Contains(got, []byte(command)) {
+			t.Errorf("matched managed wrapper lost custom handler %q:\n%s", command, got)
+		}
+	}
+}
+
+func TestInstallCodexMatchedWrapperConvergenceIsByteStable(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("seed managed Codex hooks: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(fs.Files["/work/.codex/hooks.json"], &doc); err != nil {
+		t.Fatalf("unmarshal managed Codex hooks: %v", err)
+	}
+	hooksMap := doc["hooks"].(map[string]any)
+	for event, command := range map[string]string{
+		"SessionStart":     "bd codex-hook session-start",
+		"UserPromptSubmit": "printf custom-prompt-submit",
+	} {
+		entry := hooksMap[event].([]any)[0].(map[string]any)
+		entry["hooks"] = append(entry["hooks"].([]any), map[string]any{"type": "command", "command": command})
+	}
+	seeded, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		t.Fatalf("marshal hooks with custom handlers: %v", err)
+	}
+	fs.Files["/work/.codex/hooks.json"] = seeded
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("first convergence: %v", err)
+	}
+	first := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("second convergence: %v", err)
+	}
+	second := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Equal(first, second) {
+		t.Fatalf("matched-wrapper convergence changed on repeat:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestInstallCodexPreservesLargeNumericMetadata(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "schemaVersion": 9007199254740993,
+  "customMetadata": {"sequence": 18446744073709551615},
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{"type":"command","command":"bd codex-hook session-start"}]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	for _, want := range []string{`"schemaVersion": 9007199254740993`, `"sequence": 18446744073709551615`, "bd codex-hook session-start"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("reconciled Codex hooks lost exact metadata %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -777,7 +989,7 @@ func TestInstallCodexRebindsManagedHooksToCurrentCity(t *testing.T) {
 	}
 }
 
-func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
+func TestInstallCodexComposesFullyCustomHooksWithManagedBehavior(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{
   "hooks": {
@@ -795,12 +1007,16 @@ func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
-		t.Fatalf("fully custom codex hooks were overwritten:\n%s", got)
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Contains(got, []byte("printf custom-codex-hook")) {
+		t.Fatalf("fully custom codex hook was lost:\n%s", got)
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("custom document was not converged to exact-one managed behavior:\n%s", got)
 	}
 }
 
-func TestInstallCodexPreservesEnvPrefixedManagedLookingCustomHooks(t *testing.T) {
+func TestInstallCodexPreservesEnvPrefixedCustomHooksWhileConverging(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{
   "hooks": {
@@ -818,12 +1034,16 @@ func TestInstallCodexPreservesEnvPrefixedManagedLookingCustomHooks(t *testing.T)
 		t.Fatalf("Install: %v", err)
 	}
 
-	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
-		t.Fatalf("env-prefixed custom codex hooks were rewritten:\n%s", got)
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Contains(got, []byte("FOO=1 gc mail check --inject --hook-format codex")) {
+		t.Fatalf("env-prefixed custom Codex hook was lost:\n%s", got)
+	}
+	if !CodexHooksAreConverged(got, "/city") {
+		t.Fatalf("custom document was not converged to exact-one managed behavior:\n%s", got)
 	}
 }
 
-func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
+func TestInstallCodexNormalizesExtraEnvOnManagedHooks(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/work/.codex/hooks.json"] = []byte(`{
   "hooks": {
@@ -841,8 +1061,8 @@ func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`) {
-		t.Fatalf("managed codex hook lost extra env prefix:\n%s", got)
+	if strings.Contains(got, "FOO=1") {
+		t.Fatalf("stale managed extra environment survived normalization:\n%s", got)
 	}
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Fatalf("managed codex hook with extra env missing PreCompact:\n%s", got)
@@ -927,8 +1147,8 @@ func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 		_ = os.Chmod(hookPath, 0o644)
 	})
 
-	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
+	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err == nil {
+		t.Fatal("Install succeeded for unreadable Codex hooks")
 	}
 
 	if err := os.Chmod(hookPath, 0o644); err != nil {
@@ -939,7 +1159,7 @@ func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
 		t.Fatalf("read hooks: %v", err)
 	}
 	if string(got) != string(custom) {
-		t.Fatalf("unreadable codex hooks were overwritten:\n%s", string(got))
+		t.Fatalf("unreadable Codex hooks were changed after failure:\n%s", string(got))
 	}
 }
 

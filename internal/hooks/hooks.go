@@ -6,6 +6,7 @@ package hooks
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -614,20 +616,9 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 	return candidateUnreadable, nil, err
 }
 
-func writeCodexHooksManaged(fs fsys.FS, cityDir, dst string, data []byte) error {
-	if normalized, _, err := normalizeCodexHookCommands(data, cityDir); err == nil {
-		data = normalized
-	}
-	if existing, err := fs.ReadFile(dst); err == nil {
-		upgraded, changed, upgradeErr := upgradeCodexHooks(existing, data, cityDir)
-		if upgradeErr != nil || !changed {
-			return nil
-		}
-		return writeManagedData(fs, dst, upgraded)
-	} else if _, statErr := fs.Stat(dst); statErr == nil {
-		return nil
-	}
-	return writeManagedData(fs, dst, data)
+func writeCodexHooksManaged(fs fsys.FS, cityDir, dst string, _ []byte) error {
+	_, err := reconcileCodexHooksAtPath(fs, cityDir, dst, nil)
+	return err
 }
 
 func writeManagedData(fs fsys.FS, dst string, data []byte) error {
@@ -713,6 +704,67 @@ type CodexHooksAudit struct {
 	ManagedBehaviorCounts map[string]int
 }
 
+// CodexHooksAreConverged reports whether a document has exactly one current,
+// city-bound managed command for every Codex behavior. User-authored handlers
+// do not affect the result.
+func CodexHooksAreConverged(data []byte, cityDir string) bool {
+	if strings.TrimSpace(cityDir) == "" {
+		return false
+	}
+	root, err := codexhooks.ParseDocument(data, "Codex hooks")
+	if err != nil {
+		return false
+	}
+	counts := map[string]int{}
+	managedEntries := map[string]map[int]bool{}
+	valid := true
+	visitCodexHookCommands(root, func(event string, entryIndex int, entry, hook map[string]any, nested bool, command string) {
+		if !codexHookCommandLooksManaged(event, command) {
+			return
+		}
+		if !nested || hook["type"] != "command" {
+			valid = false
+			return
+		}
+		wantMatcher := ""
+		if event == "SessionStart" {
+			wantMatcher = "startup"
+		}
+		if matcher, ok := entry["matcher"].(string); !ok || matcher != wantMatcher {
+			valid = false
+			return
+		}
+		if _, changed := upgradeCodexHookCommand(event, command, cityDir); changed {
+			valid = false
+			return
+		}
+		behavior := codexManagedBehavior(event, command)
+		if behavior == "" {
+			valid = false
+			return
+		}
+		counts[behavior]++
+		if managedEntries[event] == nil {
+			managedEntries[event] = map[int]bool{}
+		}
+		managedEntries[event][entryIndex] = true
+	})
+	if !valid {
+		return false
+	}
+	for _, behavior := range []string{"session-start", "pre-compact", "mail", "nudge"} {
+		if counts[behavior] != 1 {
+			return false
+		}
+	}
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		if len(managedEntries[event]) != 1 {
+			return false
+		}
+	}
+	return true
+}
+
 // AuditCodexHooks classifies Codex hook handlers without changing the input.
 func AuditCodexHooks(data []byte) (CodexHooksAudit, error) {
 	doc, err := codexhooks.ParseDocument(data, "Codex hooks")
@@ -759,6 +811,301 @@ func AuditCodexHooks(data []byte) (CodexHooksAudit, error) {
 	return audit, nil
 }
 
+var codexHooksReconcileMu sync.Mutex
+
+var errCodexHooksConcurrentChange = errors.New("codex hooks changed during reconciliation")
+
+// ReconcileCodexHooks converges one session-workdir hooks document to a
+// city-bound semantic fixed point. It preserves custom handlers and configured
+// overlay hooks while publishing only after a stable read under a path lock.
+func ReconcileCodexHooks(fs fsys.FS, cityDir, workDir string, configuredLayers [][]byte) (string, error) {
+	if fs == nil || strings.TrimSpace(workDir) == "" {
+		return "", nil
+	}
+	return reconcileCodexHooksAtPath(fs, cityDir, filepath.Join(workDir, ".codex", "hooks.json"), configuredLayers)
+}
+
+func reconcileCodexHooksAtPath(fs fsys.FS, cityDir, dst string, configuredLayers [][]byte) (string, error) {
+	codexHooksReconcileMu.Lock()
+	defer codexHooksReconcileMu.Unlock()
+	var digest string
+	err := codexhooks.WithPathLock(fs, dst, func() error {
+		for attempt := 0; attempt < 3; attempt++ {
+			snapshot, err := readRegularCodexHooks(fs, dst)
+			if err != nil {
+				return err
+			}
+			candidate, err := composeCodexHooks(snapshot.data, cityDir, configuredLayers)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(candidate, snapshot.data) || !snapshot.exists {
+				if err := writeCodexHooksIfUnchanged(fs, dst, snapshot, candidate); err != nil {
+					if errors.Is(err, errCodexHooksConcurrentChange) {
+						continue
+					}
+					return err
+				}
+			}
+			final, err := readRegularCodexHooks(fs, dst)
+			if err != nil {
+				return fmt.Errorf("verifying %s after reconcile: %w", dst, err)
+			}
+			if !final.exists || !bytes.Equal(final.data, candidate) {
+				continue
+			}
+			if !CodexHooksAreConverged(final.data, cityDir) {
+				return fmt.Errorf("verifying %s after reconcile: not semantically converged", dst)
+			}
+			digest = fmt.Sprintf("%x", sha256.Sum256(final.data))
+			return nil
+		}
+		return errCodexHooksConcurrentChange
+	})
+	return digest, err
+}
+
+type codexHooksFileSnapshot struct {
+	data   []byte
+	exists bool
+	mode   os.FileMode
+}
+
+func readRegularCodexHooks(fs fsys.FS, dst string) (codexHooksFileSnapshot, error) {
+	parent := filepath.Dir(dst)
+	if info, err := fs.Lstat(parent); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return codexHooksFileSnapshot{}, fmt.Errorf("refusing non-directory or symlinked Codex hooks parent %s", parent)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return codexHooksFileSnapshot{}, fmt.Errorf("inspecting %s: %w", parent, err)
+	}
+	info, err := fs.Lstat(dst)
+	if errors.Is(err, os.ErrNotExist) {
+		return codexHooksFileSnapshot{data: []byte("{}"), mode: 0o644}, nil
+	}
+	if err != nil {
+		return codexHooksFileSnapshot{}, fmt.Errorf("inspecting %s: %w", dst, err)
+	}
+	if !info.Mode().IsRegular() {
+		return codexHooksFileSnapshot{}, fmt.Errorf("refusing non-regular Codex hooks path %s", dst)
+	}
+	data, stableInfo, err := fsys.ReadRegularFileStable(fs, dst)
+	if err != nil {
+		return codexHooksFileSnapshot{}, fmt.Errorf("reading %s: %w", dst, err)
+	}
+	return codexHooksFileSnapshot{data: data, exists: true, mode: fsys.ComparableMode(stableInfo.Mode())}, nil
+}
+
+func writeCodexHooksIfUnchanged(fs fsys.FS, dst string, expected codexHooksFileSnapshot, candidate []byte) error {
+	current, err := readRegularCodexHooks(fs, dst)
+	if err != nil {
+		return err
+	}
+	if current.exists != expected.exists || current.mode != expected.mode || !bytes.Equal(current.data, expected.data) {
+		return errCodexHooksConcurrentChange
+	}
+	if err := fs.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(dst), err)
+	}
+	if err := codexhooks.WriteFileAtomicNoFollow(fs, dst, candidate, expected.mode); err != nil {
+		return fmt.Errorf("writing %s atomically: %w", dst, err)
+	}
+	return nil
+}
+
+func composeCodexHooks(existing []byte, cityDir string, configuredLayers [][]byte) ([]byte, error) {
+	custom, _, err := RemoveManagedCodexHooks(existing)
+	if err != nil {
+		return nil, fmt.Errorf("removing managed commands from existing Codex hooks: %w", err)
+	}
+	desired, err := desiredCodexHookData(cityDir, configuredLayers)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := overlay.MergeSettingsJSON(custom, desired, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, fmt.Errorf("merging Codex hooks: %w", err)
+	}
+	if _, err := codexhooks.ParseDocument(candidate, "reconciled Codex hooks"); err != nil {
+		return nil, err
+	}
+	secondCustom, _, err := RemoveManagedCodexHooks(candidate)
+	if err != nil {
+		return nil, fmt.Errorf("removing managed commands from fixed-point Codex hooks: %w", err)
+	}
+	second, err := overlay.MergeSettingsJSON(secondCustom, desired, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, fmt.Errorf("verifying Codex hook fixed point: %w", err)
+	}
+	if !bytes.Equal(candidate, second) {
+		return nil, errors.New("codex hooks composition is not byte-stable")
+	}
+	return candidate, nil
+}
+
+func desiredCodexHookData(cityDir string, configuredLayers [][]byte) ([]byte, error) {
+	coreHooks, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded Codex hooks: %w", err)
+	}
+	managedCore, _, err := normalizeCodexHookCommands(coreHooks, cityDir)
+	if err != nil {
+		return nil, fmt.Errorf("normalizing embedded Codex hooks: %w", err)
+	}
+	desired := []byte("{}")
+	for i, layer := range configuredLayers {
+		customLayer, _, err := RemoveManagedCodexHooks(layer)
+		if err != nil {
+			return nil, fmt.Errorf("removing managed commands from configured Codex hook layer %d: %w", i, err)
+		}
+		desired, err = overlay.MergeSettingsJSON(desired, customLayer, overlay.WithMergeMatchedHookContents())
+		if err != nil {
+			return nil, fmt.Errorf("merging configured Codex hook layer %d: %w", i, err)
+		}
+	}
+	desired, err = overlay.MergeSettingsJSON(desired, managedCore, overlay.WithMergeMatchedHookContents())
+	if err != nil {
+		return nil, fmt.Errorf("merging embedded Codex hooks: %w", err)
+	}
+	return desired, nil
+}
+
+func visitCodexHookCommands(root map[string]any, visit func(event string, entryIndex int, entry, hook map[string]any, nested bool, command string)) {
+	hooksMap, _ := root["hooks"].(map[string]any)
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		for entryIndex, value := range entries {
+			entry, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if command, ok := entry["command"].(string); ok {
+				visit(event, entryIndex, entry, entry, false, command)
+			}
+			inner, _ := entry["hooks"].([]any)
+			for _, hookValue := range inner {
+				hook, ok := hookValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if command, ok := hook["command"].(string); ok {
+					visit(event, entryIndex, entry, hook, true, command)
+				}
+			}
+		}
+	}
+}
+
+// RemoveManagedCodexHooksForCity removes exact current managed handlers owned
+// by cityDir while preserving legacy, unbound, and differently bound handlers.
+func RemoveManagedCodexHooksForCity(data []byte, cityDir string) ([]byte, bool, error) {
+	if strings.TrimSpace(cityDir) == "" {
+		return data, false, nil
+	}
+	doc, err := codexhooks.ParseDocument(data, "Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	desired, err := desiredCodexHookData(cityDir, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	desiredDoc, err := codexhooks.ParseDocument(desired, "managed Codex hooks")
+	if err != nil {
+		return nil, false, err
+	}
+	exactHandlers := map[string]map[string]string{}
+	visitCodexHookCommands(desiredDoc, func(event string, _ int, _ map[string]any, handler map[string]any, nested bool, command string) {
+		if !nested {
+			return
+		}
+		canonical, marshalErr := overlay.MarshalCanonicalJSON(handler)
+		if marshalErr != nil {
+			return
+		}
+		if exactHandlers[event] == nil {
+			exactHandlers[event] = map[string]string{}
+		}
+		exactHandlers[event][command] = string(canonical)
+	})
+
+	hooksMap, _ := doc["hooks"].(map[string]any)
+	changed := false
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit"} {
+		entries, ok := hooksMap[event].([]any)
+		if !ok {
+			continue
+		}
+		keptEntries := make([]any, 0, len(entries))
+		for _, entryValue := range entries {
+			entry := entryValue.(map[string]any)
+			handlers, wrapped := entry["hooks"].([]any)
+			if !wrapped {
+				keptEntries = append(keptEntries, entryValue)
+				continue
+			}
+			wantMatcher := ""
+			if event == "SessionStart" {
+				wantMatcher = "startup"
+			}
+			matcher, matcherOK := entry["matcher"].(string)
+			if !matcherOK || matcher != wantMatcher {
+				keptEntries = append(keptEntries, entryValue)
+				continue
+			}
+			keptHandlers := make([]any, 0, len(handlers))
+			for _, handlerValue := range handlers {
+				handler := handlerValue.(map[string]any)
+				command, _ := handler["command"].(string)
+				wantCanonical, exactCommand := exactHandlers[event][command]
+				eligible := exactCommand
+				if exactCommand {
+					canonical, marshalErr := overlay.MarshalCanonicalJSON(handler)
+					eligible = marshalErr == nil && string(canonical) == wantCanonical
+					if !eligible {
+						if key, found := firstUnknownCodexHookField(handler, "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
+							return nil, false, fmt.Errorf("refusing to remove managed Codex %s handler with inseparable field %q", event, key)
+						}
+					}
+				}
+				if eligible {
+					changed = true
+					continue
+				}
+				keptHandlers = append(keptHandlers, handlerValue)
+			}
+			if len(keptHandlers) == 0 {
+				if len(handlers) > 0 {
+					if key, found := firstUnknownCodexHookField(entry, "matcher", "hooks"); found {
+						return nil, false, fmt.Errorf("refusing to remove managed Codex %s wrapper with inseparable field %q", event, key)
+					}
+				}
+				continue
+			}
+			entry["hooks"] = keptHandlers
+			keptEntries = append(keptEntries, entryValue)
+		}
+		if len(keptEntries) != len(entries) {
+			hooksMap[event] = keptEntries
+		}
+	}
+	if !changed {
+		return data, false, nil
+	}
+	candidate, err := overlay.MarshalCanonicalJSON(doc)
+	if err != nil {
+		return nil, false, fmt.Errorf("encoding migrated Codex hooks: %w", err)
+	}
+	if err := codexhooks.ValidateDocument(candidate, "migrated Codex hooks"); err != nil {
+		return nil, false, err
+	}
+	return candidate, true, nil
+}
+
 // RemoveManagedCodexHooks removes only recognized Gas City command handlers
 // from a Codex hook document. Custom handlers and unknown fields on retained
 // objects are preserved. An unchanged document is returned byte-for-byte.
@@ -776,7 +1123,10 @@ func RemoveManagedCodexHooks(data []byte) ([]byte, bool, error) {
 		}
 		keptEntries := make([]any, 0, len(entries))
 		for _, entryValue := range entries {
-			entry := entryValue.(map[string]any)
+			entry, ok := entryValue.(map[string]any)
+			if !ok {
+				return nil, false, fmt.Errorf("codex hooks event %s contains a non-object entry", event)
+			}
 			if command, ok := entry["command"].(string); ok && codexManagedBehavior(event, command) != "" {
 				if key, found := firstUnknownCodexHookField(entry, "matcher", "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
 					return nil, false, fmt.Errorf("refusing to remove managed Codex %s entry with inseparable field %q", event, key)
@@ -787,7 +1137,10 @@ func RemoveManagedCodexHooks(data []byte) ([]byte, bool, error) {
 			if handlers, ok := entry["hooks"].([]any); ok {
 				keptHandlers := make([]any, 0, len(handlers))
 				for _, handlerValue := range handlers {
-					handler := handlerValue.(map[string]any)
+					handler, ok := handlerValue.(map[string]any)
+					if !ok {
+						return nil, false, fmt.Errorf("codex hooks event %s contains a non-object handler", event)
+					}
 					command, _ := handler["command"].(string)
 					if codexManagedBehavior(event, command) != "" {
 						if key, found := firstUnknownCodexHookField(handler, "type", "command", "commandWindows", "statusMessage", "async", "timeout"); found {
