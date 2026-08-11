@@ -1056,6 +1056,13 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 		return false
 	}
 	for _, b := range blockedBy {
+		// bd's ready projection represents open blockers as IDs, while older
+		// output used objects carrying the blocker status. A listed ID is an
+		// open blocker, so it must prevent an assigned successor from claiming
+		// ahead of its predecessor.
+		if id, ok := b.(string); ok && strings.TrimSpace(id) != "" {
+			return true
+		}
 		dep, ok := b.(map[string]any)
 		if !ok {
 			continue

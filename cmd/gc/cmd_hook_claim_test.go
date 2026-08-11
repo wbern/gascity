@@ -217,3 +217,39 @@ func TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt(t *testing.T) {
 		t.Fatalf("claimedBead = %q, want ready-behind (blocked-head must be skipped)", claimedBead)
 	}
 }
+
+func TestDoHookClaimSkipsAssignedSuccessorWithStringBlockerAndClaimsReadyWork(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"preflight","status":"open","assignee":"worker-1","blocked_by":["workspace-setup"]},
+			{"id":"workspace-setup","status":"open","metadata":{"gc.routed_to":"worker-1"}}
+		]`, nil
+	}
+
+	var claims []string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claims = append(claims, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker-1"},
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !reflect.DeepEqual(claims, []string{"workspace-setup"}) {
+		t.Fatalf("claim attempts = %#v, want only workspace-setup", claims)
+	}
+	if !strings.Contains(stdout.String(), `"action":"work"`) || !strings.Contains(stdout.String(), `"bead_id":"workspace-setup"`) {
+		t.Fatalf("stdout = %q, want workspace-setup work result", stdout.String())
+	}
+}
