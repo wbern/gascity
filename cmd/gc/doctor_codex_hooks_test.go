@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -160,8 +163,9 @@ func TestCodexHooksDriftCheckKeepsIndependentConsumersSeparate(t *testing.T) {
 
 func TestCodexHooksDriftCheckIgnoresDormantConfiguredConsumerButBlocksLiveMissingOwner(t *testing.T) {
 	cityDir := t.TempDir()
-	dormantDir := filepath.Join(cityDir, ".gc", "worktrees", "bd.dog")
-	check := newCodexHooksDriftCheck(cityDir, []string{dormantDir})
+	bdDogDir := filepath.Join(cityDir, ".gc", "worktrees", "bd.dog")
+	packsDir := filepath.Join(cityDir, ".gc", "worktrees", "gascity-packs")
+	check := newCodexHooksDriftCheck(cityDir, []string{bdDogDir, packsDir})
 	check.userHooksPath = ""
 	check.ownership = codexHookOwnership{fileSourcesActive: true, filesystemOwned: true}
 	check.activeConsumers = func() ([]codexHookConsumer, error) { return nil, nil }
@@ -170,18 +174,18 @@ func TestCodexHooksDriftCheckIgnoresDormantConfiguredConsumerButBlocksLiveMissin
 	if result.Status != doctor.StatusOK {
 		t.Fatalf("dormant configured consumer status = %v, want OK; message=%q details=%v", result.Status, result.Message, result.Details)
 	}
-	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=configured-dormant workdir="+dormantDir) {
-		t.Fatalf("dormant consumer is not identified in details:\n%s", details)
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=configured-dormant workdir="+bdDogDir) || !strings.Contains(details, "consumer=configured-dormant workdir="+packsDir) {
+		t.Fatalf("dormant consumers are not identified in details:\n%s", details)
 	}
 
 	check.activeConsumers = func() ([]codexHookConsumer, error) {
-		return []codexHookConsumer{{workDir: dormantDir, sessionName: "live-codex"}}, nil
+		return []codexHookConsumer{{workDir: bdDogDir, sessionName: "live-codex"}}, nil
 	}
 	result = check.Run(&doctor.CheckContext{})
 	if result.Status != doctor.StatusWarning || !strings.Contains(result.Message, "not the exact current-city owner") {
 		t.Fatalf("live missing owner status/message = %v/%q, want exact-owner warning; details=%v", result.Status, result.Message, result.Details)
 	}
-	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=runtime-active workdir="+dormantDir+" sessions=live-codex") {
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=runtime-active workdir="+bdDogDir+" sessions=live-codex") {
 		t.Fatalf("live consumer identity missing from details:\n%s", details)
 	}
 }
@@ -226,6 +230,53 @@ func TestCodexHooksDriftCheckFailsClosedWhenActiveConsumerEnumerationFails(t *te
 	result := check.Run(&doctor.CheckContext{})
 	if result.Status != doctor.StatusWarning || !strings.Contains(result.Message, "cannot enumerate runtime-active Codex consumers") {
 		t.Fatalf("enumeration failure status/message = %v/%q, want blocking diagnostic; details=%v", result.Status, result.Message, result.Details)
+	}
+}
+
+func TestCodexHookConsumersFromSessionInfosRequiresPersistedActiveAndRuntimeLiveness(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{InstallAgentHooks: []string{"codex"}},
+		Agents: []config.Agent{
+			{Name: "native-codex", Provider: "codex"},
+			{Name: "hook-consumer", Provider: "claude"},
+		},
+	}
+	infos := []session.Info{
+		{SessionName: "stale-active", Template: "native-codex", Provider: "codex", State: session.StateActive, WorkDir: "/work/stale"},
+		{SessionName: "asleep", Template: "native-codex", Provider: "codex", State: session.StateAsleep, WorkDir: "/work/asleep"},
+		{SessionName: "suspended", Template: "native-codex", Provider: "codex", State: session.StateSuspended, WorkDir: "/work/suspended"},
+		{SessionName: "closed", Template: "native-codex", Provider: "codex", State: session.StateActive, Closed: true, WorkDir: "/work/closed"},
+		{SessionName: "start-pending", Template: "native-codex", Provider: "codex", State: session.StateStartPending, WorkDir: "/work/start-pending"},
+		{SessionName: "unprovisioned", Template: "native-codex", Provider: "codex", State: session.StateActive},
+		{SessionName: "live-codex", Template: "native-codex", Provider: "codex", State: session.StateActive, WorkDir: "/work/live-codex"},
+		{SessionName: "live-install-hook", Template: "hook-consumer", Provider: "claude", State: session.StateActive, WorkDir: "/work/live-install-hook"},
+	}
+	observed := []string{}
+	consumers, err := codexHookConsumersFromSessionInfos(cfg, infos, func(name string, _ []string) (runtime.Liveness, error) {
+		observed = append(observed, name)
+		return runtime.Liveness{Running: name != "stale-active"}, nil
+	})
+	if err != nil {
+		t.Fatalf("codexHookConsumersFromSessionInfos: %v", err)
+	}
+	if got, want := consumers, []codexHookConsumer{
+		{workDir: "/work/live-codex", sessionName: "live-codex"},
+		{workDir: "/work/live-install-hook", sessionName: "live-install-hook"},
+	}; !slices.Equal(got, want) {
+		t.Fatalf("consumers = %#v, want %#v", got, want)
+	}
+	if got, want := observed, []string{"stale-active", "live-codex", "live-install-hook"}; !slices.Equal(got, want) {
+		t.Fatalf("observed sessions = %v, want %v", got, want)
+	}
+}
+
+func TestCodexHookConsumersFromSessionInfosFailsClosedOnLivenessError(t *testing.T) {
+	infos := []session.Info{{SessionName: "live", Provider: "codex", State: session.StateActive, WorkDir: "/work/live"}}
+	_, err := codexHookConsumersFromSessionInfos(&config.City{}, infos, func(string, []string) (runtime.Liveness, error) {
+		return runtime.Liveness{}, errors.New("runtime status timed out")
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime status timed out") {
+		t.Fatalf("error = %v, want liveness failure", err)
 	}
 }
 
@@ -826,6 +877,9 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 	}
 	check := newCodexHooksDriftCheck(dir, []string{dir}, cfg)
 	check.userHooksPath = ""
+	check.activeConsumers = func() ([]codexHookConsumer, error) {
+		return []codexHookConsumer{{workDir: dir, sessionName: "live-worker"}}, nil
+	}
 
 	result := check.Run(&doctor.CheckContext{})
 
@@ -837,6 +891,7 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 		"source=sessionFlags active=false",
 		"source=project active=true",
 		"managed=session-start:1",
+		"consumer=runtime-active workdir=" + dir + " sessions=live-worker",
 	} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details missing %q:\n%s", want, details)
@@ -857,6 +912,26 @@ func TestCodexHooksDriftCheckRetainsFilesystemHooksForNonT3Codex(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatal("refused fix changed filesystem-owned Codex hooks")
+	}
+}
+
+func TestCodexHooksDriftCheckTreatsNonT3CodexWithoutRuntimeAsDormant(t *testing.T) {
+	dir := t.TempDir()
+	writeCodexHooksForDoctorTest(t, dir, `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents:  []config.Agent{{Name: "worker", Provider: "codex"}},
+	}
+	check := newCodexHooksDriftCheck(dir, []string{dir}, cfg)
+	check.userHooksPath = ""
+	check.activeConsumers = func() ([]codexHookConsumer, error) { return nil, nil }
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want OK for dormant non-T3 consumer; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "consumer=configured-dormant workdir="+dir) {
+		t.Fatalf("dormant non-T3 consumer missing from details:\n%s", details)
 	}
 }
 
