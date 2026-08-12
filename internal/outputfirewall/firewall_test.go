@@ -55,6 +55,15 @@ func TestWriteOversizedPayloadProducesValidManifest(t *testing.T) {
 	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), strings.Repeat("x", 32)) {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+	var manifest struct {
+		Remediation string `json:"remediation"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(manifest.Remediation, "--allow-unbounded") || !strings.Contains(manifest.Remediation, "spill.path") {
+		t.Fatalf("remediation=%q", manifest.Remediation)
+	}
 }
 
 func TestWriteDirectorySwapAfterSpillPublishesUnavailableManifest(t *testing.T) {

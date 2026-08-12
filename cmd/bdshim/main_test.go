@@ -180,11 +180,11 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
-func TestRunManagedPassthroughReadReplacesOversizedOutput(t *testing.T) {
+func TestRunManagedPassthroughShowPreservesJSONArrayWhenOverBudget(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"description":"`+strings.Repeat("secret", 200)+`"}]`))
+	t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"id":"gcw-1","status":"open","description":"`+strings.Repeat("secret", 200)+`"}]`))
 	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
-	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "512")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "1024")
 	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show,list")
 	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
 	t.Setenv("GC_BD_HQ_GUARD", "")
@@ -194,11 +194,52 @@ func TestRunManagedPassthroughReadReplacesOversizedOutput(t *testing.T) {
 	if code := run([]string{"show", "gcw-1", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("run() = %d, stderr=%q", code, stderr.String())
 	}
-	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "secret") {
-		t.Fatalf("managed passthrough escaped firewall: %d bytes %q", stdout.Len(), stdout.String())
+	var got []json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("show output changed top-level JSON type: %v; output=%q", err, stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "gc.output_firewall") {
-		t.Fatalf("stdout = %q, want firewall manifest", stdout.String())
+	if len(got) != 1 {
+		t.Fatalf("show result length=%d, want 1", len(got))
+	}
+	if strings.Contains(stdout.String(), "secret") {
+		t.Fatalf("bounded show leaked description: %q", stdout.String())
+	}
+}
+
+func TestRunShowAllowUnboundedPreservesFullPayloadAndStripsFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd shell script is POSIX-only")
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "output.json")
+	calls := filepath.Join(dir, "calls.txt")
+	full := `[{"id":"gcw-1","description":"` + strings.Repeat("secret", 200) + `"}]`
+	if err := os.WriteFile(fixture, []byte(full), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bd := filepath.Join(dir, "bd.real")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\necho \"$@\" > \""+calls+"\"\ncat \""+fixture+"\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BD_REAL", bd)
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "1024")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show")
+	t.Setenv("GC_BD_HQ_GUARD", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"show", "gcw-1", "--json", "--allow-unbounded"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("run()=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != full {
+		t.Fatalf("stdout=%q, want full payload", stdout.String())
+	}
+	gotArgs, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gotArgs), "--allow-unbounded") {
+		t.Fatalf("raw bd received gc-only flag: %q", gotArgs)
 	}
 }
 

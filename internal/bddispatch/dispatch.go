@@ -827,7 +827,35 @@ func WriteManagedReadJSON(out []beads.Bead, stdout, stderr io.Writer) int {
 // WriteManagedReadJSONForVerb writes one routed read response under the
 // managed-session policy when its verb is within the configured read scope.
 func WriteManagedReadJSONForVerb(verb string, out []beads.Bead, stdout, stderr io.Writer) int {
+	if verb == "show" {
+		if outputfirewall.BudgetForVerb(verb) > 0 {
+			return WriteManagedShowSummaries("managed_bd_read", out, stdout, stderr)
+		}
+	}
 	return WriteManagedJSON(context.Background(), "managed_bd_read", verb, out, stdout, stderr)
+}
+
+// WriteManagedShowOutput bounds a staged raw bd show JSON response without
+// changing its top-level array contract.
+func WriteManagedShowOutput(payload []byte, stdout, stderr io.Writer) int {
+	var out []beads.Bead
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return WriteManagedShowSummaries("managed_bd_passthrough", nil, stdout, stderr)
+	}
+	return WriteManagedShowSummaries("managed_bd_passthrough", out, stdout, stderr)
+}
+
+// WriteManagedShowSummaries applies the managed show projection without ever
+// replacing bd show's JSON array with a firewall manifest.
+func WriteManagedShowSummaries(commandClass string, out []beads.Bead, stdout, stderr io.Writer) int {
+	summaries := NewBeadShowSummaries(out)
+	if budget := outputfirewall.BudgetForVerb("show"); budget > 0 {
+		payload, err := json.Marshal(summaries)
+		if err != nil || len(payload)+1 > budget {
+			summaries = []BeadShowSummary{}
+		}
+	}
+	return WriteManagedJSON(context.Background(), commandClass, "show", summaries, stdout, stderr)
 }
 
 // WriteManagedJSON serializes a known managed read entirely before it reaches

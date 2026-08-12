@@ -56,6 +56,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Strip the gc-only --city/--rig scope flags (raw bd does not accept them);
 	// --city overrides the routed target city, matching extractBdScopeFlags.
 	cityOverride, rigOverride, rawBDArgs := extractScopeFlags(args)
+	rawBDArgs, allowUnbounded := stripAllowUnbounded(rawBDArgs)
 	rawVerb, _ := bdshim.SplitGlobalFlags(rawBDArgs)
 
 	// --rig selects a DIFFERENT rig's bead store, and this shim has no way to
@@ -95,9 +96,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 
 	passthrough := func() int {
-		if bddispatch.ManagedOutputFirewallActive(verb) && managedPassthroughReadVerb(verb, verbArgs) {
+		if !allowUnbounded && bddispatch.ManagedOutputFirewallActive(verb) && managedPassthroughReadVerb(verb, verbArgs) {
 			var staged bytes.Buffer
 			code := execRealBd(bdArgs, nil, stdin, &staged, stderr)
+			if verb == "show" && hasJSONOutput(verbArgs) {
+				if firewallCode := bddispatch.WriteManagedShowOutput(staged.Bytes(), stdout, stderr); firewallCode != 0 {
+					logDisposition(verb, rawBDArgs, "passthrough", firewallCode, start)
+					return firewallCode
+				}
+				logDisposition(verb, rawBDArgs, "passthrough", code, start)
+				return code
+			}
 			if firewallCode := bddispatch.WriteManagedOutput(context.Background(), "managed_bd_passthrough", verb, staged.Bytes(), hasJSONOutput(verbArgs), stdout, stderr); firewallCode != 0 {
 				logDisposition(verb, rawBDArgs, "passthrough", firewallCode, start)
 				return firewallCode
@@ -209,6 +218,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default: // bdshim.Passthrough
 		return passthrough()
 	}
+}
+
+func stripAllowUnbounded(args []string) ([]string, bool) {
+	result := make([]string, 0, len(args))
+	allow := false
+	for _, arg := range args {
+		if arg == "--allow-unbounded" {
+			allow = true
+			continue
+		}
+		result = append(result, arg)
+	}
+	return result, allow
 }
 
 func managedPassthroughReadVerb(verb string, args []string) bool {

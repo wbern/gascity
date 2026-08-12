@@ -46,12 +46,31 @@ type BeadSummary struct {
 	FieldsOmitted         []string          `json:"fields_omitted,omitempty"`
 }
 
+// BeadShowSummary is the bounded show projection. It preserves bd show's
+// top-level array contract while carrying the scalar fields machine consumers
+// need to locate and manage a task workspace.
+type BeadShowSummary struct {
+	ID                    string            `json:"id"`
+	Status                string            `json:"status"`
+	Assignee              string            `json:"assignee"`
+	Metadata              map[string]string `json:"metadata,omitempty"`
+	SourceSerializedBytes int               `json:"source_serialized_bytes"`
+	DetailsOmitted        []string          `json:"details_omitted"`
+	FieldsOmitted         []string          `json:"fields_omitted,omitempty"`
+}
+
 var summaryRoutingMetadataKeys = []string{
 	"gc.routed_to",
 	"gc.root_bead_id",
 	"gc.session_id",
 	"gc.session_name",
 	"gc.step_id",
+	"target",
+	"branch",
+	"gc.base_sha",
+	"gc.task_worktree",
+	"work_dir",
+	"gc.workspace_owner",
 }
 
 var summaryDetailsOmitted = []string{
@@ -119,6 +138,44 @@ func beadSummary(bead beads.Bead) BeadSummary {
 	}
 	summary.FieldsOmitted = append(summary.FieldsOmitted, routingOmitted...)
 	return summary
+}
+
+// NewBeadShowSummaries projects show results without changing JSON's top-level
+// array type. An absent metadata field is absent from Metadata; a withheld one
+// is named in FieldsOmitted.
+func NewBeadShowSummaries(input []beads.Bead) []BeadShowSummary {
+	result := make([]BeadShowSummary, 0, len(input))
+	for _, bead := range input {
+		source, _ := json.Marshal(bead)
+		metadata, omitted := selectedShowMetadata(bead.Metadata)
+		result = append(result, BeadShowSummary{
+			ID:                    bead.ID,
+			Status:                bead.Status,
+			Assignee:              bead.Assignee,
+			Metadata:              metadata,
+			SourceSerializedBytes: len(source),
+			DetailsOmitted:        append([]string(nil), summaryDetailsOmitted...),
+			FieldsOmitted:         omitted,
+		})
+	}
+	return result
+}
+
+func selectedShowMetadata(metadata beads.StringMap) (map[string]string, []string) {
+	selected := make(map[string]string)
+	omitted := make([]string, 0)
+	for _, key := range summaryRoutingMetadataKeys {
+		value, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		if _, wasOmitted := boundedSummaryStringWithOmission(value); wasOmitted {
+			omitted = append(omitted, "metadata."+key)
+			continue
+		}
+		selected[key] = value
+	}
+	return selected, omitted
 }
 
 func selectedRoutingMetadata(metadata beads.StringMap) (map[string]string, []string) {
