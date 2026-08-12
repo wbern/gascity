@@ -73,15 +73,15 @@ func TestWriteReadyJSONWithBudgetGiantSingleFieldNeverReachesStdout(t *testing.T
 	}
 }
 
-func TestWriteReadyJSONWithBudgetEncodeFailureWritesNoPartialOutput(t *testing.T) {
+func TestWriteReadyJSONWithBudgetEncodeFailureWritesBoundedValidManifest(t *testing.T) {
 	original := marshalOutputJSON
 	marshalOutputJSON = func(any) ([]byte, error) { return nil, errors.New("encode failed") }
 	t.Cleanup(func() { marshalOutputJSON = original })
 	var stdout, stderr bytes.Buffer
-	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg"}}, &stdout, &stderr, 512); code != 1 {
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg"}}, &stdout, &stderr, 512); code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "encoding") {
+	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "encode failed") || !strings.Contains(stdout.String(), "gc.output_firewall") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
@@ -104,7 +104,6 @@ func TestWriteReadyJSONPreservesDirectUserOutput(t *testing.T) {
 
 func TestWriteManagedReadJSONUsesBudgetOnlyWhenManaged(t *testing.T) {
 	t.Setenv(managedOutputFirewallEnv, "1")
-	t.Setenv(managedOutputFirewallSpillDirEnv, "")
 
 	var stdout, stderr bytes.Buffer
 	beadsOut := []beads.Bead{{ID: "gcg-managed", Description: strings.Repeat("managed-secret", 4000)}}
@@ -151,7 +150,7 @@ func TestWriteReadyJSONWithBudgetDisabledSpillDoesNotCreateArtifact(t *testing.T
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	setOutputFirewallSpillPath(t, dir)
 	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
 	var stdout, stderr bytes.Buffer
 	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
@@ -171,7 +170,7 @@ func TestWriteReadyJSONWithBudgetUnavailableSpillReturnsNoSpillManifest(t *testi
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, blocked)
+	setOutputFirewallSpillPath(t, blocked)
 	var stdout, stderr bytes.Buffer
 	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
 		t.Fatalf("code=%d", code)
@@ -188,6 +187,12 @@ func TestWriteReadyJSONWithBudgetUnavailableSpillReturnsNoSpillManifest(t *testi
 }
 
 type failingOutputWriter struct{ writes int }
+
+func setOutputFirewallSpillPath(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv(managedOutputFirewallSpillRootEnv, filepath.Dir(dir))
+	t.Setenv(managedOutputFirewallSpillPathEnv, filepath.Base(dir))
+}
 
 func (w *failingOutputWriter) Write([]byte) (int, error) { w.writes++; return 0, os.ErrClosed }
 
@@ -210,7 +215,7 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod spill dir: %v", err)
 	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	setOutputFirewallSpillPath(t, dir)
 	dirInfo, err := os.Lstat(dir)
 	if err != nil {
 		t.Fatalf("stat temp dir: %v", err)
@@ -247,7 +252,7 @@ func TestWriteReadyJSONWithBudgetUsesConfiguredRetentionTTL(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	setOutputFirewallSpillPath(t, dir)
 	t.Setenv(managedOutputFirewallRetentionEnv, "1h")
 	before := time.Now().UTC()
 	var stdout, stderr bytes.Buffer
@@ -284,6 +289,17 @@ func TestWriteManagedJSONCancelledBeforePublishWritesNoOutput(t *testing.T) {
 	}
 }
 
+func TestWriteManagedOutputReplacesMalformedJSON(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedOutput(context.Background(), "managed_bd_passthrough", "show", []byte("not-json"), true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "not-json") || !strings.Contains(stdout.String(), "invalid_json") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
 func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
 	t.Setenv(managedOutputFirewallEnv, "1")
 	t.Setenv(managedOutputFirewallBudgetEnv, "512")
@@ -295,68 +311,6 @@ func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), body) {
 		t.Fatalf("out-of-scope show was firewalled: %q", stdout.String())
-	}
-}
-
-func TestCleanupOutputFirewallSpillRemovesOnlyExpiredOwnedFiles(t *testing.T) {
-	dir := t.TempDir()
-	expired := filepath.Join(dir, "output-expired")
-	if err := os.WriteFile(expired, []byte("old"), 0o600); err != nil {
-		t.Fatalf("write expired artifact: %v", err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(expired, old, old); err != nil {
-		t.Fatalf("age artifact: %v", err)
-	}
-	keep := filepath.Join(dir, "other-file")
-	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
-		t.Fatalf("write unrelated file: %v", err)
-	}
-
-	cleanupOutputFirewallSpill(dir, 24*time.Hour)
-
-	if _, err := os.Stat(expired); !os.IsNotExist(err) {
-		t.Fatalf("expired owned artifact remains: %v", err)
-	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Fatalf("unrelated artifact was removed: %v", err)
-	}
-}
-
-func TestWriteOutputFirewallSpillConcurrentArtifactsAreDistinct(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod spill dir: %v", err)
-	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
-	paths := make(chan string, 8)
-	for i := 0; i < cap(paths); i++ {
-		go func() { paths <- writeOutputFirewallSpill([]byte(strings.Repeat("payload", 100))) }()
-	}
-	seen := map[string]bool{}
-	for i := 0; i < cap(paths); i++ {
-		path := <-paths
-		if path == "" || seen[path] {
-			t.Fatalf("invalid or duplicate spill path %q", path)
-		}
-		seen[path] = true
-		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("spill %q unsafe: %v mode=%v", path, err, info.Mode())
-		}
-	}
-}
-
-func TestWriteOutputFirewallSpillRejectsSymlinkDirectory(t *testing.T) {
-	parent := t.TempDir()
-	target := t.TempDir()
-	dir := filepath.Join(parent, "output")
-	if err := os.Symlink(target, dir); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
-	if got := writeOutputFirewallSpill([]byte("secret")); got != "" {
-		t.Fatalf("spill through symlink = %q, want empty", got)
 	}
 }
 

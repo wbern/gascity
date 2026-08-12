@@ -1095,6 +1095,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("session") {
 		base.Session = fragment.Session
 	}
+	if fragMeta.IsDefined("output_firewall") {
+		base.OutputFirewall = fragment.OutputFirewall
+	}
 	if fragMeta.IsDefined("mail") {
 		base.Mail = fragment.Mail
 	}

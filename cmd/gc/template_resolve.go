@@ -331,6 +331,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
+	// Output-firewall variables are controller-owned. Explicit empty values
+	// prevent inherited, pack, or agent environment from activating a policy
+	// the city disabled.
+	agentEnv[managedOutputFirewallEnv] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE"] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT"] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH"] = ""
+	agentEnv["GC_MANAGED_OUTPUT_FIREWALL_RETENTION"] = ""
 	if p.city == nil || p.city.OutputFirewall.EnabledForManagedSessions() {
 		firewall := config.OutputFirewallConfig{}
 		if p.city != nil {
@@ -340,7 +350,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"] = fmt.Sprintf("%d", firewall.EffectiveByteBudget())
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"] = strings.Join(firewall.EffectiveReadVerbs(), ",")
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE"] = firewall.EffectiveSpillMode()
-		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"] = filepath.Join(p.cityPath, firewall.EffectiveSpillPath())
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT"] = p.cityPath
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH"] = firewall.EffectiveSpillPath()
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_RETENTION"] = firewall.EffectiveRetentionTTL().String()
 	}
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {

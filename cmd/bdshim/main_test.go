@@ -180,6 +180,76 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
+func TestRunManagedPassthroughReadReplacesOversizedOutput(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"description":"`+strings.Repeat("secret", 200)+`"}]`))
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "512")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show,list")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	t.Setenv("GC_BD_HQ_GUARD", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"show", "gcw-1", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d, stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "secret") {
+		t.Fatalf("managed passthrough escaped firewall: %d bytes %q", stdout.Len(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "gc.output_firewall") {
+		t.Fatalf("stdout = %q, want firewall manifest", stdout.String())
+	}
+}
+
+func TestRunManagedPassthroughReadAdmitsPlainAndInferredMoleculeReads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "plain show", args: []string{"show", "gcw-1"}},
+		{name: "inferred molecule current", args: []string{"mol", "current"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, strings.Repeat("secret", 600)))
+			t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+			t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "512")
+			t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show,mol")
+			t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+			t.Setenv("GC_BD_HQ_GUARD", "")
+			t.Setenv("GC_BDSHIM_LOG", "")
+
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("run() = %d, stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "secret") {
+				t.Fatalf("managed read escaped firewall: %d bytes %q", stdout.Len(), stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunManagedPassthroughPlainReadPreservesUnderBudgetBytes(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, "human output\n"))
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "512")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	t.Setenv("GC_BD_HQ_GUARD", "")
+	t.Setenv("GC_BDSHIM_LOG", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"show", "gcw-1"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d, stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "human output\n"; got != want {
+		t.Fatalf("stdout=%q, want byte-exact %q", got, want)
+	}
+}
+
 func TestRunHQGuardRefusesBareBdBeforeRoutingOrPassthrough(t *testing.T) {
 	dir := t.TempDir()
 	city := filepath.Join(dir, "city")

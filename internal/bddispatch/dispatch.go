@@ -9,21 +9,16 @@ package bddispatch
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/outputfirewall"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -35,16 +30,10 @@ const (
 	managedOutputFirewallEnv          = "GC_MANAGED_OUTPUT_FIREWALL"
 	managedOutputFirewallBudgetEnv    = "GC_MANAGED_OUTPUT_FIREWALL_BUDGET"
 	managedOutputFirewallReadVerbsEnv = "GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"
-	managedOutputFirewallSpillDirEnv  = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
+	managedOutputFirewallSpillRootEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT"
+	managedOutputFirewallSpillPathEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH"
 	managedOutputFirewallRetentionEnv = "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"
-	managedOutputFirewallRetention    = 24 * time.Hour
 )
-
-type outputFirewallSpillManifest struct {
-	Mode      string `json:"mode"`
-	Path      string `json:"path,omitempty"`
-	ExpiresAt string `json:"expires_at"`
-}
 
 // DispatchViaAPI serves a routed bd verb by calling the controller's HTTP API
 // (the pure-HTTP redirect: the controller owns the store, every worker is a
@@ -835,49 +824,20 @@ func WriteManagedReadJSONForVerb(verb string, out []beads.Bead, stdout, stderr i
 // WriteManagedJSON serializes a known managed read entirely before it reaches
 // stdout. A canceled context never publishes staged bytes.
 func WriteManagedJSON(ctx context.Context, commandClass, verb string, value any, stdout, stderr io.Writer) int {
-	budget := managedOutputBudgetForVerb(verb)
-	return writeJSONWithBudget(ctx, commandClass, value, stdout, stderr, budget)
+	return outputfirewall.WriteJSON(ctx, commandClass, verb, value, stdout, stderr, marshalOutputJSON)
+}
+
+// WriteManagedOutput applies the managed-output admission check to an already
+// rendered known-read response. It preserves direct CLI bytes when the policy
+// is inactive and never applies to mutation paths.
+func WriteManagedOutput(ctx context.Context, commandClass, verb string, payload []byte, structured bool, stdout, stderr io.Writer) int {
+	return outputfirewall.Write(ctx, commandClass, verb, payload, structured, stdout, stderr)
 }
 
 // ManagedOutputFirewallActive reports whether a managed read verb is subject
 // to the explicitly injected output policy.
 func ManagedOutputFirewallActive(verb string) bool {
-	return managedOutputBudgetForVerb(verb) > 0
-}
-
-func managedOutputBudgetForVerb(verb string) int {
-	if os.Getenv(managedOutputFirewallEnv) != "1" || !managedOutputVerbEnabled(verb) {
-		return 0
-	}
-	budget := managedReadOutputBudget
-	if raw := os.Getenv(managedOutputFirewallBudgetEnv); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 512 {
-			budget = parsed
-		}
-	}
-	return budget
-}
-
-func managedOutputVerbEnabled(verb string) bool {
-	scope := strings.TrimSpace(os.Getenv(managedOutputFirewallReadVerbsEnv))
-	if scope == "" || verb == "" {
-		return true
-	}
-	for _, configured := range strings.Split(scope, ",") {
-		if strings.TrimSpace(configured) == verb {
-			return true
-		}
-	}
-	return false
-}
-
-func managedOutputRetention() time.Duration {
-	if raw := os.Getenv(managedOutputFirewallRetentionEnv); raw != "" {
-		if retention, err := time.ParseDuration(raw); err == nil && retention > 0 {
-			return retention
-		}
-	}
-	return managedOutputFirewallRetention
+	return outputfirewall.Active(verb)
 }
 
 // WriteReadyJSONWithBudget writes a complete bead result when it fits within
@@ -888,156 +848,5 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 	if out == nil {
 		out = []beads.Bead{}
 	}
-	return writeJSONWithBudget(context.Background(), "managed_bd_read", out, stdout, stderr, budget)
-}
-
-func writeJSONWithBudget(ctx context.Context, commandClass string, value any, stdout, stderr io.Writer, budget int) int {
-	if err := ctx.Err(); err != nil {
-		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	payload, err := marshalOutputJSON(value)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc output firewall: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	payload = append(payload, '\n')
-	if err := ctx.Err(); err != nil {
-		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if budget > 0 && len(payload) > budget {
-		digest := sha256.Sum256(payload)
-		spillPath := writeOutputFirewallSpill(payload)
-		retention := managedOutputRetention()
-		spill := outputFirewallSpillManifest{
-			Mode:      "unavailable",
-			ExpiresAt: time.Now().Add(retention).UTC().Format(time.RFC3339),
-		}
-		if spillPath != "" {
-			spill.Mode = "secure"
-			spill.Path = spillPath
-		}
-		manifest := struct {
-			SchemaVersion   string                      `json:"schema_version"`
-			Kind            string                      `json:"kind"`
-			Reason          string                      `json:"reason"`
-			CommandClass    string                      `json:"command_class"`
-			BudgetBytes     int                         `json:"budget_bytes"`
-			SerializedBytes int                         `json:"serialized_bytes"`
-			SHA256          string                      `json:"sha256"`
-			Spill           outputFirewallSpillManifest `json:"spill"`
-		}{
-			SchemaVersion:   "1",
-			Kind:            "gc.output_firewall",
-			Reason:          "byte_budget_exceeded",
-			CommandClass:    commandClass,
-			BudgetBytes:     budget,
-			SerializedBytes: len(payload),
-			SHA256:          fmt.Sprintf("%x", digest),
-			Spill:           spill,
-		}
-		payload, err = marshalOutputJSON(manifest)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc output firewall: encoding manifest: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		payload = append(payload, '\n')
-		if len(payload) > budget {
-			fmt.Fprintln(stderr, "gc output firewall: output budget too small for firewall manifest") //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		fmt.Fprintf(stderr, "gc output firewall: staging canceled: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if _, err := stdout.Write(payload); err != nil {
-		fmt.Fprintf(stderr, "gc output firewall: writing output: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
-
-// writeOutputFirewallSpill persists withheld output only in the controller
-// supplied directory. A configured-but-unsafe directory degrades to a
-// no-spill manifest rather than risking an arbitrary write.
-func writeOutputFirewallSpill(payload []byte) string {
-	if os.Getenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE") == "disabled" {
-		return ""
-	}
-	dir := os.Getenv(managedOutputFirewallSpillDirEnv)
-	if dir == "" || !filepath.IsAbs(dir) {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	cleanupOutputFirewallSpill(dir, managedOutputRetention())
-	info, err := os.Lstat(dir)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return ""
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return ""
-	}
-	defer root.Close() //nolint:errcheck // no useful recovery after a completed spill
-	rootInfo, err := root.Stat(".")
-	if err != nil || !os.SameFile(info, rootInfo) || info.Mode().Perm()&0o077 != 0 {
-		return ""
-	}
-	// The temporary file is deliberately not an artifact name: no manifest can
-	// reference it, and a reader can only discover the completed file after the
-	// atomic rename below.
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return ""
-	}
-	suffix := hex.EncodeToString(random)
-	temporary := ".output-" + suffix + ".tmp"
-	finalName := "output-" + suffix
-	f, err := root.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return ""
-	}
-	if _, err := f.Write(payload); err != nil {
-		_ = f.Close()
-		_ = root.Remove(temporary)
-		return ""
-	}
-	if err := f.Close(); err != nil {
-		_ = root.Remove(temporary)
-		return ""
-	}
-	if err := root.Rename(temporary, finalName); err != nil {
-		_ = root.Remove(temporary)
-		return ""
-	}
-	current, err := os.Lstat(dir)
-	if err != nil || !os.SameFile(rootInfo, current) {
-		_ = root.Remove(finalName)
-		return ""
-	}
-	return filepath.Join(dir, finalName)
-}
-
-// cleanupOutputFirewallSpill removes expired regular artifacts created by this
-// package. It deliberately ignores unknown names, directories, and symlinks.
-func cleanupOutputFirewallSpill(dir string, retention time.Duration) {
-	entries, err := os.ReadDir(dir)
-	if err != nil || retention <= 0 {
-		return
-	}
-	cutoff := time.Now().Add(-retention)
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "output-") || entry.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, entry.Name()))
-	}
+	return outputfirewall.WriteJSONWithBudget(context.Background(), "managed_bd_read", out, stdout, stderr, budget, marshalOutputJSON)
 }

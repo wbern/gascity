@@ -85,6 +85,25 @@ func TestResolveTemplateMarksManagedSessionsForOutputFirewall(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateScrubsFirewallEnvironmentWhenDisabled(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	disabled := false
+	params := &agentBuildParams{cityName: "city", cityPath: cityPath, city: &config.City{OutputFirewall: config.OutputFirewallConfig{Enabled: &disabled}}, workspace: &config.Workspace{Provider: "test"}, providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}}, lookPath: func(string) (string, error) { return "/bin/echo", nil }, fs: fsys.OSFS{}, beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard}
+	for _, key := range []string{"GC_MANAGED_OUTPUT_FIREWALL", "GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH", "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"} {
+		t.Setenv(key, "ambient")
+	}
+	tp, err := resolveTemplate(params, &config.Agent{Name: "runner", Env: map[string]string{"GC_MANAGED_OUTPUT_FIREWALL": "agent"}}, "runner", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"GC_MANAGED_OUTPUT_FIREWALL", "GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT", "GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH", "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"} {
+		if got := tp.Env[key]; got != "" {
+			t.Fatalf("%s=%q, want scrubbed", key, got)
+		}
+	}
+}
+
 func TestResolveTemplatePrependsGCBinDirToConfiguredAgentPATH(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")

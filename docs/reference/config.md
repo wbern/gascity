@@ -622,12 +622,12 @@ OutputFirewallConfig is the operator-owned policy applied to managed read output
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean |  |  |  |
-| `byte_budget` | integer |  |  |  |
-| `read_verbs` | []string |  |  |  |
-| `spill_mode` | string |  |  |  |
-| `spill_path` | string |  |  |  |
-| `retention_ttl` | string |  |  |  |
+| `enabled` | boolean |  |  | Enabled controls whether managed known-read output is bounded. |
+| `byte_budget` | integer |  |  | ByteBudget is the maximum serialized stdout bytes for a managed read. |
+| `read_verbs` | []string |  |  | ReadVerbs is the closed allowlist of managed read routes to protect. |
+| `spill_mode` | string |  |  | SpillMode selects secure, disabled, or required evidence retention. |
+| `spill_path` | string |  |  | SpillPath is the city-relative directory for protected evidence artifacts. |
+| `retention_ttl` | string |  |  | RetentionTTL is how long protected evidence artifacts are retained. |
 
 ## PackDefaults
 

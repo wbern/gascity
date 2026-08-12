@@ -36,6 +36,7 @@ var hookClaimMutationTimeout = 10 * time.Second
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
 type hookClaimOptions struct {
+	Context            context.Context
 	Assignee           string
 	IdentityCandidates []string
 	RouteTargets       []string
@@ -611,9 +612,13 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	result.ContinuationAssigned = assigned
 	if opts.JSON {
-		if err := writeHookClaimJSON(context.Background(), stdout, stderr, result); err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
-			return 1
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := writeHookClaimJSON(ctx, stdout, stderr, result); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: writing JSON after completed claim: %v\n", err) //nolint:errcheck
+			return 0
 		}
 		return 0
 	}

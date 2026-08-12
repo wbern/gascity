@@ -2167,25 +2167,31 @@
     "OutputFirewallConfig": {
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Enabled controls whether managed known-read output is bounded."
         },
         "byte_budget": {
-          "type": "integer"
+          "type": "integer",
+          "description": "ByteBudget is the maximum serialized stdout bytes for a managed read."
         },
         "read_verbs": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "ReadVerbs is the closed allowlist of managed read routes to protect."
         },
         "spill_mode": {
-          "type": "string"
+          "type": "string",
+          "description": "SpillMode selects secure, disabled, or required evidence retention."
         },
         "spill_path": {
-          "type": "string"
+          "type": "string",
+          "description": "SpillPath is the city-relative directory for protected evidence artifacts."
         },
         "retention_ttl": {
-          "type": "string"
+          "type": "string",
+          "description": "RetentionTTL is how long protected evidence artifacts are retained."
         }
       },
       "additionalProperties": false,
