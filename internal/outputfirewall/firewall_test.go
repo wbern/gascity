@@ -250,11 +250,21 @@ func TestConcurrentSpillsUseDistinctPrivateArtifacts(t *testing.T) {
 
 func TestPrepareSpillRejectsFinalAndIntermediateSymlinks(t *testing.T) {
 	parent, target := t.TempDir(), t.TempDir()
+	valid := filepath.Join(parent, "valid")
+	if err := os.Mkdir(valid, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(spillRootEnv, parent)
+	t.Setenv(spillPathEnv, "valid")
+	if root := prepareSpill(); root == nil {
+		t.Fatal("rejected valid spill directory")
+	} else {
+		_ = root.root.Close()
+	}
 	final := filepath.Join(parent, "output")
 	if err := os.Symlink(target, final); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(spillRootEnv, parent)
 	t.Setenv(spillPathEnv, "output")
 	if root := prepareSpill(); root != nil {
 		_ = root.root.Close()

@@ -215,7 +215,17 @@ func managedPassthroughReadVerb(verb string, args []string) bool {
 	case "show", "ready", "list", "query":
 		return true
 	case "mol":
-		return len(args) > 0 && (args[0] == "current" || args[0] == "progress")
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if strings.HasPrefix(arg, "-") {
+				if arg == "--format" || arg == "--db" || arg == "--repo" {
+					i++
+				}
+				continue
+			}
+			return arg == "current" || arg == "progress"
+		}
+		return false
 	default:
 		return false
 	}

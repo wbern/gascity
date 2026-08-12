@@ -209,6 +209,7 @@ func TestRunManagedPassthroughReadAdmitsPlainAndInferredMoleculeReads(t *testing
 	}{
 		{name: "plain show", args: []string{"show", "gcw-1"}},
 		{name: "inferred molecule current", args: []string{"mol", "current"}},
+		{name: "flag before molecule current", args: []string{"mol", "--json", "current"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -228,6 +229,14 @@ func TestRunManagedPassthroughReadAdmitsPlainAndInferredMoleculeReads(t *testing
 				t.Fatalf("managed read escaped firewall: %d bytes %q", stdout.Len(), stdout.String())
 			}
 		})
+	}
+}
+
+func TestManagedPassthroughReadVerbExcludesMoleculeMutations(t *testing.T) {
+	for _, args := range [][]string{{"close", "current"}, {"--json", "close", "current"}} {
+		if managedPassthroughReadVerb("mol", args) {
+			t.Fatalf("mol %v classified as a read", args)
+		}
 	}
 }
 

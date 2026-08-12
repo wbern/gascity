@@ -9,17 +9,17 @@ import (
 
 // OutputFirewallConfig is the operator-owned policy applied to managed read output.
 type OutputFirewallConfig struct {
-	// Enabled controls whether managed known-read output is bounded.
+	// Enabled controls whether managed known-read output is bounded; default true.
 	Enabled *bool `toml:"enabled,omitempty"`
-	// ByteBudget is the maximum serialized stdout bytes for a managed read.
+	// ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768.
 	ByteBudget *int `toml:"byte_budget,omitempty"`
-	// ReadVerbs is the closed allowlist of managed read routes to protect.
+	// ReadVerbs is the closed allowlist of managed read routes to protect; default show, ready, list, query, mol, hook.
 	ReadVerbs []string `toml:"read_verbs,omitempty"`
-	// SpillMode selects secure, disabled, or required evidence retention.
+	// SpillMode selects secure, disabled, or required evidence retention; default secure.
 	SpillMode string `toml:"spill_mode,omitempty"`
-	// SpillPath is the city-relative directory for protected evidence artifacts.
+	// SpillPath is the city-relative directory for protected evidence artifacts; default .gc/evidence/output.
 	SpillPath string `toml:"spill_path,omitempty"`
-	// RetentionTTL is how long protected evidence artifacts are retained.
+	// RetentionTTL is how long protected evidence artifacts are retained; default 24h.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 

@@ -3,8 +3,10 @@ package bddispatch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,7 +229,9 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
 	}
 	var manifest struct {
-		Spill struct {
+		SerializedBytes int    `json:"serialized_bytes"`
+		SHA256          string `json:"sha256"`
+		Spill           struct {
 			Mode string `json:"mode"`
 			Path string `json:"path"`
 		} `json:"spill"`
@@ -244,6 +248,25 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("spill mode = %o, want 600", got)
+	}
+	artifact, err := os.ReadFile(manifest.Spill.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal([]beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("body", 1000)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if !bytes.Equal(artifact, want) {
+		t.Fatalf("artifact does not match serialized payload")
+	}
+	digest := sha256.Sum256(artifact)
+	if manifest.SerializedBytes != len(artifact) || manifest.SHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("manifest bytes/digest mismatch: %#v", manifest)
+	}
+	if strings.Contains(stdout.String(), "bodybody") || strings.Contains(stderr.String(), "bodybody") {
+		t.Fatal("withheld payload leaked")
 	}
 }
 

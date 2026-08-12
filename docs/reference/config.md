@@ -622,12 +622,12 @@ OutputFirewallConfig is the operator-owned policy applied to managed read output
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean |  |  | Enabled controls whether managed known-read output is bounded. |
-| `byte_budget` | integer |  |  | ByteBudget is the maximum serialized stdout bytes for a managed read. |
-| `read_verbs` | []string |  |  | ReadVerbs is the closed allowlist of managed read routes to protect. |
-| `spill_mode` | string |  |  | SpillMode selects secure, disabled, or required evidence retention. |
-| `spill_path` | string |  |  | SpillPath is the city-relative directory for protected evidence artifacts. |
-| `retention_ttl` | string |  |  | RetentionTTL is how long protected evidence artifacts are retained. |
+| `enabled` | boolean |  |  | Enabled controls whether managed known-read output is bounded; default true. |
+| `byte_budget` | integer |  |  | ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768. |
+| `read_verbs` | []string |  |  | ReadVerbs is the closed allowlist of managed read routes to protect; default show, ready, list, query, mol, hook. |
+| `spill_mode` | string |  |  | SpillMode selects secure, disabled, or required evidence retention; default secure. |
+| `spill_path` | string |  |  | SpillPath is the city-relative directory for protected evidence artifacts; default .gc/evidence/output. |
+| `retention_ttl` | string |  |  | RetentionTTL is how long protected evidence artifacts are retained; default 24h. |
 
 ## PackDefaults
 

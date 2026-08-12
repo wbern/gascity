@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 type hookFirewallFailingWriter struct{}
@@ -67,5 +69,19 @@ func TestDoHookReportsManagedOutputPublishFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "output firewall could not publish") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCompletedHookClaimDoesNotBecomeRetryableWhenRequiredSpillFails(t *testing.T) {
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "512")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "hook")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "required")
+	var stdout, stderr bytes.Buffer
+	ops := hookClaimOps{}
+	ops.applyDefaults()
+	result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: hookClaimCommandName, Action: "work", ContinuationAssigned: []string{strings.Repeat("secret", 200)}}
+	if code := writeHookClaimWorkResultForBead(result, beads.Bead{ID: "gcw-1"}, hookClaimOptions{Assignee: "worker", JSON: true}, ops, ".", &stdout, &stderr); code != 0 {
+		t.Fatalf("completed claim code=%d, want success; stderr=%q", code, stderr.String())
 	}
 }
