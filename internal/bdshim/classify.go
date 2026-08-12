@@ -445,6 +445,9 @@ const QueryRoutingEnabled = true
 // city is in the split phase (graph_store=sqlite active, so a distinct graph
 // backend exists). See the Disposition docs above.
 func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
+	if SummaryJSONRoutable(verb, args) {
+		return Route
+	}
 	// bd show and bd list have richer output contracts than the controller's
 	// Bead: show emits IssueDetails (including computed relation/comment counts)
 	// and list emits IssueWithCounts. Passing them through is therefore the only
@@ -538,6 +541,31 @@ func ClassifyVerb(verb string, args []string, splitPhase bool) Disposition {
 		return Refuse
 	}
 	return Passthrough
+}
+
+// SummaryJSONRoutable reports whether an explicit compact discovery request
+// has an otherwise controller-routable list or ready shape. The flag belongs to
+// the Gas City shim, so normal bd JSON remains a faithful passthrough.
+func SummaryJSONRoutable(verb string, args []string) bool {
+	if verb != "list" && verb != "ready" {
+		return false
+	}
+	withoutSummary := make([]string, 0, len(args))
+	found := false
+	for _, arg := range args {
+		if arg == "--summary-json" {
+			found = true
+			continue
+		}
+		withoutSummary = append(withoutSummary, arg)
+	}
+	if !found {
+		return false
+	}
+	if verb == "list" {
+		return ListRoutable(withoutSummary)
+	}
+	return ReadyRoutable(withoutSummary)
 }
 
 // QueryRoutable reports whether a `bd query` arg list is the ephemeral

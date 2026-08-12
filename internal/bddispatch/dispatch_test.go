@@ -20,6 +20,142 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing.T) {
+	giantNotes := strings.Repeat("evidence ", 100_000) // representative of an 845KiB notes field
+	bead := beads.Bead{
+		ID:       "gcw-giant",
+		Title:    "Preserve large evidence",
+		Status:   "open",
+		Priority: intPtr(0),
+		Assignee: "worker",
+		Labels:   []string{"context-budget"},
+		Metadata: beads.StringMap{"gc.routed_to": "rig/worker"},
+		Notes:    giantNotes,
+	}
+
+	payload, err := json.Marshal(NewBeadSummaryEnvelope("ready", []beads.Bead{bead}, DefaultBeadSummaryBudget))
+	if err != nil {
+		t.Fatalf("marshal summary: %v", err)
+	}
+	if len(payload) > DefaultBeadSummaryBudget {
+		t.Fatalf("summary is %d bytes, want at most %d", len(payload), DefaultBeadSummaryBudget)
+	}
+	if strings.Contains(string(payload), giantNotes) {
+		t.Fatal("summary leaked notes")
+	}
+
+	var got struct {
+		Kind  string `json:"kind"`
+		Beads []struct {
+			ID             string   `json:"id"`
+			DetailsOmitted []string `json:"details_omitted"`
+		} `json:"beads"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	if got.Kind != "gc.bead_summary" || len(got.Beads) != 1 || got.Beads[0].ID != bead.ID {
+		t.Fatalf("summary = %+v, want actionable %q entry", got, bead.ID)
+	}
+	if !containsString(got.Beads[0].DetailsOmitted, "notes") {
+		t.Fatalf("details_omitted = %v, want notes", got.Beads[0].DetailsOmitted)
+	}
+}
+
+func TestBeadSummaryEnvelopeMarksOversizedIndexFieldsInsteadOfSilentlyTruncating(t *testing.T) {
+	envelope := NewBeadSummaryEnvelope("list", []beads.Bead{{
+		ID: "gcw-giant-title", Title: strings.Repeat("x", 1024), Status: "open",
+	}}, DefaultBeadSummaryBudget)
+	if len(envelope.Beads) != 1 {
+		t.Fatalf("beads = %d, want one", len(envelope.Beads))
+	}
+	if !containsString(envelope.Beads[0].FieldsOmitted, "title") {
+		t.Fatalf("fields_omitted = %v, want title", envelope.Beads[0].FieldsOmitted)
+	}
+}
+
+func TestBeadSummaryEnvelopeMarksOversizedRoutingMetadata(t *testing.T) {
+	envelope := NewBeadSummaryEnvelope("ready", []beads.Bead{{
+		ID: "gcw-giant-route", Status: "open", Metadata: beads.StringMap{"gc.routed_to": strings.Repeat("x", 1024)},
+	}}, DefaultBeadSummaryBudget)
+	if !containsString(envelope.Beads[0].FieldsOmitted, "routing_metadata.gc.routed_to") {
+		t.Fatalf("fields_omitted = %v, want routed metadata marker", envelope.Beads[0].FieldsOmitted)
+	}
+}
+
+func TestBeadSummaryEnvelopeCapsRowsAndReportsOmissions(t *testing.T) {
+	input := make([]beads.Bead, MaxBeadSummaryRows+1)
+	for i := range input {
+		input[i] = beads.Bead{ID: fmt.Sprintf("gcw-%03d", i), Status: "open"}
+	}
+	envelope := NewBeadSummaryEnvelope("list", input, 128<<10)
+	if len(envelope.Beads) != MaxBeadSummaryRows || envelope.Omitted != 1 {
+		t.Fatalf("summary has %d beads and %d omissions, want %d and 1", len(envelope.Beads), envelope.Omitted, MaxBeadSummaryRows)
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDispatchViaAPIReadySummaryJSONUsesBoundedProjection(t *testing.T) {
+	giantNotes := strings.Repeat("evidence ", 100_000)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []beads.Bead{{
+			ID: "gcw-giant", Title: "Preserve evidence", Status: "open", Notes: giantNotes,
+		}}}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := DispatchViaAPI(beadclient.NewCityScopedClient(ts.URL, "alpha"), "ready", []string{"--json", "--summary-json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("DispatchViaAPI() = %d, stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() > DefaultBeadSummaryBudget || strings.Contains(stdout.String(), giantNotes) {
+		t.Fatalf("summary stdout is not bounded: %d bytes", stdout.Len())
+	}
+	var got BeadSummaryEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	if got.Kind != "gc.bead_summary" || got.Verb != "ready" || len(got.Beads) != 1 || got.Beads[0].ID != "gcw-giant" {
+		t.Fatalf("summary = %#v", got)
+	}
+}
+
+func TestDispatchViaAPIListSummaryJSONUsesBoundedProjection(t *testing.T) {
+	giantNotes := strings.Repeat("evidence ", 100_000)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []beads.Bead{{
+			ID: "gcw-giant", Title: "Preserve evidence", Status: "open", Notes: giantNotes,
+		}}}) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := DispatchViaAPI(beadclient.NewCityScopedClient(ts.URL, "alpha"), "list", []string{"--json", "--summary-json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("DispatchViaAPI() = %d, stderr = %q", code, stderr.String())
+	}
+	var got BeadSummaryEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	if got.Kind != "gc.bead_summary" || got.Verb != "list" || len(got.Beads) != 1 || got.Beads[0].ID != "gcw-giant" {
+		t.Fatalf("summary = %#v", got)
+	}
+}
+
 func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	beadsOut := []beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("secret-value", 64)}}

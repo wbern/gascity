@@ -75,6 +75,7 @@ var commandShapeFlags = map[string]string{
 	"--set-metadata":      "--set-metadata",
 	"--sort":              "--sort",
 	"--status":            "--status",
+	"--summary-json":      "--summary-json",
 	"-s":                  "--status",
 	"--token":             "--token",
 	"--type":              "--type",
