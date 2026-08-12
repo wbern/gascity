@@ -161,9 +161,21 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
+	now := time.Now
+	if ops.Now != nil {
+		now = ops.Now
+	}
+
+	// The ready projection is fetched at most ONCE per invocation and shared by
+	// the trigger readiness check below and the pool loop further down. The
+	// trigger path runs first (it must keep its priority over pool work), so the
+	// fetch is lazy rather than hoisted: a session with no trigger pays nothing,
+	// and a session with one pays a single query, not two.
+	ready := &hookReadyProjection{workQuery: workQuery, dir: dir, ops: ops, now: now}
+
 	triggerErrored := false
 	if triggerID := strings.TrimSpace(opts.TriggerBeadID); triggerID != "" {
-		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, stdout, stderr)
+		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, ready, stdout, stderr)
 		if res.terminal {
 			return res
 		}
@@ -175,19 +187,12 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintln(stderr, "gc hook --claim: missing work query runner") //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
-	now := time.Now
-	if ops.Now != nil {
-		now = ops.Now
-	}
 
-	output, err := ops.Runner(workQuery, dir)
+	preFilter, normalized, err := ready.fetch()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
-
-	preFilter := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized := filterUnreadyHookCandidates(preFilter, now())
 	if stripped := hookClaimStripDiagnostic(preFilter, now()); len(stripped) > 0 {
 		// Emit len(before) and len(after) so a recurrence self-classifies the
 		// mechanism (gci-x8zo): before>0,after=0 == the worker stripped rows the
@@ -428,7 +433,127 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 //
 // A terminal result means the trigger was handled (claimed, adopted, or a hard
 // error). A non-terminal result means "not claimable — try the pool".
-func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
+// hookReadyProjection memoizes the one work-query round trip per invocation.
+// fetch returns the raw normalized output and the readiness-filtered output;
+// both callers (trigger readiness, pool loop) get the same snapshot, so they
+// cannot disagree about what was ready at this instant — which is the whole
+// point of gci-pha.
+type hookReadyProjection struct {
+	workQuery string
+	dir       string
+	ops       *hookClaimOps
+	now       func() time.Time
+
+	done       bool
+	preFilter  string
+	normalized string
+	err        error
+}
+
+func (r *hookReadyProjection) fetch() (string, string, error) {
+	if r.done {
+		return r.preFilter, r.normalized, r.err
+	}
+	r.done = true
+	if r.ops == nil || r.ops.Runner == nil {
+		r.err = errors.New("missing work query runner")
+		return r.preFilter, r.normalized, r.err
+	}
+	output, err := r.ops.Runner(r.workQuery, r.dir)
+	if err != nil {
+		r.err = err
+		return r.preFilter, r.normalized, r.err
+	}
+	r.preFilter = normalizeWorkQueryOutput(strings.TrimSpace(output))
+	r.normalized = filterUnreadyHookCandidates(r.preFilter, r.now())
+	return r.preFilter, r.normalized, nil
+}
+
+// strippedByReadinessFilter reports whether the work query SAW this bead and the
+// readiness filter then dropped it. That conjunction is the only membership
+// signal worth acting on.
+//
+// Absence from the query means nothing: the work query is not guaranteed to
+// cover the trigger's route — it may be a global ready query returning entirely
+// unrelated beads — and the trigger path exists precisely to claim work the pool
+// query did not surface (TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQuery
+// Result pins that contract). Treating absence as "not ready" would refuse
+// legitimate triggers, so we require positive evidence: seen, then stripped.
+//
+// Fails OPEN on any unusable input (no runner, query error, non-JSON): a broken
+// work query is a real GC3 condition and must not become a way to starve a
+// worker of its own trigger.
+func (r *hookReadyProjection) strippedByReadinessFilter(beadID string) bool {
+	id := strings.TrimSpace(beadID)
+	if id == "" {
+		return false
+	}
+	preFilter, normalized, err := r.fetch()
+	if err != nil {
+		return false
+	}
+	seen, ok := hookProjectionContains(preFilter, id)
+	if !ok || !seen {
+		return false
+	}
+	kept, ok := hookProjectionContains(normalized, id)
+	if !ok {
+		return false
+	}
+	return !kept
+}
+
+// hookProjectionContains reports whether a work-query projection lists beadID.
+// ok=false means the projection could not be decoded and carries no signal.
+func hookProjectionContains(projection, beadID string) (bool, bool) {
+	if strings.TrimSpace(projection) == "" {
+		return false, false
+	}
+	candidates, err := decodeHookClaimBeads(projection)
+	if err != nil {
+		return false, false
+	}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.ID) == beadID {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// hookBeadBlockedReason reports why a RESOLVED bead is not claimable, or "" when
+// nothing blocks it. This is the typed half of the shared readiness predicate:
+// isDepBlockedHookCandidate applies the same rule to the map-shaped ready
+// projection, and both now agree that a non-closed blocking dependency parks its
+// successor.
+//
+// Only ready-blocking dependency types count. A "tracks" or "relates-to" edge
+// describes a bead, it does not gate it, and treating those as blockers would
+// park work the graph never intended to serialize.
+func hookBeadBlockedReason(bead beads.Bead) string {
+	for _, dep := range bead.Dependencies {
+		blocker := strings.TrimSpace(dep.DependsOnID)
+		if blocker == "" {
+			continue
+		}
+		if depType := strings.TrimSpace(dep.Type); depType != "" && !beads.IsReadyBlockingDependencyType(depType) {
+			continue
+		}
+		// An UNKNOWN blocker status fails closed. bd's nested projection always
+		// carries one; an absent status means we are looking at a shape we do not
+		// understand, and claiming past a dependency we cannot evaluate is the
+		// exact failure this bead exists to stop.
+		if status := strings.TrimSpace(dep.Status); !strings.EqualFold(status, "closed") {
+			if status == "" {
+				status = "unknown"
+			}
+			return fmt.Sprintf("blocked by %s (status=%s)", blocker, status)
+		}
+	}
+	return ""
+}
+
+func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, ready *hookReadyProjection, stdout, stderr io.Writer) hookClaimResult {
 	triggerDir := strings.TrimSpace(opts.TriggerStoreDir)
 	if triggerDir == "" {
 		triggerDir = dir
@@ -497,6 +622,33 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 	if !hookClaimMatchesRoute(bead, opts.RouteTargets) {
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s routed to %q not in this session's targets; falling through to the pool\n", //nolint:errcheck
 			triggerID, hookClaimRoute(bead))
+		return hookClaimResult{}
+	}
+
+	// READINESS. Until gci-pha this path ran exactly four checks — exists,
+	// already-mine, unassigned+open, route — and then claimed. None of them
+	// looked at dependencies, so candidate SELECTION and the store's close gate
+	// disagreed: on GC3 2026-08-12T00:25Z a session claimed the graph.v2
+	// self-review step crm-q6zfr9 while its Investigate blocker crm-e9jahp was
+	// still open, and the close was refused with "blocked by open issues". The
+	// generic discovery path had filtered that same bead out all along.
+	//
+	// Falling through rather than draining is deliberate and costs no liveness:
+	// the pool query below is route-scoped, so a session refused its own trigger
+	// still takes the next genuinely ready bead on its route.
+	if reason := hookBeadBlockedReason(bead); reason != "" {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s is not ready (%s); falling through to the pool\n", //nolint:errcheck
+			triggerID, reason)
+		return hookClaimResult{}
+	}
+	// Second, independent guard against wire-shape drift: if the work query SAW
+	// this bead and the readiness filter dropped it, the projection knows
+	// something the resolved bead did not show us (it reads blocked_by/is_blocked,
+	// which `bd show` does not emit at all). Defer to it. Absence from the query
+	// is NOT a signal — see strippedByReadinessFilter.
+	if ready != nil && ready.strippedByReadinessFilter(bead.ID) {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s was stripped by the readiness filter; falling through to the pool\n", //nolint:errcheck
+			triggerID)
 		return hookClaimResult{}
 	}
 

@@ -4,6 +4,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -551,10 +552,58 @@ func isReadyBlockingDependencyType(t string) bool {
 // Dep represents a dependency relationship between two beads. The IssueID
 // depends on (is blocked by) DependsOnID. Type describes the relationship
 // kind (e.g. "blocks", "tracks", "relates-to").
+//
+// Status carries the BLOCKER's status when the dependency arrived through bd's
+// nested projection (see UnmarshalJSON). It is decode-only: the relational
+// stores neither set nor need it, and omitempty keeps it off the wire so the
+// marshaled form is byte-identical to what those stores have always written.
 type Dep struct {
 	IssueID     string `json:"issue_id"`
 	DependsOnID string `json:"depends_on_id"`
-	Type        string `json:"type"` // "blocks", "tracks", "relates-to", etc.
+	Type        string `json:"type"`             // "blocks", "tracks", "relates-to", etc.
+	Status      string `json:"status,omitempty"` // blocker status, bd-show projection only
+}
+
+// UnmarshalJSON accepts BOTH dependency wire shapes, because bd speaks two and
+// we were silently dropping one.
+//
+//	relational (native + caching stores, and Dep's own marshaled form):
+//	  {"issue_id":"a","depends_on_id":"b","type":"blocks"}
+//	nested projection (`bd show --json`, one full bead object per dependency):
+//	  {"id":"b","title":"Investigate","status":"open","dependency_type":"blocks"}
+//
+// None of the nested form's keys match this struct's tags, so a plain decode
+// produced the right NUMBER of Deps with every field empty. Callers that asked
+// "is a blocker still open?" got "" and read it as not-blocking, which is how a
+// dep-blocked bead reached the claim path (gci-pha). Decoding the nested form
+// into the same fields — the blocker's id is what this bead DependsOn — lets one
+// readiness predicate serve every caller regardless of which query produced the
+// bead.
+func (d *Dep) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		DepType     string `json:"dependency_type"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	d.IssueID = raw.IssueID
+	d.DependsOnID = raw.DependsOnID
+	d.Type = raw.Type
+	d.Status = raw.Status
+	// Only fill from the nested projection where the relational form was absent,
+	// so a payload carrying both keys keeps its explicit relational values.
+	if d.DependsOnID == "" {
+		d.DependsOnID = raw.ID
+	}
+	if d.Type == "" {
+		d.Type = raw.DepType
+	}
+	return nil
 }
 
 // QueryOpt controls query behavior for list methods.
