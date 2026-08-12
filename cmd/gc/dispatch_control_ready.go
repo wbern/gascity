@@ -350,6 +350,7 @@ func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
 			ID:        summary.ID,
 			Title:     summary.Title,
 			Status:    summary.Status,
+			Type:      summary.Type,
 			Priority:  summary.Priority,
 			CreatedAt: summary.CreatedAt,
 			Assignee:  summary.Assignee,

@@ -518,7 +518,7 @@ func TestControlReadyFallbackReadyConsumesSummaryProjection(t *testing.T) {
 	bdPath := filepath.Join(tmp, "bd")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s' "$*" > %q
-	printf '%%s' '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","beads":[{"id":"gcw-summary","status":"open","created_at":"2026-08-12T08:40:00Z","assignee":"control","labels":["pool:worker"],"routing_metadata":{"gc.routed_to":"rig/control"}}]}'
+	printf '%%s' '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","beads":[{"id":"gcw-summary","status":"open","type":"epic","created_at":"2026-08-12T08:40:00Z","assignee":"control","labels":["pool:worker"],"routing_metadata":{"gc.routed_to":"rig/control"}}]}'
 `, argsPath)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
@@ -535,6 +535,9 @@ printf '%%s' "$*" > %q
 	}
 	if result[0].Metadata[beadmeta.RoutedToMetadataKey] != "rig/control" {
 		t.Fatalf("routing metadata = %#v", result[0].Metadata)
+	}
+	if got := filterReadyByAssignee(result, "control", workflowServeScanLimit); len(got) != 0 {
+		t.Fatalf("filterReadyByAssignee(summary epic) = %#v, want empty", got)
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {

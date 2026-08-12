@@ -34,6 +34,7 @@ type BeadSummary struct {
 	ID                    string            `json:"id"`
 	Title                 string            `json:"title,omitempty"`
 	Status                string            `json:"status"`
+	Type                  string            `json:"type,omitempty"`
 	Priority              *int              `json:"priority,omitempty"`
 	CreatedAt             time.Time         `json:"created_at,omitempty"`
 	Assignee              string            `json:"assignee,omitempty"`
@@ -103,6 +104,7 @@ func beadSummary(bead beads.Bead) BeadSummary {
 		ID:                    bead.ID,
 		Title:                 title,
 		Status:                bead.Status,
+		Type:                  bead.Type,
 		Priority:              bead.Priority,
 		CreatedAt:             bead.CreatedAt,
 		Assignee:              bead.Assignee,
