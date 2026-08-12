@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bddispatch"
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/bdguard"
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
@@ -215,17 +216,8 @@ func managedPassthroughReadVerb(verb string, args []string) bool {
 	case "show", "ready", "list", "query":
 		return true
 	case "mol":
-		for i := 0; i < len(args); i++ {
-			arg := args[i]
-			if strings.HasPrefix(arg, "-") {
-				if arg == "--format" || arg == "--db" || arg == "--repo" {
-					i++
-				}
-				continue
-			}
-			return arg == "current" || arg == "progress"
-		}
-		return false
+		positionals := bdflags.Positionals("mol current", args)
+		return len(positionals) > 0 && (positionals[0] == "current" || positionals[0] == "progress")
 	default:
 		return false
 	}

@@ -210,6 +210,9 @@ func TestRunManagedPassthroughReadAdmitsPlainAndInferredMoleculeReads(t *testing
 		{name: "plain show", args: []string{"show", "gcw-1"}},
 		{name: "inferred molecule current", args: []string{"mol", "current"}},
 		{name: "flag before molecule current", args: []string{"mol", "--json", "current"}},
+		{name: "directory value flag before molecule current", args: []string{"mol", "-C", ".", "current", "--json"}},
+		{name: "actor value flag before molecule current", args: []string{"mol", "--actor", "reviewer", "current", "--json"}},
+		{name: "dolt value flag before molecule current", args: []string{"mol", "--dolt-auto-commit", "off", "current", "--json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
