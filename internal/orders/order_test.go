@@ -395,6 +395,8 @@ description = "Auto-close convoys where all children are closed"
 formula = "mol-convoy-check"
 trigger = "event"
 on = "bead.closed"
+subject = "gc-42"
+metadata = { "gc.routed_to" = "rig/polecat" }
 `)
 	a, err := Parse(data)
 	if err != nil {
@@ -405,6 +407,12 @@ on = "bead.closed"
 	}
 	if a.On != "bead.closed" {
 		t.Errorf("On = %q, want %q", a.On, "bead.closed")
+	}
+	if a.Subject != "gc-42" {
+		t.Errorf("Subject = %q, want %q", a.Subject, "gc-42")
+	}
+	if got := a.Metadata["gc.routed_to"]; got != "rig/polecat" {
+		t.Errorf("Metadata[gc.routed_to] = %q, want rig/polecat", got)
 	}
 	if a.Formula != "mol-convoy-check" {
 		t.Errorf("Formula = %q, want %q", a.Formula, "mol-convoy-check")

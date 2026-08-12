@@ -411,6 +411,63 @@ func TestCheckTriggerEventDue(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerEventPredicates(t *testing.T) {
+	matchingPayload := json.RawMessage(`{"metadata":{"gc.routed_to":"rig/polecat"}}`)
+	nonMatchingPayload := json.RawMessage(`{"metadata":{"gc.routed_to":"rig/other"}}`)
+	eventsForTest := []events.Event{
+		{Type: "bead.updated", Subject: "wrong-bead", Payload: matchingPayload},
+		{Type: "bead.updated", Subject: "target-bead", Payload: nonMatchingPayload},
+		{Type: "bead.updated", Subject: "target-bead", Payload: matchingPayload},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		order  Order
+		want   bool
+		reason string
+	}{
+		{
+			name: "subject and metadata predicates reject same-type non-matches",
+			order: Order{
+				Name:     "route-nudge",
+				Trigger:  "event",
+				On:       "bead.updated",
+				Subject:  "target-bead",
+				Metadata: map[string]string{"gc.routed_to": "rig/polecat"},
+			},
+			want:   true,
+			reason: "event: 1 bead.updated event(s)",
+		},
+		{
+			name:   "no predicates retain type-only behavior",
+			order:  Order{Name: "route-nudge", Trigger: "event", On: "bead.updated"},
+			want:   true,
+			reason: "event: 3 bead.updated event(s)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := CheckTrigger(tc.order, time.Time{}, neverRan, newEventsProvider(t, eventsForTest), nil)
+			if result.Due != tc.want {
+				t.Fatalf("Due = %v, want %v; reason: %s", result.Due, tc.want, result.Reason)
+			}
+			if result.Reason != tc.reason {
+				t.Fatalf("Reason = %q, want %q", result.Reason, tc.reason)
+			}
+		})
+	}
+
+	noMatch := CheckTrigger(Order{
+		Name:     "route-nudge",
+		Trigger:  "event",
+		On:       "bead.updated",
+		Subject:  "target-bead",
+		Metadata: map[string]string{"gc.routed_to": "rig/polecat"},
+	}, time.Time{}, neverRan, newEventsProvider(t, eventsForTest[:2]), nil)
+	if noMatch.Due {
+		t.Fatalf("Due = true, want false for same-type events that do not satisfy predicates; reason: %s", noMatch.Reason)
+	}
+}
+
 func TestCheckTriggerEventWithCursor(t *testing.T) {
 	ep := newEventsProvider(t, []events.Event{
 		{Type: "bead.closed"},
