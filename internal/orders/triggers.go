@@ -416,6 +416,7 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 
 	matched, err := ep.List(events.Filter{
 		Type:     a.On,
+		Subject:  a.Subject,
 		AfterSeq: cursor,
 	})
 	if err != nil {
@@ -425,7 +426,7 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	for _, e := range matched {
 		// Exclude the dispatcher's own order-tracking bookkeeping beads so an event
 		// order never self-fires on lifecycle events emitted by those beads (#3720).
-		if !payloadHasLabel(e.Payload, labelOrderTracking) {
+		if !payloadHasLabel(e.Payload, labelOrderTracking) && payloadMatchesMetadata(e.Payload, a.Metadata) {
 			count++
 		}
 	}
@@ -433,6 +434,29 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+}
+
+// payloadMatchesMetadata reports whether a JSON bead payload contains every
+// configured metadata key-value pair. An empty predicate matches all payloads.
+func payloadMatchesMetadata(payload json.RawMessage, metadata map[string]string) bool {
+	if len(metadata) == 0 {
+		return true
+	}
+	if len(payload) == 0 {
+		return false
+	}
+	var p struct {
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	for key, want := range metadata {
+		if p.Metadata[key] != want {
+			return false
+		}
+	}
+	return true
 }
 
 // payloadHasLabel reports whether a JSON bead payload contains the given label.

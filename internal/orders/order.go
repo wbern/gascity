@@ -51,6 +51,13 @@ type Order struct {
 	Check string `toml:"check,omitempty"`
 	// On is the event type to match (for event triggers). E.g., "bead.closed".
 	On string `toml:"on,omitempty"`
+	// Subject optionally restricts an event trigger to events for this subject.
+	// Empty preserves type-only event matching.
+	Subject string `toml:"subject,omitempty"`
+	// Metadata optionally restricts an event trigger to events whose payload
+	// contains every configured metadata key-value pair. Empty preserves
+	// type-only event matching.
+	Metadata map[string]string `toml:"metadata,omitempty"`
 	// Pool is the target agent/pool for dispatching the wisp.
 	Pool string `toml:"pool,omitempty"`
 	// Timeout is the per-order timeout. Go duration string (e.g., "90s").
@@ -124,6 +131,8 @@ type orderDecode struct {
 	TZ           string                `toml:"tz,omitempty"`
 	Check        string                `toml:"check,omitempty"`
 	On           string                `toml:"on,omitempty"`
+	Subject      string                `toml:"subject,omitempty"`
+	Metadata     map[string]string     `toml:"metadata,omitempty"`
 	Pool         string                `toml:"pool,omitempty"`
 	Timeout      string                `toml:"timeout,omitempty"`
 	CheckTimeout string                `toml:"check_timeout,omitempty"`
@@ -150,6 +159,8 @@ func (d orderDecode) normalized() Order {
 		TZ:           d.TZ,
 		Check:        d.Check,
 		On:           d.On,
+		Subject:      d.Subject,
+		Metadata:     d.Metadata,
 		Pool:         d.Pool,
 		Timeout:      d.Timeout,
 		CheckTimeout: d.CheckTimeout,
