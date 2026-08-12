@@ -751,6 +751,8 @@ var nativeDoltTransientReadErrorSignatures = []string{
 	"unexpected eof",
 	"use of closed network connection",
 	"connection refused",
+	"dolt circuit breaker is open",
+	"server appears down, failing fast",
 }
 
 // isNativeDoltTransientReadError reports whether err is a transient managed-Dolt

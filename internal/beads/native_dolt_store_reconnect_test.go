@@ -80,6 +80,33 @@ func TestNativeDoltStoreGetReconnectsAndInstallsFreshStorage(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreBreakerOpenReconnectsThenPersists(t *testing.T) {
+	fresh := healthySearchStorage(&beadslib.Issue{
+		ID: "gc-session", Title: "session", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 0,
+	})
+	fresh.createIssue = func(_ context.Context, issue *beadslib.Issue, _ string) error {
+		issue.ID = "gc-session-start"
+		return nil
+	}
+	dead := deadSearchStorage(errors.New("failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"))
+	var reopens int32
+	store := storeWithReopen(dead, fresh, &reopens)
+
+	if _, err := store.Get("gc-session"); err != nil {
+		t.Fatalf("Get after managed endpoint replacement: %v", err)
+	}
+	created, err := store.Create(Bead{Title: "persist session start", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create after managed endpoint replacement: %v", err)
+	}
+	if created.ID != "gc-session-start" {
+		t.Fatalf("Create.ID = %q, want gc-session-start", created.ID)
+	}
+	if got := atomic.LoadInt32(&reopens); got != 1 {
+		t.Fatalf("reopen calls = %d, want exactly 1", got)
+	}
+}
+
 func TestNativeDoltStoreListReconnectsAfterTransientConnError(t *testing.T) {
 	healthy := healthySearchStorage(&beadslib.Issue{
 		ID: "gc-2", Title: "recovered list", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
@@ -144,6 +171,8 @@ func TestIsNativeDoltTransientReadError(t *testing.T) {
 		"use of closed network connection",
 		"bad connection",
 		"read: connection reset by peer",
+		"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)",
+		"server appears down, failing fast (cooldown 5s)",
 	}
 	for _, msg := range transient {
 		if !isNativeDoltTransientReadError(errors.New(msg)) {
