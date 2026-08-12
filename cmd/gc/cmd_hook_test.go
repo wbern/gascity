@@ -1461,6 +1461,172 @@ func TestClaimHookWorkTargetsTriggerBeforeFederatedDiscovery(t *testing.T) {
 	}
 }
 
+func TestClaimHookWorkWithRunnerClosedOwnedTriggerFallsThroughToFederatedReadyWork(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	var claimDir string
+	var claimEnv []string
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, dir string, env []string, id string) (beads.Bead, bool, error) {
+			if id != "stale-trigger" || dir != "city" {
+				t.Fatalf("ResolveBead = id %q dir %q, want stale trigger in city", id, dir)
+			}
+			if len(env) != 1 || env[0] != "GC_STORE=city" {
+				t.Fatalf("ResolveBead env = %v, want [GC_STORE=city]", env)
+			}
+			return beads.Bead{ID: id, Status: "closed", Assignee: "worker-1", Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		Claim: func(_ context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+			claimDir, claimEnv = dir, env
+			if id != "ready-riga" || assignee != "worker-1" {
+				t.Fatalf("Claim = id %q assignee %q, want ready-riga for worker-1", id, assignee)
+			}
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		TriggerBeadID:      "stale-trigger",
+		TriggerStoreDir:    "city",
+		JSON:               true,
+	}
+	run := func(_ string, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			return `[]`, nil
+		case "riga":
+			return `[{"id":"ready-riga","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("work query dir = %q, want city or riga", dir)
+			return "", nil
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimDir != "riga" {
+		t.Fatalf("Claim dir = %q, want riga", claimDir)
+	}
+	if len(claimEnv) != 1 || claimEnv[0] != "GC_STORE=riga" {
+		t.Fatalf("Claim env = %v, want [GC_STORE=riga]", claimEnv)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "ready-riga" {
+		t.Fatalf("claim result = %+v, want ready-riga claimed", result)
+	}
+}
+
+func TestClaimHookWorkWithRunnerClosedOwnedTriggerDrainsWhenFederationIsEmpty(t *testing.T) {
+	stores := []hookStore{{dir: "city", env: []string{"GC_STORE=city"}}, {dir: "riga", env: []string{"GC_STORE=riga"}}}
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, dir string, _ []string, id string) (beads.Bead, bool, error) {
+			if dir != "city" || id != "stale-trigger" {
+				t.Fatalf("ResolveBead = id %q dir %q, want stale trigger in city", id, dir)
+			}
+			return beads.Bead{ID: id, Status: "closed", Assignee: "worker-1"}, true, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, TriggerBeadID: "stale-trigger", TriggerStoreDir: "city", DrainAck: true, JSON: true}
+	run := func(_ string, dir string, _ []string) (string, error) {
+		if dir != "city" && dir != "riga" {
+			t.Fatalf("work query dir = %q, want city or riga", dir)
+		}
+		return `[]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("claim result = %+v, want drain/no_work", result)
+	}
+}
+
+func TestClaimHookWorkWithRunnerPeerHeldTriggerDrainsWithoutFederatedQuery(t *testing.T) {
+	stores := []hookStore{{dir: "city", env: []string{"GC_STORE=city"}}, {dir: "riga", env: []string{"GC_STORE=riga"}}}
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, dir string, _ []string, id string) (beads.Bead, bool, error) {
+			if dir != "city" || id != "trigger" {
+				t.Fatalf("ResolveBead = id %q dir %q, want trigger in city", id, dir)
+			}
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-2"}, true, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, TriggerBeadID: "trigger", TriggerStoreDir: "city", DrainAck: true, JSON: true}
+	run := func(string, string, []string) (string, error) {
+		t.Fatal("federated work query must not run for a peer-held trigger")
+		return "", nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("claim result = %+v, want drain/no_work", result)
+	}
+}
+
+func TestClaimHookWorkWithRunnerTriggerClaimErrorPreservesClaimsErroredDrain(t *testing.T) {
+	stores := []hookStore{{dir: "city", env: []string{"GC_STORE=city"}}, {dir: "riga", env: []string{"GC_STORE=riga"}}}
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, dir string, _ []string, id string) (beads.Bead, bool, error) {
+			if dir != "city" || id != "trigger" {
+				t.Fatalf("ResolveBead = id %q dir %q, want trigger in city", id, dir)
+			}
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			return beads.Bead{}, false, errors.New("store write failed")
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, TriggerBeadID: "trigger", TriggerStoreDir: "city", DrainAck: true, JSON: true}
+	run := func(_ string, dir string, _ []string) (string, error) {
+		if dir != "city" && dir != "riga" {
+			t.Fatalf("work query dir = %q, want city or riga", dir)
+		}
+		return `[]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, opts, ops, run, func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored", result)
+	}
+}
+
 func TestHookTriggerStoreDirResolvesProducedStoreRefs(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "crm")

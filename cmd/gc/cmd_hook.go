@@ -648,12 +648,18 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	claimsErrored := false
 	if strings.TrimSpace(claimOpts.TriggerBeadID) != "" {
 		claimOpts.Env = queryEnv
 		if env, ok := hookStoreEnvForDir(stores, claimOpts.TriggerStoreDir); ok {
 			claimOpts.Env = env
 		}
-		return doHookClaim(workQuery, workDir, claimOpts, ops, stdout, stderr)
+		triggerResult := doHookTriggerClaim(claimOpts.TriggerBeadID, workDir, claimOpts, ops, stdout, stderr)
+		if triggerResult.terminal {
+			return triggerResult.code
+		}
+		claimsErrored = triggerResult.claimsErrored
+		claimOpts.TriggerBeadID = ""
 	}
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
@@ -668,7 +674,6 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// claimsErrored aggregates the per-store signal that a store reported ready
 	// work but every eligible claim mutation errored, so the shared drain below can
 	// report claims_errored instead of laundering a write failure into no_work.
-	claimsErrored := false
 	for len(remaining) > 0 {
 		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
