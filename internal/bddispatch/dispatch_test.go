@@ -466,7 +466,7 @@ func TestWriteManagedOutputReplacesMalformedJSON(t *testing.T) {
 
 func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
 	t.Setenv(managedOutputFirewallEnv, "1")
-	t.Setenv(managedOutputFirewallBudgetEnv, "512")
+	t.Setenv(managedOutputFirewallBudgetEnv, "1024")
 	t.Setenv(managedOutputFirewallReadVerbsEnv, "ready")
 	var stdout, stderr bytes.Buffer
 	body := strings.Repeat("show-body", 200)
@@ -475,6 +475,74 @@ func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), body) {
 		t.Fatalf("out-of-scope show was firewalled: %q", stdout.String())
+	}
+}
+
+func TestWriteManagedReadJSONForShowPreservesJSONArrayWhenOverBudget(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "1024")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "show")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedReadJSONForVerb("show", []beads.Bead{{
+		ID:          "gcw-large",
+		Status:      "open",
+		Description: strings.Repeat("large-detail", 100),
+	}}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	var got []json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("show output changed top-level JSON type: %v; output=%q", err, stdout.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("show result length=%d, want 1", len(got))
+	}
+}
+
+func TestWriteManagedShowOutputPreservesUnderBudgetPayload(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "1024")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "show")
+	payload := []byte("[{\"id\":\"gcw-small\",\"comment_count\":2,\"dependency_count\":1,\"dependent_count\":3,\"created_by\":\"agent\"}]\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedShowOutput(payload, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if got := stdout.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("under-budget show output = %q, want unchanged raw bd JSON %q", got, payload)
+	}
+}
+
+func TestBeadShowSummaryKeepsWorkspaceFieldsAndMarksWithheldMetadata(t *testing.T) {
+	createdAt := time.Date(2026, time.August, 12, 13, 40, 0, 0, time.UTC)
+	got := NewBeadShowSummaries([]beads.Bead{{
+		ID: "gcw-show", Status: "open", Assignee: "worker", CreatedAt: createdAt,
+		Metadata: beads.StringMap{
+			"target":             "develop",
+			"gc.base_sha":        "abc123",
+			"gc.task_worktree":   "/worktree",
+			"work_dir":           "/work",
+			"gc.workspace_owner": "worker",
+			"branch":             strings.Repeat("x", 1024),
+		},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("summaries=%d, want 1", len(got))
+	}
+	if got[0].Metadata["target"] != "develop" || got[0].Metadata["gc.task_worktree"] != "/worktree" || got[0].Metadata["work_dir"] != "/work" {
+		t.Fatalf("workspace metadata=%v", got[0].Metadata)
+	}
+	if _, ok := got[0].Metadata["branch"]; ok || !containsString(got[0].FieldsOmitted, "metadata.branch") {
+		t.Fatalf("branch metadata=%q fields_omitted=%v, want withheld marker", got[0].Metadata["branch"], got[0].FieldsOmitted)
+	}
+	if _, ok := got[0].Metadata["gc.routed_to"]; ok {
+		t.Fatalf("absent routing metadata unexpectedly present: %v", got[0].Metadata)
+	}
+	if !got[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("created_at = %s, want %s", got[0].CreatedAt, createdAt)
 	}
 }
 

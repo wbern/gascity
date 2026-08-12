@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -140,6 +141,17 @@ func TestExtractBdScopeFlags(t *testing.T) {
 	}
 	if len(gotArgs) != 1 || gotArgs[0] != "list" {
 		t.Fatalf("fallback args = %v, want [list]", gotArgs)
+	}
+}
+
+func TestStripBdAllowUnbounded(t *testing.T) {
+	got, allow := stripBdAllowUnbounded([]string{"show", "gcw-1", "--allow-unbounded", "--json"})
+	if !allow {
+		t.Fatal("allow=false, want true")
+	}
+	want := []string{"show", "gcw-1", "--json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%v, want %v", got, want)
 	}
 }
 

@@ -219,9 +219,23 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	return doBdWithProfiler(args, stdout, stderr, disabledBdInvocationProfiler)
 }
 
+func stripBdAllowUnbounded(args []string) ([]string, bool) {
+	result := make([]string, 0, len(args))
+	allow := false
+	for _, arg := range args {
+		if arg == "--allow-unbounded" {
+			allow = true
+			continue
+		}
+		result = append(result, arg)
+	}
+	return result, allow
+}
+
 func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvocationProfiler) int {
 	endRewriteHeartbeat := profiler.phase("rewrite_heartbeat")
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
+	bdArgs, allowUnbounded := stripBdAllowUnbounded(bdArgs)
 
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	endRewriteHeartbeat()
@@ -388,6 +402,9 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if allowUnbounded {
+		env = mergeRuntimeEnv(env, map[string]string{"GC_MANAGED_OUTPUT_FIREWALL": "0"})
 	}
 	endBdSubprocess := profiler.phase("bd_subprocess")
 	traceStart := time.Now()

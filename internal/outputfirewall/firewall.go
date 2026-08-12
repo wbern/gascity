@@ -49,6 +49,10 @@ type spillManifest struct {
 // Active reports whether verb is protected by the injected managed policy.
 func Active(verb string) bool { return budgetForVerb(verb) > 0 }
 
+// BudgetForVerb reports the managed byte budget for verb, or zero when the
+// managed output firewall does not apply.
+func BudgetForVerb(verb string) int { return budgetForVerb(verb) }
+
 // WriteJSON serializes value wholly before admitting it to stdout.
 func WriteJSON(ctx context.Context, commandClass, verb string, value any, stdout, stderr io.Writer, marshal func(any) ([]byte, error)) int {
 	if err := ctx.Err(); err != nil {
@@ -209,13 +213,28 @@ func marshalManifest(commandClass string, budget, bytes int, digest string, spil
 		SerializedBytes int           `json:"serialized_bytes"`
 		SHA256          string        `json:"sha256"`
 		Spill           spillManifest `json:"spill"`
-	}{"1", "gc.output_firewall", "byte_budget_exceeded", commandClass, budget, bytes, digest, spill}
+		Remediation     string        `json:"remediation,omitempty"`
+	}{"1", "gc.output_firewall", "byte_budget_exceeded", commandClass, budget, bytes, digest, spill, ""}
 	payload, err := json.Marshal(manifest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "gc output firewall: encoding manifest: %v\n", err)
 		return nil, false
 	} //nolint:errcheck
-	return append(payload, '\n'), true
+	payload = append(payload, '\n')
+	if len(payload) > budget {
+		return nil, false
+	}
+	manifest.Remediation = "Use --allow-unbounded to request the full payload; its evidence is available at spill.path when present."
+	withRemediation, err := json.Marshal(manifest)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "gc output firewall: encoding manifest: %v\n", err)
+		return nil, false
+	} //nolint:errcheck
+	withRemediation = append(withRemediation, '\n')
+	if len(withRemediation) <= budget {
+		return withRemediation, true
+	}
+	return payload, true
 }
 
 func publish(ctx context.Context, payload []byte, stdout, stderr io.Writer) int {
