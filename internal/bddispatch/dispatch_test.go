@@ -23,14 +23,15 @@ import (
 func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing.T) {
 	giantNotes := strings.Repeat("evidence ", 100_000) // representative of an 845KiB notes field
 	bead := beads.Bead{
-		ID:       "gcw-giant",
-		Title:    "Preserve large evidence",
-		Status:   "open",
-		Priority: intPtr(0),
-		Assignee: "worker",
-		Labels:   []string{"context-budget"},
-		Metadata: beads.StringMap{"gc.routed_to": "rig/worker"},
-		Notes:    giantNotes,
+		ID:        "gcw-giant",
+		Title:     "Preserve large evidence",
+		Status:    "open",
+		Priority:  intPtr(0),
+		Assignee:  "worker",
+		CreatedAt: time.Date(2026, time.August, 12, 8, 40, 0, 0, time.UTC),
+		Labels:    []string{"context-budget"},
+		Metadata:  beads.StringMap{"gc.routed_to": "rig/worker"},
+		Notes:     giantNotes,
 	}
 
 	payload, err := json.Marshal(NewBeadSummaryEnvelope("ready", []beads.Bead{bead}, DefaultBeadSummaryBudget))
@@ -47,8 +48,9 @@ func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing
 	var got struct {
 		Kind  string `json:"kind"`
 		Beads []struct {
-			ID             string   `json:"id"`
-			DetailsOmitted []string `json:"details_omitted"`
+			ID             string    `json:"id"`
+			CreatedAt      time.Time `json:"created_at"`
+			DetailsOmitted []string  `json:"details_omitted"`
 		} `json:"beads"`
 	}
 	if err := json.Unmarshal(payload, &got); err != nil {
@@ -59,6 +61,9 @@ func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing
 	}
 	if !containsString(got.Beads[0].DetailsOmitted, "notes") {
 		t.Fatalf("details_omitted = %v, want notes", got.Beads[0].DetailsOmitted)
+	}
+	if !got.Beads[0].CreatedAt.Equal(bead.CreatedAt) {
+		t.Fatalf("created_at = %s, want %s", got.Beads[0].CreatedAt, bead.CreatedAt)
 	}
 }
 
