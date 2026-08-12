@@ -11,7 +11,14 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.ClearManagedOutputFirewallEnv()
+	os.Exit(m.Run())
+}
 
 func TestWriteCancellationAfterSpillRemovesUnpublishedArtifact(t *testing.T) {
 	dir := t.TempDir()

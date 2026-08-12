@@ -11,7 +11,13 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.ClearManagedOutputFirewallEnv()
+	os.Exit(m.Run())
+}
 
 func TestExtractScopeFlags(t *testing.T) {
 	tests := []struct {
