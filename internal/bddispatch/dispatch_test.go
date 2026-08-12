@@ -501,6 +501,21 @@ func TestWriteManagedReadJSONForShowPreservesJSONArrayWhenOverBudget(t *testing.
 	}
 }
 
+func TestWriteManagedShowOutputPreservesUnderBudgetPayload(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "1024")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "show")
+	payload := []byte("[{\"id\":\"gcw-small\",\"comment_count\":2,\"dependency_count\":1,\"dependent_count\":3,\"created_by\":\"agent\"}]\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedShowOutput(payload, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if got := stdout.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("under-budget show output = %q, want unchanged raw bd JSON %q", got, payload)
+	}
+}
+
 func TestBeadShowSummaryKeepsWorkspaceFieldsAndMarksWithheldMetadata(t *testing.T) {
 	got := NewBeadShowSummaries([]beads.Bead{{
 		ID: "gcw-show", Status: "open", Assignee: "worker",

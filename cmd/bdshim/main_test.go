@@ -562,6 +562,11 @@ func TestRunCompatibilityReadsDelegateToRealBd(t *testing.T) {
 	t.Setenv("GC_API_URL", "http://127.0.0.1:1")
 	t.Setenv("GC_CITY_PATH", "/tmp/gc2")
 	t.Setenv("GC_BDSHIM_LOG", "")
+	// A bounded managed session must not alter an already-small show response:
+	// bd owns additional IssueDetails fields that the controller model does not.
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL", "1")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "show")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_BUDGET", "32768")
 
 	for _, args := range [][]string{
 		{"show", "gcw-1", "--json"},
