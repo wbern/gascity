@@ -13,6 +13,7 @@ import (
 type fakeStrayProbe struct {
 	isRepo      bool
 	uncommitted bool
+	ignored     bool
 	unpushed    bool
 	unpreserved bool
 	stashes     bool
@@ -21,7 +22,7 @@ type fakeStrayProbe struct {
 
 func (f fakeStrayProbe) IsRepo() bool                            { return f.isRepo }
 func (f fakeStrayProbe) CurrentBranch() (string, error)          { return f.branch, nil }
-func (f fakeStrayProbe) HasUncommittedWork() bool                { return f.uncommitted }
+func (f fakeStrayProbe) HasUncommittedOrIgnoredWork() bool       { return f.uncommitted || f.ignored }
 func (f fakeStrayProbe) HasUnpushedCommitsResult() (bool, error) { return f.unpushed, nil }
 func (f fakeStrayProbe) HasUnlandedCommitsResult() (bool, error) { return f.unpushed, nil }
 
@@ -63,7 +64,7 @@ func TestScanStrayWorktrees(t *testing.T) {
 	liveSet := map[string]bool{filepath.Clean(live): true}
 	probes := map[string]gitProbe{
 		orphanClean:    fakeStrayProbe{isRepo: true},
-		orphanDirty:    fakeStrayProbe{isRepo: true, uncommitted: true},
+		orphanDirty:    fakeStrayProbe{isRepo: true, ignored: true},
 		orphanUnpushed: fakeStrayProbe{isRepo: true, unpushed: true, unpreserved: true},
 		// Same unlanded commits, but a branch holds them.
 		orphanBranchBacked: fakeStrayProbe{isRepo: true, unpushed: true, branch: "wt/orphan"},
@@ -95,7 +96,7 @@ func TestScanStrayWorktrees(t *testing.T) {
 	}
 
 	assertStray(t, byPath, orphanClean, true, "")
-	assertStray(t, byPath, orphanDirty, false, "uncommitted changes")
+	assertStray(t, byPath, orphanDirty, false, "uncommitted or ignored work")
 	assertStray(t, byPath, orphanUnpushed, false, "unlanded commits reachable from no ref")
 	assertStray(t, byPath, orphanBranchBacked, true, "")
 	if w := byPath[filepath.Clean(orphanBranchBacked)].Warning; !strings.Contains(w, "wt/orphan") {

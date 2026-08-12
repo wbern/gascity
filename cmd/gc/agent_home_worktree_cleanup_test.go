@@ -22,6 +22,7 @@ type fakeAgentWorktreeGit struct {
 	currentBranch     string
 	currentBranchErr  error
 	hasUncommitted    bool
+	hasIgnored        bool
 	checkoutDetachErr error
 	checkoutDetachRef string
 	defaultBranch     string
@@ -34,7 +35,9 @@ func (f *fakeAgentWorktreeGit) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
 }
 
-func (f *fakeAgentWorktreeGit) HasUncommittedWork() bool { return f.hasUncommitted }
+func (f *fakeAgentWorktreeGit) HasUncommittedOrIgnoredWork() bool {
+	return f.hasUncommitted || f.hasIgnored
+}
 
 func (f *fakeAgentWorktreeGit) CheckoutDetach(ref string) error {
 	f.checkoutDetachRef = ref
@@ -268,9 +271,9 @@ func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_OpenBeadSkips(t *testing.T) {
 	}
 }
 
-// TestCleanupClosedBeadAgentHomeWorktrees_CaseB_UncommittedWorkSkips verifies
-// that a worktree with uncommitted changes is never reset even if the bead is closed.
-func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_UncommittedWorkSkips(t *testing.T) {
+// TestCleanupClosedBeadAgentHomeWorktrees_CaseB_IgnoredWorkSkips verifies
+// that an ignored local file prevents resetting a closed-bead worktree.
+func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_IgnoredWorkSkips(t *testing.T) {
 	cityPath, builderWTPath, _ := setupAgentHomeWorktreeCleanupTest(t)
 	cfg := agentHomeConfig()
 	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-abc123", Status: "closed"}}, nil)
@@ -285,9 +288,9 @@ func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_UncommittedWorkSkips(t *testi
 	defer func() { newAgentWorktreeGitProbe = orig }()
 	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
 		fake = &fakeAgentWorktreeGit{
-			isRepo:         true,
-			currentBranch:  "builder/ga-abc123",
-			hasUncommitted: true,
+			isRepo:        true,
+			currentBranch: "builder/ga-abc123",
+			hasIgnored:    true,
 		}
 		return fake
 	}
@@ -296,16 +299,16 @@ func TestCleanupClosedBeadAgentHomeWorktrees_CaseB_UncommittedWorkSkips(t *testi
 	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": store}, &stderr)
 
 	if cleaned != 0 {
-		t.Errorf("cleaned = %d, want 0 when uncommitted work present", cleaned)
+		t.Errorf("cleaned = %d, want 0 when ignored work present", cleaned)
 	}
 	if fake.checkoutDetachRef != "" {
-		t.Error("CheckoutDetach was called, want skipped when uncommitted work present")
+		t.Error("CheckoutDetach was called, want skipped when ignored work present")
 	}
 	if _, err := os.Stat(stalePath); err != nil {
 		t.Error("stale marker removed despite uncommitted work, want untouched")
 	}
 	if !strings.Contains(stderr.String(), "uncommitted") {
-		t.Errorf("stderr = %q, want mention of uncommitted work", stderr.String())
+		t.Errorf("stderr = %q, want mention of ignored work", stderr.String())
 	}
 }
 

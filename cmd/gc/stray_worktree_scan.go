@@ -9,7 +9,7 @@ import (
 
 // strayWorktree is one git checkout found under a managed root that is not
 // bound to a live session. Reclaimable is true only when the checkout probes
-// clean (no uncommitted, unpushed, or stashed work); otherwise Reason records
+// clean (no uncommitted or ignored files, unpushed, or stashed work); otherwise Reason records
 // why it must be left alone. This is a report-only classification — gcw-noyd
 // slice 1 never removes anything.
 type strayWorktree struct {
@@ -74,7 +74,7 @@ func scanStrayWorktrees(roots []string, liveWorkerDirs map[string]bool, probeFor
 
 // classifyStrayWorktree applies the same safety gate as
 // pruneAgentHomeWorktreeIfSafe: a checkout is reclaimable only when it is a git
-// repo with no uncommitted changes and no unpushed commits — the two forms of
+// repo with no uncommitted changes or ignored files and no unpushed commits — the two forms of
 // work that live inside this checkout and that its removal would destroy. A
 // failed probe on either is treated as not-reclaimable — never guess in favor
 // of removal.
@@ -91,8 +91,8 @@ func classifyStrayWorktree(path string, probeFor func(string) gitProbe) strayWor
 	if !gp.IsRepo() {
 		return strayWorktree{Path: path, Reason: "not a git repo"}
 	}
-	if gp.HasUncommittedWork() {
-		return strayWorktree{Path: path, Reason: "uncommitted changes"}
+	if gp.HasUncommittedOrIgnoredWork() {
+		return strayWorktree{Path: path, Reason: "uncommitted or ignored work"}
 	}
 	unlanded, err := gp.HasUnlandedCommitsResult()
 	if err != nil {

@@ -81,7 +81,7 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes and no unpushed commits — the two
+//  6. Git state: no uncommitted or ignored files and no unpushed commits — the two
 //     forms of work that live inside this worktree and that its removal would
 //     destroy. Either probe failing protects the tree.
 //
@@ -312,7 +312,7 @@ func reapClosedBeadWorktrees(
 
 			// Git safety gates, only if not already protected. A worktree is
 			// unsafe to remove when it holds work removal would destroy:
-			// uncommitted changes in its own working files and index, or
+			// uncommitted changes or ignored files in its own working tree, or
 			// commits whose content is carried nowhere else. Both fail closed —
 			// an unreadable repository is never assumed clean.
 			//
@@ -327,7 +327,7 @@ func reapClosedBeadWorktrees(
 			holdsUnlandedWork := false
 			unlandedButPreserved := ""
 			if reason == "" {
-				hasUncommitted := wg.HasUncommittedWork()
+				hasUncommitted := wg.HasUncommittedOrIgnoredWork()
 				hasUnlanded, unlandedErr := wg.HasUnlandedCommitsResult()
 				hasUnpreserved, preservedErr := wg.HasUnpreservedCommitsResult()
 				holdsUnlandedWork = unlandedErr == nil && hasUnlanded
