@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -180,43 +181,14 @@ func TestDoHookClaimTriggerWithClosedBlockerIsStillClaimed(t *testing.T) {
 	}
 }
 
-func TestDoHookClaimTriggerStrippedByReadinessFilterFallsThrough(t *testing.T) {
-	// Belt and braces for wire-shape drift, in the ONLY form that carries signal.
-	// The resolved trigger looks perfect on its own fields — open, unassigned,
-	// route-matched, no dependencies visible — because `bd show` emits neither
-	// blocked_by nor is_blocked. The work query DID surface this bead, and the
-	// readiness filter dropped it on the blocked_by the projection does carry.
-	// The projection therefore knows something the typed bead cannot show, so the
-	// trigger path must defer to it rather than claim.
-	resolved := beads.Bead{
-		ID:       "crm-q6zfr9",
-		Status:   "open",
-		Metadata: map[string]string{"gc.routed_to": "crm/gastown.polecat"},
-	}
-	ready := `[
-		{"id":"crm-q6zfr9","status":"open","blocked_by":["crm-e9jahp"],"metadata":{"gc.routed_to":"crm/gastown.polecat"}},
-		{"id":"ready-routed","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}
-	]`
-
-	var claims []string
-	ops := hookTriggerReadinessOps(t, resolved, ready, &claims)
-	var stdout, stderr bytes.Buffer
-	if code := doHookClaim("bd ready --json", "/tmp/work", hookTriggerReadinessOpts(), ops, &stdout, &stderr); code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if len(claims) != 1 || claims[0] != "ready-routed" {
-		t.Fatalf("claims = %#v, want only ready-routed", claims)
-	}
-}
-
 func TestDoHookClaimTriggerAbsentFromWorkQueryIsStillClaimed(t *testing.T) {
-	// The counterweight, and the reason the check above is narrowed to
-	// seen-then-stripped. The work query is NOT guaranteed to cover the trigger's
-	// route — here it returns an unrelated, unrouted global candidate — and the
-	// trigger path exists to claim work the pool query never surfaced. Treating
-	// absence as unready would refuse legitimate triggers, which is the false
-	// refusal TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQueryResult
-	// caught when this guard was first written the naive way.
+	// The counterweight to the readiness gate, and the reason no ready-projection
+	// cross-check lives on this path. The work query is NOT guaranteed to cover
+	// the trigger's route — here it returns an unrelated, unrouted global
+	// candidate — and the trigger path exists to claim work the pool query never
+	// surfaced. Treating absence as unready refuses legitimate triggers, which is
+	// the false refusal TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQuery
+	// Result caught when that guard was first written the naive way.
 	resolved := beads.Bead{
 		ID:       "crm-q6zfr9",
 		Status:   "open",
@@ -277,5 +249,62 @@ func TestDoHookClaimTriggerSelfBlockedStatusFallsThrough(t *testing.T) {
 	}
 	if len(claims) != 1 || claims[0] != "ready-routed" {
 		t.Fatalf("claims = %#v, want only ready-routed", claims)
+	}
+}
+
+func TestClaimHookWorkTriggerFallthroughStillQueriesThePool(t *testing.T) {
+	// LIVE REPRODUCTION, GC3 2026-08-12T09:47Z, reported by crm/gastown.furiosa.
+	// After handing off its bead the session re-ran `gc hook --claim --drain-ack`
+	// and got, verbatim:
+	//
+	//   gc hook --claim: trigger bead crm-ed9xpb routed to "" not in this
+	//     session's targets; falling through to the pool
+	//   gc hook --claim: missing work query runner
+	//   (exit 1)
+	//
+	// The trigger branch of claimHookWorkWithRunner calls doHookClaim with the
+	// caller's ops — which production passes as a bare hookClaimOps{} — and
+	// applyDefaults deliberately leaves Runner nil ("a missing work-query runner
+	// is a caller error"). So EVERY trigger that falls through reaches a nil
+	// Runner and hard-fails the whole wake with exit 1, starving the session of
+	// pool work it is perfectly entitled to claim. The non-trigger path never hit
+	// this because it uses the injected hookStoreRunner instead.
+	//
+	// A trigger that does not match must degrade to the pool, not kill the wake.
+	var claimed []string
+	stores := []hookStore{{dir: "/rig", env: []string{"GC_TEST=1"}}}
+	run := func(_, _ string, _ []string) (string, error) {
+		return `[{"id":"pool-ready","status":"open","metadata":{"gc.routed_to":"crm/gastown.polecat"}}]`, nil
+	}
+	ops := hookClaimOps{
+		ResolveBead: func(_ context.Context, _ string, _ []string, id string) (beads.Bead, bool, error) {
+			// Handed off: unassigned, and its route was cleared — so it cannot
+			// match this session's targets and must fall through.
+			return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{"gc.routed_to": ""}}, true, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = append(claimed, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "crm/gastown.furiosa",
+		IdentityCandidates: []string{"crm/gastown.furiosa"},
+		RouteTargets:       []string{"crm/gastown.polecat"},
+		TriggerBeadID:      "crm-ed9xpb",
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := claimHookWorkWithRunner("bd ready --json", "/rig", []string{"GC_TEST=1"}, stores, opts, ops, run,
+		func(string, error) {}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "missing work query runner") {
+		t.Fatalf("trigger fallthrough hit a nil runner instead of the pool; stderr=%s", stderr.String())
+	}
+	if len(claimed) != 1 || claimed[0] != "pool-ready" {
+		t.Fatalf("claimed = %#v, want the pool bead after the trigger fell through", claimed)
 	}
 }

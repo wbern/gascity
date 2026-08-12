@@ -175,7 +175,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 
 	triggerErrored := false
 	if triggerID := strings.TrimSpace(opts.TriggerBeadID); triggerID != "" {
-		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, ready, stdout, stderr)
+		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, stdout, stderr)
 		if res.terminal {
 			return res
 		}
@@ -469,58 +469,6 @@ func (r *hookReadyProjection) fetch() (string, string, error) {
 	return r.preFilter, r.normalized, nil
 }
 
-// strippedByReadinessFilter reports whether the work query SAW this bead and the
-// readiness filter then dropped it. That conjunction is the only membership
-// signal worth acting on.
-//
-// Absence from the query means nothing: the work query is not guaranteed to
-// cover the trigger's route — it may be a global ready query returning entirely
-// unrelated beads — and the trigger path exists precisely to claim work the pool
-// query did not surface (TestDoHookClaimTargetsTriggerBeadOverUnrelatedWorkQuery
-// Result pins that contract). Treating absence as "not ready" would refuse
-// legitimate triggers, so we require positive evidence: seen, then stripped.
-//
-// Fails OPEN on any unusable input (no runner, query error, non-JSON): a broken
-// work query is a real GC3 condition and must not become a way to starve a
-// worker of its own trigger.
-func (r *hookReadyProjection) strippedByReadinessFilter(beadID string) bool {
-	id := strings.TrimSpace(beadID)
-	if id == "" {
-		return false
-	}
-	preFilter, normalized, err := r.fetch()
-	if err != nil {
-		return false
-	}
-	seen, ok := hookProjectionContains(preFilter, id)
-	if !ok || !seen {
-		return false
-	}
-	kept, ok := hookProjectionContains(normalized, id)
-	if !ok {
-		return false
-	}
-	return !kept
-}
-
-// hookProjectionContains reports whether a work-query projection lists beadID.
-// ok=false means the projection could not be decoded and carries no signal.
-func hookProjectionContains(projection, beadID string) (bool, bool) {
-	if strings.TrimSpace(projection) == "" {
-		return false, false
-	}
-	candidates, err := decodeHookClaimBeads(projection)
-	if err != nil {
-		return false, false
-	}
-	for _, candidate := range candidates {
-		if strings.TrimSpace(candidate.ID) == beadID {
-			return true, true
-		}
-	}
-	return false, true
-}
-
 // hookBeadBlockedReason reports why a RESOLVED bead is not claimable, or "" when
 // nothing blocks it. This is the typed half of the shared readiness predicate:
 // isDepBlockedHookCandidate applies the same rule to the map-shaped ready
@@ -553,7 +501,7 @@ func hookBeadBlockedReason(bead beads.Bead) string {
 	return ""
 }
 
-func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, ready *hookReadyProjection, stdout, stderr io.Writer) hookClaimResult {
+func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
 	triggerDir := strings.TrimSpace(opts.TriggerStoreDir)
 	if triggerDir == "" {
 		triggerDir = dir
@@ -641,16 +589,14 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 			triggerID, reason)
 		return hookClaimResult{}
 	}
-	// Second, independent guard against wire-shape drift: if the work query SAW
-	// this bead and the readiness filter dropped it, the projection knows
-	// something the resolved bead did not show us (it reads blocked_by/is_blocked,
-	// which `bd show` does not emit at all). Defer to it. Absence from the query
-	// is NOT a signal — see strippedByReadinessFilter.
-	if ready != nil && ready.strippedByReadinessFilter(bead.ID) {
-		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s was stripped by the readiness filter; falling through to the pool\n", //nolint:errcheck
-			triggerID)
-		return hookClaimResult{}
-	}
+	// NO READY-PROJECTION CROSS-CHECK HERE, deliberately. Consulting it would be
+	// a useful second opinion — the projection reads blocked_by/is_blocked, which
+	// `bd show` does not emit at all — but it costs a work query on EVERY trigger
+	// claim, and the trigger path is contractually cheap: a trigger-scoped claim
+	// must resolve and claim one bead without running discovery at all
+	// (TestClaimHookWorkTargetsTriggerBeforeFederatedDiscovery fails the runner
+	// outright if it is called). The typed predicate above is the fix; this would
+	// only have been belt and braces, and not at the price of a query per wake.
 
 	claimed, ok, err := ops.Claim(ctx, triggerDir, opts.Env, triggerID, opts.Assignee)
 	if err != nil {
