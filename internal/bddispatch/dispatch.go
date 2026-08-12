@@ -125,7 +125,11 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		}
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
-		return WriteManagedReadJSONForVerb("ready", applyReadyParams(read.Body, p), stdout, stderr)
+		result := applyReadyParams(read.Body, p)
+		if summaryJSONRequested(args) {
+			return WriteManagedJSON(context.Background(), "managed_bd_summary", "ready", NewBeadSummaryEnvelope("ready", result, DefaultBeadSummaryBudget), stdout, stderr)
+		}
+		return WriteManagedReadJSONForVerb("ready", result, stdout, stderr)
 	case "list":
 		opts, err := ParseListOpts(args)
 		if err != nil {
@@ -136,6 +140,9 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
+		}
+		if summaryJSONRequested(args) {
+			return WriteManagedJSON(context.Background(), "managed_bd_summary", "list", NewBeadSummaryEnvelope("list", read.Body, DefaultBeadSummaryBudget), stdout, stderr)
 		}
 		return WriteManagedReadJSONForVerb("list", read.Body, stdout, stderr)
 	case "query":
@@ -834,6 +841,15 @@ func WriteManagedJSON(ctx context.Context, commandClass, verb string, value any,
 // is inactive and never applies to mutation paths.
 func WriteManagedOutput(ctx context.Context, commandClass, verb string, payload []byte, structured bool, stdout, stderr io.Writer) int {
 	return outputfirewall.Write(ctx, commandClass, verb, payload, structured, stdout, stderr)
+}
+
+func summaryJSONRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--summary-json" {
+			return true
+		}
+	}
+	return false
 }
 
 // ManagedOutputFirewallActive reports whether a managed read verb is subject

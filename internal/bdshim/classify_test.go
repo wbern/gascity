@@ -98,6 +98,20 @@ func TestClassifyVerbListCompatibility(t *testing.T) {
 	}
 }
 
+func TestClassifyVerbSummaryJSONRoutesListAndReady(t *testing.T) {
+	for _, tc := range []struct {
+		verb string
+		args []string
+	}{
+		{"list", []string{"--status=open", "--json", "--summary-json"}},
+		{"ready", []string{"--assignee=worker", "--json", "--summary-json"}},
+	} {
+		if got := ClassifyVerb(tc.verb, tc.args, true); got != Route {
+			t.Errorf("ClassifyVerb(%q, %v, split=true) = %v, want Route", tc.verb, tc.args, got)
+		}
+	}
+}
+
 // TestClassifyVerbQueryRoutes: a mappable ephemeral query routes in both phases;
 // an unmappable one refuses under split (would miss SQLite wisps) and passes
 // through in the identity phase.

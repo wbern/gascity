@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,8 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -291,6 +294,9 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 // mode requires --include-ephemeral (a tier CachedReady can't serve).
 func controlReadyFallbackReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+	if controlReadyUsesSummary(env) {
+		query += " --summary-json"
+	}
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
@@ -302,14 +308,57 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 	if !workQueryHasReadyWork(trimmed) {
 		return nil, nil
 	}
-	var result []beads.Bead
-	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+	result, err := decodeControlReadySummary([]byte(trimmed))
+	if err != nil {
 		return nil, fmt.Errorf("control-ready fallback: unexpected bd ready output: %s", trimmed)
 	}
 	if len(result) == controlReadyFallbackLimit {
 		log.Printf("control-ready fallback: bd ready for %s returned exactly the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
 	}
 	beads.SortBeadsReadyOrder(result)
+	return result, nil
+}
+
+// controlReadyUsesSummary reports whether the worker environment is fronted
+// by bdshim. The compact flag is shim-provided and must not be sent to a raw
+// bd binary, which preserves the configured bd_shim=off behavior.
+func controlReadyUsesSummary(env map[string]string) bool {
+	return strings.TrimSpace(envListValue(mergeRuntimeEnv(os.Environ(), env), citylayout.RealBdEnvVar)) != ""
+}
+
+// decodeControlReadySummary accepts either the bounded discovery projection or
+// the full bd array and returns the scheduling fields used by the
+// control-ready evaluator.
+func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
+	if bytes.HasPrefix(bytes.TrimSpace(data), []byte("[")) {
+		var result []beads.Bead
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	var envelope bddispatch.BeadSummaryEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.SchemaVersion != "1" || envelope.Kind != "gc.bead_summary" || envelope.Verb != "ready" {
+		return nil, fmt.Errorf("unrecognized summary envelope (schema_version=%q kind=%q verb=%q)", envelope.SchemaVersion, envelope.Kind, envelope.Verb)
+	}
+	result := make([]beads.Bead, 0, len(envelope.Beads))
+	for _, summary := range envelope.Beads {
+		result = append(result, beads.Bead{
+			ID:        summary.ID,
+			Title:     summary.Title,
+			Status:    summary.Status,
+			Type:      summary.Type,
+			Priority:  summary.Priority,
+			CreatedAt: summary.CreatedAt,
+			Assignee:  summary.Assignee,
+			ParentID:  summary.Parent,
+			Labels:    append([]string(nil), summary.Labels...),
+			Metadata:  beads.StringMap(summary.RoutingMetadata),
+		})
+	}
 	return result, nil
 }
 
