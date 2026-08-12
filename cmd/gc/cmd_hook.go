@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -38,7 +39,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 
 		The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			opts := hookCommandOptions{
 				Inject:     inject,
 				HookFormat: hookFormat,
@@ -46,7 +47,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
+			if cmdHookWithOptionsContext(c.Context(), args, opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -237,6 +238,10 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 }
 
 func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return cmdHookWithOptionsContext(context.Background(), args, opts, stdout, stderr)
+}
+
+func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookCommandOptions, stdout, stderr io.Writer) int {
 	if opts.Inject {
 		return 0
 	}
@@ -465,6 +470,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			}
 		}
 		claimOpts := hookClaimOptions{
+			Context:  ctx,
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
 			// work (hookClaimExistingAssignment and
@@ -493,7 +499,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+	return doHookWithContext(ctx, workQuery, workDir, false, runner, stdout, stderr)
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -889,6 +895,10 @@ func workQueryEnvForDir(env []string, dir string) []string {
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
 // returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
+	return doHookWithContext(context.Background(), workQuery, dir, inject, runner, stdout, stderr)
+}
+
+func doHookWithContext(ctx context.Context, workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	if inject {
 		return 0
 	}
@@ -896,7 +906,7 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	output, err := runner(workQuery, dir)
 	if err != nil {
 		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			_ = writeHookReadOutput(ctx, stdout, stderr, normalized)
 		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -910,11 +920,22 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
 	if !hasWork {
 		if normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			_ = writeHookReadOutput(ctx, stdout, stderr, normalized)
 		}
 		return 1
 	}
-	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+	return writeHookReadOutput(ctx, stdout, stderr, normalized)
+}
+
+func writeHookReadOutput(ctx context.Context, stdout, stderr io.Writer, output string) int {
+	if !bddispatch.ManagedOutputFirewallActive("hook") {
+		fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	if code := bddispatch.WriteManagedOutput(ctx, "managed_hook_read", "hook", []byte(output), true, stdout, stderr); code != 0 {
+		fmt.Fprintln(stderr, "gc hook: output firewall could not publish result") //nolint:errcheck // best-effort stderr
+		return code
+	}
 	return 0
 }
 

@@ -1190,6 +1190,10 @@
           "$ref": "#/$defs/SessionConfig",
           "description": "Session configures the session provider backend."
         },
+        "output_firewall": {
+          "$ref": "#/$defs/OutputFirewallConfig",
+          "description": "OutputFirewall configures bounded output for managed-session known reads.\nIt is operator-owned city policy; direct CLI output is unaffected."
+        },
         "mail": {
           "$ref": "#/$defs/MailConfig",
           "description": "Mail configures the mail provider backend."
@@ -2159,6 +2163,40 @@
       "additionalProperties": false,
       "type": "object",
       "description": "OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers)."
+    },
+    "OutputFirewallConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled controls whether managed known-read output is bounded; default true."
+        },
+        "byte_budget": {
+          "type": "integer",
+          "description": "ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768."
+        },
+        "read_verbs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ReadVerbs is the closed allowlist of managed read routes to protect; default show, ready, list, query, mol, hook."
+        },
+        "spill_mode": {
+          "type": "string",
+          "description": "SpillMode selects secure, disabled, or required evidence retention; default secure."
+        },
+        "spill_path": {
+          "type": "string",
+          "description": "SpillPath is the city-relative directory for protected evidence artifacts; default .gc/evidence/output."
+        },
+        "retention_ttl": {
+          "type": "string",
+          "description": "RetentionTTL is how long protected evidence artifacts are retained; default 24h."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OutputFirewallConfig is the operator-owned policy applied to managed read output."
     },
     "PackDefaults": {
       "properties": {

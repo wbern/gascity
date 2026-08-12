@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -35,6 +36,7 @@ var hookClaimMutationTimeout = 10 * time.Second
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
 
 type hookClaimOptions struct {
+	Context            context.Context
 	Assignee           string
 	IdentityCandidates []string
 	RouteTargets       []string
@@ -100,6 +102,19 @@ type hookClaimJSONResult struct {
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+}
+
+// writeHookClaimJSON stages a managed hook result before publishing one JSON
+// line. It intentionally runs after every claim-side mutation has completed so
+// output admission cannot turn a successful claim into a retryable mutation.
+func writeHookClaimJSON(ctx context.Context, stdout, stderr io.Writer, result hookClaimJSONResult) error {
+	if !bddispatch.ManagedOutputFirewallActive("hook") {
+		return writeCLIJSONLine(stdout, result)
+	}
+	if code := bddispatch.WriteManagedJSON(ctx, "managed_hook_claim", "hook", result, stdout, stderr); code != 0 {
+		return errors.New("writing managed hook JSON")
+	}
+	return nil
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -397,7 +412,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 //
 // WHEN THE TRIGGER IS UNCLAIMABLE IT NOW FALLS THROUGH to the generic pool query
 // instead of draining (gci-n1u2 / crm-72mmp2). It used to drain, which was safe in
-// isolation and starved a queue in practice: the trigger id is materialised into
+// isolation and starved a queue in practice: the trigger id is materialized into
 // the process env at SPAWN and never re-read, while the reconciler keeps
 // re-pointing gc.trigger_bead_id on the session bead as work arrives. A worker
 // whose trigger was legitimately parked therefore attempted one bead it could never
@@ -597,9 +612,13 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	result.ContinuationAssigned = assigned
 	if opts.JSON {
-		if err := writeCLIJSONLine(stdout, result); err != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
-			return 1
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := writeHookClaimJSON(ctx, stdout, stderr, result); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: writing JSON after completed claim: %v\n", err) //nolint:errcheck
+			return 0
 		}
 		return 0
 	}
@@ -654,7 +673,7 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 		result.DrainAcknowledged = true
 	}
 	if jsonOut {
-		if err := writeCLIJSONLine(stdout, result); err != nil {
+		if err := writeHookClaimJSON(context.Background(), stdout, stderr, result); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
 			return 1
 		}

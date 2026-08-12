@@ -27,6 +27,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +37,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bddispatch"
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/bdguard"
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
@@ -92,6 +95,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 
 	passthrough := func() int {
+		if bddispatch.ManagedOutputFirewallActive(verb) && managedPassthroughReadVerb(verb, verbArgs) {
+			var staged bytes.Buffer
+			code := execRealBd(bdArgs, nil, stdin, &staged, stderr)
+			if firewallCode := bddispatch.WriteManagedOutput(context.Background(), "managed_bd_passthrough", verb, staged.Bytes(), hasJSONOutput(verbArgs), stdout, stderr); firewallCode != 0 {
+				logDisposition(verb, rawBDArgs, "passthrough", firewallCode, start)
+				return firewallCode
+			}
+			logDisposition(verb, rawBDArgs, "passthrough", code, start)
+			return code
+		}
 		code := execRealBd(bdArgs, nil, stdin, stdout, stderr)
 		logDisposition(verb, rawBDArgs, "passthrough", code, start)
 		return code
@@ -196,6 +209,27 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default: // bdshim.Passthrough
 		return passthrough()
 	}
+}
+
+func managedPassthroughReadVerb(verb string, args []string) bool {
+	switch verb {
+	case "show", "ready", "list", "query":
+		return true
+	case "mol":
+		positionals := bdflags.Positionals("mol current", args)
+		return len(positionals) > 0 && (positionals[0] == "current" || positionals[0] == "progress")
+	default:
+		return false
+	}
+}
+
+func hasJSONOutput(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" || strings.HasPrefix(arg, "--format=json") {
+			return true
+		}
+	}
+	return false
 }
 
 // bareBDHQGuardRefusal applies the same managed-session HQ fence to the `bd`

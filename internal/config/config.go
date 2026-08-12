@@ -261,6 +261,9 @@ type City struct {
 	BdGuard BdGuardConfig `toml:"bd_guard,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`
+	// OutputFirewall configures bounded output for managed-session known reads.
+	// It is operator-owned city policy; direct CLI output is unaffected.
+	OutputFirewall OutputFirewallConfig `toml:"output_firewall,omitempty"`
 	// Mail configures the mail provider backend.
 	Mail MailConfig `toml:"mail,omitempty"`
 	// Events configures the events provider backend.

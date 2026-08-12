@@ -8,27 +8,32 @@
 package bddispatch
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/outputfirewall"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 const managedReadOutputBudget = 32 << 10
 
+var marshalOutputJSON = json.Marshal
+
 const (
-	managedOutputFirewallEnv         = "GC_MANAGED_OUTPUT_FIREWALL"
-	managedOutputFirewallSpillDirEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_DIR"
+	managedOutputFirewallEnv          = "GC_MANAGED_OUTPUT_FIREWALL"
+	managedOutputFirewallBudgetEnv    = "GC_MANAGED_OUTPUT_FIREWALL_BUDGET"
+	managedOutputFirewallReadVerbsEnv = "GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"
+	managedOutputFirewallSpillRootEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT"
+	managedOutputFirewallSpillPathEnv = "GC_MANAGED_OUTPUT_FIREWALL_SPILL_PATH"
+	managedOutputFirewallRetentionEnv = "GC_MANAGED_OUTPUT_FIREWALL_RETENTION"
 )
 
 // DispatchViaAPI serves a routed bd verb by calling the controller's HTTP API
@@ -101,12 +106,12 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			if isAPINotFound(err) {
 				// Raw bd prints an empty array (exit 0) for an unknown id; a
 				// `bd show ... --json | jq '.[0]'` consumer reads that as absent.
-				return WriteManagedReadJSON(nil, stdout, stderr)
+				return WriteManagedReadJSONForVerb("show", nil, stdout, stderr)
 			}
 			fmt.Fprintf(stderr, "gc bd-shim: show %q via API: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON([]beads.Bead{read.Body}, stdout, stderr)
+		return WriteManagedReadJSONForVerb("show", []beads.Bead{read.Body}, stdout, stderr)
 	case "ready":
 		p, err := ParseReadyParams(args)
 		if err != nil {
@@ -120,7 +125,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		}
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
-		return WriteManagedReadJSON(applyReadyParams(read.Body, p), stdout, stderr)
+		return WriteManagedReadJSONForVerb("ready", applyReadyParams(read.Body, p), stdout, stderr)
 	case "list":
 		opts, err := ParseListOpts(args)
 		if err != nil {
@@ -132,7 +137,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			fmt.Fprintf(stderr, "gc bd-shim: list via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON(read.Body, stdout, stderr)
+		return WriteManagedReadJSONForVerb("list", read.Body, stdout, stderr)
 	case "query":
 		opts, ok := ParseQueryEphemeral(args)
 		if !ok {
@@ -144,7 +149,7 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			fmt.Fprintf(stderr, "gc bd-shim: query via API: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return WriteManagedReadJSON(read.Body, stdout, stderr)
+		return WriteManagedReadJSONForVerb("query", read.Body, stdout, stderr)
 	case "mol":
 		sub, id, jsonOut, ok := bdshim.MolRoutable(args)
 		if !ok {
@@ -353,7 +358,7 @@ func isBareBdQueryValue(v string) bool {
 func renderBdMol(sub string, g beadclient.BeadGraph, jsonOut bool, stdout, stderr io.Writer) int {
 	steps := molSteps(g)
 	if jsonOut {
-		return WriteManagedReadJSON(steps, stdout, stderr)
+		return WriteManagedReadJSONForVerb("mol", steps, stdout, stderr)
 	}
 	done := 0
 	for _, b := range steps {
@@ -361,20 +366,21 @@ func renderBdMol(sub string, g beadclient.BeadGraph, jsonOut bool, stdout, stder
 			done++
 		}
 	}
+	var rendered bytes.Buffer
 	switch sub {
 	case "progress":
 		pct := 0
 		if len(steps) > 0 {
 			pct = done * 100 / len(steps)
 		}
-		fmt.Fprintf(stdout, "%s: %d/%d steps complete (%d%%)\n", g.Root.ID, done, len(steps), pct) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(&rendered, "%s: %d/%d steps complete (%d%%)\n", g.Root.ID, done, len(steps), pct) //nolint:errcheck // bytes.Buffer never fails
 	default: // current
-		fmt.Fprintf(stdout, "Molecule %s — %s (%d/%d done)\n", g.Root.ID, g.Root.Title, done, len(steps)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(&rendered, "Molecule %s — %s (%d/%d done)\n", g.Root.ID, g.Root.Title, done, len(steps)) //nolint:errcheck // bytes.Buffer never fails
 		for _, b := range steps {
-			fmt.Fprintf(stdout, "  [%s] %s %s\n", molStepIndicator(b), b.ID, b.Title) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(&rendered, "  [%s] %s %s\n", molStepIndicator(b), b.ID, b.Title) //nolint:errcheck // bytes.Buffer never fails
 		}
 	}
-	return 0
+	return WriteManagedOutput(context.Background(), "managed_bd_mol", "mol", rendered.Bytes(), false, stdout, stderr)
 }
 
 // molSteps returns the molecule's step beads (every graph bead except the root),
@@ -725,7 +731,7 @@ func DispatchListMetadataGuarded(client *beadclient.Client, args []string, stdou
 		fmt.Fprintf(stderr, "gc bd-shim: list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	return WriteManagedReadJSON(applyListMetadataFilter(read.Body, f), stdout, stderr), true
+	return WriteManagedReadJSONForVerb("list", applyListMetadataFilter(read.Body, f), stdout, stderr), true
 }
 
 // ParseUpdateOpts maps the routable `bd update` flags onto a beads.UpdateOpts.
@@ -808,11 +814,32 @@ func WriteReadyJSON(out []beads.Bead, stdout, stderr io.Writer) int {
 // read responses. Mutation acknowledgements intentionally retain their native
 // behavior so a successful write is never reported as a post-write failure.
 func WriteManagedReadJSON(out []beads.Bead, stdout, stderr io.Writer) int {
-	budget := 0
-	if os.Getenv(managedOutputFirewallEnv) == "1" {
-		budget = managedReadOutputBudget
-	}
-	return WriteReadyJSONWithBudget(out, stdout, stderr, budget)
+	return WriteManagedReadJSONForVerb("", out, stdout, stderr)
+}
+
+// WriteManagedReadJSONForVerb writes one routed read response under the
+// managed-session policy when its verb is within the configured read scope.
+func WriteManagedReadJSONForVerb(verb string, out []beads.Bead, stdout, stderr io.Writer) int {
+	return WriteManagedJSON(context.Background(), "managed_bd_read", verb, out, stdout, stderr)
+}
+
+// WriteManagedJSON serializes a known managed read entirely before it reaches
+// stdout. A canceled context never publishes staged bytes.
+func WriteManagedJSON(ctx context.Context, commandClass, verb string, value any, stdout, stderr io.Writer) int {
+	return outputfirewall.WriteJSON(ctx, commandClass, verb, value, stdout, stderr, marshalOutputJSON)
+}
+
+// WriteManagedOutput applies the managed-output admission check to an already
+// rendered known-read response. It preserves direct CLI bytes when the policy
+// is inactive and never applies to mutation paths.
+func WriteManagedOutput(ctx context.Context, commandClass, verb string, payload []byte, structured bool, stdout, stderr io.Writer) int {
+	return outputfirewall.Write(ctx, commandClass, verb, payload, structured, stdout, stderr)
+}
+
+// ManagedOutputFirewallActive reports whether a managed read verb is subject
+// to the explicitly injected output policy.
+func ManagedOutputFirewallActive(verb string) bool {
+	return outputfirewall.Active(verb)
 }
 
 // WriteReadyJSONWithBudget writes a complete bead result when it fits within
@@ -823,88 +850,5 @@ func WriteReadyJSONWithBudget(out []beads.Bead, stdout, stderr io.Writer, budget
 	if out == nil {
 		out = []beads.Bead{}
 	}
-	payload, err := json.Marshal(out)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd-shim: encoding: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	payload = append(payload, '\n')
-	if budget > 0 && len(payload) > budget {
-		digest := sha256.Sum256(payload)
-		spill := writeOutputFirewallSpill(payload)
-		manifest := struct {
-			Kind            string `json:"kind"`
-			Reason          string `json:"reason"`
-			BudgetBytes     int    `json:"budget_bytes"`
-			SerializedBytes int    `json:"serialized_bytes"`
-			SHA256          string `json:"sha256"`
-			Spill           string `json:"spill,omitempty"`
-		}{
-			Kind:            "gc.output_firewall",
-			Reason:          "byte_budget_exceeded",
-			BudgetBytes:     budget,
-			SerializedBytes: len(payload),
-			SHA256:          fmt.Sprintf("%x", digest),
-			Spill:           spill,
-		}
-		payload, err = json.Marshal(manifest)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc bd-shim: encoding output firewall manifest: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		payload = append(payload, '\n')
-		if len(payload) > budget {
-			fmt.Fprintln(stderr, "gc bd-shim: output budget too small for firewall manifest") //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
-	if _, err := stdout.Write(payload); err != nil {
-		fmt.Fprintf(stderr, "gc bd-shim: writing output: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
-
-// writeOutputFirewallSpill persists withheld output only in the controller
-// supplied directory. A configured-but-unsafe directory degrades to a
-// no-spill manifest rather than risking an arbitrary write.
-func writeOutputFirewallSpill(payload []byte) string {
-	dir := os.Getenv(managedOutputFirewallSpillDirEnv)
-	if dir == "" || !filepath.IsAbs(dir) {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return ""
-	}
-	info, err := os.Lstat(dir)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return ""
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return ""
-	}
-	info, err = os.Lstat(dir)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
-		return ""
-	}
-	f, err := os.CreateTemp(dir, "output-")
-	if err != nil {
-		return ""
-	}
-	name := f.Name()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(name)
-		return ""
-	}
-	if _, err := f.Write(payload); err != nil {
-		_ = f.Close()
-		_ = os.Remove(name)
-		return ""
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return ""
-	}
-	return name
+	return outputfirewall.WriteJSONWithBudget(context.Background(), "managed_bd_read", out, stdout, stderr, budget, marshalOutputJSON)
 }

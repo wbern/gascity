@@ -2,12 +2,18 @@ package bddispatch
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
@@ -15,16 +21,14 @@ import (
 )
 
 func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing.T) {
-	t.Parallel()
-
 	var stdout, stderr bytes.Buffer
 	beadsOut := []beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("secret-value", 64)}}
 
-	if code := WriteReadyJSONWithBudget(beadsOut, &stdout, &stderr, 256); code != 0 {
+	if code := WriteReadyJSONWithBudget(beadsOut, &stdout, &stderr, 512); code != 0 {
 		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
 	}
-	if got := stdout.Len(); got > 256 {
-		t.Fatalf("stdout is %d bytes, want at most 256", got)
+	if got := stdout.Len(); got > 512 {
+		t.Fatalf("stdout is %d bytes, want at most 512", got)
 	}
 	if !json.Valid(stdout.Bytes()) {
 		t.Fatalf("stdout is not valid JSON: %q", stdout.String())
@@ -33,26 +37,187 @@ func TestWriteReadyJSONWithBudgetReplacesOversizedPayloadWithManifest(t *testing
 		t.Fatalf("stdout leaked withheld content: %q", stdout.String())
 	}
 	var manifest struct {
+		SchemaVersion   string `json:"schema_version"`
 		Kind            string `json:"kind"`
 		Reason          string `json:"reason"`
+		CommandClass    string `json:"command_class"`
 		BudgetBytes     int    `json:"budget_bytes"`
 		SerializedBytes int    `json:"serialized_bytes"`
 		SHA256          string `json:"sha256"`
+		Spill           struct {
+			Mode      string `json:"mode"`
+			Path      string `json:"path"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"spill"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
-	if manifest.Kind != "gc.output_firewall" || manifest.Reason != "byte_budget_exceeded" {
+	if manifest.SchemaVersion != "1" || manifest.Kind != "gc.output_firewall" || manifest.Reason != "byte_budget_exceeded" || manifest.CommandClass != "managed_bd_read" {
 		t.Fatalf("manifest = %#v", manifest)
 	}
-	if manifest.BudgetBytes != 256 || manifest.SerializedBytes <= manifest.BudgetBytes || manifest.SHA256 == "" {
+	if manifest.BudgetBytes != 512 || manifest.SerializedBytes <= manifest.BudgetBytes || manifest.SHA256 == "" {
 		t.Fatalf("manifest = %#v", manifest)
+	}
+	if manifest.Spill.Mode == "" || manifest.Spill.ExpiresAt == "" {
+		t.Fatalf("spill manifest is incomplete: %#v", manifest.Spill)
+	}
+}
+
+func TestWriteReadyJSONWithBudgetGiantSingleFieldNeverReachesStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	giant := strings.Repeat("giant-secret", managedReadOutputBudget)
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg-giant", Description: giant}}, &stdout, &stderr, managedReadOutputBudget); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() > managedReadOutputBudget || strings.Contains(stdout.String(), "giant-secret") || !json.Valid(stdout.Bytes()) {
+		t.Fatalf("giant field escaped firewall: %d bytes", stdout.Len())
+	}
+}
+
+func TestWriteReadyJSONWithBudgetEncodeFailureWritesBoundedValidManifest(t *testing.T) {
+	original := marshalOutputJSON
+	marshalOutputJSON = func(any) ([]byte, error) { return nil, errors.New("encode failed") }
+	t.Cleanup(func() { marshalOutputJSON = original })
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg"}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "encode failed") || !strings.Contains(stdout.String(), "gc.output_firewall") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestWriteReadyJSONPreservesDirectUserOutput(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	beadsOut := []beads.Bead{{ID: "gcg-direct", Description: strings.Repeat("direct-user-body", 3000)}}
+	if code := WriteReadyJSON(beadsOut, &stdout, &stderr); code != 0 {
+		t.Fatalf("WriteReadyJSON() = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "direct-user-body") {
+		t.Fatal("direct compatibility writer replaced the body")
+	}
+	if !json.Valid(stdout.Bytes()) {
+		t.Fatalf("direct output is not valid JSON: %q", stdout.String())
+	}
+}
+
+func TestWriteManagedReadJSONUsesBudgetOnlyWhenManaged(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+
+	var stdout, stderr bytes.Buffer
+	beadsOut := []beads.Bead{{ID: "gcg-managed", Description: strings.Repeat("managed-secret", 4000)}}
+	if code := WriteManagedReadJSON(beadsOut, &stdout, &stderr); code != 0 {
+		t.Fatalf("WriteManagedReadJSON() = %d, stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() > managedReadOutputBudget || strings.Contains(stdout.String(), "managed-secret") {
+		t.Fatalf("managed output leaked body or exceeded budget (%d bytes)", stdout.Len())
+	}
+}
+
+func TestWriteReadyJSONWithBudgetCountsEscapedUTF8AndManyRows(t *testing.T) {
+	cases := []struct {
+		name string
+		out  []beads.Bead
+	}{
+		{"escaped utf8", []beads.Bead{{ID: "gcg-utf8", Description: strings.Repeat("\"\\漢", 80)}}},
+		{"many rows", func() []beads.Bead {
+			out := make([]beads.Bead, 80)
+			for i := range out {
+				out[i] = beads.Bead{ID: "gcg-row", Title: strings.Repeat("row", 20)}
+			}
+			return out
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := WriteReadyJSONWithBudget(tc.out, &stdout, &stderr, 512); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) {
+				t.Fatalf("invalid bounded output: %d bytes %q", stdout.Len(), stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "gc.output_firewall") {
+				t.Fatalf("want manifest, got %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestWriteReadyJSONWithBudgetDisabledSpillDoesNotCreateArtifact(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setOutputFirewallSpillPath(t, dir)
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("disabled spill created %d artifacts", len(entries))
+	}
+}
+
+func TestWriteReadyJSONWithBudgetUnavailableSpillReturnsNoSpillManifest(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setOutputFirewallSpillPath(t, blocked)
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	var manifest struct {
+		Spill struct{ Mode, Path string } `json:"spill"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Spill.Mode != "unavailable" || manifest.Spill.Path != "" {
+		t.Fatalf("spill=%#v", manifest.Spill)
+	}
+}
+
+type failingOutputWriter struct{ writes int }
+
+func setOutputFirewallSpillPath(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv(managedOutputFirewallSpillRootEnv, filepath.Dir(dir))
+	t.Setenv(managedOutputFirewallSpillPathEnv, filepath.Base(dir))
+}
+
+func (w *failingOutputWriter) Write([]byte) (int, error) { w.writes++; return 0, os.ErrClosed }
+
+func TestWriteReadyJSONWithBudgetWriteFailureDoesNotRetryOrLeakPayload(t *testing.T) {
+	w := &failingOutputWriter{}
+	var stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("secret", 1000)}}, w, &stderr, 512); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes=%d, want one final publish attempt", w.writes)
+	}
+	if strings.Contains(stderr.String(), "secret") {
+		t.Fatalf("stderr leaked payload: %q", stderr.String())
 	}
 }
 
 func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv(managedOutputFirewallSpillDirEnv, dir)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod spill dir: %v", err)
+	}
+	setOutputFirewallSpillPath(t, dir)
 	dirInfo, err := os.Lstat(dir)
 	if err != nil {
 		t.Fatalf("stat temp dir: %v", err)
@@ -64,23 +229,118 @@ func TestWriteReadyJSONWithBudgetSpillsWithPrivatePermissions(t *testing.T) {
 		t.Fatalf("WriteReadyJSONWithBudget() = %d, stderr = %q", code, stderr.String())
 	}
 	var manifest struct {
-		Spill string `json:"spill"`
+		SerializedBytes int    `json:"serialized_bytes"`
+		SHA256          string `json:"sha256"`
+		Spill           struct {
+			Mode string `json:"mode"`
+			Path string `json:"path"`
+		} `json:"spill"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
-	info, err := os.Stat(manifest.Spill)
+	if manifest.Spill.Mode != "secure" || manifest.Spill.Path == "" {
+		t.Fatalf("spill manifest = %#v", manifest.Spill)
+	}
+	info, err := os.Stat(manifest.Spill.Path)
 	if err != nil {
-		t.Fatalf("stat spill %q: %v; stdout=%q", manifest.Spill, err, stdout.String())
+		t.Fatalf("stat spill %q: %v; stdout=%q", manifest.Spill.Path, err, stdout.String())
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("spill mode = %o, want 600", got)
+	}
+	artifact, err := os.ReadFile(manifest.Spill.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal([]beads.Bead{{ID: "gcg-oversized", Description: strings.Repeat("body", 1000)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if !bytes.Equal(artifact, want) {
+		t.Fatalf("artifact does not match serialized payload")
+	}
+	digest := sha256.Sum256(artifact)
+	if manifest.SerializedBytes != len(artifact) || manifest.SHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("manifest bytes/digest mismatch: %#v", manifest)
+	}
+	if strings.Contains(stdout.String(), "bodybody") || strings.Contains(stderr.String(), "bodybody") {
+		t.Fatal("withheld payload leaked")
+	}
+}
+
+func TestWriteReadyJSONWithBudgetUsesConfiguredRetentionTTL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setOutputFirewallSpillPath(t, dir)
+	t.Setenv(managedOutputFirewallRetentionEnv, "1h")
+	before := time.Now().UTC()
+	var stdout, stderr bytes.Buffer
+	if code := WriteReadyJSONWithBudget([]beads.Bead{{ID: "gcg", Description: strings.Repeat("body", 1000)}}, &stdout, &stderr, 512); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	var manifest struct {
+		Spill struct {
+			ExpiresAt string `json:"expires_at"`
+		} `json:"spill"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, manifest.Spill.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := expiresAt.Sub(before); got < 59*time.Minute || got > 61*time.Minute {
+		t.Fatalf("expires_at interval = %s, want about 1h", got)
+	}
+}
+
+func TestWriteManagedJSONCancelledBeforePublishWritesNoOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedJSON(ctx, "managed_hook_claim", "hook", []string{strings.Repeat("secret", 1000)}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "canceled") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestWriteManagedOutputReplacesMalformedJSON(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	var stdout, stderr bytes.Buffer
+	if code := WriteManagedOutput(context.Background(), "managed_bd_passthrough", "show", []byte("not-json"), true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "not-json") || !strings.Contains(stdout.String(), "invalid_json") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestWriteManagedReadJSONForVerbHonorsConfiguredScope(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "512")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "ready")
+	var stdout, stderr bytes.Buffer
+	body := strings.Repeat("show-body", 200)
+	if code := WriteManagedReadJSONForVerb("show", []beads.Bead{{ID: "gcg", Description: body}}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), body) {
+		t.Fatalf("out-of-scope show was firewalled: %q", stdout.String())
 	}
 }
 
 // TestDispatchViaAPICreate proves `bd create` routes to POST /v0/beads with the
 // parsed fields and renders the created bead id like raw bd.
 func TestDispatchViaAPICreate(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
 	var gotMethod, gotPath string
 	var gotBody map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +427,34 @@ func TestDispatchViaAPIMol(t *testing.T) {
 			t.Fatalf("mol progress render = %q, want 1/2 steps complete (50%%)", out.String())
 		}
 	})
+}
+
+func TestRenderBdMolBoundsManagedPlainOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "512")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "mol")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	g := beadclient.BeadGraph{Root: beads.Bead{ID: "gcw-root", Title: strings.Repeat("root-secret", 200)}, Beads: []beads.Bead{{ID: "gcw-root"}, {ID: "gcw-step", Title: strings.Repeat("step-secret", 200)}}}
+	var stdout, stderr bytes.Buffer
+	if code := renderBdMol("current", g, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "root-secret") || strings.Contains(stdout.String(), "step-secret") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestRenderBdMolPreservesUnderBudgetPlainOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "mol")
+	g := beadclient.BeadGraph{Root: beads.Bead{ID: "gcw-root", Title: "Root"}, Beads: []beads.Bead{{ID: "gcw-root"}, {ID: "gcw-step", Title: "Step", Status: "open"}}}
+	var stdout, stderr bytes.Buffer
+	if code := renderBdMol("current", g, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "Molecule gcw-root — Root (0/1 done)\n  [pending] gcw-step Step\n"; got != want {
+		t.Fatalf("stdout=%q want=%q", got, want)
+	}
 }
 
 // TestDispatchViaAPIQueryEphemeral proves `bd query --json 'ephemeral=true AND
