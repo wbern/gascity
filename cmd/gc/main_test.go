@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/rogpeppe/go-internal/testscript"
 )
@@ -203,6 +204,7 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	testutil.ClearManagedOutputFirewallEnv()
 	maybeRunProductMetricsDirectChildEnvSpy()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

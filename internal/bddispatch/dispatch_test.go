@@ -18,7 +18,13 @@ import (
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.ClearManagedOutputFirewallEnv()
+	os.Exit(m.Run())
+}
 
 func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing.T) {
 	giantNotes := strings.Repeat("evidence ", 100_000) // representative of an 845KiB notes field
