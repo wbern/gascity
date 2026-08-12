@@ -52,6 +52,7 @@ type BeadSummary struct {
 type BeadShowSummary struct {
 	ID                    string            `json:"id"`
 	Status                string            `json:"status"`
+	CreatedAt             time.Time         `json:"created_at,omitempty"`
 	Assignee              string            `json:"assignee"`
 	Metadata              map[string]string `json:"metadata,omitempty"`
 	SourceSerializedBytes int               `json:"source_serialized_bytes"`
@@ -151,6 +152,7 @@ func NewBeadShowSummaries(input []beads.Bead) []BeadShowSummary {
 		result = append(result, BeadShowSummary{
 			ID:                    bead.ID,
 			Status:                bead.Status,
+			CreatedAt:             bead.CreatedAt,
 			Assignee:              bead.Assignee,
 			Metadata:              metadata,
 			SourceSerializedBytes: len(source),

@@ -517,8 +517,9 @@ func TestWriteManagedShowOutputPreservesUnderBudgetPayload(t *testing.T) {
 }
 
 func TestBeadShowSummaryKeepsWorkspaceFieldsAndMarksWithheldMetadata(t *testing.T) {
+	createdAt := time.Date(2026, time.August, 12, 13, 40, 0, 0, time.UTC)
 	got := NewBeadShowSummaries([]beads.Bead{{
-		ID: "gcw-show", Status: "open", Assignee: "worker",
+		ID: "gcw-show", Status: "open", Assignee: "worker", CreatedAt: createdAt,
 		Metadata: beads.StringMap{
 			"target":             "develop",
 			"gc.base_sha":        "abc123",
@@ -539,6 +540,9 @@ func TestBeadShowSummaryKeepsWorkspaceFieldsAndMarksWithheldMetadata(t *testing.
 	}
 	if _, ok := got[0].Metadata["gc.routed_to"]; ok {
 		t.Fatalf("absent routing metadata unexpectedly present: %v", got[0].Metadata)
+	}
+	if !got[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("created_at = %s, want %s", got[0].CreatedAt, createdAt)
 	}
 }
 
