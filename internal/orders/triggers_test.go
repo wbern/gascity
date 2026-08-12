@@ -131,23 +131,47 @@ func TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary(t *testing.T) {
 	}
 }
 
-// TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence guards the
-// #3947 fix's own safety bound: a never-run order must not reach back
-// through its full history and fire for a schedule occurrence that
-// elapsed long before it was even installed — only the warm (non-zero
-// lastRun) catch-up path gets the full year-long lookback. A daily
-// schedule's most recent occurrence is always <=24h before now, so this
-// needs a weekly schedule to construct a "most recent occurrence is
-// clearly outside the never-run bootstrap window" case.
-func TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence(t *testing.T) {
+func TestCheckTriggerCronNeverRunCatchesUpWithinSchedulePeriod(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		schedule string
+		now      time.Time
+	}{
+		{
+			name:     "weekly Sunday 04:00",
+			schedule: "0 4 * * 0",
+			now:      time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC), // Tuesday after Sunday's missed slot.
+		},
+		{
+			name:     "weekly Sunday 05:00",
+			schedule: "0 5 * * 0",
+			now:      time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC), // Tuesday after Sunday's missed slot.
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Order{Name: "weekly", Trigger: "cron", Schedule: tc.schedule}
+
+			result := CheckTrigger(a, tc.now, neverRan, nil, nil)
+			if !result.Due {
+				t.Errorf("Due = false, want true (never-run order should catch up a missed occurrence within one schedule period); reason=%q", result.Reason)
+			}
+		})
+	}
+}
+
+// TestCheckTriggerCronNeverRunCatchesUpLatestWeeklyOccurrence documents the
+// creation-time limitation of the Order model: it records no creation time, so
+// checkCron cannot distinguish an old installation from one created after the
+// latest weekly occurrence. It therefore must catch up that latest occurrence
+// rather than permanently starving a weekly order.
+func TestCheckTriggerCronNeverRunCatchesUpLatestWeeklyOccurrence(t *testing.T) {
 	a := Order{Name: "weekly-report", Trigger: "cron", Schedule: "0 4 * * 0"} // Sundays 04:00
 	// 2026-07-05 is a Sunday; evaluating three days later, the most recent
-	// occurrence (07-05 04:00) is ~74h in the past — well outside any
-	// reasonable never-run bootstrap window, and next Sunday hasn't come yet.
+	// occurrence (07-05 04:00) is ~74h in the past.
 	now := time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
-	if result.Due {
-		t.Errorf("Due = true, want false (never-run bootstrap window must not reach back days); reason=%q", result.Reason)
+	if !result.Due {
+		t.Errorf("Due = false, want true (never-run weekly order must catch up the latest occurrence); reason=%q", result.Reason)
 	}
 }
 

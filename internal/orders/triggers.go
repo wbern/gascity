@@ -157,6 +157,11 @@ func resolveOrderLocation(a Order, now time.Time) (*time.Location, error) {
 // wall-clock reading and must count as a single cron slot.
 const wallMinuteLayout = "2006-01-02 15:04"
 
+const (
+	maxCatchupLookback      = 366 * 24 * time.Hour
+	neverRunCatchupLookback = 25 * time.Hour
+)
+
 // checkCron uses minute-granularity matching against the schedule, WITH
 // catch-up. A scheduled occurrence fires if either (a) the current minute
 // matches, or (b) a scheduled minute elapsed since the last run without the
@@ -238,13 +243,11 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	// floor keeps a freshly-enabled order from firing for an occurrence that
 	// elapsed long before it existed, unlike the year-long lookback a warm
 	// order's lastRun-anchored catch-up gets.
-	const maxCatchupLookback = 366 * 24 * time.Hour
-	const neverRunCatchupLookback = 25 * time.Hour
 	lookback := maxCatchupLookback
 	start := last.Truncate(time.Minute).Add(time.Minute)
 	if last.IsZero() {
-		lookback = neverRunCatchupLookback
-		start = now.Add(-neverRunCatchupLookback).Truncate(time.Minute)
+		lookback = cronNeverRunCatchupLookback(now, matchesAt)
+		start = now.Add(-lookback).Truncate(time.Minute)
 	}
 	if floor := now.Add(-lookback).Truncate(time.Minute); start.Before(floor) {
 		start = floor
@@ -267,6 +270,38 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	}
 
 	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
+}
+
+// cronNeverRunCatchupLookback returns at least the cold-start safety floor and
+// otherwise one recurrence interval for the schedule nearest now. A never-run
+// order has no last-run timestamp from which to bound catch-up, so its own
+// recurrence interval is the narrowest available window that can cover its
+// most recently missed slot.
+func cronNeverRunCatchupLookback(now time.Time, matchesAt func(time.Time) bool) time.Duration {
+	floor := now.Add(-maxCatchupLookback).Truncate(time.Minute)
+	var latest time.Time
+	for t := now.Truncate(time.Minute); !t.Before(floor); t = t.Add(-time.Minute) {
+		if !matchesAt(t) {
+			continue
+		}
+		if latest.IsZero() {
+			latest = t
+			continue
+		}
+		if latest.Format(wallMinuteLayout) == t.Format(wallMinuteLayout) {
+			continue // the DST fall-back repeat is one cron wall-clock slot.
+		}
+		if period := latest.Sub(t); period > neverRunCatchupLookback {
+			return period
+		}
+		return neverRunCatchupLookback
+	}
+	if !latest.IsZero() {
+		if elapsed := now.Sub(latest) + time.Minute; elapsed > neverRunCatchupLookback {
+			return elapsed
+		}
+	}
+	return neverRunCatchupLookback
 }
 
 // matchesInWallGap reports whether any wall-clock minute strictly between
