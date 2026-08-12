@@ -429,6 +429,34 @@ func TestDispatchViaAPIMol(t *testing.T) {
 	})
 }
 
+func TestRenderBdMolBoundsManagedPlainOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallBudgetEnv, "512")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "mol")
+	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE", "disabled")
+	g := beadclient.BeadGraph{Root: beads.Bead{ID: "gcw-root", Title: strings.Repeat("root-secret", 200)}, Beads: []beads.Bead{{ID: "gcw-root"}, {ID: "gcw-step", Title: strings.Repeat("step-secret", 200)}}}
+	var stdout, stderr bytes.Buffer
+	if code := renderBdMol("current", g, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "root-secret") || strings.Contains(stdout.String(), "step-secret") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestRenderBdMolPreservesUnderBudgetPlainOutput(t *testing.T) {
+	t.Setenv(managedOutputFirewallEnv, "1")
+	t.Setenv(managedOutputFirewallReadVerbsEnv, "mol")
+	g := beadclient.BeadGraph{Root: beads.Bead{ID: "gcw-root", Title: "Root"}, Beads: []beads.Bead{{ID: "gcw-root"}, {ID: "gcw-step", Title: "Step", Status: "open"}}}
+	var stdout, stderr bytes.Buffer
+	if code := renderBdMol("current", g, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "Molecule gcw-root — Root (0/1 done)\n  [pending] gcw-step Step\n"; got != want {
+		t.Fatalf("stdout=%q want=%q", got, want)
+	}
+}
+
 // TestDispatchViaAPIQueryEphemeral proves `bd query --json 'ephemeral=true AND
 // ...'` routes to GET /beads/ephemeral with the parsed filters and renders the
 // wisp rows as a JSON array (like raw `bd query`).

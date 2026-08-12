@@ -8,6 +8,7 @@
 package bddispatch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -365,20 +366,21 @@ func renderBdMol(sub string, g beadclient.BeadGraph, jsonOut bool, stdout, stder
 			done++
 		}
 	}
+	var rendered bytes.Buffer
 	switch sub {
 	case "progress":
 		pct := 0
 		if len(steps) > 0 {
 			pct = done * 100 / len(steps)
 		}
-		fmt.Fprintf(stdout, "%s: %d/%d steps complete (%d%%)\n", g.Root.ID, done, len(steps), pct) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(&rendered, "%s: %d/%d steps complete (%d%%)\n", g.Root.ID, done, len(steps), pct) //nolint:errcheck // bytes.Buffer never fails
 	default: // current
-		fmt.Fprintf(stdout, "Molecule %s — %s (%d/%d done)\n", g.Root.ID, g.Root.Title, done, len(steps)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(&rendered, "Molecule %s — %s (%d/%d done)\n", g.Root.ID, g.Root.Title, done, len(steps)) //nolint:errcheck // bytes.Buffer never fails
 		for _, b := range steps {
-			fmt.Fprintf(stdout, "  [%s] %s %s\n", molStepIndicator(b), b.ID, b.Title) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(&rendered, "  [%s] %s %s\n", molStepIndicator(b), b.ID, b.Title) //nolint:errcheck // bytes.Buffer never fails
 		}
 	}
-	return 0
+	return WriteManagedOutput(context.Background(), "managed_bd_mol", "mol", rendered.Bytes(), false, stdout, stderr)
 }
 
 // molSteps returns the molecule's step beads (every graph bead except the root),
