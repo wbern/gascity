@@ -52,3 +52,50 @@ jobs:
         run: go test ./internal/orders/ -run 'TestParseScope|TestValidateRejectsUnknownScope|TestValidateAcceptsCityAndRigScope|TestParseEnv' -count=1 -v
       - name: Unit tests — scale from zero (#2819)
         run: go test ./cmd/gc/ -run 'TestBuildDesiredState_ScaleFromZero' -count=1 -v
+      # Whole packages, not a named list. The named lists above cannot catch a
+      # regression in code written after they were authored: none of them ran a
+      # single test from the gcw-qap3.16 fix. These three are the bead/dispatch
+      # core, they are green on develop, and they run in well under a minute.
+      - name: Unit tests — bead store, bd dispatch, control dispatch
+        run: go test ./internal/beads/ ./internal/bddispatch/ ./internal/dispatch/ -count=1
+
+  # Static analysis belongs on a runner, not on a developer's pre-commit hook.
+  # Whole-program linters (staticcheck/unused/unparam) over ~3,400 Go files
+  # need roughly 6.7GB at the default concurrency=NumCPU; on a workstation that
+  # OOM-killed two workers and left a change deployed unlinted. This job is
+  # deliberately NOT a required check yet: it reports first, so its true
+  # baseline on develop is measured rather than assumed.
+  lint:
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    env:
+      DOLT_VERSION: "2.1.7"
+      BD_VERSION: "v1.1.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Get golangci-lint + Go toolchain versions for cache key
+        id: glint-version
+        run: |
+          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+      - name: Restore golangci-lint cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/golangci-lint
+          # Exact-key-only restore, matching upstream ci.yml: a prefix fallback
+          # let an incompatible cache be inherited and re-saved forward, which
+          # produced a SA5011 false-positive storm upstream (ga-v7x9vk).
+          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+      - name: Lint full repository
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
+          # Bound the peak the OOM came from. ubuntu-latest is 4 vCPU / 16GB;
+          # the unbounded default is what exhausted a 10-core workstation.
+          LINT_FLAGS: --concurrency=2 --timeout=20m
+        run: make lint
