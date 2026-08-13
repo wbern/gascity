@@ -161,6 +161,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
+	now := time.Now
+	if ops.Now != nil {
+		now = ops.Now
+	}
+
+	// The ready projection is fetched at most ONCE per invocation and shared by
+	// the trigger readiness check below and the pool loop further down. The
+	// trigger path runs first (it must keep its priority over pool work), so the
+	// fetch is lazy rather than hoisted: a session with no trigger pays nothing,
+	// and a session with one pays a single query, not two.
+	ready := &hookReadyProjection{workQuery: workQuery, dir: dir, ops: ops, now: now}
+
 	triggerErrored := false
 	if triggerID := strings.TrimSpace(opts.TriggerBeadID); triggerID != "" {
 		res := doHookTriggerClaim(triggerID, dir, *opts, *ops, stdout, stderr)
@@ -175,19 +187,12 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		fmt.Fprintln(stderr, "gc hook --claim: missing work query runner") //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
-	now := time.Now
-	if ops.Now != nil {
-		now = ops.Now
-	}
 
-	output, err := ops.Runner(workQuery, dir)
+	preFilter, normalized, err := ready.fetch()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
-
-	preFilter := normalizeWorkQueryOutput(strings.TrimSpace(output))
-	normalized := filterUnreadyHookCandidates(preFilter, now())
 	if stripped := hookClaimStripDiagnostic(preFilter, now()); len(stripped) > 0 {
 		// Emit len(before) and len(after) so a recurrence self-classifies the
 		// mechanism (gci-x8zo): before>0,after=0 == the worker stripped rows the
@@ -428,6 +433,74 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 //
 // A terminal result means the trigger was handled (claimed, adopted, or a hard
 // error). A non-terminal result means "not claimable — try the pool".
+// hookReadyProjection memoizes the one work-query round trip per invocation.
+// fetch returns the raw normalized output and the readiness-filtered output;
+// both callers (trigger readiness, pool loop) get the same snapshot, so they
+// cannot disagree about what was ready at this instant — which is the whole
+// point of gci-pha.
+type hookReadyProjection struct {
+	workQuery string
+	dir       string
+	ops       *hookClaimOps
+	now       func() time.Time
+
+	done       bool
+	preFilter  string
+	normalized string
+	err        error
+}
+
+func (r *hookReadyProjection) fetch() (string, string, error) {
+	if r.done {
+		return r.preFilter, r.normalized, r.err
+	}
+	r.done = true
+	if r.ops == nil || r.ops.Runner == nil {
+		r.err = errors.New("missing work query runner")
+		return r.preFilter, r.normalized, r.err
+	}
+	output, err := r.ops.Runner(r.workQuery, r.dir)
+	if err != nil {
+		r.err = err
+		return r.preFilter, r.normalized, r.err
+	}
+	r.preFilter = normalizeWorkQueryOutput(strings.TrimSpace(output))
+	r.normalized = filterUnreadyHookCandidates(r.preFilter, r.now())
+	return r.preFilter, r.normalized, nil
+}
+
+// hookBeadBlockedReason reports why a RESOLVED bead is not claimable, or "" when
+// nothing blocks it. This is the typed half of the shared readiness predicate:
+// isDepBlockedHookCandidate applies the same rule to the map-shaped ready
+// projection, and both now agree that a non-closed blocking dependency parks its
+// successor.
+//
+// Only ready-blocking dependency types count. A "tracks" or "relates-to" edge
+// describes a bead, it does not gate it, and treating those as blockers would
+// park work the graph never intended to serialize.
+func hookBeadBlockedReason(bead beads.Bead) string {
+	for _, dep := range bead.Dependencies {
+		blocker := strings.TrimSpace(dep.DependsOnID)
+		if blocker == "" {
+			continue
+		}
+		if depType := strings.TrimSpace(dep.Type); depType != "" && !beads.IsReadyBlockingDependencyType(depType) {
+			continue
+		}
+		// An UNKNOWN blocker status fails closed. bd's nested projection always
+		// carries one; an absent status means we are looking at a shape we do not
+		// understand, and claiming past a dependency we cannot evaluate is the
+		// exact failure this bead exists to stop.
+		if status := strings.TrimSpace(dep.Status); !strings.EqualFold(status, "closed") {
+			if status == "" {
+				status = "unknown"
+			}
+			return fmt.Sprintf("blocked by %s (status=%s)", blocker, status)
+		}
+	}
+	return ""
+}
+
 func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) hookClaimResult {
 	triggerDir := strings.TrimSpace(opts.TriggerStoreDir)
 	if triggerDir == "" {
@@ -499,6 +572,31 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 			triggerID, hookClaimRoute(bead))
 		return hookClaimResult{}
 	}
+
+	// READINESS. Until gci-pha this path ran exactly four checks — exists,
+	// already-mine, unassigned+open, route — and then claimed. None of them
+	// looked at dependencies, so candidate SELECTION and the store's close gate
+	// disagreed: on GC3 2026-08-12T00:25Z a session claimed the graph.v2
+	// self-review step crm-q6zfr9 while its Investigate blocker crm-e9jahp was
+	// still open, and the close was refused with "blocked by open issues". The
+	// generic discovery path had filtered that same bead out all along.
+	//
+	// Falling through rather than draining is deliberate and costs no liveness:
+	// the pool query below is route-scoped, so a session refused its own trigger
+	// still takes the next genuinely ready bead on its route.
+	if reason := hookBeadBlockedReason(bead); reason != "" {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s is not ready (%s); falling through to the pool\n", //nolint:errcheck
+			triggerID, reason)
+		return hookClaimResult{}
+	}
+	// NO READY-PROJECTION CROSS-CHECK HERE, deliberately. Consulting it would be
+	// a useful second opinion — the projection reads blocked_by/is_blocked, which
+	// `bd show` does not emit at all — but it costs a work query on EVERY trigger
+	// claim, and the trigger path is contractually cheap: a trigger-scoped claim
+	// must resolve and claim one bead without running discovery at all
+	// (TestClaimHookWorkTargetsTriggerBeforeFederatedDiscovery fails the runner
+	// outright if it is called). The typed predicate above is the fix; this would
+	// only have been belt and braces, and not at the price of a query per wake.
 
 	claimed, ok, err := ops.Claim(ctx, triggerDir, opts.Env, triggerID, opts.Assignee)
 	if err != nil {
