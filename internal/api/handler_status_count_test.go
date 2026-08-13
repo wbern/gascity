@@ -115,7 +115,7 @@ func getStatus(t *testing.T, state *fakeState) statusResponse {
 // getStatusFrom fetches /status through an existing handler so tests can
 // issue multiple requests against one handler's response cache.
 // getStatusWithPrimedStoreHealth measures store health before issuing the
-// request, so the response reflects only the behaviour under test. A cold
+// request, so the response reflects only the behavior under test. A cold
 // status deliberately does not wait for the store-health walk (it reports a
 // "measurement pending" partial and refreshes in the background), which would
 // otherwise make every strict Partial assertion depend on that unrelated block.
