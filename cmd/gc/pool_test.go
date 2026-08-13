@@ -885,6 +885,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		BindingName:                  "gastown",
 		PackName:                     "gastown",
 		AssignedWorkDeferLimit:       intPtr(3),
+		OutputFirewallByteBudget:     intPtr(65536),
 	}
 
 	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not

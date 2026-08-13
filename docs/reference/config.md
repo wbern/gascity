@@ -93,6 +93,7 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides this agent's managed-output byte budget. The controller resolves it and clamps it to output_firewall.max_byte_budget. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
@@ -174,6 +175,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides the agent's managed-output byte budget. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -233,6 +235,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides the agent's managed-output byte budget. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -624,6 +627,7 @@ OutputFirewallConfig is the operator-owned policy applied to managed read output
 |-------|------|----------|---------|-------------|
 | `enabled` | boolean |  |  | Enabled controls whether managed known-read output is bounded; default true. |
 | `byte_budget` | integer |  |  | ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768. |
+| `max_byte_budget` | integer |  |  | MaxByteBudget is the city-owned ceiling for per-agent output_firewall_byte_budget values. Operators should normally keep a single command below roughly 10% of that agent's context window: dense JSON is roughly 3.5–4 bytes per token, so 32 KiB is about 8–9K tokens, 64 KiB about 16–19K, and 512 KiB about 130–150K tokens. When unset, the ceiling is ByteBudget (or 32768). |
 | `read_verbs` | []string |  |  | ReadVerbs is the closed allowlist of managed read routes to protect; default show, ready, list, query, mol, hook. |
 | `spill_mode` | string |  |  | SpillMode selects secure, disabled, or required evidence retention; default secure. |
 | `spill_path` | string |  |  | SpillPath is the city-relative directory for protected evidence artifacts; default .gc/evidence/output. |

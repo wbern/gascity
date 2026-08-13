@@ -345,6 +345,13 @@
             },
             "type": "object"
           },
+          "OutputFirewallByteBudget": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "OverlayDir": {
             "type": [
               "string",
@@ -525,6 +532,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "OutputFirewallByteBudget",
           "Upstream",
           "Args",
           "StartCommand",
