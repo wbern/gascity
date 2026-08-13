@@ -51,6 +51,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// OutputFirewallByteBudget overrides the agent's managed-output byte budget.
+	OutputFirewallByteBudget *int `toml:"output_firewall_byte_budget,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -476,6 +478,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.Provider != nil {
 		a.Provider = *p.Provider
+	}
+	if p.OutputFirewallByteBudget != nil {
+		a.OutputFirewallByteBudget = copyIntPtr(p.OutputFirewallByteBudget)
 	}
 	if p.Upstream != nil {
 		a.Upstream = *p.Upstream

@@ -347,7 +347,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			firewall = p.city.OutputFirewall
 		}
 		agentEnv[managedOutputFirewallEnv] = "1"
-		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"] = fmt.Sprintf("%d", firewall.EffectiveByteBudget())
+		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"] = fmt.Sprintf("%d", firewall.EffectiveAgentByteBudget(cfgAgent.OutputFirewallByteBudget))
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS"] = strings.Join(firewall.EffectiveReadVerbs(), ",")
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_MODE"] = firewall.EffectiveSpillMode()
 		agentEnv["GC_MANAGED_OUTPUT_FIREWALL_SPILL_ROOT"] = p.cityPath

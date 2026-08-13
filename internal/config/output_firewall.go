@@ -13,6 +13,12 @@ type OutputFirewallConfig struct {
 	Enabled *bool `toml:"enabled,omitempty"`
 	// ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768.
 	ByteBudget *int `toml:"byte_budget,omitempty"`
+	// MaxByteBudget is the city-owned ceiling for per-agent output_firewall_byte_budget values.
+	// Operators should normally keep a single command below roughly 10% of that
+	// agent's context window: dense JSON is roughly 3.5–4 bytes per token, so
+	// 32 KiB is about 8–9K tokens, 64 KiB about 16–19K, and 512 KiB about
+	// 130–150K tokens. When unset, the ceiling is ByteBudget (or 32768).
+	MaxByteBudget *int `toml:"max_byte_budget,omitempty"`
 	// ReadVerbs is the closed allowlist of managed read routes to protect; default show, ready, list, query, mol, hook.
 	ReadVerbs []string `toml:"read_verbs,omitempty"`
 	// SpillMode selects secure, disabled, or required evidence retention; default secure.
@@ -29,6 +35,24 @@ func (c OutputFirewallConfig) EffectiveByteBudget() int {
 		return 32 << 10
 	}
 	return *c.ByteBudget
+}
+
+// EffectiveAgentByteBudget returns the controller-resolved budget for an agent.
+// An explicit agent budget takes precedence over the city default and is capped
+// by the city-owned maximum when one is configured.
+func (c OutputFirewallConfig) EffectiveAgentByteBudget(agentBudget *int) int {
+	budget := c.EffectiveByteBudget()
+	if agentBudget != nil {
+		budget = *agentBudget
+	}
+	maxBudget := c.EffectiveByteBudget()
+	if c.MaxByteBudget != nil {
+		maxBudget = *c.MaxByteBudget
+	}
+	if budget > maxBudget {
+		return maxBudget
+	}
+	return budget
 }
 
 // EnabledForManagedSessions reports whether managed known reads are protected.
@@ -80,6 +104,12 @@ func ValidateOutputFirewall(cfg *City) error {
 	}
 	if c.ByteBudget != nil && *c.ByteBudget < 512 {
 		return fmt.Errorf("output_firewall.byte_budget must be at least 512")
+	}
+	if c.MaxByteBudget != nil && *c.MaxByteBudget < 512 {
+		return fmt.Errorf("output_firewall.max_byte_budget must be at least 512")
+	}
+	if c.ByteBudget != nil && c.MaxByteBudget != nil && *c.MaxByteBudget < *c.ByteBudget {
+		return fmt.Errorf("output_firewall.max_byte_budget must be at least output_firewall.byte_budget")
 	}
 	if c.SpillMode != "" && c.SpillMode != "secure" && c.SpillMode != "disabled" && c.SpillMode != "required" {
 		return fmt.Errorf("output_firewall.spill_mode must be secure, disabled, or required")

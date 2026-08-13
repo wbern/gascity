@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +77,36 @@ func TestBdStoreDirHandlesNilReceiver(t *testing.T) {
 	if got := store.Dir(); got != "" {
 		t.Fatalf("Dir() on nil store = %q, want empty string", got)
 	}
+}
+
+func TestBdStoreAllowUnboundedReadsIsOptIn(t *testing.T) {
+	t.Run("control-plane store", func(t *testing.T) {
+		var gotArgs []string
+		store := beads.NewBdStore("/city", func(_ string, _ string, args ...string) ([]byte, error) {
+			gotArgs = append([]string(nil), args...)
+			return []byte("[]"), nil
+		}, beads.WithBdStoreAllowUnboundedReads())
+		if _, err := store.List(beads.ListQuery{Status: "open"}); err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if !slices.Contains(gotArgs, "--allow-unbounded") {
+			t.Fatalf("control read args = %#v, want --allow-unbounded", gotArgs)
+		}
+	})
+
+	t.Run("ordinary agent-shaped store", func(t *testing.T) {
+		var gotArgs []string
+		store := beads.NewBdStore("/city", func(_ string, _ string, args ...string) ([]byte, error) {
+			gotArgs = append([]string(nil), args...)
+			return []byte("[]"), nil
+		})
+		if _, err := store.List(beads.ListQuery{Status: "open"}); err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if slices.Contains(gotArgs, "--allow-unbounded") {
+			t.Fatalf("ordinary read args = %#v, must remain firewall-bounded", gotArgs)
+		}
+	})
 }
 
 // --- Create ---
