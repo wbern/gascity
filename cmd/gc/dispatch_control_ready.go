@@ -299,6 +299,7 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	if controlReadyUsesSummary(env) {
+		query += " --allow-unbounded"
 		result, err := controlReadyFallbackQuery(query+" --summary-json", dir, runtimeEnv)
 		if err == nil {
 			return result, nil
@@ -404,7 +405,7 @@ type controlReadyCacheEntry struct {
 // singleflight if overlapping invocations against the same city/dir become
 // common (e.g. a restart handoff window), but the control-dispatcher serve
 // loop's typical call pattern is sequential-per-tick per dir.
-func controlReadyCacheFor(dir, cityPath string, cfg *config.City) *beads.CachingStore {
+func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string) *beads.CachingStore {
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
 	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
@@ -413,7 +414,11 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City) *beads.Caching
 		return entry.cache
 	}
 
-	store, err := openControlStoreAtForCity(dir, cityPath, cfg)
+	var opts []beads.BdStoreOption
+	if controlReadyUsesSummary(env) {
+		opts = append(opts, beads.WithBdStoreAllowUnboundedReads())
+	}
+	store, err := openControlStoreAtForCityWithBdOptions(dir, cityPath, cfg, opts...)
 	if err != nil {
 		return nil
 	}
@@ -448,7 +453,7 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
 	if !parsed.includeEphemeral {
-		if cache := controlReadyCacheFor(dir, cityPath, cfg); cache != nil {
+		if cache := controlReadyCacheFor(dir, cityPath, cfg, env); cache != nil {
 			if ready, ok := cache.CachedReady(); ok {
 				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
 			}

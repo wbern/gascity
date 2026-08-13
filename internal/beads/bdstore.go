@@ -298,6 +298,7 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
+	allowUnboundedReads   bool // whether managed control-plane reads may bypass bdshim's agent output budget
 
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
@@ -340,6 +341,15 @@ type BdStoreOption func(*BdStore)
 func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
+	}
+}
+
+// WithBdStoreAllowUnboundedReads permits this store's read commands to bypass
+// bdshim's managed agent-output firewall. It is for narrowly-scoped internal
+// control-plane stores only; ordinary agent-facing stores must not use it.
+func WithBdStoreAllowUnboundedReads() BdStoreOption {
+	return func(s *BdStore) {
+		s.allowUnboundedReads = true
 	}
 }
 
@@ -1942,6 +1952,9 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 // idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
 // stable-ID guard needed.
 func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
+	if s.allowUnboundedReads {
+		args = append(args, "--allow-unbounded")
+	}
 	var (
 		out []byte
 		err error

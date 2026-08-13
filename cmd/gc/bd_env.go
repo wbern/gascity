@@ -255,16 +255,25 @@ func scopeIsGCManaged(scopeRoot string) bool {
 }
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	return controlBdStoreForCityWithOptions(dir, cityPath, cfg)
+}
+
+func controlBdStoreForCityWithOptions(dir, cityPath string, cfg *config.City, opts ...beads.BdStoreOption) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
+	opts = append(bdStoreOptionsForConfig(cfg), opts...)
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
 		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 
 func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
+	return controlBdStoreForRigWithOptions(rigDir, cityPath, cfg, nil, knownPrefix...)
+}
+
+func controlBdStoreForRigWithOptions(rigDir, cityPath string, cfg *config.City, opts []beads.BdStoreOption, knownPrefix ...string) *beads.BdStore {
 	prefix := issuePrefixForScope(rigDir, cityPath, cfg)
 	if prefix == "" {
 		for _, candidate := range knownPrefix {
@@ -275,11 +284,12 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
+	opts = append(bdStoreOptionsForConfig(cfg), opts...)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		opts...,
 	)
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -967,7 +968,11 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 		return nil, nil
 	}
 	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
-		return queue, err
+		if err != nil {
+			log.Printf("control-ready query failed for %s: %v; continuing serve loop", dir, err)
+			return nil, nil
+		}
+		return queue, nil
 	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
