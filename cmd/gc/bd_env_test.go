@@ -1651,9 +1651,15 @@ dolt.user: canonical-user
 	}
 }
 
-func TestSessionDoltEnvPrefersInheritedCanonicalRigConfigOverCompatRigOverride(t *testing.T) {
-	cityPath := resolvedTempDir(t)
-	rigDir := filepath.Join(resolvedTempDir(t), "repo")
+// setupInheritedRigScope writes a city_canonical city and an inherited_city rig
+// whose tracked endpoint is the caller's, so a test can choose whether the rig
+// MIRRORS the city (a valid inherited config) or diverges from it (which
+// contract.ResolveScopeConfigState rejects with "canonical inherited rig config
+// must mirror the city endpoint").
+func setupInheritedRigScope(t *testing.T, rigHost, rigPort, rigUser string) (cityPath, rigDir string) {
+	t.Helper()
+	cityPath = resolvedTempDir(t)
+	rigDir = filepath.Join(resolvedTempDir(t), "repo")
 	for _, dir := range []string{cityPath, rigDir} {
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
@@ -1673,12 +1679,20 @@ dolt.user: canonical-user
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.auto-start: false
-dolt.host: stale-db.example.com
-dolt.port: 5507
-dolt.user: stale-user
+dolt.host: `+rigHost+`
+dolt.port: `+rigPort+`
+dolt.user: `+rigUser+`
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return cityPath, rigDir
+}
+
+func TestSessionDoltEnvPrefersInheritedCanonicalRigConfigOverCompatRigOverride(t *testing.T) {
+	// The rig MIRRORS the city, which is what a valid inherited_city config is.
+	// The subject here is the COMPAT rig override passed below, not a divergent
+	// on-disk rig config; the divergent case is its own test.
+	cityPath, rigDir := setupInheritedRigScope(t, "canonical-db.example.com", "3307", "canonical-user")
 
 	env := mustSessionBackendEnv(t, cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir, DoltHost: "compat-rig-db.example.com", DoltPort: "6608"}})
 	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
@@ -1696,12 +1710,41 @@ dolt.user: stale-user
 	if got := env["GC_DOLT_USER"]; got != "canonical-user" {
 		t.Fatalf("GC_DOLT_USER = %q, want inherited canonical user", got)
 	}
-	for _, forbidden := range []string{"compat-rig-db.example.com", "6608", "stale-db.example.com", "5507", "stale-user"} {
+	for _, forbidden := range []string{"compat-rig-db.example.com", "6608"} {
 		for key, value := range env {
 			if strings.Contains(value, forbidden) {
 				t.Fatalf("%s should ignore non-canonical inherited value %q, env = %#v", key, forbidden, env)
 			}
 		}
+	}
+}
+
+// A rig that declares inherited_city while tracking DIFFERENT endpoint values
+// than the city is not a valid inherited config: contract.ResolveScopeConfigState
+// rejects it ("canonical inherited rig config must mirror the city endpoint").
+// The connection still resolves to the city canonical, but the FASTPATH
+// PROVENANCE is withheld, because those variables assert that this scope's own
+// config is authoritative — and an unresolvable scope is not.
+//
+// This is the fail-closed half of the pair above and the reason that test's
+// fixture had to be corrected: withholding a provenance claim gc cannot support
+// is right, and a test asserting the opposite pinned a guarantee gc must not
+// make (gcw-vbxac).
+func TestSessionDoltEnvWithholdsCanonicalProvenanceForDivergentInheritedRig(t *testing.T) {
+	cityPath, rigDir := setupInheritedRigScope(t, "stale-db.example.com", "5507", "stale-user")
+
+	env := mustSessionBackendEnv(t, cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+
+	if got := env[canonicalDoltHostEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for a rig config that does not mirror the city", canonicalDoltHostEnv, got)
+	}
+	if got := env[canonicalDoltPortEnv]; got != "" {
+		t.Fatalf("%s = %q, want empty for a rig config that does not mirror the city", canonicalDoltPortEnv, got)
+	}
+	// The connection itself still resolves through the city canonical: a scope
+	// that cannot claim provenance is not a scope that loses its endpoint.
+	if got := env["GC_DOLT_HOST"]; got != "canonical-db.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want the city canonical host", got)
 	}
 }
 
@@ -2926,13 +2969,19 @@ dolt.user: canonical-user
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// An inherited rig MIRRORS the city endpoint — contract.ResolveScopeConfigState
+	// rejects a rig that declares inherited_city while tracking different values
+	// ("canonical inherited rig config must mirror the city endpoint"), and an
+	// unresolvable scope is not authoritative, so the fastpath provenance below
+	// is withheld. The subject of this test is the COMPAT rig override passed to
+	// mustSessionBackendEnv, not a divergent on-disk rig config.
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.auto-start: false
-dolt.host: stale-db.example.com
-dolt.port: 5507
-dolt.user: stale-user
+dolt.host: canonical-db.example.com
+dolt.port: 3307
+dolt.user: canonical-user
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
