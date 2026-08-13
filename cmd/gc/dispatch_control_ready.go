@@ -298,8 +298,10 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 		query += " --include-ephemeral"
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
-	if controlReadyUsesSummary(env) {
+	if controlReadyShimmed(env) {
 		query += " --allow-unbounded"
+	}
+	if controlReadyUsesSummary(env) {
 		result, err := controlReadyFallbackQuery(query+" --summary-json", dir, runtimeEnv)
 		if err == nil {
 			return result, nil
@@ -327,6 +329,21 @@ func controlReadyFallbackQuery(query, dir string, runtimeEnv []string) ([]beads.
 	}
 	beads.SortBeadsReadyOrder(result)
 	return result, nil
+}
+
+// controlReadyShimmed reports whether bd is fronted by bdshim at all, without
+// regard to store scope. It gates --allow-unbounded, which the shim strips
+// before any passthrough to raw bd, so it is safe on every disposition —
+// including a rig-pinned scope, where the shim must pass through and would
+// otherwise return a firewall envelope this caller cannot decode.
+//
+// It is deliberately NOT controlReadyUsesSummary: that predicate additionally
+// requires a city scope because --summary-json cannot be served on the
+// passthrough path. Gating the exemption on it would withhold the exemption
+// from rig-scoped control dispatchers, which is exactly where it is needed.
+func controlReadyShimmed(env map[string]string) bool {
+	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
+	return strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) != ""
 }
 
 // controlReadyUsesSummary reports whether the worker environment is fronted
@@ -415,7 +432,7 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 	}
 
 	var opts []beads.BdStoreOption
-	if controlReadyUsesSummary(env) {
+	if controlReadyShimmed(env) {
 		opts = append(opts, beads.WithBdStoreAllowUnboundedReads())
 	}
 	store, err := openControlStoreAtForCityWithBdOptions(dir, cityPath, cfg, opts...)

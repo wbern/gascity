@@ -587,7 +587,7 @@ printf '%%s' "$*" > %q
 	}
 }
 
-func TestControlReadyFallbackReadyOmitsSummaryForPinnedNonCityScope(t *testing.T) {
+func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityScope(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
@@ -616,8 +616,14 @@ func TestControlReadyFallbackReadyOmitsSummaryForPinnedNonCityScope(t *testing.T
 	if strings.Contains(string(args), "--summary-json") {
 		t.Fatalf("bd args = %q, must not request shim summary for pinned rig scope", args)
 	}
-	if strings.Contains(string(args), "--allow-unbounded") {
-		t.Fatalf("bd args = %q, ordinary scoped read must remain firewall-bounded", args)
+	// A pinned rig scope is the control dispatcher's ALWAYS-case
+	// (work_query_probe.go sets GC_STORE_SCOPE=rig for any rig-qualified
+	// agent), and its ready set exceeds a megabyte. Without the exemption the
+	// shim returns a gc.output_firewall envelope this caller cannot decode,
+	// which is what took the dispatcher down in gcw-78nf4. The scope governs
+	// --summary-json only; it must not withhold --allow-unbounded.
+	if !strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("bd args = %q, want --allow-unbounded: a rig-pinned control-plane read must not be firewall-bounded", args)
 	}
 }
 
