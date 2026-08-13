@@ -143,7 +143,8 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HasUncommitted(t *testing.T) {
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "uncommitted changes") {
+	// gcw-kb6r (#41) widened this reason to cover ignored-only work.
+	if !strings.Contains(stderr.String(), "uncommitted or ignored work") {
 		t.Errorf("expected uncommitted-reason log; got %q", stderr.String())
 	}
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
