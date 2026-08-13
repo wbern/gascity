@@ -2679,13 +2679,12 @@ schema = 1
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
-	}
+	// canonicalTestPath, not EvalSymlinks: on darwin gc deliberately collapses
+	// /private/var back to /var (pathutil.canonicalizePlatformPathAlias) so path
+	// equality stays stable across APIs that disagree, lsof among them. Asserting
+	// the EvalSymlinks form pins the exact spelling the product rejects, which is
+	// why these two cases fail for every macOS developer and pass on Linux CI.
+	assertSameTestPath(t, got, canonicalTestPath(dir))
 }
 
 func TestFindNearestImportRootSkipsRuntimeOnlyDirs(t *testing.T) {
@@ -2754,13 +2753,9 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(packDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
-	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want nearest pack %q", got, want)
-	}
+	// See the note in TestResolveImportRootFallsBackToStandalonePackDir: gc's
+	// canonical darwin form is /var, not the EvalSymlinks /private/var.
+	assertSameTestPath(t, got, canonicalTestPath(packDir))
 }
 
 func TestResolveImportRootRuntimeOnlyAncestorResolvesRegisteredRigCity(t *testing.T) {

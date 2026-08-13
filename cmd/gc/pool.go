@@ -395,6 +395,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.AssignedWorkDeferLimit
 		dst.AssignedWorkDeferLimit = &v
 	}
+	if src.OutputFirewallByteBudget != nil {
+		v := *src.OutputFirewallByteBudget
+		dst.OutputFirewallByteBudget = &v
+	}
 	return dst
 }
 

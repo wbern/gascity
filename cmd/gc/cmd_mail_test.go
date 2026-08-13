@@ -3538,7 +3538,11 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+	// The notice text is the fork's (6736853a4): it names how to retrieve what
+	// was held back, which the upstream "Showing the first N" wording did not.
+	// The full unread count is still carried by the header above it, so no
+	// count information was lost when the wording changed.
+	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Mail preview truncated", "gc mail inbox"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
@@ -3569,8 +3573,13 @@ func TestFormatInjectOutputCapsInjectedMessages(t *testing.T) {
 	if strings.Contains(got, "gc-4") || strings.Contains(got, "fourth") {
 		t.Fatalf("output should not include truncated fourth message:\n%s", got)
 	}
-	if !strings.Contains(got, "Showing the first 3 message(s)") {
+	// A held-back message must be announced AND retrievable: truncation that
+	// does not say how to get the rest is the silent-degradation shape.
+	if !strings.Contains(got, "Mail preview truncated") {
 		t.Fatalf("output missing truncation notice:\n%s", got)
+	}
+	if !strings.Contains(got, "gc mail inbox") {
+		t.Fatalf("truncation notice does not say how to retrieve the rest:\n%s", got)
 	}
 	if !strings.Contains(got, "You have 4 unread message(s)") {
 		t.Fatalf("output should report the full unread count, not the capped one:\n%s", got)

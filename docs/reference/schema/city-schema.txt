@@ -124,6 +124,10 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "output_firewall_byte_budget": {
+          "type": "integer",
+          "description": "OutputFirewallByteBudget overrides this agent's managed-output byte budget.\nThe controller resolves it and clamps it to output_firewall.max_byte_budget."
+        },
         "upstream": {
           "type": "string",
           "description": "Upstream selects the model-serving endpoint (a key in [upstreams]) for\nthis agent — WHO serves the model. \"\" (default) falls back to\nagent_defaults.upstream; if still empty, no upstream env is injected\n(ambient behavior). Switching it relaunches the agent in the warm box."
@@ -492,6 +496,10 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "output_firewall_byte_budget": {
+          "type": "integer",
+          "description": "OutputFirewallByteBudget overrides the agent's managed-output byte budget."
+        },
         "upstream": {
           "type": "string",
           "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
@@ -780,6 +788,10 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "output_firewall_byte_budget": {
+          "type": "integer",
+          "description": "OutputFirewallByteBudget overrides the agent's managed-output byte budget."
         },
         "upstream": {
           "type": "string",
@@ -2173,6 +2185,10 @@
         "byte_budget": {
           "type": "integer",
           "description": "ByteBudget is the maximum serialized stdout bytes for a managed read; default 32768."
+        },
+        "max_byte_budget": {
+          "type": "integer",
+          "description": "MaxByteBudget is the city-owned ceiling for per-agent output_firewall_byte_budget values.\nOperators should normally keep a single command below roughly 10% of that\nagent's context window: dense JSON is roughly 3.5–4 bytes per token, so\n32 KiB is about 8–9K tokens, 64 KiB about 16–19K, and 512 KiB about\n130–150K tokens. When unset, the ceiling is ByteBudget (or 32768)."
         },
         "read_verbs": {
           "items": {

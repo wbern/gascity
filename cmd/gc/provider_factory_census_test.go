@@ -85,6 +85,8 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_supervisor.go:reconcileCities:newSessionProviderFromContext:bind-error":                                                               1,
 	"completion.go:loadSessionsForCompletion:newSessionProviderFromContext:bind-error":                                                         1,
 	"providers.go:newSessionProvider:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":                          1,
+	"providers.go:newDoctorSessionProviderForCity:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":             1,
+	"providers.go:newDoctorSessionProviderForCity:withSessionProviderConstructionContext:bind-error":                                           1,
 	"providers.go:newSessionProvider:withSessionProviderConstructionContext:forward-return":                                                    1,
 	"providers.go:newSessionProviderForCity:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":                   1,
 	"providers.go:newSessionProviderForCity:withSessionProviderConstructionContext:forward-return":                                             1,
@@ -104,9 +106,13 @@ var reviewedCanonicalProviderForwards = map[string]bool{
 	"providers.go:newSessionProvider:newSessionProviderFromContext->withSessionProviderConstructionContext":                          true,
 	"providers.go:newSessionProviderForCity:newSessionProviderFromContext->withSessionProviderConstructionContext":                   true,
 	"providers.go:newStatusSessionProviderForCityWithSnapshot:newSessionProviderFromContext->withSessionProviderConstructionContext": true,
-	"providers.go:newSessionProvider:withSessionProviderConstructionContext->return":                                                 true,
-	"providers.go:newSessionProviderForCity:withSessionProviderConstructionContext->return":                                          true,
-	"providers.go:newStatusSessionProviderForCity:newStatusSessionProviderForCityWithSnapshot->return":                               true,
+	// Same shape as the status constructor above, and reviewed on the same
+	// grounds: the forward goes straight into the canonical context wrapper and
+	// the error is inspected locally before the bounded provider wraps it.
+	"providers.go:newDoctorSessionProviderForCity:newSessionProviderFromContext->withSessionProviderConstructionContext": true,
+	"providers.go:newSessionProvider:withSessionProviderConstructionContext->return":                                     true,
+	"providers.go:newSessionProviderForCity:withSessionProviderConstructionContext->return":                              true,
+	"providers.go:newStatusSessionProviderForCity:newStatusSessionProviderForCityWithSnapshot->return":                   true,
 }
 
 type providerFactoryCensus struct {

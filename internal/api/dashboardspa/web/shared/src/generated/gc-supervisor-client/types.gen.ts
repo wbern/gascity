@@ -90,6 +90,7 @@ export type AgentPatch = {
     OptionDefaults: {
         [key: string]: string;
     };
+    OutputFirewallByteBudget: number | null;
     OverlayDir: string | null;
     Pool: PoolOverride;
     PreStart: Array<string> | null;
