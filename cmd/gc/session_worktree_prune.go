@@ -21,7 +21,7 @@ import (
 type gitProbe interface {
 	IsRepo() bool
 	CurrentBranch() (string, error)
-	HasUncommittedWork() bool
+	HasUncommittedOrIgnoredWork() bool
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
 	HasUnpreservedCommitsResult() (bool, error)
@@ -73,7 +73,7 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 
 // workerDirGitStateSkip applies the git-state safety gates to a prune candidate
 // and returns a non-empty skip reason when the worktree holds work its removal
-// would destroy: uncommitted changes in its own working files and index, or
+// would destroy: uncommitted changes or ignored files in its own working tree, or
 // commits on its branch that no remote carries. Both fail closed. It also
 // logs — but does not return — a non-blocking warning for anything worth an
 // operator's attention that does not make removal unsafe. Neither caller has a
@@ -91,10 +91,10 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 // that agent_home_worktree_cleanup.go then read as a real signal. Both are gone:
 // the stash is a warning, and no marker is written for it.
 func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (skip string) {
-	if gp.HasUncommittedWork() {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted changes\n", workerDir) //nolint:errcheck
+	if gp.HasUncommittedOrIgnoredWork() {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted or ignored work\n", workerDir) //nolint:errcheck
 		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
-		return "has uncommitted changes"
+		return "has uncommitted or ignored work"
 	}
 	hasUnlanded, err := gp.HasUnlandedCommitsResult()
 	if err != nil {
@@ -160,7 +160,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
-//   - the worktree has uncommitted changes or unpushed commits (a repo-wide
+//   - the worktree has uncommitted changes, ignored files, or unpushed commits (a repo-wide
 //     stash is only a warning — see workerDirGitStateSkip)
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //

@@ -147,6 +147,17 @@ func (g *Git) HasUncommittedWork() bool {
 	return strings.TrimSpace(out) != ""
 }
 
+// HasUncommittedOrIgnoredWork reports whether the working directory contains
+// changes, untracked files, or ignored files. Use it before removing a
+// worktree, because removal destroys ignored local files too.
+func (g *Git) HasUncommittedOrIgnoredWork() bool {
+	out, err := g.run("status", "--porcelain", "--ignored")
+	if err != nil {
+		return true // assume dirty on error (safe default)
+	}
+	return strings.TrimSpace(out) != ""
+}
+
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
 // any remote tracking branch. Used as a safety check before removing a
 // worktree — unpushed commits represent completed work that would be lost.

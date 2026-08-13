@@ -472,6 +472,22 @@ func TestHasUncommittedWork_Dirty(t *testing.T) {
 	}
 }
 
+func TestHasUncommittedOrIgnoredWork_IgnoredOnly(t *testing.T) {
+	repo := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", ".gitignore")
+	runGit(t, repo, "commit", "-m", "ignore local environment")
+	if err := os.WriteFile(filepath.Join(repo, ".env.local"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !New(repo).HasUncommittedOrIgnoredWork() {
+		t.Error("HasUncommittedOrIgnoredWork() = false for ignored-only file, want true")
+	}
+}
+
 func TestHasUnpushedCommits_NoneWhenClean(t *testing.T) {
 	// Create a bare remote and clone it so there's a tracking branch.
 	bare := t.TempDir()

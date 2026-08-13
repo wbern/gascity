@@ -124,6 +124,38 @@ func TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree(t *testing.T) {
 	}
 }
 
+// TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree proves the removal
+// gate sees ignored files too. A credential file is normally ignored, but
+// removing this worktree would still destroy it.
+func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	if err := os.WriteFile(filepath.Join(rigRoot, ".gitignore"), []byte(".env.local\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	mustGit(t, rigRoot, "add", ".gitignore")
+	mustGit(t, rigRoot, "-c", "commit.gpgsign=false", "commit", "-m", "ignore local environment")
+	mustGit(t, rigRoot, "push", "origin", "main")
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-ignored01")
+	if err := os.WriteFile(filepath.Join(wt, ".env.local"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("write ignored file: %v", err)
+	}
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-ignored01", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+
+	if len(report.Reaped) != 0 {
+		t.Fatalf("Reaped = %+v, want 0 for ignored-only worktree\nstderr:\n%s", report.Reaped, stderr.String())
+	}
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "uncommitted") {
+		t.Fatalf("Protected = %+v, want one uncommitted-work protection", report.Protected)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".env.local")); err != nil {
+		t.Fatalf("ignored file was removed or unstattable: %v", err)
+	}
+}
+
 // TestReapClosedBeadWorktrees_ProtectsLiveWorktree is the canonical failing
 // test for gastownhall/gascity#4492: a closed-bead worktree that is git-clean
 // and fully pushed — and therefore reapable by every pre-existing gate — is NOT

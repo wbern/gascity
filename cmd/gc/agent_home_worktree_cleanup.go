@@ -20,7 +20,7 @@ const worktreeStaleFileName = ".worktree-stale"
 type agentWorktreeGitProbe interface {
 	IsRepo() bool
 	CurrentBranch() (string, error)
-	HasUncommittedWork() bool
+	HasUncommittedOrIgnoredWork() bool
 	CheckoutDetach(ref string) error
 	DefaultBranch() (string, error)
 }
@@ -38,7 +38,7 @@ var newAgentWorktreeGitProbe = func(workDir string) agentWorktreeGitProbe {
 //     remove the marker unconditionally (no rebase can be needed).
 //   - Case B: worktree is on a branch whose bead ID is confirmed closed →
 //     reset to detached origin/main and remove the marker, provided the
-//     working tree has no uncommitted changes.
+//     working tree has no uncommitted or ignored files.
 //
 // Per-bead worktrees (directories whose names do not match a session home)
 // are skipped — the bead_worktree_reaper handles those.
@@ -123,9 +123,9 @@ func cleanupClosedBeadAgentHomeWorktrees(
 				continue
 			}
 
-			// Safety: never reset a worktree that has uncommitted work.
-			if wg.HasUncommittedWork() {
-				fmt.Fprintf(stderr, "cleanupClosedBeadAgentHomeWorktrees: skipping %s: bead %s closed but has uncommitted work\n", worktreePath, beadID) //nolint:errcheck
+			// Safety: never reset a worktree that has uncommitted or ignored work.
+			if wg.HasUncommittedOrIgnoredWork() {
+				fmt.Fprintf(stderr, "cleanupClosedBeadAgentHomeWorktrees: skipping %s: bead %s closed but has uncommitted or ignored work\n", worktreePath, beadID) //nolint:errcheck
 				continue
 			}
 

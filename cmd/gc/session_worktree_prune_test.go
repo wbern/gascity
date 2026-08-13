@@ -21,6 +21,7 @@ type fakeGitProbe struct {
 	currentBranch    string
 	currentBranchErr error
 	hasUncommitted   bool
+	hasIgnored       bool
 	hasUnpushed      bool
 	unpushedErr      error
 	hasUnpreserved   bool
@@ -37,7 +38,7 @@ func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
 func (f *fakeGitProbe) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
 }
-func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
+func (f *fakeGitProbe) HasUncommittedOrIgnoredWork() bool { return f.hasUncommitted || f.hasIgnored }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
@@ -287,16 +288,16 @@ func TestPruneAgentHomeWorktreeIfSafe_NotARepo(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafe_HasIgnoredWork(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUncommitted: true, currentBranch: "builder/ga-abc123"})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasIgnored: true, currentBranch: "builder/ga-abc123"})
 
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true with uncommitted work")
+		t.Fatal("prune returned true with ignored work")
 	}
-	if !strings.Contains(stderr.String(), "uncommitted changes") {
-		t.Errorf("expected uncommitted-reason log; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "uncommitted or ignored work") {
+		t.Errorf("expected ignored-work log; got %q", stderr.String())
 	}
 	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
 }
