@@ -186,6 +186,30 @@ func TestRunPassthroughExecsRealBd(t *testing.T) {
 	}
 }
 
+// TestRunPassthroughStripsShimPrivateFlags verifies that a fallback to the
+// standalone bd binary never forwards flags implemented only by this shim.
+func TestRunPassthroughStripsShimPrivateFlags(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "calls.txt")
+	t.Setenv("GC_BD_REAL", fakeBd(t, dir, out, 0))
+	t.Setenv("GC_BDSHIM_LOG", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"list", "--summary-json", "--limit", "1"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want passthrough success; stderr=%q", code, stderr.String())
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read real bd argv: %v", err)
+	}
+	if strings.Contains(string(got), "--summary-json") {
+		t.Fatalf("real bd argv leaked shim-private flag: %q", got)
+	}
+	if !strings.Contains(string(got), "list --limit 1") {
+		t.Fatalf("real bd argv = %q, want remaining args", got)
+	}
+}
+
 func TestRunManagedPassthroughShowPreservesJSONArrayWhenOverBudget(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"id":"gcw-1","status":"open","description":"`+strings.Repeat("secret", 200)+`"}]`))

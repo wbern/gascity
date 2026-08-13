@@ -294,13 +294,22 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 // mode requires --include-ephemeral (a tier CachedReady can't serve).
 func controlReadyFallbackReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
-	if controlReadyUsesSummary(env) {
-		query += " --summary-json"
-	}
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
-	output, err := shellWorkQueryWithEnv(query, dir, mergeRuntimeEnv(os.Environ(), env))
+	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
+	if controlReadyUsesSummary(env) {
+		result, err := controlReadyFallbackQuery(query+" --summary-json", dir, runtimeEnv)
+		if err == nil {
+			return result, nil
+		}
+		log.Printf("control-ready fallback: summarized discovery unavailable (%v); retrying unsummarized", err)
+	}
+	return controlReadyFallbackQuery(query, dir, runtimeEnv)
+}
+
+func controlReadyFallbackQuery(query, dir string, runtimeEnv []string) ([]beads.Bead, error) {
+	output, err := shellWorkQueryWithEnv(query, dir, runtimeEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +332,12 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 // by bdshim. The compact flag is shim-provided and must not be sent to a raw
 // bd binary, which preserves the configured bd_shim=off behavior.
 func controlReadyUsesSummary(env map[string]string) bool {
-	return strings.TrimSpace(envListValue(mergeRuntimeEnv(os.Environ(), env), citylayout.RealBdEnvVar)) != ""
+	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
+	if strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) == "" {
+		return false
+	}
+	scope := strings.TrimSpace(envListValue(runtimeEnv, "GC_STORE_SCOPE"))
+	return scope == "" || scope == "city"
 }
 
 // decodeControlReadySummary accepts either the bounded discovery projection or
