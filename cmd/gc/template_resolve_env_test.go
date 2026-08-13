@@ -85,6 +85,43 @@ func TestResolveTemplateMarksManagedSessionsForOutputFirewall(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateUsesControllerResolvedAgentOutputFirewallBudget(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	params := &agentBuildParams{
+		cityName: "city", cityPath: cityPath,
+		city: &config.City{OutputFirewall: config.OutputFirewallConfig{
+			ByteBudget:    intPtr(8192),
+			MaxByteBudget: intPtr(16384),
+		}},
+		workspace: &config.Workspace{Provider: "test"},
+		providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:  func(string) (string, error) { return "/bin/echo", nil },
+		fs:        fsys.OSFS{}, beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		agent  *config.Agent
+		budget string
+	}{
+		{"agent value", &config.Agent{Name: "runner", OutputFirewallByteBudget: intPtr(4096)}, "4096"},
+		{"city fallback", &config.Agent{Name: "runner"}, "8192"},
+		{"city ceiling", &config.Agent{Name: "runner", OutputFirewallByteBudget: intPtr(65536)}, "16384"},
+		{"agent environment cannot override", &config.Agent{Name: "runner", OutputFirewallByteBudget: intPtr(4096), Env: map[string]string{"GC_MANAGED_OUTPUT_FIREWALL_BUDGET": "999999"}}, "4096"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, err := resolveTemplate(params, tc.agent, "runner", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := tp.Env["GC_MANAGED_OUTPUT_FIREWALL_BUDGET"]; got != tc.budget {
+				t.Fatalf("GC_MANAGED_OUTPUT_FIREWALL_BUDGET = %q, want %q", got, tc.budget)
+			}
+		})
+	}
+}
+
 func TestResolveTemplateScrubsFirewallEnvironmentWhenDisabled(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")

@@ -704,6 +704,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// OutputFirewallByteBudget overrides the agent's managed-output byte budget.
+	OutputFirewallByteBudget *int `toml:"output_firewall_byte_budget,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -3412,6 +3414,9 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// OutputFirewallByteBudget overrides this agent's managed-output byte budget.
+	// The controller resolves it and clamps it to output_firewall.max_byte_budget.
+	OutputFirewallByteBudget *int `toml:"output_firewall_byte_budget,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
 	// this agent — WHO serves the model. "" (default) falls back to
 	// agent_defaults.upstream; if still empty, no upstream env is injected
@@ -3756,6 +3761,7 @@ func (a Agent) Clone() Agent {
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.OutputFirewallByteBudget = copyIntPtr(a.OutputFirewallByteBudget)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -4334,6 +4340,9 @@ func ValidateAgents(agents []Agent) error {
 			*a.MaxActiveSessions >= 0 && *a.MinActiveSessions > *a.MaxActiveSessions {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
+		}
+		if a.OutputFirewallByteBudget != nil && *a.OutputFirewallByteBudget < 512 {
+			return fmt.Errorf("agent %q: output_firewall_byte_budget must be at least 512", a.Name)
 		}
 	}
 
