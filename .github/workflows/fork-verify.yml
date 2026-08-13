@@ -11,8 +11,11 @@ name: fork-verify
 # the Go + Dolt + native-dependency setup is not re-solved here.
 
 on:
-  push:
-    branches: ["feat/**", "fix/**"]
+  # Gate every proposed change to the fork integration branch.  Selecting
+  # source branches here would let a newly introduced branch convention skip
+  # CI entirely.
+  pull_request:
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
