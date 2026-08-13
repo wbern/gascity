@@ -66,7 +66,9 @@ func TestWorktreeScanTextReportUsesManagedRootsAndSkipsLiveSessions(t *testing.T
 		"RECLAIMABLE",
 		orphanDir,
 		nestedStray,
-		"uncommitted changes",
+		// gcw-kb6r (#41) widened this reason: the gate now also holds a
+		// worktree whose only content is ignored files, and the text says so.
+		"uncommitted or ignored work",
 		"2 stray checkout(s): 1 reclaimable, 1 kept",
 	} {
 		if !strings.Contains(out, want) {
