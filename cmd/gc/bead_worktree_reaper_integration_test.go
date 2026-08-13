@@ -135,11 +135,11 @@ func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 	mustGit(t, rigRoot, "add", ".gitignore")
 	mustGit(t, rigRoot, "-c", "commit.gpgsign=false", "commit", "-m", "ignore local environment")
 	mustGit(t, rigRoot, "push", "origin", "main")
-	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-ignored01")
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-ign01")
 	if err := os.WriteFile(filepath.Join(wt, ".env.local"), []byte("secret\n"), 0o600); err != nil {
 		t.Fatalf("write ignored file: %v", err)
 	}
-	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-ignored01", Status: "closed"}}, nil)
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-ign01", Status: "closed"}}, nil)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
