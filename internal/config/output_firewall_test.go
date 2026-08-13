@@ -14,6 +14,8 @@ func TestValidateOutputFirewallRejectsUnsafePolicy(t *testing.T) {
 		cfg  OutputFirewallConfig
 	}{
 		{"small budget", OutputFirewallConfig{ByteBudget: intPtr(1)}},
+		{"small maximum budget", OutputFirewallConfig{MaxByteBudget: intPtr(1)}},
+		{"maximum below city budget", OutputFirewallConfig{ByteBudget: intPtr(1024), MaxByteBudget: intPtr(512)}},
 		{"mutation verb", OutputFirewallConfig{ReadVerbs: []string{"update"}}},
 		{"absolute spill", OutputFirewallConfig{SpillPath: "/tmp/output"}},
 		{"bad retention", OutputFirewallConfig{RetentionTTL: "0s"}},
@@ -23,6 +25,28 @@ func TestValidateOutputFirewallRejectsUnsafePolicy(t *testing.T) {
 				t.Fatal("ValidateOutputFirewall() succeeded")
 			}
 		})
+	}
+}
+
+func TestEffectiveAgentByteBudget(t *testing.T) {
+	if got := (OutputFirewallConfig{}).EffectiveAgentByteBudget(nil); got != 32768 {
+		t.Fatalf("default budget = %d, want 32768", got)
+	}
+	if got := (OutputFirewallConfig{ByteBudget: intPtr(8192)}).EffectiveAgentByteBudget(nil); got != 8192 {
+		t.Fatalf("city fallback budget = %d, want 8192", got)
+	}
+	if got := (OutputFirewallConfig{}).EffectiveAgentByteBudget(intPtr(65536)); got != 32768 {
+		t.Fatalf("default city ceiling = %d, want 32768", got)
+	}
+	if got := (OutputFirewallConfig{ByteBudget: intPtr(8192), MaxByteBudget: intPtr(16384)}).EffectiveAgentByteBudget(intPtr(65536)); got != 16384 {
+		t.Fatalf("clamped agent budget = %d, want 16384", got)
+	}
+}
+
+func TestValidateAgentsRejectsUnsafeOutputFirewallBudget(t *testing.T) {
+	err := ValidateAgents([]Agent{{Name: "runner", OutputFirewallByteBudget: intPtr(1)}})
+	if err == nil || !strings.Contains(err.Error(), "output_firewall_byte_budget") {
+		t.Fatalf("ValidateAgents() error = %v, want output firewall budget rejection", err)
 	}
 }
 
