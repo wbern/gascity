@@ -444,6 +444,13 @@ func IsTransientControllerError(err error) bool {
 	if beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) {
 		return true
 	}
+	// A read withheld by the output firewall is a bounded read, not a broken
+	// control: the next tick re-reads. Killing the loop over one is the shape
+	// that produced the 14-hour dispatcher outage (gcw-78nf4), so it stays a
+	// re-entry class — loud in the log, never terminal (gcw-qap3.16).
+	if errors.Is(err, beads.ErrOutputTruncated) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	if isTransientWorkQueryFailure(msg) {
 		return true

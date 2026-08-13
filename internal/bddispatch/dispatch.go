@@ -851,17 +851,16 @@ func WriteManagedShowOutput(payload []byte, stdout, stderr io.Writer) int {
 	return WriteManagedShowSummaries("managed_bd_passthrough", out, stdout, stderr)
 }
 
-// WriteManagedShowSummaries applies the managed show projection without ever
-// replacing bd show's JSON array with a firewall manifest.
+// WriteManagedShowSummaries applies the managed show projection, preserving bd
+// show's JSON array contract whenever there is content to preserve.
+//
+// When even the projection exceeds budget there is no content left to publish,
+// and the array contract must yield: an empty array would report the bead as
+// ABSENT rather than WITHHELD, and no consumer — gc's own claim path least of
+// all — can tell those apart (gcw-qap3.16). The firewall's own manifest is
+// published instead, which every bd reader recognizes as truncation.
 func WriteManagedShowSummaries(commandClass string, out []beads.Bead, stdout, stderr io.Writer) int {
-	summaries := NewBeadShowSummaries(out)
-	if budget := outputfirewall.BudgetForVerb("show"); budget > 0 {
-		payload, err := json.Marshal(summaries)
-		if err != nil || len(payload)+1 > budget {
-			summaries = []BeadShowSummary{}
-		}
-	}
-	return WriteManagedJSON(context.Background(), commandClass, "show", summaries, stdout, stderr)
+	return WriteManagedJSON(context.Background(), commandClass, "show", NewBeadShowSummaries(out), stdout, stderr)
 }
 
 // WriteManagedJSON serializes a known managed read entirely before it reaches

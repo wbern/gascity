@@ -1962,11 +1962,22 @@ func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
 	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
-			return out, err
+			return out, readOutputError(out, err)
 		}
 		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
 	}
-	return out, err
+	return out, readOutputError(out, err)
+}
+
+// readOutputError converts a managed output-firewall manifest into a loud
+// ErrOutputTruncated. Without it every decoder above this line reads the
+// manifest as an empty result — the silent degradation from truncation to
+// absence that misroutes work under the default configuration (gcw-qap3.16).
+func readOutputError(out []byte, err error) error {
+	if err != nil {
+		return err
+	}
+	return OutputFirewallTruncation(out)
 }
 
 func (s *BdStore) bdTransientWriteArgs(args []string) []string {

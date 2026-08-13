@@ -1644,6 +1644,7 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "dolt breaker failing fast", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 1: server appears down, failing fast (cooldown 5s)`), want: true},
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: true},
 		{name: "workflow root close blocked", err: errors.New("gsp-p68ch6: completing workflow head: updating bead \"gsp-p68ch6\": exit status 1: cannot close blocked issue: gsp-p68ch6 is blocked by [gsp-yl7fpr]"), want: true},
+		{name: "output firewall truncation", err: fmt.Errorf("running work query %q: %w", "bd ready", beads.ErrOutputTruncated), want: true},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: false},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
