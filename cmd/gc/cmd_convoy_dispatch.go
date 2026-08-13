@@ -449,6 +449,10 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 }
 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	return openControlStoreAtForCityWithBdOptions(storePath, cityPath, cfg)
+}
+
+func openControlStoreAtForCityWithBdOptions(storePath, cityPath string, cfg *config.City, opts ...beads.BdStoreOption) (beads.Store, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
@@ -456,7 +460,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	}
 	if samePath(scopeRoot, cityPath) {
 		return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
-			return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil
+			return controlBdStoreForCityWithOptions(scopeRoot, cityPath, cfg, opts...), nil
 		})
 	}
 	if cfg != nil {
@@ -467,7 +471,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 			}
 			if samePath(rigPath, scopeRoot) {
 				return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
-					return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+					return controlBdStoreForRigWithOptions(scopeRoot, cityPath, cfg, opts), nil
 				})
 			}
 		}
@@ -475,7 +479,7 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	// A bd-backed scope can outlive its rig entry in city.toml. Control paths
 	// still need write-capable bd commands with auto-export suppressed.
 	return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
-		return controlBdStoreForRig(scopeRoot, cityPath, cfg), nil
+		return controlBdStoreForRigWithOptions(scopeRoot, cityPath, cfg, opts), nil
 	})
 }
 

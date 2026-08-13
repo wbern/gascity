@@ -316,6 +316,42 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
+func TestControlReadyCachePrimeUsesUnboundedReadOnlyForShimmedDispatcher(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "bd.args")
+	bdPath := filepath.Join(tmp, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *--allow-unbounded*) printf '[]' ;;
+  *) printf '{"reason":"byte_budget_exceeded"}' ;;
+esac
+`, argsPath)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+
+	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	if cache == nil {
+		t.Fatal("controlReadyCacheFor returned nil; shimmed control cache prime must decode its full read")
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if !strings.Contains(string(args), "list") || !strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("cache-prime bd args = %q, want a list read with --allow-unbounded", args)
+	}
+}
+
 func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCalls(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
@@ -546,9 +582,12 @@ printf '%%s' "$*" > %q
 	if !strings.Contains(string(args), "--summary-json") {
 		t.Fatalf("bd args = %q, want --summary-json", args)
 	}
+	if !strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("bd args = %q, want --allow-unbounded for the control-plane read", args)
+	}
 }
 
-func TestControlReadyFallbackReadyOmitsSummaryForPinnedNonCityScope(t *testing.T) {
+func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityScope(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
@@ -576,6 +615,15 @@ func TestControlReadyFallbackReadyOmitsSummaryForPinnedNonCityScope(t *testing.T
 	}
 	if strings.Contains(string(args), "--summary-json") {
 		t.Fatalf("bd args = %q, must not request shim summary for pinned rig scope", args)
+	}
+	// A pinned rig scope is the control dispatcher's ALWAYS-case
+	// (work_query_probe.go sets GC_STORE_SCOPE=rig for any rig-qualified
+	// agent), and its ready set exceeds a megabyte. Without the exemption the
+	// shim returns a gc.output_firewall envelope this caller cannot decode,
+	// which is what took the dispatcher down in gcw-78nf4. The scope governs
+	// --summary-json only; it must not withhold --allow-unbounded.
+	if !strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("bd args = %q, want --allow-unbounded: a rig-pinned control-plane read must not be firewall-bounded", args)
 	}
 }
 
