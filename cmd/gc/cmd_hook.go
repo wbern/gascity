@@ -1084,6 +1084,9 @@ func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
 }
 
 func isDepBlockedHookCandidate(item map[string]any) bool {
+	if hasOpenBlockingDependency(item) {
+		return true
+	}
 	blockedBy, ok := item["blocked_by"].([]any)
 	if !ok || len(blockedBy) == 0 {
 		return false
@@ -1106,6 +1109,56 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 		}
 		status = strings.TrimSpace(status)
 		if status != "" && !strings.EqualFold(status, "closed") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOpenBlockingDependency reports whether the candidate's own dependencies
+// array carries an unclosed blocking edge.
+//
+// blocked_by and is_blocked are bd's denormalized projection, and on the rows
+// this filter actually receives they are BOTH null — measured on gci-mhpd,
+// which was dispatched three times to a worker that correctly refused it
+// (gcw-kiwk7). The blocker was in the payload the whole time, just not where
+// the filter looked: dependencies[] carries the edge with its status.
+//
+// The discriminator is the dependency TYPE, not merely a non-closed status.
+// Every step bead in a graph run also "tracks" its parent workflow, which stays
+// in_progress for the entire run, so treating any unclosed dependency as
+// blocking would strand the whole graph instead of only its blocked steps.
+// beads.IsReadyBlockingDependencyType is the same predicate bd's own ready
+// projection applies to this field (internal/config/workquery.go), so the hook
+// now reaches the same conclusion bd ready already reached about the same data.
+//
+// An unreadable status on a blocking edge fails CLOSED, deliberately breaking
+// with the sibling checks below: the existence of a blocking dependency is not
+// evidence that it is satisfied. The asymmetry is the point — a false block
+// costs one tick, while a false ready hands a worker work it cannot do and it
+// loops until a human intervenes.
+func hasOpenBlockingDependency(item map[string]any) bool {
+	deps, ok := item["dependencies"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range deps {
+		dep, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		depType := ""
+		for _, key := range []string{"dependency_type", "type", "dep_type"} {
+			if v, ok := dep[key].(string); ok && strings.TrimSpace(v) != "" {
+				depType = strings.TrimSpace(v)
+				break
+			}
+		}
+		if !beads.IsReadyBlockingDependencyType(depType) {
+			continue
+		}
+		status, _ := dep["status"].(string)
+		if !strings.EqualFold(strings.TrimSpace(status), "closed") {
 			return true
 		}
 	}
