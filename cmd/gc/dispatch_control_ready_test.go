@@ -548,6 +548,71 @@ printf '%%s' "$*" > %q
 	}
 }
 
+func TestControlReadyFallbackReadyOmitsSummaryForPinnedNonCityScope(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "args")
+	bdPath := filepath.Join(tmp, "bd")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %q\nprintf '[{\"id\":\"gcw-plain\"}]'\n", argsPath)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+
+	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{
+		citylayout.RealBdEnvVar: "/real/bd",
+		"GC_STORE_SCOPE":        "rig",
+	}, false)
+	if err != nil {
+		t.Fatalf("controlReadyFallbackReady: %v", err)
+	}
+	if len(result) != 1 || result[0].ID != "gcw-plain" {
+		t.Fatalf("result = %#v, want plain bead", result)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if strings.Contains(string(args), "--summary-json") {
+		t.Fatalf("bd args = %q, must not request shim summary for pinned rig scope", args)
+	}
+}
+
+func TestControlReadyFallbackReadyDegradesWhenSummaryQueryFails(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	tmp := t.TempDir()
+	argsPath := filepath.Join(tmp, "args")
+	bdPath := filepath.Join(tmp, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *--summary-json*) exit 1 ;;
+esac
+printf '[{"id":"gcw-plain"}]'
+`, argsPath)
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+
+	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
+	if err != nil {
+		t.Fatalf("controlReadyFallbackReady: %v", err)
+	}
+	if len(result) != 1 || result[0].ID != "gcw-plain" {
+		t.Fatalf("result = %#v, want plain bead after degradation", result)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if got := strings.Count(string(args), "ready"); got != 2 {
+		t.Fatalf("bd calls = %q, want summarized then unsummarized retry", args)
+	}
+}
+
 func TestDecodeControlReadySummaryRejectsUnrecognizedEnvelope(t *testing.T) {
 	if _, err := decodeControlReadySummary([]byte(`{"beads":[{"id":"gcw-unknown"}]}`)); err == nil {
 		t.Fatal("decodeControlReadySummary accepted an unrecognized envelope")

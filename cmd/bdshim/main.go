@@ -94,11 +94,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
+	realBdArgs := stripShimPrivateFlags(bdArgs)
 
 	passthrough := func() int {
 		if !allowUnbounded && bddispatch.ManagedOutputFirewallActive(verb) && managedPassthroughReadVerb(verb, verbArgs) {
 			var staged bytes.Buffer
-			code := execRealBd(bdArgs, nil, stdin, &staged, stderr)
+			code := execRealBd(realBdArgs, nil, stdin, &staged, stderr)
 			if verb == "show" && hasJSONOutput(verbArgs) {
 				if firewallCode := bddispatch.WriteManagedShowOutput(staged.Bytes(), stdout, stderr); firewallCode != 0 {
 					logDisposition(verb, rawBDArgs, "passthrough", firewallCode, start)
@@ -114,7 +115,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			logDisposition(verb, rawBDArgs, "passthrough", code, start)
 			return code
 		}
-		code := execRealBd(bdArgs, nil, stdin, stdout, stderr)
+		code := execRealBd(realBdArgs, nil, stdin, stdout, stderr)
 		logDisposition(verb, rawBDArgs, "passthrough", code, start)
 		return code
 	}
@@ -231,6 +232,24 @@ func stripAllowUnbounded(args []string) ([]string, bool) {
 		result = append(result, arg)
 	}
 	return result, allow
+}
+
+// shimPrivateFlags are understood by this wrapper but not by the standalone bd
+// binary used for passthrough. Keep the set centralized so every passthrough
+// path remains compatible when the shim gains a new private instruction.
+var shimPrivateFlags = map[string]struct{}{
+	"--summary-json": {},
+}
+
+func stripShimPrivateFlags(args []string) []string {
+	result := make([]string, 0, len(args))
+	for _, arg := range args {
+		if _, private := shimPrivateFlags[arg]; private {
+			continue
+		}
+		result = append(result, arg)
+	}
+	return result
 }
 
 func managedPassthroughReadVerb(verb string, args []string) bool {
