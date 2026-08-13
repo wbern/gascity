@@ -737,6 +737,13 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 	}
 	canonical, err := store.Get(beadID)
 	if err != nil {
+		// A withheld re-read says nothing about the bead: the claim above
+		// already committed and its identity is verified, so report it rather
+		// than stranding it in_progress behind a failure the caller must treat
+		// as terminal. Every other read failure stays fatal (gcw-qap3.16).
+		if errors.Is(err, beads.ErrOutputTruncated) {
+			return claimed, true, nil
+		}
 		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, []string{assignee}) {
@@ -1399,8 +1406,21 @@ func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
 // hookClaimBdStoreContext is hookClaimBdStore with its bd commands bound to ctx,
 // so a best-effort claim-time write cannot outlast the caller's deadline even if
 // the underlying bd update stalls.
+//
+// Its reads are exempt from the managed output firewall wherever bdshim can
+// honor the exemption: they are control-plane reads whose result gc consumes
+// and re-renders under its own bounded output (writeHookClaimJSON), never raw
+// transcript. Bounding them a second time made an existing assignment read as
+// absent and armed a claim on unrelated work (gcw-qap3.16). The gate mirrors
+// controlReadyShimmed — raw bd does not know --allow-unbounded, and the shim
+// strips it before any passthrough.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
-	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
+	envMap := hookClaimEnvMap(env, dir, actor)
+	var opts []beads.BdStoreOption
+	if controlReadyShimmed(envMap) {
+		opts = append(opts, beads.WithBdStoreAllowUnboundedReads())
+	}
+	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, envMap), opts...)
 }
 
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
@@ -1430,6 +1450,12 @@ func decodeHookClaimBeads(output string) ([]beads.Bead, error) {
 			return nil, errors.New("output is not JSON")
 		}
 		output = extracted
+	}
+	// Reject a withheld payload before normalizeWorkQueryOutput wraps the lone
+	// manifest object into a one-element array, which yields a phantom
+	// candidate with an empty ID instead of a reported failure (gcw-qap3.16).
+	if err := beads.OutputFirewallTruncation([]byte(output)); err != nil {
+		return nil, err
 	}
 	output = normalizeWorkQueryOutput(output)
 	var candidates []beads.Bead

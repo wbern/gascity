@@ -876,6 +876,13 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		}
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
+	// A withheld payload is a failed read, not an answer. Returning it would let
+	// normalizeWorkQueryOutput wrap the manifest into a one-element array and
+	// present a phantom candidate with no ID as this session's work
+	// (gcw-qap3.16).
+	if truncated := beads.OutputFirewallTruncation(out); truncated != nil {
+		return "", fmt.Errorf("running work query %q: %w", command, truncated)
+	}
 	return string(out), nil
 }
 
