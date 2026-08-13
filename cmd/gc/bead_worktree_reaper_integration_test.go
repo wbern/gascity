@@ -149,7 +149,7 @@ func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 		t.Fatalf("Reaped = %+v, want 0 for ignored-only worktree\nstderr:\n%s", report.Reaped, stderr.String())
 	}
 	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "uncommitted") {
-		t.Fatalf("Protected = %+v, want one uncommitted-work protection", report.Protected)
+		t.Fatalf("Protected = %+v, want one uncommitted-work protection\nstderr:\n%s", report.Protected, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(wt, ".env.local")); err != nil {
 		t.Fatalf("ignored file was removed or unstattable: %v", err)
