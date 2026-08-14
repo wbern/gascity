@@ -610,6 +610,14 @@ const (
 	nativeWriteRetryBudget = 90 * time.Second
 	// nativeWriteRetryBackoff spaces reconnect-and-retry passes on the write path.
 	nativeWriteRetryBackoff = 200 * time.Millisecond
+	// nativeWriteConflictAttempts bounds how many times a clean write op is
+	// re-run after losing a transaction serialization race. Mirrors
+	// nativeMetadataWriteAttempts, which applies the same bound to the
+	// metadata-write path.
+	nativeWriteConflictAttempts = 3
+	// nativeWriteConflictBackoff is the base spacing between conflict retries;
+	// it scales with the attempt number so competing writers desynchronize.
+	nativeWriteConflictBackoff = 20 * time.Millisecond
 )
 
 // withOpRetry runs a CLEAN (fully idempotent) write op against the native
@@ -645,15 +653,36 @@ func (s *NativeDoltStore) withOpRetry(fn func(context.Context, beadslib.Storage,
 			return err
 		}
 		defer release()
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		defer cancel()
-		return fn(ctx, storage, 0)
+		// A lost serialization race is retried even here, where the
+		// reconnect loop is disabled: the two are answers to different
+		// failures. The reconnect loop is gated because a mid-commit
+		// connection death is AMBIGUOUS (the write may already have landed,
+		// so replay is unsafe). A serialization conflict is not ambiguous —
+		// the transaction provably did not commit — so re-running it is safe
+		// regardless of that gate. Leaving it gated would make the retry
+		// inert on any city that has not opted in.
+		var opErr error
+		for attempt := 1; attempt <= nativeWriteConflictAttempts; attempt++ {
+			ctx, cancel := nativeDoltOperationContext(context.TODO())
+			// fn's attempt argument stays 0: it exists so ops with weaker
+			// idempotency (e.g. Delete) can treat a REPLAY as "the prior
+			// attempt already landed". A conflicted transaction landed
+			// nothing, so every pass here is a first attempt.
+			opErr = fn(ctx, storage, 0)
+			cancel()
+			if opErr == nil || !isNativeDoltSerializationConflict(opErr) || attempt == nativeWriteConflictAttempts {
+				return opErr
+			}
+			time.Sleep(time.Duration(attempt) * nativeWriteConflictBackoff)
+		}
+		return opErr
 	}
 
 	// One wall-clock context bounds the whole chain, exactly like withReadRetry.
 	ctx, cancel := context.WithTimeout(context.Background(), nativeWriteRetryBudget)
 	defer cancel()
 	attempt := 0
+	conflicts := 0
 	for {
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
@@ -670,6 +699,24 @@ func (s *NativeDoltStore) withOpRetry(fn func(context.Context, beadslib.Storage,
 		reopen, closed := s.reopenState()
 		if closed {
 			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+		}
+		// Serialization conflicts are a distinct arm from the transient-read
+		// reconnect below and must stay that way: the connection is healthy,
+		// so reconnecting would be pointless churn. Only the transaction
+		// needs re-running. `attempt` is deliberately not advanced — the
+		// conflicted transaction committed nothing, so the next pass is not
+		// a replay (see the attempt-argument contract above).
+		if isNativeDoltSerializationConflict(opErr) {
+			conflicts++
+			if conflicts >= nativeWriteConflictAttempts {
+				return opErr
+			}
+			select {
+			case <-ctx.Done():
+				return nativeWriteRetryBudgetError(ctx.Err(), opErr)
+			case <-time.After(time.Duration(conflicts) * nativeWriteConflictBackoff):
+			}
+			continue
 		}
 		if !isNativeDoltTransientReadError(opErr) || reopen == nil {
 			return opErr
