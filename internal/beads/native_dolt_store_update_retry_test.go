@@ -22,7 +22,7 @@ var errNativeSerializationConflict = errors.New(
 func conflictThenSucceedStorage(conflicts int32) (*nativeDoltStorageSpy, *int32) {
 	var attempts int32
 	spy := &nativeDoltStorageSpy{
-		runInTransaction: func(ctx context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
 			if atomic.AddInt32(&attempts, 1) <= conflicts {
 				return errNativeSerializationConflict
 			}
