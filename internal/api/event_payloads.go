@@ -625,6 +625,7 @@ func init() {
 	events.RegisterPayload(events.SessionWoke, events.NoPayload{})
 	events.RegisterPayload(events.SessionStopped, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionCrashed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionRuntimeLost, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDraining, events.NoPayload{})
 	events.RegisterPayload(events.SessionUndrained, events.NoPayload{})
 	events.RegisterPayload(events.SessionQuarantined, events.NoPayload{})
