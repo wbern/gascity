@@ -148,13 +148,20 @@ func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 	return loadCityConfigDefaultWarningWriter()
 }
 
+// emitLoadCityConfigWarnings prints config-load warnings for a one-shot CLI
+// invocation. Deliberate-policy advisories are skipped here: they describe a
+// configuration the operator chose and carry no remediation, so re-printing
+// them on every command is pure cost — `gc config show [--validate]` remains
+// the surface that reports them. Long-lived processes emit through
+// emitSupervisorLoadCityConfigWarnings instead, which prints each warning once
+// per city for the life of the process and so keeps the advisory.
 func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 	if w == nil || prov == nil || len(prov.Warnings) == 0 {
 		return
 	}
 	seen := make(map[string]struct{}, len(prov.Warnings))
 	for _, warning := range prov.Warnings {
-		if !shouldEmitLoadCityConfigWarning(warning) {
+		if !shouldEmitLoadCityConfigWarning(warning) || config.IsDeliberatePolicyAdvisory(warning) {
 			continue
 		}
 		if _, dup := seen[warning]; dup {

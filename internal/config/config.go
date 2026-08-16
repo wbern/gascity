@@ -4479,6 +4479,22 @@ func IsAlwaysFreshWakeModeWarning(warning string) bool {
 	return strings.Contains(warning, alwaysFreshWakeModeMarker)
 }
 
+// IsDeliberatePolicyAdvisory reports whether a load warning describes a
+// configuration the operator chose on purpose rather than a defect they must
+// repair. Such a warning has no remediation — repeating it on every command
+// only spends the reader's attention, and for a managed agent it spends
+// context budget, since each CLI call is a new process and cannot dedupe
+// against the last one.
+//
+// Callers on routine command paths skip these; explicit diagnostic surfaces
+// (`gc config show`, `gc config show --validate`) report every warning
+// including these, so the advisory stays reachable on demand rather than
+// disappearing. Strict-mode classification is unaffected: an advisory is
+// non-fatal whether or not it is printed.
+func IsDeliberatePolicyAdvisory(warning string) bool {
+	return IsAlwaysFreshWakeModeWarning(warning)
+}
+
 // disabledNamedSessionMarker is a stable suffix on the warning emitted when a
 // named session is skipped because its backing template did not resolve after
 // pack expansion. CLI warning classification keys off this marker, so keep it
