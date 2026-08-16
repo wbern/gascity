@@ -49,8 +49,17 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		}
 		if step.ID == "write-report" {
 			hasWriteReport = true
-			if strings.Contains(step.Description, `bd update "$WORK_BEAD_ID" --notes`) {
+			// MUST APPEND, NOT SET. --notes REPLACES the field, so a re-pour
+			// onto a bead that already carries a report destroys it (gc2-sf0yji:
+			// a re-confirmation pass overwrote the root-cause investigation it
+			// was citing, and the surviving text still refers to "the existing
+			// notes above" that no longer exist). This assertion previously
+			// required the bare --notes form, i.e. it pinned the defect.
+			if strings.Contains(step.Description, `bd update "$WORK_BEAD_ID" --append-notes`) {
 				hasWriteNotes = true
+			}
+			if strings.Contains(step.Description, `--notes "$REPORT"`) {
+				t.Error(`write-report must use --append-notes: --notes REPLACES the field and destroys a prior report on re-pour (gc2-sf0yji)`)
 			}
 			if strings.Contains(step.Description, `bd close "$WORK_BEAD_ID"`) {
 				hasClose = true
@@ -67,7 +76,7 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		t.Error("mol-polecat-report formula missing 'write-report' step")
 	}
 	if !hasWriteNotes {
-		t.Error(`write-report step must write findings with 'bd update "$WORK_BEAD_ID" --notes'`)
+		t.Error(`write-report step must write findings with 'bd update "$WORK_BEAD_ID" --append-notes'`)
 	}
 	if !hasClose {
 		t.Error(`write-report step must close the bead with 'bd close "$WORK_BEAD_ID"'`)
