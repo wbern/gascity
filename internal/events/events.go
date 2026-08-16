@@ -83,6 +83,24 @@ const (
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionRuntimeLost fires when the reconciler is about to restart a
+	// session whose persisted state is ACTIVE but whose runtime is gone — a
+	// death gc DISCOVERED rather than performed. Deliberate stops already emit
+	// their own events (session.stopped, session.suspended,
+	// session.idle_killed) and leave the bead in a non-active state, so they do
+	// not fire this one: its presence means specifically "something outside gc
+	// killed this runtime and nothing in gc knows what".
+	//
+	// It exists because the recorded history was one-sided. A city that loses
+	// every session at once — e.g. when the shared tmux server every pane hangs
+	// off is replaced — produced a session.woke for each recovery and no death
+	// event at all, leaving a socket mtime and process start times as the only
+	// evidence, both of which the next occurrence overwrites.
+	//
+	// Like SessionContinuationObserved it is diagnostic only: emitters must not
+	// use recording success or failure to influence session behavior. The
+	// restart proceeds identically whether or not this event lands.
+	SessionRuntimeLost = "session.runtime_lost"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -294,7 +312,7 @@ const (
 // event type has a registered payload — a missing registration is a
 // programming error that fails CI, not a runtime condition.
 var KnownEventTypes = []string{
-	SessionWoke, SessionStopped, SessionCrashed,
+	SessionWoke, SessionStopped, SessionCrashed, SessionRuntimeLost,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,

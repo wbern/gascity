@@ -3758,6 +3758,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
+			// Record the DEATH, not only the recovery. Reaching here with an
+			// ACTIVE state means the store believed this session was running and
+			// its runtime is gone — nothing in gc stopped it. The wake that
+			// follows is already recorded (session.woke, emitted at the
+			// start-commit boundary); without this the log shows a session that
+			// woke and never died. Emitted at the append rather than earlier so it
+			// fires only for sessions we are actually about to start, after every
+			// skip gate (quarantine, circuit breaker, provider health).
+			emitSessionRuntimeLost(infoByID[target.info.ID], target.tp.TemplateName, rec, clk)
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
 			// infoByID BEFORE this append, so the captured twin carries this tick's
 			// currently_processing_bead_id. It is the start-execution feed's only
@@ -4501,6 +4510,51 @@ const strandedWorkIDListLimit = 10
 // unmarked bead and emit a duplicate event. SetMetadata is best-effort
 // for cross-restart durability; the in-memory marker is the
 // load-bearing single-emission guarantee within a controller lifetime.
+// emitSessionRuntimeLost records that a session's runtime disappeared without
+// gc stopping it — the half of session lifecycle the event log did not carry.
+//
+// THE STATE CHECK IS THE WHOLE DISCRIMINATOR. The reconciler reaches its
+// start-candidate append for two different reasons: a session that was
+// deliberately stopped and is now wanted again (drained, suspended,
+// start-pending — each already announced by its own event), and a session the
+// store still believes is ACTIVE whose runtime is simply gone. Only the second
+// is news. Emitting for both would bury the signal in routine wakes, which is
+// how an audit trail becomes something nobody reads.
+//
+// Deliberately NOT throttled per session, unlike emitSessionStrandedDiagnostic:
+// the condition clears as soon as the session starts, and a session that keeps
+// dying and being restarted is a fact worth one line per occurrence. If a start
+// fails repeatedly the state leaves ACTIVE, so the retry path does not re-emit.
+func emitSessionRuntimeLost(
+	info sessionpkg.Info,
+	template string,
+	rec events.Recorder,
+	clk clock.Clock,
+) {
+	if rec == nil || info.State != sessionpkg.StateActive {
+		return
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		name = strings.TrimSpace(info.SessionName)
+	}
+	if name == "" {
+		name = info.ID
+	}
+	rec.Record(events.Event{
+		Type:      events.SessionRuntimeLost,
+		Ts:        clk.Now().UTC(),
+		Actor:     "gc",
+		Subject:   info.ID,
+		SessionID: info.ID,
+		Message: fmt.Sprintf(
+			"session %q (template %q) was active but its runtime is gone; gc did not stop it — restarting",
+			name, template,
+		),
+		Payload: api.SessionLifecyclePayloadJSON(info.ID, template, "runtime_absent_while_active"),
+	})
+}
+
 func emitSessionStrandedDiagnostic(
 	cityPath string,
 	cfg *config.City,

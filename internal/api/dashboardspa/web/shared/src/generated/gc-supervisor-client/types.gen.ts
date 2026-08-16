@@ -794,6 +794,7 @@ export type DeliveryContextRecord = {
 export type Dep = {
     depends_on_id: string;
     issue_id: string;
+    status?: string;
     type: string;
 };
 
@@ -5353,6 +5354,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
 } & TypedEventStreamEnvelopeSessionResetStalled) | ({
+    type: 'session.runtime_lost';
+} & TypedEventStreamEnvelopeSessionRuntimeLost) | ({
     type: 'session.startup_uninitialized';
 } & TypedEventStreamEnvelopeSessionStartupUninitialized) | ({
     type: 'session.stopped';
@@ -6577,6 +6580,24 @@ export type TypedEventStreamEnvelopeSessionResetStalled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.runtime_lost
+ */
+export type TypedEventStreamEnvelopeSessionRuntimeLost = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.runtime_lost';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.startup_uninitialized
  */
 export type TypedEventStreamEnvelopeSessionStartupUninitialized = {
@@ -7000,6 +7021,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
 } & TypedTaggedEventStreamEnvelopeSessionResetStalled) | ({
+    type: 'session.runtime_lost';
+} & TypedTaggedEventStreamEnvelopeSessionRuntimeLost) | ({
     type: 'session.startup_uninitialized';
 } & TypedTaggedEventStreamEnvelopeSessionStartupUninitialized) | ({
     type: 'session.stopped';
@@ -8286,6 +8309,25 @@ export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
     subject?: string;
     ts: string;
     type: 'session.reset_stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.runtime_lost
+ */
+export type TypedTaggedEventStreamEnvelopeSessionRuntimeLost = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.runtime_lost';
     workflow?: WorkflowEventProjection;
 };
 
