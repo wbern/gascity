@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -304,7 +305,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		} else {
 			register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 			register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp, doctorSessionAttribution(cityPath, cfg)))
 		}
 	}
 
@@ -695,5 +696,35 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
 	return func(dirPath string) (beads.StoreOpenResult, error) {
 		return openStoreResultAtForCity(dirPath, cityPath)
+	}
+}
+
+// doctorSessionAttribution supplies OrphanSessionsCheck with the session names
+// gc itself tracks, read from its own session records.
+//
+// It deliberately does NOT reuse loadProviderSessionSnapshot, which returns nil
+// on every failure. That conflation is safe there (no snapshot means fall back
+// to plain provider routing) and unsafe here: a nil set is indistinguishable
+// from "gc tracks nothing", which would make every running session a kill
+// candidate at exactly the moment the store is unreadable. Every failure below
+// is returned as an error so the check refuses to kill instead.
+func doctorSessionAttribution(cityPath string, cfg *config.City) doctor.SessionAttribution {
+	return func() (map[string]bool, error) {
+		store, err := openSessionProviderStore(cityPath)
+		if err != nil {
+			return nil, fmt.Errorf("opening session store: %w", err)
+		}
+		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).
+			ListLabeledSessionInfosUnfiltered()
+		if err != nil {
+			return nil, fmt.Errorf("listing session records: %w", err)
+		}
+		tracked := make(map[string]bool, len(infos))
+		for _, info := range infos {
+			if info.SessionName != "" {
+				tracked[info.SessionName] = true
+			}
+		}
+		return tracked, nil
 	}
 }
