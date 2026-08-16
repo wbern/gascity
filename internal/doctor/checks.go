@@ -562,17 +562,57 @@ func (c *ZombieSessionsCheck) Fix(_ *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// SessionAttribution reports the session names gc itself knows about — the
+// session names carried by its own open session records. It is the POSITIVE
+// half of the orphan question: "gc created this and still tracks it", as
+// opposed to "this is absent from a static list".
+//
+// It returns an error rather than an empty set when attribution cannot be
+// established, because the two are opposites and must not be conflated: an
+// empty set means "gc tracks nothing", which would make every running session
+// a kill candidate.
+type SessionAttribution func() (map[string]bool, error)
+
+// OrphanSessionsCheck finds running sessions that neither the config nor gc's
+// own session records account for.
+//
+// WHY ATTRIBUTION AND NOT A STATIC LIST (gci-zsw8t). This check used to treat
+// "absent from cfg.Agents" as sufficient grounds to kill, and Fix() stopped
+// every session in that set. cfg.Agents holds only STATICALLY configured
+// agents, so the complement is not a set of leftovers — it is every DYNAMIC
+// session the city creates at runtime: scaled pool members, the control
+// dispatcher, and the chat-bridge sessions that carry live user conversations.
+// Measured on a live city: all three of those classes were in the kill set.
+//
+// The hazard was sharpened by WHERE the check runs. Registration is gated on
+// the controller being down (cmd/gc/cmd_doctor.go), so the check is inert while
+// the city is healthy and arms itself exactly when a human reaches for
+// `gc doctor --fix` to recover a wedged one — the moment when killing live work
+// is least recoverable and least likely to be noticed.
+//
+// The fix is not an exclusion list. Enumerating what must not be killed is an
+// unbounded denylist: the set of legitimate dynamic sessions is open-ended and
+// grows with every new session origin, so each new origin silently joins the
+// kill set until someone remembers to exempt it. Instead this check now kills
+// only what it can POSITIVELY attribute as unaccounted-for — running, not
+// configured, AND not tracked by gc — and refuses to act at all when
+// attribution is unavailable. Its failure mode is doing nothing.
 type OrphanSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	// attributed is the positive-attribution source. A nil value means
+	// attribution is unavailable, which disables Fix entirely rather than
+	// falling back to the old absent-from-config behaviour.
+	attributed SessionAttribution
 }
 
-// NewOrphanSessionsCheck creates a check for orphaned sessions.
-func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *OrphanSessionsCheck {
-	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+// NewOrphanSessionsCheck creates a check for orphaned sessions. attributed
+// supplies the session names gc tracks; pass nil when no such source is
+// available, which leaves the check reporting but unable to kill anything.
+func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, attributed SessionAttribution) *OrphanSessionsCheck {
+	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, attributed: attributed}
 }
 
 // Name returns the check identifier.
@@ -590,19 +630,35 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	unconfigured := c.unconfigured(running)
+	if len(unconfigured) == 0 {
+		if partialList {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
+			return r
+		}
+		r.Status = StatusOK
+		r.Message = "no orphaned sessions"
+		return r
+	}
+
+	tracked, attrErr := c.attribution()
+	if attrErr != nil {
+		// Unattributable is not orphaned. Say so, and say that nothing will be
+		// killed, so a reader is not left thinking the fix is merely pending.
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%d session(s) not in config; cannot attribute them (%v) — none will be killed", len(unconfigured), attrErr)
+		r.Details = unconfigured
+		return r
 	}
 
 	var orphans []string
-	for _, s := range running {
-		if !expected[s] {
+	for _, s := range unconfigured {
+		if !tracked[s] {
 			orphans = append(orphans, s)
 		}
 	}
+	dynamic := len(unconfigured) - len(orphans)
 
 	if len(orphans) == 0 {
 		if partialList {
@@ -611,7 +667,7 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 			return r
 		}
 		r.Status = StatusOK
-		r.Message = "no orphaned sessions"
+		r.Message = fmt.Sprintf("no orphaned sessions (%d dynamic session(s) accounted for by gc)", dynamic)
 		return r
 	}
 	r.Status = StatusWarning
@@ -624,10 +680,49 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
-// CanFix returns true — orphan sessions can be killed.
-func (c *OrphanSessionsCheck) CanFix() bool { return true }
+// unconfigured returns the running sessions that no statically configured
+// agent accounts for. It is only the FIRST half of the orphan test — see the
+// type comment for why being unconfigured is not grounds to kill.
+func (c *OrphanSessionsCheck) unconfigured(running []string) []string {
+	expected := make(map[string]bool)
+	for _, a := range c.cfg.Agents {
+		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
+		expected[sn] = true
+	}
+	var out []string
+	for _, s := range running {
+		if !expected[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
-// Fix kills all orphaned sessions.
+// attribution resolves the set of session names gc tracks, treating a missing
+// source as an error rather than as an empty set.
+func (c *OrphanSessionsCheck) attribution() (map[string]bool, error) {
+	if c.attributed == nil {
+		return nil, errors.New("no session-attribution source")
+	}
+	tracked, err := c.attributed()
+	if err != nil {
+		return nil, err
+	}
+	if tracked == nil {
+		tracked = map[string]bool{}
+	}
+	return tracked, nil
+}
+
+// CanFix reports whether orphaned sessions can be killed. Without an
+// attribution source there is no safe way to tell an orphan from a live
+// dynamic session, so the check offers no fix at all.
+func (c *OrphanSessionsCheck) CanFix() bool { return c.attributed != nil }
+
+// Fix kills the sessions that neither the config nor gc's own session records
+// account for. It fails closed: any failure to establish the running set or
+// the attributed set aborts before a single Stop, because both failures would
+// otherwise widen the kill set rather than narrow it.
 func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
@@ -637,16 +732,16 @@ func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	tracked, err := c.attribution()
+	if err != nil {
+		return fmt.Errorf("refusing to kill any session: %w", err)
 	}
-	for _, s := range running {
-		if !expected[s] {
-			if err := c.sp.Stop(s); err != nil {
-				return fmt.Errorf("killing orphan session %q: %w", s, err)
-			}
+	for _, s := range c.unconfigured(running) {
+		if tracked[s] {
+			continue
+		}
+		if err := c.sp.Stop(s); err != nil {
+			return fmt.Errorf("killing orphan session %q: %w", s, err)
 		}
 	}
 	return nil

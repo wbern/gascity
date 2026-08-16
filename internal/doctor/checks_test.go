@@ -907,7 +907,7 @@ func TestOrphanSessionsCheck_NoOrphans(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions())
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -926,7 +926,7 @@ func TestOrphanSessionsCheck_Found(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions())
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -945,7 +945,7 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions())
 	if err := c.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
@@ -967,7 +967,7 @@ func TestOrphanSessionsCheck_PartialListWarns(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions())
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -987,9 +987,135 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions())
 	if err := c.Fix(&CheckContext{}); err == nil {
 		t.Fatal("Fix() error = nil, want partial list failure")
+	}
+}
+
+// trackedSessions builds a SessionAttribution over the session names gc is
+// pretending to track. The zero-argument form means "gc tracks nothing", which
+// is what the pre-existing orphan tests assume.
+func trackedSessions(names ...string) SessionAttribution {
+	return func() (map[string]bool, error) {
+		out := make(map[string]bool, len(names))
+		for _, n := range names {
+			out[n] = true
+		}
+		return out, nil
+	}
+}
+
+// TestOrphanSessionsCheck_DoesNotKillAttributedDynamicSession is the gci-zsw8t
+// regression. A session that no static agent configures but that gc still
+// tracks — a scaled pool member, the control dispatcher, or a chat-bridge
+// session carrying a live user conversation — must survive --fix. Before the
+// attribution test it was killed for being absent from cfg.Agents.
+func TestOrphanSessionsCheck_DoesNotKillAttributedDynamicSession(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, n := range []string{"mayor", "slay-chat-abc123", "gastown__polecat-gc2-5mq9lz", "stale-worker"} {
+		if err := sp.Start(context.Background(), n, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp,
+		trackedSessions("slay-chat-abc123", "gastown__polecat-gc2-5mq9lz"))
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning for the one real orphan; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 || r.Details[0] != "stale-worker" {
+		t.Fatalf("details = %v, want only [stale-worker]", r.Details)
+	}
+
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	for _, n := range []string{"mayor", "slay-chat-abc123", "gastown__polecat-gc2-5mq9lz"} {
+		if !sp.IsRunning(n) {
+			t.Errorf("attributed session %q was killed by fix", n)
+		}
+	}
+	if sp.IsRunning("stale-worker") {
+		t.Error("unattributed orphan still running after fix")
+	}
+}
+
+// TestOrphanSessionsCheck_AllDynamicAccountedForIsOK covers the ordinary live
+// city: every unconfigured session is one gc tracks, so there is nothing to
+// report and nothing to kill.
+func TestOrphanSessionsCheck_AllDynamicAccountedForIsOK(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, n := range []string{"mayor", "slay-chat-abc123"} {
+		if err := sp.Start(context.Background(), n, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions("slay-chat-abc123"))
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "accounted for by gc") {
+		t.Fatalf("message = %q, want it to say the dynamic sessions are accounted for", r.Message)
+	}
+}
+
+// TestOrphanSessionsCheck_FixFailsClosedOnAttributionError pins the direction
+// of the failure. An unreadable session store must stop the fix entirely, not
+// degrade to the old absent-from-config kill — the failure would otherwise
+// WIDEN the kill set at the moment the city is least healthy.
+func TestOrphanSessionsCheck_FixFailsClosedOnAttributionError(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, n := range []string{"mayor", "slay-chat-abc123"} {
+		if err := sp.Start(context.Background(), n, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	failing := func() (map[string]bool, error) { return nil, errors.New("session store unreadable") }
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, failing)
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "none will be killed") {
+		t.Fatalf("message = %q, want an explicit statement that nothing will be killed", r.Message)
+	}
+
+	if err := c.Fix(&CheckContext{}); err == nil {
+		t.Fatal("Fix() error = nil, want a refusal when attribution is unavailable")
+	}
+	if !sp.IsRunning("slay-chat-abc123") {
+		t.Error("session killed despite attribution being unavailable")
+	}
+}
+
+// TestOrphanSessionsCheck_NoAttributionSourceOffersNoFix covers the nil source:
+// with no way to tell an orphan from a live dynamic session, the check must not
+// advertise a fix at all.
+func TestOrphanSessionsCheck_NoAttributionSourceOffersNoFix(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "slay-chat-abc123", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewOrphanSessionsCheck(&config.City{}, "test", "", sp, nil)
+	if c.CanFix() {
+		t.Error("CanFix() = true with no attribution source, want false")
+	}
+	if err := c.Fix(&CheckContext{}); err == nil {
+		t.Fatal("Fix() error = nil, want a refusal with no attribution source")
+	}
+	if !sp.IsRunning("slay-chat-abc123") {
+		t.Error("session killed with no attribution source")
 	}
 }
 
