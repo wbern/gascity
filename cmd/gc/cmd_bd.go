@@ -283,6 +283,10 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if msg, refuse := bdCrossRigDepRefusal(cfg, bdArgs); refuse {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := bdSelfPRGateGuard(bdArgs, func(id string) (beads.Bead, error) {
 		store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 		if storeErr != nil {
