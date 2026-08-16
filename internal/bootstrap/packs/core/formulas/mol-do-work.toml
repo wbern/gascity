@@ -120,7 +120,7 @@ prevents `mol-do-work` wrapper beads from remaining ready after the real work
 is complete.
 ```bash
 if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --append-notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
 fi
 ```
 
@@ -144,7 +144,7 @@ session:
 ```bash
 DRAIN_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
 if [ -n "$DRAIN_BEAD_ID" ]; then
-  gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+  gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --append-notes "Drain acknowledged."
 fi
 gc runtime drain-ack
 ```
