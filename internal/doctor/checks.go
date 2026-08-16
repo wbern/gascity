@@ -604,7 +604,7 @@ type OrphanSessionsCheck struct {
 	sp              runtime.Provider
 	// attributed is the positive-attribution source. A nil value means
 	// attribution is unavailable, which disables Fix entirely rather than
-	// falling back to the old absent-from-config behaviour.
+	// falling back to the old absent-from-config behavior.
 	attributed SessionAttribution
 }
 
