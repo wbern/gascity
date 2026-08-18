@@ -300,9 +300,11 @@ type BdStore struct {
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 	allowUnboundedReads   bool // whether managed control-plane reads may bypass bdshim's agent output budget
 
-	readyProjectionMu      sync.Mutex
-	readyProjectionChecked bool
-	readyProjectionEnabled bool
+	// readyProjectionCapability memoizes the `bd version` gate gating ready
+	// enrichment. Never nil: the constructor installs a private cache so a
+	// directly-built store probes once for itself, while the city/rig factories
+	// inject a shared one so per-tick stores stop re-probing (gcw-clnxz).
+	readyProjectionCapability *ReadyProjectionCapabilityCache
 
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
@@ -353,6 +355,19 @@ func WithBdStoreAllowUnboundedReads() BdStoreOption {
 	}
 }
 
+// WithBdStoreReadyProjectionCapability shares one `bd version` capability memo
+// across every store a process opens, instead of letting each store probe for
+// itself. Callers that open a store per request — the control dispatcher opens
+// one per tick — must pass a process-lifetime cache, or the probe runs on every
+// open (gcw-clnxz). A nil cache leaves the store's private default in place.
+func WithBdStoreReadyProjectionCapability(cache *ReadyProjectionCapabilityCache) BdStoreOption {
+	return func(s *BdStore) {
+		if cache != nil {
+			s.readyProjectionCapability = cache
+		}
+	}
+}
+
 // NewBdStore creates a BdStore rooted at dir using the given runner.
 func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStore {
 	return NewBdStoreWithPrefix(dir, runner, "", opts...)
@@ -361,10 +376,11 @@ func NewBdStore(dir string, runner CommandRunner, opts ...BdStoreOption) *BdStor
 // NewBdStoreWithPrefix creates a BdStore with an explicit owned bead ID prefix.
 func NewBdStoreWithPrefix(dir string, runner CommandRunner, idPrefix string, opts ...BdStoreOption) *BdStore {
 	s := &BdStore{
-		dir:          dir,
-		runner:       runner,
-		idPrefix:     normalizeIDPrefix(idPrefix),
-		localStrings: newLocalSidecar(bdLocalSidecarPath(dir)),
+		dir:                       dir,
+		runner:                    runner,
+		idPrefix:                  normalizeIDPrefix(idPrefix),
+		localStrings:              newLocalSidecar(bdLocalSidecarPath(dir)),
+		readyProjectionCapability: NewReadyProjectionCapabilityCache(),
 	}
 	for _, opt := range opts {
 		if opt != nil {

@@ -3,11 +3,63 @@ package beads
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/deps"
 )
 
 const bdReadyProjectionMinVersion = "1.0.5"
+
+// ReadyProjectionCapabilityCache memoizes the `bd version` capability probe
+// that gates ready-projection enrichment, keyed by store directory.
+//
+// The memo cannot usefully live on a BdStore. The control dispatcher opens a
+// fresh store on every tick (makeSourceWorkflowStoresLister), so an
+// instance-scoped memo is cold every time and the probe degenerates into one bd
+// subprocess per reconcile — measured on the live gc2 city at ~20/min, 211
+// seconds of wall clock per 50 minutes, re-reading a constant (gcw-clnxz).
+// Sharing one cache across the stores a process opens collapses that to a
+// single probe per directory.
+//
+// Keying by directory rather than using one process-wide answer is deliberate:
+// workspacePinnedBdBinary resolves bd from the owning city's workspace PATH, so
+// stores rooted in different places may legitimately drive different bd
+// binaries and must not share a verdict.
+//
+// The zero value is not usable; construct with NewReadyProjectionCapabilityCache.
+type ReadyProjectionCapabilityCache struct {
+	mu      sync.Mutex
+	enabled map[string]bool
+}
+
+// NewReadyProjectionCapabilityCache returns an empty capability cache ready to
+// be shared by every BdStore a process opens.
+func NewReadyProjectionCapabilityCache() *ReadyProjectionCapabilityCache {
+	return &ReadyProjectionCapabilityCache{enabled: make(map[string]bool)}
+}
+
+// lookup reports the memoized verdict for dir, if one was recorded.
+func (c *ReadyProjectionCapabilityCache) lookup(dir string) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	enabled, ok := c.enabled[dir]
+	return enabled, ok
+}
+
+// record memoizes a successful probe verdict for dir. Probe FAILURES are
+// deliberately never recorded, so a transient bd error is retried on the next
+// call rather than latching ready enrichment off for the life of the process.
+//
+// The cache lock is not held across the probe subprocess, so concurrent first
+// callers for the same directory may each probe once before either records.
+// That is deliberate: the probe is idempotent and the duplicate is bounded by
+// the number of racing callers, which is a far better trade than blocking every
+// reconcile behind a ~142ms subprocess held under a lock.
+func (c *ReadyProjectionCapabilityCache) record(dir string, enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enabled[dir] = enabled
+}
 
 type bdReadyProjectionRow struct {
 	ID        string       `json:"id"`
@@ -75,12 +127,12 @@ func skipBDReadyProjectionEnrichment(item Bead) bool {
 }
 
 func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
-	s.readyProjectionMu.Lock()
-	defer s.readyProjectionMu.Unlock()
-	// Probe the bd version once per process. Operators must restart gc after
-	// changing bd versions to re-evaluate ready-projection support.
-	if s.readyProjectionChecked {
-		return s.readyProjectionEnabled, nil
+	// Probe the bd version once per capability-cache scope. Operators must
+	// restart gc after changing bd versions to re-evaluate ready-projection
+	// support. Stores opened through the city/rig factories share one cache for
+	// the life of the process; a store built directly gets its own.
+	if enabled, ok := s.readyProjectionCapability.lookup(s.dir); ok {
+		return enabled, nil
 	}
 	out, err := s.runner(s.dir, "bd", "version")
 	if err != nil {
@@ -90,9 +142,9 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("bd ready projection version gate: %w", err)
 	}
-	s.readyProjectionEnabled = deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
-	s.readyProjectionChecked = true
-	return s.readyProjectionEnabled, nil
+	enabled := deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
+	s.readyProjectionCapability.record(s.dir, enabled)
+	return enabled, nil
 }
 
 func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
