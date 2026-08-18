@@ -6433,3 +6433,32 @@ func TestProjectGitHubTokenExecEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestBdStoreOptionsAlwaysShareReadyProjectionCapability guards gcw-clnxz.
+//
+// bdStoreOptionsForConfig previously returned nil for a city that does not use
+// bd 1.0.5 CLI semantics. Every store the factories opened therefore kept a
+// private `bd version` memo, and because the control dispatcher opens a fresh
+// store per tick, the capability gate re-probed forever — measured live at ~20
+// bd subprocesses/min doing nothing but re-reading a constant.
+//
+// The shared capability cache must be attached unconditionally, for every
+// config shape, or the fix silently stops applying.
+func TestBdStoreOptionsAlwaysShareReadyProjectionCapability(t *testing.T) {
+	if sharedReadyProjectionCapability == nil {
+		t.Fatal("sharedReadyProjectionCapability is nil — the process-lifetime memo must exist")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+	}{
+		{name: "nil config", cfg: nil},
+		{name: "default config", cfg: &config.City{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(bdStoreOptionsForConfig(tc.cfg)); got == 0 {
+				t.Fatalf("bdStoreOptionsForConfig returned %d options, want at least the ready-projection capability option (gcw-clnxz)", got)
+			}
+		})
+	}
+}

@@ -167,11 +167,21 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 	)
 }
 
+// sharedReadyProjectionCapability memoizes the `bd version` ready-projection
+// gate for the lifetime of this process. The store factories below open a new
+// BdStore per call — the control dispatcher opens one on every tick — so
+// without a cache that outlives the store the gate re-probes forever, spawning
+// one bd subprocess per reconcile (gcw-clnxz).
+var sharedReadyProjectionCapability = beads.NewReadyProjectionCapabilityCache()
+
 func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
-	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
-		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
+	opts := []beads.BdStoreOption{
+		beads.WithBdStoreReadyProjectionCapability(sharedReadyProjectionCapability),
 	}
-	return nil
+	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
+		opts = append(opts, beads.WithBdStoreListSkipLabels(true))
+	}
+	return opts
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
