@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type countingWakeMetadataStore struct {
@@ -597,6 +598,15 @@ func writeTestFile(path string) error {
 func TestVerifiedStop_MatchingToken(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
+	oldLive := liveSubagentsForKill
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		return []worker.InFlightSubagent{{AgentID: "helper", Description: "Inspect drain state"}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = oldLive })
+	var observed bytes.Buffer
+	oldLogWriter := log.Writer()
+	log.SetOutput(&observed)
+	t.Cleanup(func() { log.SetOutput(oldLogWriter) })
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -613,6 +623,9 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	}
 	if sp.IsRunning(info.SessionName) {
 		t.Error("expected session to be stopped")
+	}
+	if got := observed.String(); !strings.Contains(got, "session drain timeout") || !strings.Contains(got, "helper") {
+		t.Fatalf("autonomous-stop observation = %q", got)
 	}
 }
 

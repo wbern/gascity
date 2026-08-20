@@ -2847,6 +2847,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 	if !sp.IsRunning(sessionName) {
 		return true
 	}
+	observeAutonomousKillLiveSubagents("session bead mutation: "+reason, workerHandleForSessionTargetWithConfig, "", store, sp, cfg, sessionName, stderr)
 	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, b.ID, err) //nolint:errcheck
 		return false
@@ -2880,6 +2881,7 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 	if !sp.IsRunning(sessionName) {
 		return true
 	}
+	observeAutonomousKillLiveSubagents("session bead mutation: "+reason, workerHandleForSessionTargetWithConfig, "", store, sp, cfg, sessionName, stderr)
 	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, info.ID, err) //nolint:errcheck
 		return false

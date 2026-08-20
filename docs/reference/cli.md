@@ -1841,6 +1841,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
@@ -3869,6 +3870,7 @@ gc session kill <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | destroy a session even when it has live background subagents |
 | `--json` | bool |  | emit JSONL |
 
 ## gc session list

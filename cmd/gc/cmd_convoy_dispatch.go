@@ -239,6 +239,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
 				}
+				observeAutonomousKillLiveSubagents("convoy retry-eval recycle", workerHandleForSessionTargetWithConfig, cityPath, store, sp, cfg, subject.Assignee, stderr)
 				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
 			}
 		case "retry", "ralph":
@@ -251,6 +252,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
 				}
+				observeAutonomousKillLiveSubagents("convoy retry recycle", workerHandleForSessionTargetWithConfig, cityPath, store, sp, cfg, subject.Assignee, stderr)
 				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
 			}
 		}
