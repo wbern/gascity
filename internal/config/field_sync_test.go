@@ -164,6 +164,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	patch := AgentPatch{
 		Dir:                      "target-dir",
@@ -180,6 +181,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		Session:                  strVal("acp"),
 		Provider:                 strVal("claude"),
 		OutputFirewallByteBudget: intVal(4096),
+		ContextAdvisory:          contextAdvisory,
 		Upstream:                 strVal("bedrock"),
 		Args:                     Fragments("--custom-arg"),
 		StartCommand:             strVal("claude --dangerously"),
@@ -321,6 +323,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	override := AgentOverride{
 		Agent:                    "target",
@@ -338,6 +341,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		Session:                  strVal("acp"),
 		Provider:                 strVal("claude"),
 		OutputFirewallByteBudget: intVal(4096),
+		ContextAdvisory:          contextAdvisory,
 		Upstream:                 strVal("bedrock"),
 		Args:                     Fragments("--custom-arg"),
 		StartCommand:             strVal("claude --dangerously"),

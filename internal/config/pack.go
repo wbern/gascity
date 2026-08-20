@@ -2797,6 +2797,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		Session:                  ov.Session,
 		Provider:                 ov.Provider,
 		OutputFirewallByteBudget: ov.OutputFirewallByteBudget,
+		ContextAdvisory:          ov.ContextAdvisory,
 		Upstream:                 ov.Upstream,
 		Args:                     ov.Args,
 		StartCommand:             ov.StartCommand,

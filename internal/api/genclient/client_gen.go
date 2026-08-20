@@ -949,6 +949,7 @@ type AgentPatch struct {
 	AssignedWorkDeferLimit   *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                   *bool             `json:"Attach"`
 	ClaimHolderStallTimeout  *string           `json:"ClaimHolderStallTimeout"`
+	ContextAdvisory          ContextAdvisory   `json:"ContextAdvisory"`
 	DefaultSlingFormula      *string           `json:"DefaultSlingFormula"`
 	DependsOn                *[]string         `json:"DependsOn"`
 	Dir                      string            `json:"Dir"`
@@ -1467,6 +1468,20 @@ type ConfigValidateOutputBody struct {
 
 	// Warnings Validation warnings.
 	Warnings *[]string `json:"warnings"`
+}
+
+// ContextAdvisory defines model for ContextAdvisory.
+type ContextAdvisory struct {
+	Enabled      *bool                  `json:"Enabled"`
+	Tiers        *[]ContextAdvisoryTier `json:"Tiers"`
+	WindowTokens *int64                 `json:"WindowTokens"`
+}
+
+// ContextAdvisoryTier defines model for ContextAdvisoryTier.
+type ContextAdvisoryTier struct {
+	Enabled   *bool   `json:"Enabled"`
+	Message   *string `json:"Message"`
+	Threshold *int64  `json:"Threshold"`
 }
 
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
