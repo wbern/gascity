@@ -187,6 +187,9 @@
               "null"
             ]
           },
+          "ContextAdvisory": {
+            "$ref": "#/components/schemas/ContextAdvisory"
+          },
           "DefaultSlingFormula": {
             "type": [
               "string",
@@ -533,6 +536,7 @@
           "Session",
           "Provider",
           "OutputFirewallByteBudget",
+          "ContextAdvisory",
           "Upstream",
           "Args",
           "StartCommand",
@@ -1779,6 +1783,69 @@
           "valid",
           "errors",
           "warnings"
+        ],
+        "type": "object"
+      },
+      "ContextAdvisory": {
+        "additionalProperties": false,
+        "properties": {
+          "Enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "Tiers": {
+            "items": {
+              "$ref": "#/components/schemas/ContextAdvisoryTier"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "WindowTokens": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Enabled",
+          "WindowTokens",
+          "Tiers"
+        ],
+        "type": "object"
+      },
+      "ContextAdvisoryTier": {
+        "additionalProperties": false,
+        "properties": {
+          "Enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "Message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Threshold": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Threshold",
+          "Message",
+          "Enabled"
         ],
         "type": "object"
       },

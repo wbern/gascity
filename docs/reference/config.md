@@ -94,6 +94,7 @@ Agent defines a configured agent in the city.
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides this agent's managed-output byte budget. The controller resolves it and clamps it to output_firewall.max_byte_budget. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
@@ -145,6 +146,7 @@ AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory is the city-wide default context-pressure guidance. |
 | `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `upstream` | string |  |  | Upstream is the default model-serving endpoint (a key in [upstreams]) for agents that do not set their own upstream (Phase C — the Upstream axis). Applied to agents with an empty Upstream by ApplyAgentDefaults. |
@@ -176,6 +178,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides the agent's managed-output byte budget. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -236,6 +239,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `output_firewall_byte_budget` | integer |  |  | OutputFirewallByteBudget overrides the agent's managed-output byte budget. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -316,6 +320,26 @@ ChatSessionsConfig configures chat session behavior.
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
+
+## ContextAdvisory
+
+ContextAdvisory configures context-pressure guidance.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  | Enabled enables context-pressure guidance; nil inherits the lower scope. |
+| `window_tokens` | integer |  |  | WindowTokens overrides the provider-reported context window; nil uses it. |
+| `tiers` | []ContextAdvisoryTier |  |  | Tiers replaces the lower-scope tiers when set. |
+
+## ContextAdvisoryTier
+
+ContextAdvisoryTier is one threshold and message in a context-pressure advisory.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `threshold` | integer |  |  | Threshold is the percent of the context window at which this tier applies. |
+| `message` | string |  |  | Message is a text/template rendered with .Tokens, .Window, .Pct, .UsedK, .WindowK, and .Threshold. |
+| `enabled` | boolean |  |  | Enabled disables this tier while retaining it in an inherited policy. |
 
 ## ConvergenceConfig
 
