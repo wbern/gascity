@@ -19,6 +19,17 @@ func TestResolveContextAdvisoryPerAgentOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestContextAdvisorySelectTierKeepsLegacyThresholdBoundaries(t *testing.T) {
+	policy := ResolveContextAdvisory(contextAdvisoryPtr(DefaultContextAdvisory()))
+
+	if _, ok := policy.SelectTier(60); ok {
+		t.Fatal("60% selected an advisory tier; legacy context injection begins above 60%")
+	}
+	if tier, ok := policy.SelectTier(80); !ok || tier.Threshold != 60 {
+		t.Fatalf("80%% tier = %#v, %t; want the 60%% advisory tier", tier, ok)
+	}
+}
+
 func TestParseContextAdvisoryAtGlobalAndAgentScope(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [agent_defaults.context_advisory]
