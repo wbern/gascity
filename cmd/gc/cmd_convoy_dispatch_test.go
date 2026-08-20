@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestDrainItemRecipeVarsIncludesRuntimeMetadata(t *testing.T) {
@@ -6189,10 +6190,18 @@ provider = "file"
 	oldProvider := dispatchControlSessionProvider
 	dispatchControlSessionProvider = func() (runtime.Provider, error) { return fakeProvider, nil }
 	t.Cleanup(func() { dispatchControlSessionProvider = oldProvider })
+	oldLive := liveSubagentsForKill
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		return []worker.InFlightSubagent{{AgentID: "helper", Description: "Finish retry analysis"}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = oldLive })
 
-	var stdout bytes.Buffer
-	if err := runControlDispatcher(eval1.ID, &stdout, io.Discard); err != nil {
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcher(eval1.ID, &stdout, &stderr); err != nil {
 		t.Fatalf("runControlDispatcher(retry-eval): %v", err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "convoy retry-eval recycle") || !strings.Contains(got, "helper") {
+		t.Fatalf("autonomous-recycle observation = %q", got)
 	}
 
 	stopCalls := 0

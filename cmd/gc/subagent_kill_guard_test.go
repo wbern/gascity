@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,5 +84,29 @@ func TestRefuseKillForLiveSubagentsFailsOpen(t *testing.T) {
 				t.Fatalf("refuseKillForLiveSubagents() = true; output=%q", out.String())
 			}
 		})
+	}
+}
+
+func TestObserveAutonomousKillLogsLiveSubagents(t *testing.T) {
+	old := liveSubagentsForKill
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		return []worker.InFlightSubagent{{AgentID: "helper", Description: "Inspect the live incident"}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = old })
+
+	var out bytes.Buffer
+	observeAutonomousKillLiveSubagents(
+		"convoy retry recycle",
+		func(string, beads.Store, runtime.Provider, *config.City, string) (worker.Handle, error) {
+			return nil, nil
+		},
+		"", nil, nil, nil, "worker-1", &out,
+	)
+
+	got := out.String()
+	for _, want := range []string{"convoy retry recycle", "worker-1", "helper", "Inspect the live incident"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("observation %q does not contain %q", got, want)
+		}
 	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type countingMetadataStore struct {
@@ -2022,6 +2023,11 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfter
 func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBeadOpen(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
+	oldLive := liveSubagentsForKill
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		return []worker.InFlightSubagent{{AgentID: "helper", Description: "Preserve the retry context"}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = oldLive })
 	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start worker: %v", err)
@@ -2055,6 +2061,9 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 	}
 	if !strings.Contains(stderr.String(), b.ID) {
 		t.Fatalf("stderr = %q, want bead ID %q", stderr.String(), b.ID)
+	}
+	if got := stderr.String(); !strings.Contains(got, "session bead mutation: orphaned") || !strings.Contains(got, "helper") {
+		t.Fatalf("autonomous-session-bead observation = %q", got)
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {

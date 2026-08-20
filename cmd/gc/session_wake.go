@@ -754,6 +754,7 @@ func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cf
 	if err != nil {
 		return err
 	}
+	observeAutonomousKillLiveSubagentsForHandle("session drain timeout", name, handle, log.Writer())
 	return handle.Kill(context.Background())
 }
 
