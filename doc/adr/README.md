@@ -10,6 +10,7 @@ for why this exists and how it is enforced.
 | [0002](0002-bdshim-stays-gc-bd-does-not-become-standalone.md) | accepted | bdshim stays; `gc bd` reaches `bd` by exec, not in-process | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go` |
 | [0003](0003-worktree-removal-must-check-ignored-files.md) | accepted | Automated worktree removal must check ignored files; `git worktree remove` is not a backstop | the three `cmd/gc` worktree-removal paths, `internal/git/**` |
 | [0004](0004-assignee-holds-a-session-name-not-a-qualified-identity.md) | accepted | A bead's `assignee` holds a session name, not a qualified identity | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go` |
+| [0005](0005-session-destruction-guards-operator-initiated-paths-only.md) | accepted | Session-destruction guards cover operator-initiated paths only; self-handoff is deliberately unguarded | `cmd/gc/subagent_kill_guard.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go`, `internal/worker/subagent_guard.go` |
 | [0006](0006-attended-session-self-recycle-requires-explicit-handoff-opt-in.md) | accepted | Attended sessions recycle only through an explicit self-handoff opt-in | `cmd/gc/cmd_handoff.go` |
 
 ## Writing one
