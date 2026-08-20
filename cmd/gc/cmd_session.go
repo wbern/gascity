@@ -2341,8 +2341,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 var sessionKillPokeController = pokeController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	return cmdSessionKillWithForce(args, stdout, stderr, sessionJSONRequested(jsonOutput), false)
+func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+	return cmdSessionKillWithForce(args, stdout, stderr, false, false)
 }
 
 func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {

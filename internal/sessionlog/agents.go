@@ -216,11 +216,12 @@ func agentIDFromPath(path string) string {
 		return ""
 	}
 	name := strings.TrimPrefix(base, "agent-")
-	if strings.HasSuffix(name, ".meta.json") {
+	switch {
+	case strings.HasSuffix(name, ".meta.json"):
 		name = strings.TrimSuffix(name, ".meta.json")
-	} else if strings.HasSuffix(name, ".jsonl") {
+	case strings.HasSuffix(name, ".jsonl"):
 		name = strings.TrimSuffix(name, ".jsonl")
-	} else {
+	default:
 		return ""
 	}
 	if name == "" {
