@@ -192,10 +192,11 @@ func (p ContextAdvisoryPolicy) SelectTier(pct float64) (ResolvedContextAdvisoryT
 	}
 	var selected ResolvedContextAdvisoryTier
 	found := false
-	for _, tier := range p.Tiers {
-		// Tier thresholds are exclusive: their boundary remains in the preceding
-		// tier. This preserves the legacy >60% advisory and >80% urgent split.
-		if pct <= float64(tier.Threshold) {
+	for i, tier := range p.Tiers {
+		// The first tier activates at its threshold. Subsequent tiers are
+		// escalation bands, so their boundary remains in the preceding tier.
+		// This preserves the original 60–80% advisory and >80% urgent split.
+		if pct < float64(tier.Threshold) || (i > 0 && pct == float64(tier.Threshold)) {
 			break
 		}
 		selected, found = tier, true

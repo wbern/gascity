@@ -22,11 +22,17 @@ func TestResolveContextAdvisoryPerAgentOverridesGlobal(t *testing.T) {
 func TestContextAdvisorySelectTierKeepsLegacyThresholdBoundaries(t *testing.T) {
 	policy := ResolveContextAdvisory(contextAdvisoryPtr(DefaultContextAdvisory()))
 
-	if _, ok := policy.SelectTier(60); ok {
-		t.Fatal("60% selected an advisory tier; legacy context injection begins above 60%")
+	if _, ok := policy.SelectTier(59.9); ok {
+		t.Fatal("59.9% selected an advisory tier; legacy context injection begins at 60%")
+	}
+	if tier, ok := policy.SelectTier(60); !ok || tier.Threshold != 60 {
+		t.Fatalf("60%% tier = %#v, %t; want the 60%% advisory tier", tier, ok)
 	}
 	if tier, ok := policy.SelectTier(80); !ok || tier.Threshold != 60 {
 		t.Fatalf("80%% tier = %#v, %t; want the 60%% advisory tier", tier, ok)
+	}
+	if tier, ok := policy.SelectTier(80.1); !ok || tier.Threshold != 80 {
+		t.Fatalf("80.1%% tier = %#v, %t; want the 80%% urgent tier", tier, ok)
 	}
 }
 
