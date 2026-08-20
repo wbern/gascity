@@ -263,7 +263,7 @@ func TestReadAgentSession(t *testing.T) {
 	}
 }
 
-func TestReadAgentSession_Running(t *testing.T) {
+func TestReadAgentSession_UnknownWithoutTerminalMarker(t *testing.T) {
 	dir := t.TempDir()
 	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
 
@@ -275,8 +275,8 @@ func TestReadAgentSession_Running(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAgentSession: %v", err)
 	}
-	if sess.Status != AgentStatusRunning {
-		t.Errorf("status = %q, want %q", sess.Status, AgentStatusRunning)
+	if sess.Status != AgentStatusUnknown {
+		t.Errorf("status = %q, want %q", sess.Status, AgentStatusUnknown)
 	}
 }
 
@@ -396,7 +396,7 @@ func TestInferAgentStatus(t *testing.T) {
 		want     AgentStatus
 	}{
 		{"empty", nil, AgentStatusPending},
-		{"no result", []*Entry{{Type: "assistant"}}, AgentStatusRunning},
+		{"assistant without terminal marker", []*Entry{{Type: "assistant"}}, AgentStatusUnknown},
 		{"completed", []*Entry{{Type: "assistant"}, {Type: "result", Message: []byte(`{}`)}}, AgentStatusCompleted},
 		{"failed", []*Entry{{Type: "assistant"}, {Type: "result", Message: []byte(`{"is_error":true}`)}}, AgentStatusFailed},
 	}
