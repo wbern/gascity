@@ -29,6 +29,7 @@ type AgentStatus string
 const (
 	AgentStatusPending   AgentStatus = "pending"
 	AgentStatusRunning   AgentStatus = "running"
+	AgentStatusUnknown   AgentStatus = "unknown"
 	AgentStatusCompleted AgentStatus = "completed"
 	AgentStatusFailed    AgentStatus = "failed"
 )
@@ -231,8 +232,7 @@ func agentIDFromPath(path string) string {
 }
 
 // extractParentToolUseID reads the first few lines of an agent JSONL file
-// and looks for the parentToolUseId field. Claude Code writes this on
-// the first entry of every subagent session.
+// and falls back to a parentToolUseId field when it is present.
 func extractParentToolUseID(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -267,7 +267,8 @@ func extractParentToolUseID(path string) (string, error) {
 	return "", nil
 }
 
-// inferAgentStatus determines the agent's status from its message history.
+// inferAgentStatus determines an agent's terminal status from its message history.
+// A transcript without a recognized terminal marker cannot establish liveness.
 func inferAgentStatus(messages []*Entry) AgentStatus {
 	if len(messages) == 0 {
 		return AgentStatusPending
@@ -287,5 +288,5 @@ func inferAgentStatus(messages []*Entry) AgentStatus {
 			return AgentStatusCompleted
 		}
 	}
-	return AgentStatusRunning
+	return AgentStatusUnknown
 }
