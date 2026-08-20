@@ -1802,8 +1802,13 @@ controller-restartable, requests a restart and blocks until the controller
 stops the session. For on-demand configured named sessions, sends mail and
 returns without requesting restart: handoff intentionally leaves the
 user-attended session running instead of restarting it out from under the
-user. The controller can restart such a session via
-gc runtime request-restart; handoff deliberately does not.
+user.
+
+Self-handoff with --recycle deliberately requests a fresh controller-managed
+conversation after writing the continuation mail, including for an on-demand
+configured named session. Use it only when the current agent is explicitly
+ready to leave and resume from its handoff; it never lets the controller
+unilaterally recycle an attended session.
 
 For controller-restartable sessions, equivalent to:
 
@@ -1844,6 +1849,7 @@ gc handoff [subject] [message] [flags]
 | `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
+| `--recycle` | bool |  | restart this session after sending the handoff mail, including an attended named session |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
