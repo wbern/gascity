@@ -28,10 +28,11 @@ func TestHandoffRemoteRefusesLiveSubagentsUnlessForced(t *testing.T) {
 	if code := doHandoffRemote(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("code = %d, want refusal", code)
 	}
-	if !sp.IsRunning("target") || !bytes.Contains(stdout.Bytes(), []byte("--force")) || !bytes.Contains(stdout.Bytes(), []byte("Investigate make check slowness")) || !bytes.Contains(stdout.Bytes(), []byte("agent-42")) || !bytes.Contains(stdout.Bytes(), []byte("running")) {
-		t.Fatalf("refusal output=%q running=%v", stdout.String(), sp.IsRunning("target"))
+	if !sp.IsRunning("target") || !bytes.Contains(stderr.Bytes(), []byte("--force")) || !bytes.Contains(stderr.Bytes(), []byte("Investigate make check slowness")) || !bytes.Contains(stderr.Bytes(), []byte("agent-42")) || !bytes.Contains(stderr.Bytes(), []byte("running")) {
+		t.Fatalf("refusal stderr=%q running=%v", stderr.String(), sp.IsRunning("target"))
 	}
 	stdout.Reset()
+	stderr.Reset()
 	if code := doHandoffRemoteWithForce(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 || sp.IsRunning("target") {
 		t.Fatalf("force code=%d running=%v stderr=%s", code, sp.IsRunning("target"), stderr.String())
 	}

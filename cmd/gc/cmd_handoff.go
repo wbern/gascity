@@ -531,7 +531,7 @@ func doHandoffRemoteWithForce(store, sessStore beads.Store, rec events.Recorder,
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	if !force && refuseKillForLiveSubagents("gc handoff", workerHandleForSessionTargetWithConfig, "", sessStore, sp, nil, sessionName, stdout) {
+	if !force && refuseKillForLiveSubagents("gc handoff", workerHandleForSessionTargetWithConfig, "", sessStore, sp, nil, sessionName, stderr) {
 		return 1
 	}
 	// Resolve the agent identity before the kill, while the session bead is
