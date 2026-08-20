@@ -12,17 +12,24 @@ func contextAdvisoryPtr[T any](v T) *T { return &v }
 
 // ContextAdvisoryTier is one threshold and message in a context-pressure advisory.
 type ContextAdvisoryTier struct {
-	Threshold *int    `toml:"threshold,omitempty"`
-	Message   *string `toml:"message,omitempty"`
-	Enabled   *bool   `toml:"enabled,omitempty"`
+	// Threshold is the percent of the context window at which this tier applies.
+	Threshold *int `toml:"threshold,omitempty"`
+	// Message is a text/template rendered with .Tokens, .Window, .Pct,
+	// .UsedK, .WindowK, and .Threshold.
+	Message *string `toml:"message,omitempty"`
+	// Enabled disables this tier while retaining it in an inherited policy.
+	Enabled *bool `toml:"enabled,omitempty"`
 }
 
 // ContextAdvisory configures context-pressure guidance. Fields are pointers so
 // agent settings can inherit individual global settings.
 type ContextAdvisory struct {
-	Enabled      *bool                 `toml:"enabled,omitempty"`
-	WindowTokens *int                  `toml:"window_tokens,omitempty"`
-	Tiers        []ContextAdvisoryTier `toml:"tiers,omitempty"`
+	// Enabled enables context-pressure guidance; nil inherits the lower scope.
+	Enabled *bool `toml:"enabled,omitempty"`
+	// WindowTokens overrides the provider-reported context window; nil uses it.
+	WindowTokens *int `toml:"window_tokens,omitempty"`
+	// Tiers replaces the lower-scope tiers when set.
+	Tiers []ContextAdvisoryTier `toml:"tiers,omitempty"`
 }
 
 // ResolvedContextAdvisoryTier is an enabled, complete advisory tier.
@@ -185,8 +192,11 @@ func (p ContextAdvisoryPolicy) SelectTier(pct float64) (ResolvedContextAdvisoryT
 	}
 	var selected ResolvedContextAdvisoryTier
 	found := false
-	for _, tier := range p.Tiers {
-		if pct < float64(tier.Threshold) {
+	for i, tier := range p.Tiers {
+		// The first tier activates at its threshold. Subsequent tiers are
+		// escalation bands, so their boundary remains in the preceding tier.
+		// This preserves the original 60–80% advisory and >80% urgent split.
+		if pct < float64(tier.Threshold) || (i > 0 && pct == float64(tier.Threshold)) {
 			break
 		}
 		selected, found = tier, true

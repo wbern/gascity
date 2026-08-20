@@ -327,9 +327,9 @@ ContextAdvisory configures context-pressure guidance.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean |  |  |  |
-| `window_tokens` | integer |  |  |  |
-| `tiers` | []ContextAdvisoryTier |  |  |  |
+| `enabled` | boolean |  |  | Enabled enables context-pressure guidance; nil inherits the lower scope. |
+| `window_tokens` | integer |  |  | WindowTokens overrides the provider-reported context window; nil uses it. |
+| `tiers` | []ContextAdvisoryTier |  |  | Tiers replaces the lower-scope tiers when set. |
 
 ## ContextAdvisoryTier
 
@@ -337,9 +337,9 @@ ContextAdvisoryTier is one threshold and message in a context-pressure advisory.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `threshold` | integer |  |  |  |
-| `message` | string |  |  |  |
-| `enabled` | boolean |  |  |  |
+| `threshold` | integer |  |  | Threshold is the percent of the context window at which this tier applies. |
+| `message` | string |  |  | Message is a text/template rendered with .Tokens, .Window, .Pct, .UsedK, .WindowK, and .Threshold. |
+| `enabled` | boolean |  |  | Enabled disables this tier while retaining it in an inherited policy. |
 
 ## ConvergenceConfig
 

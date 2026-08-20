@@ -681,16 +681,19 @@
     "ContextAdvisory": {
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Enabled enables context-pressure guidance; nil inherits the lower scope."
         },
         "window_tokens": {
-          "type": "integer"
+          "type": "integer",
+          "description": "WindowTokens overrides the provider-reported context window; nil uses it."
         },
         "tiers": {
           "items": {
             "$ref": "#/$defs/ContextAdvisoryTier"
           },
-          "type": "array"
+          "type": "array",
+          "description": "Tiers replaces the lower-scope tiers when set."
         }
       },
       "additionalProperties": false,
@@ -700,13 +703,16 @@
     "ContextAdvisoryTier": {
       "properties": {
         "threshold": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Threshold is the percent of the context window at which this tier applies."
         },
         "message": {
-          "type": "string"
+          "type": "string",
+          "description": "Message is a text/template rendered with .Tokens, .Window, .Pct,\n.UsedK, .WindowK, and .Threshold."
         },
         "enabled": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Enabled disables this tier while retaining it in an inherited policy."
         }
       },
       "additionalProperties": false,

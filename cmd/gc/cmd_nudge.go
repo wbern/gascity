@@ -413,12 +413,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var wispExtra string // set after target resolution; captured by defer closure
 	emittedHookContext := false
 	var injectPrefix string
+	var contextHookInput []byte
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin(), hookFormat)
+		contextHookInput = readHookStdin()
+		injectPrefix = clockInjectLine()
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
@@ -446,12 +448,15 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		if inject {
+			// Preserve the legacy advisory when session resolution itself fails.
+			injectPrefix += contextInjectLine(contextHookInput, hookFormat)
 			return 0
 		}
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if inject {
+		injectPrefix += contextInjectLineForNudgeTarget(contextHookInput, hookFormat, target)
 		wispExtra = wispStepInjectionContent(target.cityPath, false)
 	}
 

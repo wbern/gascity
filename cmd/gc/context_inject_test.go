@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func writeTranscript(t *testing.T, lines ...string) string {
@@ -108,6 +110,89 @@ func TestContextInjectThresholdOverrides(t *testing.T) {
 		t.Errorf("threshold overrides not applied: %q", got)
 	}
 }
+
+func TestContextInjectUsesPerAgentContextAdvisory(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "")
+	p := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+
+	global := config.ContextAdvisory{
+		Tiers: []config.ContextAdvisoryTier{{
+			Threshold: contextInjectInt(60),
+			Message:   contextInjectString("global {{.Tokens}}/{{.Window}} {{printf \"%.0f\" .Pct}}"),
+		}},
+	}
+	agent := config.ContextAdvisory{
+		WindowTokens: contextInjectInt(500_000),
+		Tiers: []config.ContextAdvisoryTier{{
+			Threshold: contextInjectInt(80),
+			Message:   contextInjectString("agent {{.Tokens}}/{{.Window}} {{printf \"%.0f\" .Pct}}"),
+		}},
+	}
+
+	got := contextInjectLineForAdvisory(hookInputFor(p), "", &global, &agent)
+	if got != "agent 700000/500000 140\n" {
+		t.Errorf("per-agent advisory = %q, want rendered override", got)
+	}
+}
+
+func TestContextInjectForNudgeTargetUsesResolvedAgent(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	p := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	target := nudgeTarget{
+		cfg: &config.City{AgentDefaults: config.AgentDefaults{ContextAdvisory: &config.ContextAdvisory{
+			Tiers: []config.ContextAdvisoryTier{{
+				Threshold: contextInjectInt(60),
+				Message:   contextInjectString("global"),
+			}},
+		}}},
+		agent: config.Agent{ContextAdvisory: &config.ContextAdvisory{
+			Tiers: []config.ContextAdvisoryTier{{
+				Threshold: contextInjectInt(60),
+				Message:   contextInjectString("agent"),
+			}},
+		}},
+	}
+	if got := contextInjectLineForNudgeTarget(hookInputFor(p), "", target); got != "agent\n" {
+		t.Errorf("target advisory = %q, want agent override", got)
+	}
+}
+
+func TestContextAdvisoryZeroConfigPreservesLegacyMessages(t *testing.T) {
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
+	builtin := config.DefaultContextAdvisory()
+	policy := config.ResolveContextAdvisory(&builtin, nil, nil)
+	for _, tokens := range []int{700_000, 800_000, 900_000} {
+		if got, want := contextUsageMessageForPolicy(tokens, 1_000_000, policy), contextUsageMessage(tokens, 1_000_000); got != want {
+			t.Errorf("%d-token zero-config message changed\n got: %q\nwant: %q", tokens, got, want)
+		}
+	}
+}
+
+func TestContextAdvisoryEnvironmentOverridesConfiguredThresholdAndWindow(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "60")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "500000")
+	p := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	configured := config.ContextAdvisory{
+		WindowTokens: contextInjectInt(1_000_000),
+		Tiers: []config.ContextAdvisoryTier{
+			{Threshold: contextInjectInt(60), Message: contextInjectString("advisory")},
+			{Threshold: contextInjectInt(90), Message: contextInjectString("urgent")},
+		},
+	}
+	if got := contextInjectLineForAdvisory(hookInputFor(p), "", &configured, nil); got != "urgent\n" {
+		t.Errorf("environment override advisory = %q, want urgent tier", got)
+	}
+}
+
+func contextInjectInt(value int) *int { return &value }
+
+func contextInjectString(value string) *string { return &value }
 
 func TestContextInjectDisabled(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "0")

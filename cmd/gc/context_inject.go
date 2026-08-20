@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/modelwindow"
 	"github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -174,6 +175,39 @@ func contextInjectLine(hookInput []byte, hookFormat string) string {
 	return ""
 }
 
+// contextInjectLineForAdvisory applies global and agent-scoped context advisory
+// configuration to one hook payload. Environment variables remain the final
+// compatibility override for enablement, thresholds, and window size.
+func contextInjectLineForAdvisory(hookInput []byte, hookFormat string, global, agent *config.ContextAdvisory) string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
+	case "0", "false", "off":
+		return ""
+	}
+	var in hookStdinInput
+	if err := json.Unmarshal(hookInput, &in); err != nil {
+		return ""
+	}
+	path := transcriptPathForHook(in)
+	if path == "" {
+		return ""
+	}
+	builtin := config.DefaultContextAdvisory()
+	policy := config.ResolveContextAdvisory(&builtin, global, agent)
+	for _, read := range transcriptContextReaders(hookFormat) {
+		if c, ok := read(path); ok {
+			return contextUsageMessageForPolicy(c.Tokens, contextWindowTokensWithOverride(c.Models, c.ProviderWindow, policy.WindowTokens), policy)
+		}
+	}
+	return ""
+}
+
+func contextInjectLineForNudgeTarget(hookInput []byte, hookFormat string, target nudgeTarget) string {
+	if target.cfg == nil {
+		return contextInjectLine(hookInput, hookFormat)
+	}
+	return contextInjectLineForAdvisory(hookInput, hookFormat, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
+}
+
 // transcriptPathForHook resolves the transcript to read for a hook payload.
 //
 // The payload's transcript_path is authoritative when present. The fallback
@@ -264,10 +298,17 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 // The env override still wins over everything: it is the operator's documented
 // last word when detection is wrong.
 func contextWindowTokens(models []string, providerWindow int) int {
+	return contextWindowTokensWithOverride(models, providerWindow, 0)
+}
+
+func contextWindowTokensWithOverride(models []string, providerWindow, configuredWindow int) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
+	}
+	if configuredWindow > 0 {
+		return configuredWindow
 	}
 	if providerWindow > 0 {
 		return providerWindow
@@ -306,6 +347,41 @@ func contextUsageMessage(tokens, window int) string {
 			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, keep durable notes + work-item updates + memory current, then run `gc handoff \"<where you were + next step>\"`. That writes your continuation note and recycles you fresh from it — or, if you are an attended session the controller cannot restart, it hands off and you reattach for the fresh session. Prefer this over riding lossy compaction; repeated compaction degrades awareness. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of recycling.)\n",
 			k(tokens), k(window), pct)
 	}
+}
+
+func contextUsageMessageForPolicy(tokens, window int, policy config.ContextAdvisoryPolicy) string {
+	if window <= 0 || !policy.Enabled {
+		return ""
+	}
+	policy = contextUsagePolicyWithEnvThresholdOverrides(policy)
+	pct := 100 * float64(tokens) / float64(window)
+	tier, ok := policy.SelectTier(pct)
+	if !ok {
+		return ""
+	}
+	line := config.RenderTier(tier, config.ContextAdvisoryView{
+		Tokens:    tokens,
+		Window:    window,
+		UsedK:     contextUsageK(tokens),
+		WindowK:   contextUsageK(window),
+		Pct:       pct,
+		Threshold: tier.Threshold,
+	})
+	return line + "\n"
+}
+
+func contextUsageK(tokens int) string {
+	return fmt.Sprintf("%dk", (tokens+500)/1000)
+}
+
+func contextUsagePolicyWithEnvThresholdOverrides(policy config.ContextAdvisoryPolicy) config.ContextAdvisoryPolicy {
+	if len(policy.Tiers) > 0 {
+		policy.Tiers[0].Threshold = thresholdPct("GC_CONTEXT_ADVISORY_PCT", policy.Tiers[0].Threshold)
+	}
+	if len(policy.Tiers) > 1 {
+		policy.Tiers[1].Threshold = thresholdPct("GC_CONTEXT_URGENT_PCT", policy.Tiers[1].Threshold)
+	}
+	return policy
 }
 
 func thresholdPct(env string, def int) int {
