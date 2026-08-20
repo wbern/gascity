@@ -627,6 +627,16 @@ func TestDoHandoffWithRecycle_NamedSessionRequestsRestart(t *testing.T) {
 	if !persistCalled {
 		t.Error("persistRestart was not called")
 	}
+	mailFound := false
+	for _, got := range listOpenMessagesBothTiers(t, store) {
+		if got.Type == "message" && got.Title == "HANDOFF: context full" {
+			mailFound = true
+			break
+		}
+	}
+	if !mailFound {
+		t.Fatal("handoff mail not created before requesting restart")
+	}
 	if !strings.Contains(stdout.String(), "requesting restart") {
 		t.Errorf("stdout = %q, want restart confirmation", stdout.String())
 	}
