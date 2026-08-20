@@ -2342,16 +2342,10 @@ var sessionKillPokeController = pokeController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	return cmdSessionKillWithForce(args, stdout, stderr, append(jsonOutput, false)...)
+	return cmdSessionKillWithForce(args, stdout, stderr, sessionJSONRequested(jsonOutput), false)
 }
 
-func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	force := false
-	if len(jsonOutput) > 1 {
-		force = jsonOutput[len(jsonOutput)-1]
-		jsonOutput = jsonOutput[:len(jsonOutput)-1]
-	}
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -2360,7 +2354,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, jsonOutput
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
