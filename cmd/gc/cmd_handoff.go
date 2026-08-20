@@ -29,6 +29,7 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookFormat string
 	var jsonOut bool
 	var force bool
+	var recycle bool
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
@@ -39,8 +40,13 @@ controller-restartable, requests a restart and blocks until the controller
 stops the session. For on-demand configured named sessions, sends mail and
 returns without requesting restart: handoff intentionally leaves the
 user-attended session running instead of restarting it out from under the
-user. The controller can restart such a session via
-gc runtime request-restart; handoff deliberately does not.
+user.
+
+Self-handoff with --recycle deliberately requests a fresh controller-managed
+conversation after writing the continuation mail, including for an on-demand
+configured named session. Use it only when the current agent is explicitly
+ready to leave and resume from its handoff; it never lets the controller
+unilaterally recycle an attended session.
 
 For controller-restartable sessions, equivalent to:
 
@@ -81,7 +87,7 @@ or ID. Subject is required unless --auto is set.`,
 			if jsonOut {
 				out = io.Discard
 			}
-			if cmdHandoffWithForce(args, target, auto, hookFormat, force, out, stderr) != 0 {
+			if cmdHandoffWithForce(args, target, auto, hookFormat, force, recycle, out, stderr) != 0 {
 				return errExit
 			}
 			if jsonOut {
@@ -102,6 +108,7 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy a target even when it has live background subagents")
+	cmd.Flags().BoolVar(&recycle, "recycle", false, "restart this session after sending the handoff mail, including an attended named session")
 	return cmd
 }
 
@@ -135,16 +142,24 @@ func handoffJSONSubject(args []string, auto bool) string {
 }
 
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
-	return cmdHandoffWithForce(args, target, auto, hookFormat, false, stdout, stderr)
+	return cmdHandoffWithForce(args, target, auto, hookFormat, false, false, stdout, stderr)
 }
 
-func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat string, force bool, stdout, stderr io.Writer) int {
+func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat string, force, recycle bool, stdout, stderr io.Writer) int {
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if recycle {
+			fmt.Fprintln(stderr, "gc handoff: --recycle cannot be used with --target") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return cmdHandoffRemoteWithForce(args, target, force, stdout, stderr)
+	}
+	if auto && recycle {
+		fmt.Fprintln(stderr, "gc handoff: --recycle cannot be used with --auto") //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -181,7 +196,7 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	persistRestart := sessionRestartPersister(current.cityPath, sessStore, sp, cfg, current.sessionName)
 
-	outcome := doHandoffWithOutcome(store, sessStore, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
+	outcome := doHandoffWithRecycleOutcome(store, sessStore, rec, dops, persistRestart, current.display, current.sessionName, args, recycle, stdout, stderr)
 	if outcome.code != 0 {
 		return outcome.code
 	}
@@ -265,6 +280,12 @@ func doHandoff(store, sessStore beads.Store, rec events.Recorder, dops drainOps,
 func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
+	return doHandoffWithRecycleOutcome(store, sessStore, rec, dops, persistRestart, sessionAddress, sessionName, args, false, stdout, stderr)
+}
+
+func doHandoffWithRecycleOutcome(store, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
+	sessionAddress, sessionName string, args []string, recycle bool, stdout, stderr io.Writer,
+) handoffOutcome {
 	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
 	if !ok {
 		return handoffOutcome{code: 1}
@@ -275,7 +296,7 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
-	if !restartable {
+	if !restartable && !recycle {
 		if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1}

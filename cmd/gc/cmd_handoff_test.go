@@ -590,6 +590,77 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	}
 }
 
+func TestDoHandoffWithRecycle_NamedSessionRequestsRestart(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{"gc:session"}})
+	if err != nil {
+		t.Fatalf("seeding session bead: %v", err)
+	}
+	for key, value := range map[string]string{
+		"session_name":             "mayor",
+		"configured_named_session": "true",
+		"configured_named_mode":    "on_demand",
+	} {
+		if err := store.SetMetadata(b.ID, key, value); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+	}
+
+	persistCalled := false
+	outcome := doHandoffWithRecycleOutcome(store, store, rec, dops, func() error {
+		persistCalled = true
+		return nil
+	}, "mayor", "mayor", []string{"HANDOFF: context full"}, true, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	if !outcome.restartRequested {
+		t.Fatal("restartRequested = false, want true")
+	}
+	if !dops.restartRequested["mayor"] {
+		t.Error("restart-requested flag not set")
+	}
+	if !persistCalled {
+		t.Error("persistRestart was not called")
+	}
+	mailFound := false
+	for _, got := range listOpenMessagesBothTiers(t, store) {
+		if got.Type == "message" && got.Title == "HANDOFF: context full" {
+			mailFound = true
+			break
+		}
+	}
+	if !mailFound {
+		t.Fatal("handoff mail not created before requesting restart")
+	}
+	if !strings.Contains(stdout.String(), "requesting restart") {
+		t.Errorf("stdout = %q, want restart confirmation", stdout.String())
+	}
+}
+
+func TestHandoffRecycleRejectsNonSelfModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--auto", "--recycle", "context cycle"},
+		{"--target", "other", "--recycle", "context cycle"},
+	} {
+		var stdout, stderr bytes.Buffer
+		cmd := newHandoffCmd(&stdout, &stderr)
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("gc handoff %v succeeded, want error", args)
+		}
+		if !strings.Contains(stderr.String(), "--recycle cannot be used") {
+			t.Fatalf("stderr = %q, want --recycle conflict", stderr.String())
+		}
+	}
+}
+
 func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
