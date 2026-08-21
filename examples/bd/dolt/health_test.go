@@ -2210,6 +2210,27 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 			t.Errorf("transient compact siblings reported as quarantine:\n%s", out)
 		}
 	})
+
+	// Clearing a quarantine renames the marker in place to
+	// `<db>.cleared-<timestamp>`. The renamed file is durable audit evidence,
+	// not an active marker, so it must not keep health red after the guard has
+	// been lifted.
+	t.Run("cleared marker exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		writeQuarantineMarker(t, cityPath, "hq", "post-flatten table value hash changed", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+		quarantineDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+		if err := os.Rename(filepath.Join(quarantineDir, "hq"), filepath.Join(quarantineDir, "hq.cleared-20260803T1731Z")); err != nil {
+			t.Fatalf("rename cleared quarantine marker: %v", err)
+		}
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero for cleared quarantine marker: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("cleared quarantine marker reported as active:\n%s", out)
+		}
+	})
 }
 
 // backupCityWithArtifacts builds a city whose managed-Dolt backup artifacts
