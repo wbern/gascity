@@ -88,7 +88,7 @@ func contextInjectLineForAdvisory(hookInput []byte, global, agent *config.Contex
 // returns the context footprint of the most recent usage entry (prompt-side
 // input tokens + cache reads + cache writes ≈ current context size) plus every
 // non-empty model string seen — the window is the MAX over those (see
-// contextWindowTokens), so a smaller-window sidecar/compaction call logged in
+// contextWindowTokensWithOverride), so a smaller-window sidecar/compaction call logged in
 // the same transcript can't shrink the main-loop session's window.
 func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 	const tailBytes = 2 << 20 // last 2MiB is ample for the newest entries
@@ -132,19 +132,6 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 		ok = true
 	}
 	return tokens, models, ok
-}
-
-// contextWindowTokens resolves the session's context window as the MAX window
-// of any model it ran (they share one context), so a smaller-window sidecar or
-// compaction call (e.g. a 200k-window Haiku entry inside a 1M Fable session)
-// can't flip the session to the 200k default and fire the urgent tier at ~20%
-// of real usage. Per-model windows come from the shared modelwindow package so
-// this agrees with the API/session-log path; an unrecognized model (window 0)
-// floors to the conservative default. GC_CONTEXT_WINDOW_TOKENS overrides —
-// gc-managed deployments that know the launch model should pin it for
-// determinism.
-func contextWindowTokens(models []string) int {
-	return contextWindowTokensWithOverride(models, 0)
 }
 
 func contextWindowTokensWithOverride(models []string, configuredWindow int) int {
@@ -193,30 +180,6 @@ func contextUsagePolicyWithEnvThresholdOverrides(policy config.ContextAdvisoryPo
 		policy.Tiers[1].Threshold = thresholdPct("GC_CONTEXT_URGENT_PCT", policy.Tiers[1].Threshold)
 	}
 	return policy
-}
-
-// contextUsageMessage renders the guidance line for tokens used of window, or
-// "" below the advisory threshold.
-func contextUsageMessage(tokens, window int) string {
-	if window <= 0 {
-		return ""
-	}
-	advisory := thresholdPct("GC_CONTEXT_ADVISORY_PCT", 60)
-	urgent := thresholdPct("GC_CONTEXT_URGENT_PCT", 80)
-	pct := 100 * float64(tokens) / float64(window)
-	k := func(n int) string { return fmt.Sprintf("%dk", (n+500)/1000) }
-	switch {
-	case pct < float64(advisory):
-		return ""
-	case pct <= float64(urgent):
-		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%). Approaching the recycle zone. Steer toward a clean seam: finish in-flight work, don't open new long-horizon tasks, and keep durable notes/work-items current so a handoff is cheap. Plan to hand off and reset before this climbs into the urgent band — a fresh session from durable notes outperforms riding lossy compaction.\n",
-			k(tokens), k(window), pct)
-	default:
-		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, run your handoff (durable notes + work-item updates + memory), then `gc session reset` yourself to resume fresh from that durable state. Repeated compaction degrades awareness — a clean reset beats running to compaction. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)\n",
-			k(tokens), k(window), pct)
-	}
 }
 
 func thresholdPct(env string, def int) int {

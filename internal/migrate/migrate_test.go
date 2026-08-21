@@ -1104,6 +1104,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 	trueVal := true
 	intVal := 42
 	formula := "mol-work"
+	message := "test {{.Tokens}}"
 	src := config.Agent{
 		Name:                   "worker",
 		Description:            "test agent description",
@@ -1117,6 +1118,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, Tiers: []config.ContextAdvisoryTier{{Threshold: &intVal, Message: &message, Enabled: &trueVal}}},
 		Upstream:               "anthropic",
 		StartCommand:           "claude --dangerously",
 		Lifecycle:              config.AgentLifecycleOneShot,
