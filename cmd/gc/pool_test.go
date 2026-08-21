@@ -801,6 +801,7 @@ func TestCountRunningPoolInstancesNoneRunning(t *testing.T) {
 func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	trueVal := true
 	intVal := 42
+	message := "Context {{.Tokens}}"
 	src := config.Agent{
 		Name:                         "original",
 		Description:                  "test agent description",
@@ -813,6 +814,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		ContextAdvisory:              &config.ContextAdvisory{Enabled: &trueVal, Tiers: []config.ContextAdvisoryTier{{Threshold: &intVal, Message: &message, Enabled: &trueVal}}},
 		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",

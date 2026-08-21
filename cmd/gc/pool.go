@@ -394,6 +394,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.AssignedWorkDeferLimit
 		dst.AssignedWorkDeferLimit = &v
 	}
+	dst.ContextAdvisory = src.Clone().ContextAdvisory
 	return dst
 }
 
