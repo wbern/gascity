@@ -1415,6 +1415,79 @@ func TestDoSlingIdempotent(t *testing.T) {
 	}
 }
 
+func TestDoSlingWarnsWhenTargetBranchLiveOwned(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID:       "live-1",
+			Title:    "live worker session",
+			Type:     "task",
+			Status:   "in_progress",
+			Assignee: "architect",
+			Metadata: map[string]string{"gc.work_branch": "crm/gastown.furiosa"},
+		},
+		{
+			ID:       "work-1",
+			Title:    "remediation",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"target": "crm/gastown.furiosa"},
+		},
+	}, nil)
+	live := beads.Bead{ID: "live-1"}
+	work := beads.Bead{ID: "work-1"}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+	result, err := DoSling(testOpts(a, work.ID), deps, store)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if len(result.BeadWarnings) != 1 {
+		t.Fatalf("BeadWarnings = %v, want exactly 1 warning", result.BeadWarnings)
+	}
+	warning := result.BeadWarnings[0]
+	if !strings.Contains(warning, "crm/gastown.furiosa") || !strings.Contains(warning, "architect") || !strings.Contains(warning, live.ID) {
+		t.Errorf("warning %q missing branch/assignee/bead-id context", warning)
+	}
+	// Advisory only: the sling still proceeds and routes the bead.
+	if len(runner.calls) != 1 {
+		t.Fatalf("got %d runner calls, want 1 (warning must not block routing)", len(runner.calls))
+	}
+}
+
+func TestDoSlingNoBranchWarningWhenNoLiveOwner(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID:       "work-2",
+			Title:    "remediation",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"target": "crm/gastown.furiosa"},
+		},
+	}, nil)
+	work := beads.Bead{ID: "work-2"}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+	result, err := DoSling(testOpts(a, work.ID), deps, store)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if len(result.BeadWarnings) != 0 {
+		t.Errorf("BeadWarnings = %v, want none", result.BeadWarnings)
+	}
+}
+
 func TestCheckBatchBurnOutputsWarn(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-2", Type: "task", Status: "open"},

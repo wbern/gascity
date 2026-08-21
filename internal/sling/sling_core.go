@@ -116,6 +116,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Branch live-ownership check: warn (never block) when the bead's target
+	// branch is already checked out by another in_progress bead's live
+	// session. See checkBranchLiveOwnership for rationale (gcw-4f9).
+	if shouldCheckBranchLiveOwnership(opts) {
+		result.BeadWarnings = append(result.BeadWarnings, checkBranchLiveOwnership(opts, deps)...)
+	}
+
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
 		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
@@ -261,6 +268,56 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+func shouldCheckBranchLiveOwnership(opts SlingOpts) bool {
+	// Only meaningful for plain-bead slinging where a bead ID (and therefore
+	// a resolvable target branch) is known. Formula slinging creates a new
+	// molecule with no target bead yet.
+	return !opts.IsFormula
+}
+
+// checkBranchLiveOwnership warns when the bead being slung targets a branch
+// that another still-in_progress bead's live session already has checked
+// out (recorded via beadmeta.WorkBranchMetadataKey at claim time). This is
+// the earliest point the collision is knowable: today it is only caught
+// much later, when a runtime worktree guard refuses a double-checkout,
+// after a molecule has already been poured, a worker has claimed it, and an
+// escalation mail has gone out (gcw-4f9). The check is advisory only — a
+// genuinely abandoned worktree must stay reclaimable, so it never blocks
+// the route.
+func checkBranchLiveOwnership(opts SlingOpts, deps SlingDeps) []string {
+	if deps.Store == nil {
+		return nil
+	}
+	branch := strings.TrimSpace(BeadMetadataTarget(deps.Store, opts.BeadOrFormula))
+	if branch == "" {
+		return nil
+	}
+	owners, err := deps.Store.List(beads.ListQuery{
+		Status:   "in_progress",
+		Metadata: map[string]string{beadmeta.WorkBranchMetadataKey: branch},
+	})
+	if err != nil {
+		return nil
+	}
+	var warnings []string
+	for _, owner := range owners {
+		if owner.ID == opts.BeadOrFormula {
+			continue
+		}
+		who := strings.TrimSpace(owner.Assignee)
+		if who == "" {
+			who = strings.TrimSpace(owner.Metadata[beadmeta.SessionNameMetadataKey])
+		}
+		if who == "" {
+			who = "an unknown live session"
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"branch %q is already checked out by %s (bead %s, in_progress) — routing anyway, but expect a worktree collision unless that session releases it",
+			branch, who, owner.ID))
+	}
+	return warnings
 }
 
 // attachmentDecision is the result of onFormulaNeedsAttachment: whether an
