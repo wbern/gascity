@@ -617,16 +617,36 @@ const processKillGracePeriod = 2 * time.Second
 // processes that remain alive and may still be flushing state.
 const processExitCheckInterval = 25 * time.Millisecond
 
-func terminateVerifiedProcesses(pids []string, identities map[string]string) {
-	terminateVerifiedProcessSet(
+func terminateVerifiedProcesses(pids []string, root string, identities map[string]string) {
+	terminateVerifiedProcessSetForRoot(
 		pids,
+		root,
 		identities,
 		processKillGracePeriod,
 		processStartTime,
-		func(pid, signal string) { _ = exec.Command("kill", "-"+signal, pid).Run() },
+		signalVerifiedProcess,
 		time.Sleep,
 		time.Now,
 	)
+}
+
+// terminateVerifiedProcessSetForRoot refuses the whole teardown phase unless
+// the pane leader still has the identity captured with its descendants. A
+// recycled root means the snapshot no longer proves ownership of any child.
+func terminateVerifiedProcessSetForRoot(
+	pids []string,
+	root string,
+	identities map[string]string,
+	gracePeriod time.Duration,
+	currentIdentity func(string) string,
+	signalProcess func(string, string),
+	sleep func(time.Duration),
+	now func() time.Time,
+) {
+	if !killIdentityMatches(currentIdentity(root), identities[root]) {
+		return
+	}
+	terminateVerifiedProcessSet(pids, identities, gracePeriod, currentIdentity, signalProcess, sleep, now)
 }
 
 // terminateVerifiedProcessSet preserves terminateProcessSet's early-exit grace
@@ -744,8 +764,8 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 		killList := append([]string{}, descendants...)
 		killList = append(killList, reparented...)
 
-		terminateVerifiedProcesses(killList, identity)
-		terminateVerifiedProcesses([]string{pid}, identity)
+		terminateVerifiedProcesses(killList, pid, identity)
+		terminateVerifiedProcesses([]string{pid}, pid, identity)
 	}
 
 	// Kill the tmux session
@@ -792,12 +812,12 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// real processes (see computeExcludingKillSet).
 		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
 
-		terminateVerifiedProcesses(killList, identity)
+		terminateVerifiedProcesses(killList, pid, identity)
 
 		// Kill the pane process itself (may have called setsid() and detached)
 		// Only if not excluded
 		if killPaneLeader {
-			terminateVerifiedProcesses([]string{pid}, identity)
+			terminateVerifiedProcesses([]string{pid}, pid, identity)
 		}
 	}
 
@@ -876,7 +896,7 @@ func discoverKillTargets(root string) (descendants []string, reparented []string
 // (like computeExcludingKillSet). Returns empty for an empty snapshot.
 func buildKillTargetsFromSnapshot(root string, snap map[string]procIdentity) (descendants []string, reparented []string, identity map[string]string) {
 	rootInfo, rootFound := snap[root]
-	if len(snap) == 0 || !rootFound || !validProcessPID(root) {
+	if len(snap) == 0 || !rootFound || !validProcessPID(root) || rootInfo.start == "" {
 		return nil, nil, nil
 	}
 
@@ -948,31 +968,8 @@ func killIdentityMatches(current, want string) bool {
 	return want != "" && current != "" && current == want
 }
 
-// KillPaneProcesses explicitly kills all processes associated with a tmux pane.
-// This prevents orphan processes that survive pane respawn due to SIGHUP being ignored.
-//
-// Process:
-// 1. Get the pane's main process PID and its process group ID (PGID)
-// 2. Kill the entire process group (catches reparented processes)
-// 3. Find all descendant processes recursively (catches any stragglers)
-// 4. Send SIGTERM/SIGKILL to descendants
-// 5. Kill the pane process itself
-//
-// This ensures Claude processes and all their children are properly terminated
-// before respawning the pane.
-
-// KillPaneProcesses explicitly kills all processes associated with a tmux pane.
-// This prevents orphan processes that survive pane respawn due to SIGHUP being ignored.
-//
-// Process:
-// 1. Get the pane's main process PID and its process group ID (PGID)
-// 2. Kill the entire process group (catches reparented processes)
-// 3. Find all descendant processes recursively (catches any stragglers)
-// 4. Send SIGTERM/SIGKILL to descendants
-// 5. Kill the pane process itself
-//
-// This ensures Claude processes and all their children are properly terminated
-// before respawning the pane.
+// KillPaneProcesses terminates only processes still proven to belong to the
+// pane snapshot, then leaves tmux to reap the pane itself on respawn.
 func (t *Tmux) KillPaneProcesses(pane string) error {
 	// Get the pane PID
 	pid, err := t.GetPanePID(pane)
@@ -985,8 +982,10 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 	}
 
 	descendants, reparented, identities := discoverKillTargets(pid)
-	terminateVerifiedProcesses(append(descendants, reparented...), identities)
-	terminateVerifiedProcesses([]string{pid}, identities)
+	killList := append([]string{}, descendants...)
+	killList = append(killList, reparented...)
+	terminateVerifiedProcesses(killList, pid, identities)
+	terminateVerifiedProcesses([]string{pid}, pid, identities)
 
 	return nil
 }
@@ -1018,11 +1017,11 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 
 	descendants, reparented, identities := discoverKillTargets(pid)
 	killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-	terminateVerifiedProcesses(killList, identities)
+	terminateVerifiedProcesses(killList, pid, identities)
 
 	// Kill the pane process itself only if not excluded
 	if killPaneLeader {
-		terminateVerifiedProcesses([]string{pid}, identities)
+		terminateVerifiedProcesses([]string{pid}, pid, identities)
 	}
 
 	return nil

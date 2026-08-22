@@ -41,6 +41,17 @@ func TestBuildKillTargetsFromSnapshotRejectsMissingOrSystemRoot(t *testing.T) {
 	}
 }
 
+func TestBuildKillTargetsFromSnapshotRejectsIdentitylessRoot(t *testing.T) {
+	snapshot := map[string]procIdentity{
+		"100": {ppid: "9", pgid: "100"},
+		"200": {ppid: "100", pgid: "100", start: "child"},
+	}
+	descendants, reparented, identities := buildKillTargetsFromSnapshot("100", snapshot)
+	if len(descendants) != 0 || len(reparented) != 0 || len(identities) != 0 {
+		t.Fatalf("identity-less root produced targets descendants=%v reparented=%v identity=%v", descendants, reparented, identities)
+	}
+}
+
 func TestParseProcessTableSkipsMalformedAndSpecialPIDs(t *testing.T) {
 	snapshot := parseProcessTable("  0 1 0 bad\n  1 1 1 bad\n bad 1 2 bad\n  101 100 101 Mon Jul 6 08:00:00 2026\n  102 101 101\n")
 	if got := snapshot["101"]; got != (procIdentity{ppid: "100", pgid: "101", start: "Mon Jul 6 08:00:00 2026"}) {
@@ -131,6 +142,26 @@ func TestTerminateVerifiedProcessSetRefusesUnreadableAndAbsentSnapshotPIDs(t *te
 	)
 	if len(signals) != 0 {
 		t.Fatalf("signals = %v, want none", signals)
+	}
+}
+
+func TestTerminateVerifiedProcessSetForRootRefusesRecycledRoot(t *testing.T) {
+	var signals []string
+	now := time.Unix(0, 0)
+	terminateVerifiedProcessSetForRoot(
+		[]string{"101"}, "100", map[string]string{"100": "root-start", "101": "child-start"}, time.Second,
+		func(pid string) string {
+			if pid == "100" {
+				return "reused-root"
+			}
+			return "child-start"
+		},
+		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
+		func(time.Duration) { t.Fatal("recycled root must not enter grace loop") },
+		func() time.Time { return now },
+	)
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want none after root reuse", signals)
 	}
 }
 

@@ -3119,6 +3119,12 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 		t.Fatalf("sibling session/process did not survive target handoff")
 	}
 	after := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if got := after.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after target handoff: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := after.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after target handoff: before=%q after=%q", before.starts[siblingPID], got)
+	}
 	t.Logf("after handoff stop: server_pid=%s sibling=%s/%s exit-empty=%s\n%s", serverPID, siblingPID, after.pgids[siblingPID], mustExitEmpty(t, tmux), after.text)
 
 	start(target)
@@ -3133,6 +3139,12 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 	targetAfterRestart := mustPanePID(t, tmux, target)
 	final := handoffProcessSnapshot(t, targetAfterRestart, siblingPID, serverPID)
+	if got := final.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after target restart: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := final.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after target restart: before=%q after=%q", before.starts[siblingPID], got)
+	}
 	t.Logf("after target restart: server_pid=%s target=%s/%s sibling=%s/%s exit-empty=%s\n%s", serverPID, targetAfterRestart, final.pgids[targetAfterRestart], siblingPID, final.pgids[siblingPID], mustExitEmpty(t, tmux), final.text)
 
 	if err := provider.Stop(target); err != nil {
@@ -3140,6 +3152,13 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 	if err := provider.Stop(target); err != nil {
 		t.Fatalf("already-gone target stop: %v", err)
+	}
+	afterSecondStop := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if got := afterSecondStop.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after idempotent stop: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := afterSecondStop.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after idempotent stop: before=%q after=%q", before.starts[siblingPID], got)
 	}
 	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
 		t.Fatalf("sibling session/process did not survive already-gone target stop")
@@ -3208,21 +3227,27 @@ func mustExitEmpty(t *testing.T, tmux *Tmux) string {
 }
 
 type handoffProcessSnapshotInfo struct {
-	pgids map[string]string
-	text  string
+	pgids  map[string]string
+	starts map[string]string
+	text   string
 }
 
 func handoffProcessSnapshot(t *testing.T, pids ...string) handoffProcessSnapshotInfo {
 	t.Helper()
+	snapshot := snapshotProcessTable()
 	pgids := make(map[string]string, len(pids))
+	starts := make(map[string]string, len(pids))
 	rows := make([]string, 0, len(pids))
 	for _, pid := range pids {
-		pgid := getProcessGroupID(pid)
-		ppid := getParentPID(pid)
-		pgids[pid] = pgid
-		rows = append(rows, fmt.Sprintf("pid=%s ppid=%s pgid=%s", pid, ppid, pgid))
+		identity := snapshot[pid]
+		if identity.start == "" {
+			t.Fatalf("missing process identity for pid %s", pid)
+		}
+		pgids[pid] = identity.pgid
+		starts[pid] = identity.start
+		rows = append(rows, fmt.Sprintf("pid=%s ppid=%s pgid=%s start=%s", pid, identity.ppid, identity.pgid, identity.start))
 	}
-	return handoffProcessSnapshotInfo{pgids: pgids, text: strings.Join(rows, "\n")}
+	return handoffProcessSnapshotInfo{pgids: pgids, starts: starts, text: strings.Join(rows, "\n")}
 }
 
 func processAlive(pid string) bool {

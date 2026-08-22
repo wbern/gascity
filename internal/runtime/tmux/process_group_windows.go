@@ -27,3 +27,7 @@ func parseProcessTable(_ string) map[string]procIdentity {
 func processStartTime(_ string) string {
 	return ""
 }
+
+// signalVerifiedProcess is unreachable on Windows because its snapshot is
+// empty; retain a no-op seam so the shared teardown code compiles.
+func signalVerifiedProcess(_, _ string) {}
