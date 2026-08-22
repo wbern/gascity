@@ -23,7 +23,7 @@ none requires per-city configuration.
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
-| **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
+| **`renudge-stale-human-gates`** | **cooldown 5m** | **Boundedly re-notify stale human gates with exponential backoff and a hard repeat cap** |
 
 The **event-driven nudge orders** are documented in detail below.
 

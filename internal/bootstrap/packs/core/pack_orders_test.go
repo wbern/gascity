@@ -293,16 +293,19 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	body := string(data)
 
 	for _, want := range []string{
-		"gc bd gate list",                // enumerate OPEN gates (not events)
-		"--limit 0",                      // no silent 50-gate truncation
-		`.await_type == "human"`,         // human gates only
-		`.status == "open"`,              // skip already-resolved gates
-		"GC_STALE_GATE_THRESHOLD",        // configurable staleness threshold
-		"GC_STALE_GATE_RENUDGE_INTERVAL", // configurable repeat interval
-		"gc bd show",                     // re-fetch (list omits assignee)
-		"gc.deferred_assignee",           // formula/molecule addressee
-		"--notify",                       // mail + nudge, human-safe primitive
-		".hq != true",                    // exclude HQ from prefix->rig lookup
+		"gc bd gate list",                  // enumerate OPEN gates (not events)
+		"--limit 0",                        // no silent 50-gate truncation
+		`.await_type == "human"`,           // human gates only
+		`.status == "open"`,                // skip already-resolved gates
+		"GC_STALE_GATE_THRESHOLD",          // configurable staleness threshold
+		"GC_STALE_GATE_RENUDGE_INTERVAL",   // configurable repeat interval
+		"GC_STALE_GATE_BACKOFF_MULTIPLIER", // exponential repeat spacing
+		"GC_STALE_GATE_MAX_RENUDGES",       // hard lifetime reminder cap
+		"last_seen_at",                     // capped gates cannot age out and reset
+		"gc bd show",                       // re-fetch (list omits assignee)
+		"gc.deferred_assignee",             // formula/molecule addressee
+		"--notify",                         // mail + nudge, human-safe primitive
+		".hq != true",                      // exclude HQ from prefix->rig lookup
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renudge-stale-human-gates.sh missing load-bearing element %q", want)
