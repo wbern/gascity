@@ -540,10 +540,9 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		}
 		command = "env" + prefix + " " + command
 	}
-	// Add the command as the last argument
+	// Add the command as the last argument.
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.runNewSession(args, env); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
