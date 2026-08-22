@@ -998,19 +998,19 @@ func TestHasDescendantWithNames(t *testing.T) {
 	}
 
 	// Test with a definitely nonexistent PID
-	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
+	got := hasDescendantWithNames("999999999", []string{"node", "claude"})
 	if got {
 		t.Error("hasDescendantWithNames should return false for nonexistent PID")
 	}
 
 	// Test with empty names slice - should always return false
-	got = hasDescendantWithNames("1", []string{}, 0)
+	got = hasDescendantWithNames("1", []string{})
 	if got {
 		t.Error("hasDescendantWithNames should return false for empty names slice")
 	}
 
 	// Test with nil names slice - should always return false
-	got = hasDescendantWithNames("1", nil, 0)
+	got = hasDescendantWithNames("1", nil)
 	if got {
 		t.Error("hasDescendantWithNames should return false for nil names slice")
 	}
@@ -1018,40 +1018,8 @@ func TestHasDescendantWithNames(t *testing.T) {
 	// Exercise a real process-tree edge without recursively scanning every
 	// process on the host. The helper is a direct child of this test binary.
 	helper := startDescendantTestProcess(t)
-	if !hasDescendantWithNames(strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}, 0) {
+	if !hasDescendantWithNames(strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}) {
 		t.Fatalf("hasDescendantWithNames did not find controlled child pid %d", helper.Process.Pid)
-	}
-}
-
-func TestGetAllDescendants(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process-tree traversal uses pgrep")
-	}
-
-	// Test with nonexistent PID - should return empty slice
-	got := getAllDescendants("999999999")
-	if len(got) != 0 {
-		t.Errorf("getAllDescendants(nonexistent) = %v, want empty slice", got)
-	}
-
-	helper := startDescendantTestProcess(t)
-	helperPID := strconv.Itoa(helper.Process.Pid)
-	descendants := getAllDescendants(strconv.Itoa(os.Getpid()))
-	foundHelper := false
-
-	// Verify returned PIDs are all numeric strings
-	for _, pid := range descendants {
-		if pid == helperPID {
-			foundHelper = true
-		}
-		for _, c := range pid {
-			if c < '0' || c > '9' {
-				t.Errorf("getAllDescendants returned non-numeric PID: %q", pid)
-			}
-		}
-	}
-	if !foundHelper {
-		t.Fatalf("getAllDescendants(%d) = %v, want controlled child %s", os.Getpid(), descendants, helperPID)
 	}
 }
 
@@ -1221,55 +1189,6 @@ func TestKillSessionWithProcessesExcluding_NonexistentSession(t *testing.T) {
 	err := tm.KillSessionWithProcessesExcluding("nonexistent-session-xyz-12345", []string{"12345"})
 	// We don't care about the error value, just that it doesn't panic
 	_ = err
-}
-
-func TestGetProcessGroupID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping test: process groups not available on Windows")
-	}
-
-	// Test with current process
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-
-	if pgid == "" {
-		t.Error("expected non-empty PGID for current process")
-	}
-
-	// PGID should not be 0 or 1 for a normal process
-	if pgid == "0" || pgid == "1" {
-		t.Errorf("unexpected PGID %q for current process", pgid)
-	}
-
-	// Test with nonexistent PID
-	pgid = getProcessGroupID("999999999")
-	if pgid != "" {
-		t.Errorf("expected empty PGID for nonexistent process, got %q", pgid)
-	}
-}
-
-func TestGetProcessGroupMembers(t *testing.T) {
-	// Get current process's PGID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-	if pgid == "" {
-		t.Skip("could not get PGID for current process")
-	}
-
-	members := getProcessGroupMembers(pgid)
-
-	// Current process should be in the list
-	found := false
-	for _, m := range members {
-		if m == pid {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("current process %s not found in process group %s members: %v", pid, pgid, members)
-	}
 }
 
 func TestKillSessionWithProcesses_KillsProcessGroup(t *testing.T) {
@@ -1507,71 +1426,6 @@ func TestCleanupOrphanedSessions_NoSessions(t *testing.T) {
 	t.Logf("CleanupOrphanedSessions cleaned %d sessions", cleaned)
 }
 
-func TestCollectReparentedGroupMembers(t *testing.T) {
-	// Test that collectReparentedGroupMembers correctly filters group members.
-	// A returned member must not be in the known set and must have a parent
-	// outside the known descendant set (parents that reparented to init OR to a
-	// user-session subreaper both qualify). The full parent-outside-set rule is
-	// covered deterministically with an injected parentOf by
-	// TestReparentedOrphans_* in tmux_unit_test.go; this test exercises the real
-	// getProcessGroupID/getParentPID integration.
-
-	// Test with current process's PGID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
-	if pgid == "" {
-		t.Skip("could not get PGID for current process")
-	}
-
-	// Build a known set containing the current process
-	knownPIDs := map[string]bool{pid: true}
-
-	// collectReparentedGroupMembers should NOT include our PID (it's in known set)
-	reparented := collectReparentedGroupMembers(pgid, knownPIDs)
-	for _, rpid := range reparented {
-		if rpid == pid {
-			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
-		}
-		// A returned member's parent must be outside the known set (the
-		// "parent outside the known descendant set" rule). The process may
-		// exit between collection and this check (TOCTOU race), so skip
-		// verification if getParentPID returns empty for a since-exited PID.
-		ppid := getParentPID(rpid)
-		if ppid == "" && runtime.GOOS != "windows" {
-			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {
-				continue
-			}
-		}
-		if knownPIDs[ppid] {
-			t.Errorf("collectReparentedGroupMembers returned PID %s whose parent %s is in the known set", rpid, ppid)
-		}
-	}
-}
-
-func TestGetParentPID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("getParentPID returns empty string on Windows (no /proc or ps)")
-	}
-
-	// Test with current process - should have a valid PPID
-	pid := fmt.Sprintf("%d", os.Getpid())
-	ppid := getParentPID(pid)
-	if ppid == "" {
-		t.Error("expected non-empty PPID for current process")
-	}
-
-	// PPID should not be "0" for a normal user process
-	if ppid == "0" {
-		t.Error("unexpected PPID 0 for current process")
-	}
-
-	// Test with nonexistent PID
-	ppid = getParentPID("999999999")
-	if ppid != "" {
-		t.Errorf("expected empty PPID for nonexistent process, got %q", ppid)
-	}
-}
-
 func TestKillSessionWithProcesses_DoesNotKillUnrelatedProcesses(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -1641,14 +1495,15 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 		t.Fatalf("GetPaneID: %v", err)
 	}
 
-	// Kill pane processes with empty excludePIDs (should kill all processes)
+	// Pane-process teardown is intentionally a no-op: the following named
+	// RespawnPane(-k) operation owns teardown without direct PID signals.
 	if err := tm.KillPaneProcessesExcluding(paneID, nil); err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
 
-	// Session may still exist (pane respawns as dead), but processes should be gone
-	// Check that we can still get info about the session (verifies we didn't panic)
-	_, _ = tm.HasSession(sessionName)
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
+	}
 }
 
 func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
@@ -1683,17 +1538,15 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 		t.Skip("could not get pane PID")
 	}
 
-	// Kill pane processes with the pane PID excluded
-	// The function should NOT kill the excluded PID
+	// Exclusions are accepted for API compatibility; pane-process teardown is
+	// a no-op until named RespawnPane(-k) runs.
 	err = tm.KillPaneProcessesExcluding(paneID, []string{panePID})
 	if err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
 
-	// The session/pane should still exist since we excluded the main process
-	has, _ := tm.HasSession(sessionName)
-	if !has {
-		t.Log("Session was destroyed - this may happen if tmux auto-cleaned after descendants died")
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
 	}
 }
 
@@ -1704,55 +1557,38 @@ func TestKillPaneProcessesExcluding_NonexistentPane(t *testing.T) {
 
 	tm := testTmux()
 
-	// Killing nonexistent pane should return an error but not panic
-	err := tm.KillPaneProcessesExcluding("%99999", []string{"12345"})
-	if err == nil {
-		t.Error("expected error for nonexistent pane")
+	// A no-op neither looks up nor signals the pane, so an unknown ID is safe.
+	if err := tm.KillPaneProcessesExcluding("%99999", []string{"12345"}); err != nil {
+		t.Fatalf("KillPaneProcessesExcluding nonexistent pane: %v, want nil no-op", err)
 	}
 }
 
-func TestKillPaneProcessesExcluding_FiltersPIDs(t *testing.T) {
-	// Unit test the PID filtering logic without needing tmux
-	// This tests that the exclusion set is built correctly
-
-	excludePIDs := []string{"123", "456", "789"}
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
+func TestKillPaneProcessesExcluding_FilterArgumentsNoOp(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
 	}
 
-	// Test that excluded PIDs are in the set
-	for _, pid := range excludePIDs {
-		if !exclude[pid] {
-			t.Errorf("exclude[%q] = false, want true", pid)
-		}
+	tm := testTmux()
+	sessionName := "gt-test-killpaneexcl-multiple-" + t.Name()
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
 	}
+	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Test that non-excluded PIDs are not in the set
-	nonExcluded := []string{"111", "222", "333"}
-	for _, pid := range nonExcluded {
-		if exclude[pid] {
-			t.Errorf("exclude[%q] = true, want false", pid)
-		}
+	paneID, err := tm.GetPaneID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneID: %v", err)
 	}
-
-	// Test filtering logic
-	allPIDs := []string{"111", "123", "222", "456", "333", "789"}
-	var filtered []string
-	for _, pid := range allPIDs {
-		if !exclude[pid] {
-			filtered = append(filtered, pid)
-		}
+	panePID, err := tm.GetPanePID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPanePID: %v", err)
 	}
-
-	expectedFiltered := []string{"111", "222", "333"}
-	if len(filtered) != len(expectedFiltered) {
-		t.Fatalf("filtered = %v, want %v", filtered, expectedFiltered)
+	if err := tm.KillPaneProcessesExcluding(paneID, []string{panePID, "not-a-pid"}); err != nil {
+		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
-	for i, pid := range filtered {
-		if pid != expectedFiltered[i] {
-			t.Errorf("filtered[%d] = %q, want %q", i, pid, expectedFiltered[i])
-		}
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
 	}
 }
 
@@ -3233,7 +3069,13 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	const sibling = "handoff-sibling"
 	start := func(name string) {
 		t.Helper()
-		if err := provider.Start(context.Background(), name, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		command := "sleep 600"
+		if name == target {
+			// Keep replacing a child while the target is stopped/restarted. The
+			// shared server and sibling must survive this churn unchanged.
+			command = "while :; do sleep 1 & wait $!; done"
+		}
+		if err := provider.Start(context.Background(), name, runtimepkg.Config{Command: command}); err != nil {
 			t.Fatalf("start %s: %v", name, err)
 		}
 	}
@@ -3259,6 +3101,12 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 		t.Fatalf("sibling session/process did not survive target handoff")
 	}
 	after := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if got := after.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after target handoff: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := after.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after target handoff: before=%q after=%q", before.starts[siblingPID], got)
+	}
 	t.Logf("after handoff stop: server_pid=%s sibling=%s/%s exit-empty=%s\n%s", serverPID, siblingPID, after.pgids[siblingPID], mustExitEmpty(t, tmux), after.text)
 
 	start(target)
@@ -3273,6 +3121,12 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 	targetAfterRestart := mustPanePID(t, tmux, target)
 	final := handoffProcessSnapshot(t, targetAfterRestart, siblingPID, serverPID)
+	if got := final.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after target restart: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := final.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after target restart: before=%q after=%q", before.starts[siblingPID], got)
+	}
 	t.Logf("after target restart: server_pid=%s target=%s/%s sibling=%s/%s exit-empty=%s\n%s", serverPID, targetAfterRestart, final.pgids[targetAfterRestart], siblingPID, final.pgids[siblingPID], mustExitEmpty(t, tmux), final.text)
 
 	if err := provider.Stop(target); err != nil {
@@ -3280,6 +3134,13 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 	if err := provider.Stop(target); err != nil {
 		t.Fatalf("already-gone target stop: %v", err)
+	}
+	afterSecondStop := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if got := afterSecondStop.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after idempotent stop: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := afterSecondStop.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after idempotent stop: before=%q after=%q", before.starts[siblingPID], got)
 	}
 	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
 		t.Fatalf("sibling session/process did not survive already-gone target stop")
@@ -3348,21 +3209,27 @@ func mustExitEmpty(t *testing.T, tmux *Tmux) string {
 }
 
 type handoffProcessSnapshotInfo struct {
-	pgids map[string]string
-	text  string
+	pgids  map[string]string
+	starts map[string]string
+	text   string
 }
 
 func handoffProcessSnapshot(t *testing.T, pids ...string) handoffProcessSnapshotInfo {
 	t.Helper()
+	snapshot := snapshotProcessTable()
 	pgids := make(map[string]string, len(pids))
+	starts := make(map[string]string, len(pids))
 	rows := make([]string, 0, len(pids))
 	for _, pid := range pids {
-		pgid := getProcessGroupID(pid)
-		ppid := getParentPID(pid)
-		pgids[pid] = pgid
-		rows = append(rows, fmt.Sprintf("pid=%s ppid=%s pgid=%s", pid, ppid, pgid))
+		identity := snapshot[pid]
+		if identity.start == "" {
+			t.Fatalf("missing process identity for pid %s", pid)
+		}
+		pgids[pid] = identity.pgid
+		starts[pid] = identity.start
+		rows = append(rows, fmt.Sprintf("pid=%s ppid=%s pgid=%s start=%s", pid, identity.ppid, identity.pgid, identity.start))
 	}
-	return handoffProcessSnapshotInfo{pgids: pgids, text: strings.Join(rows, "\n")}
+	return handoffProcessSnapshotInfo{pgids: pgids, starts: starts, text: strings.Join(rows, "\n")}
 }
 
 func processAlive(pid string) bool {
