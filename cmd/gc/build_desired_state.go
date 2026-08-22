@@ -454,7 +454,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		if s, ok := rigStores[rig.Name]; ok {
-			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
+			activeStores = append(activeStores, activeStore{store: s, ref: "rig:" + rig.Name})
 		}
 	}
 
