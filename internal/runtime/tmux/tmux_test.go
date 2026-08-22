@@ -1496,7 +1496,7 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 	}
 
 	// Pane-process teardown is intentionally a no-op: the following named
-	// RespawnPane(-k) operation owns teardown without direct PID signals.
+	// RespawnPane operation owns replacement without direct PID signals.
 	if err := tm.KillPaneProcessesExcluding(paneID, nil); err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
@@ -1539,7 +1539,7 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 	}
 
 	// Exclusions are accepted for API compatibility; pane-process teardown is
-	// a no-op until named RespawnPane(-k) runs.
+	// a no-op until named RespawnPane runs.
 	err = tm.KillPaneProcessesExcluding(paneID, []string{panePID})
 	if err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)

@@ -850,8 +850,8 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 	return o.tm.NewSession(name, workDir)
 }
 
-// respawnAgent relaunches the agent command in the session's existing pane
-// (respawn-pane -k), reusing the warm box and its session environment. The
+// respawnAgent relaunches the agent command by atomically replacing its
+// one-pane window, reusing the warm box and its session environment. The
 // launch-half of the un-weld relaunch path.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string) error {
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
