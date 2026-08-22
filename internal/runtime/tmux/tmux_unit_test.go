@@ -1,7 +1,9 @@
 package tmux
 
 import (
+	"context"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -98,8 +100,9 @@ func TestTerminateVerifiedProcessSetExitsAfterTERM(t *testing.T) {
 	var signals []string
 	now := time.Unix(0, 0)
 	terminateVerifiedProcessSet(
+		context.Background(),
 		[]string{"101"}, map[string]string{"101": "start-a"}, time.Second,
-		func(string) string { return current },
+		func(context.Context, string) string { return current },
 		func(pid, signal string) { signals = append(signals, signal+":"+pid); current = "" },
 		func(time.Duration) { t.Fatal("must exit before sleeping after TERM") },
 		func() time.Time { return now },
@@ -114,8 +117,9 @@ func TestTerminateVerifiedProcessSetSkipsReusedPIDBeforeKILL(t *testing.T) {
 	var signals []string
 	now := time.Unix(0, 0)
 	terminateVerifiedProcessSet(
+		context.Background(),
 		[]string{"101"}, map[string]string{"101": "start-a"}, time.Second,
-		func(string) string { return current },
+		func(context.Context, string) string { return current },
 		func(pid, signal string) {
 			signals = append(signals, signal+":"+pid)
 			if signal == "TERM" {
@@ -130,12 +134,47 @@ func TestTerminateVerifiedProcessSetSkipsReusedPIDBeforeKILL(t *testing.T) {
 	}
 }
 
+func TestTerminateVerifiedProcessSetForRootStopsWhenTotalProbeBudgetExpires(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	identities := map[string]string{}
+	pids := make([]string, 200)
+	for i := range pids {
+		pid := strconv.Itoa(101 + i)
+		pids[i] = pid
+		identities[pid] = "start-" + pid
+	}
+	var signals []string
+	probes := 0
+	terminateVerifiedProcessSetForRoot(
+		ctx, pids, "100", map[string]string{"100": "root", "101": identities["101"]}, time.Second,
+		func(_ context.Context, pid string) string {
+			probes++
+			if pid == "100" {
+				return "root"
+			}
+			cancel() // Simulate expiry of the shared phase budget.
+			return identities[pid]
+		},
+		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
+		func(time.Duration) { t.Fatal("budget exhaustion must not enter the grace loop") },
+		time.Now,
+	)
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want no signal after an expired target probe", signals)
+	}
+	if probes != 2 { // one root witness + one target; hundreds must not accumulate.
+		t.Fatalf("probes = %d, want root plus one budget-expiring target", probes)
+	}
+}
+
 func TestTerminateVerifiedProcessSetRefusesUnreadableAndAbsentSnapshotPIDs(t *testing.T) {
 	var signals []string
 	now := time.Unix(0, 0)
 	terminateVerifiedProcessSet(
+		context.Background(),
 		[]string{"101", "102"}, map[string]string{"101": "start-a"}, time.Second,
-		func(string) string { return "" },
+		func(context.Context, string) string { return "" },
 		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
 		func(time.Duration) { t.Fatal("unowned PIDs must not enter the grace loop") },
 		func() time.Time { return now },
@@ -149,8 +188,9 @@ func TestTerminateVerifiedProcessSetForRootRefusesRecycledRoot(t *testing.T) {
 	var signals []string
 	now := time.Unix(0, 0)
 	terminateVerifiedProcessSetForRoot(
+		context.Background(),
 		[]string{"101"}, "100", map[string]string{"100": "root-start", "101": "child-start"}, time.Second,
-		func(pid string) string {
+		func(_ context.Context, pid string) string {
 			if pid == "100" {
 				return "reused-root"
 			}

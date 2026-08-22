@@ -612,18 +612,26 @@ func (t *Tmux) KillSession(name string) error {
 // and caused Claude processes to become orphans when they couldn't shut down in time.
 const processKillGracePeriod = 2 * time.Second
 
+// processTeardownPhaseTimeout bounds one TERM/KILL phase. Discovery is
+// separately capped at one second; two teardown phases plus discovery remain
+// below the ten-second stop-operation budget.
+const processTeardownPhaseTimeout = 4 * time.Second
+
 // processExitCheckInterval bounds how long cleanup waits after observing that a
 // TERM-targeted process has exited. The full grace period is reserved for
 // processes that remain alive and may still be flushing state.
 const processExitCheckInterval = 25 * time.Millisecond
 
 func terminateVerifiedProcesses(pids []string, root string, identities map[string]string) {
+	ctx, cancel := context.WithTimeout(context.Background(), processTeardownPhaseTimeout)
+	defer cancel()
 	terminateVerifiedProcessSetForRoot(
+		ctx,
 		pids,
 		root,
 		identities,
 		processKillGracePeriod,
-		processStartTime,
+		processStartTimeWithPhaseBudget,
 		signalVerifiedProcess,
 		time.Sleep,
 		time.Now,
@@ -634,19 +642,20 @@ func terminateVerifiedProcesses(pids []string, root string, identities map[strin
 // the pane leader still has the identity captured with its descendants. A
 // recycled root means the snapshot no longer proves ownership of any child.
 func terminateVerifiedProcessSetForRoot(
+	ctx context.Context,
 	pids []string,
 	root string,
 	identities map[string]string,
 	gracePeriod time.Duration,
-	currentIdentity func(string) string,
+	currentIdentity func(context.Context, string) string,
 	signalProcess func(string, string),
 	sleep func(time.Duration),
 	now func() time.Time,
 ) {
-	if !killIdentityMatches(currentIdentity(root), identities[root]) {
+	if !killIdentityMatches(currentIdentity(ctx, root), identities[root]) {
 		return
 	}
-	terminateVerifiedProcessSet(pids, identities, gracePeriod, currentIdentity, signalProcess, sleep, now)
+	terminateVerifiedProcessSet(ctx, pids, identities, gracePeriod, currentIdentity, signalProcess, sleep, now)
 }
 
 // terminateVerifiedProcessSet preserves terminateProcessSet's early-exit grace
@@ -654,16 +663,21 @@ func terminateVerifiedProcessSetForRoot(
 // An exited, recycled, unreadable, or never-snapshotted PID is no longer owned
 // and is neither signaled nor kept alive for escalation.
 func terminateVerifiedProcessSet(
+	ctx context.Context,
 	pids []string,
 	identities map[string]string,
 	gracePeriod time.Duration,
-	currentIdentity func(string) string,
+	currentIdentity func(context.Context, string) string,
 	signalProcess func(string, string),
 	sleep func(time.Duration),
 	now func() time.Time,
 ) {
 	owned := func(pid string) bool {
-		return killIdentityMatches(currentIdentity(pid), identities[pid])
+		if ctx.Err() != nil {
+			return false
+		}
+		current := currentIdentity(ctx, pid)
+		return ctx.Err() == nil && killIdentityMatches(current, identities[pid])
 	}
 	terminateProcessSet(
 		pids,
@@ -759,7 +773,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	if pid != "" {
 		// Atomic snapshot discovery + identity-verified kills. Replaces the
 		// live tree walk that raced PID reuse and caused the session massacre
-		// (see discoverKillTargets / killVerified).
+		// (see discoverKillTargets and terminateVerifiedProcesses).
 		descendants, reparented, identity := discoverKillTargets(pid)
 		killList := append([]string{}, descendants...)
 		killList = append(killList, reparented...)
@@ -802,7 +816,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 
 	if pid != "" {
 		// Atomic snapshot discovery + identity-verified kills (see
-		// discoverKillTargets / killVerified) — the same session-massacre fix,
+		// discoverKillTargets and terminateVerifiedProcesses) — the same session-massacre fix,
 		// with the self-kill exclusion set honored via computeExcludingKillSet.
 		descendants, reparented, identity := discoverKillTargets(pid)
 
@@ -882,7 +896,7 @@ const maxDescendantDepth = 40
 // Two changes close it: (1) one atomic snapshot removes the multi-second
 // discovery window and makes the descendant/PGID view internally consistent;
 // (2) every target carries the start time it had at snapshot instant, so
-// killVerified can re-check identity immediately before signaling and skip a PID
+// teardown can re-check identity immediately before signaling and skip a PID
 // that has since been recycled. Returns empty on snapshot failure, so callers
 // signal nothing and rely on tmux kill-session (safe degradation).
 func discoverKillTargets(root string) (descendants []string, reparented []string, identity map[string]string) {

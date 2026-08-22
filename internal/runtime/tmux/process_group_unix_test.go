@@ -41,3 +41,18 @@ func TestProcessStartTimeProbeIsBoundedAndFailsClosed(t *testing.T) {
 		t.Fatalf("start time = %q, called=%v; want fail-closed empty", got, called)
 	}
 }
+
+func TestProcessStartTimePhaseProbeDoesNotLaunchAfterBudgetExpiry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	if got := processStartTimeWithPhaseBudgetWithProbe(ctx, "101", func(context.Context, string, ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}); got != "" {
+		t.Fatalf("start time = %q, want empty after phase expiry", got)
+	}
+	if called {
+		t.Fatal("expired phase launched ps probe")
+	}
+}

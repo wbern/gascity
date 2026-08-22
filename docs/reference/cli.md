@@ -1782,8 +1782,8 @@ Flags:
   --base &lt;branch&gt;           base branch for the PR
   --head &lt;branch&gt;           head branch for the PR
   --title &lt;text&gt;            PR title
-  --body &lt;text&gt;             inline PR body
-  --body-file &lt;path&gt;        read PR body from file
+  --body &lt;text&gt;             inline markdown body
+  --body-file &lt;path&gt;        read markdown body from file
 
 ```
 gc github create-pr
@@ -1791,7 +1791,7 @@ gc github create-pr
 
 ## gc github import-app
 
-Import an existing GitHub App into the shared intake state.
+Import an existing GitHub App into the pack state.
 
 Examples:
   gc github import-app \

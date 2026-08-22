@@ -35,18 +35,23 @@ type procIdentity struct {
 // TOCTOU: during a stop/drain wave the agent trees collapse, the kernel recycles
 // their PIDs onto unrelated processes inside the walk→kill window, and the kill
 // loop then landed on whatever now owned each reused PID. A single atomic
-// snapshot removes the multi-second discovery window; killVerified closes the
-// residual gap. Returns nil on ps failure, which callers treat as "signal
-// nothing" (safe: tmux kill-session still tears the pane down).
+// snapshot removes the multi-second discovery window; the teardown phase
+// re-verifies identity before each signal. Returns nil on ps failure, which
+// callers treat as "signal nothing" (safe: tmux kill-session still tears the
+// pane down).
 func snapshotProcessTable() map[string]procIdentity {
 	return snapshotProcessTableWithProbe(runProcessProbe)
 }
 
 func snapshotProcessTableWithProbe(run func(context.Context, string, ...string) ([]byte, error)) map[string]procIdentity {
-	// pid/ppid/pgid are single numeric tokens; lstart is the trailing
-	// (space-containing) field, so parse the first three and join the rest.
 	ctx, cancel := context.WithTimeout(context.Background(), processProbeTimeout)
 	defer cancel()
+	return snapshotProcessTableWithContext(ctx, run)
+}
+
+func snapshotProcessTableWithContext(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error)) map[string]procIdentity {
+	// pid/ppid/pgid are single numeric tokens; lstart is the trailing
+	// (space-containing) field, so parse the first three and join the rest.
 	out, err := run(ctx, "ps", "-axo", "pid=,ppid=,pgid=,lstart=")
 	if err != nil {
 		return nil
@@ -73,22 +78,34 @@ func parseProcessTable(output string) map[string]procIdentity {
 	return table
 }
 
-// processStartTime returns pid's current start time, normalized the same way as
-// snapshotProcessTable (collapsed whitespace) so the two are directly
-// comparable. Returns "" if the process is gone. Used to re-verify identity
-// immediately before signaling.
-func processStartTime(pid string) string {
-	return processStartTimeWithProbe(pid, runProcessProbe)
-}
-
 func processStartTimeWithProbe(pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
 	ctx, cancel := context.WithTimeout(context.Background(), processProbeTimeout)
 	defer cancel()
+	return processStartTimeWithContext(ctx, pid, run)
+}
+
+func processStartTimeWithContext(ctx context.Context, pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
 	out, err := run(ctx, "ps", "-o", "lstart=", "-p", pid)
 	if err != nil {
 		return ""
 	}
 	return strings.Join(strings.Fields(string(out)), " ")
+}
+
+// processStartTimeWithPhaseBudget gives each ps call at most one second while
+// preserving the enclosing phase deadline. Once the phase expires, the probe
+// is not launched and ownership fails closed.
+func processStartTimeWithPhaseBudget(ctx context.Context, pid string) string {
+	return processStartTimeWithPhaseBudgetWithProbe(ctx, pid, runProcessProbe)
+}
+
+func processStartTimeWithPhaseBudgetWithProbe(ctx context.Context, pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, processProbeTimeout)
+	defer cancel()
+	return processStartTimeWithContext(probeCtx, pid, run)
 }
 
 // signalVerifiedProcess sends a direct Unix signal after the caller has

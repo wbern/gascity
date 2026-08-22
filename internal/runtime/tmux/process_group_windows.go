@@ -2,6 +2,8 @@
 
 package tmux
 
+import "context"
+
 // procIdentity mirrors the unix type so cross-platform tmux.go compiles.
 type procIdentity struct {
 	ppid  string
@@ -23,8 +25,9 @@ func parseProcessTable(_ string) map[string]procIdentity {
 	return nil
 }
 
-// processStartTime is unused on Windows (see snapshotProcessTable).
-func processStartTime(_ string) string {
+// processStartTimeWithPhaseBudget is unreachable on Windows because its
+// snapshot is empty; retain the no-op seam for shared teardown code.
+func processStartTimeWithPhaseBudget(_ context.Context, _ string) string {
 	return ""
 }
 
