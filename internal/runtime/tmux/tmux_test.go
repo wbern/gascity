@@ -1563,48 +1563,32 @@ func TestKillPaneProcessesExcluding_NonexistentPane(t *testing.T) {
 	}
 }
 
-func TestKillPaneProcessesExcluding_FiltersPIDs(t *testing.T) {
-	// Unit test the PID filtering logic without needing tmux
-	// This tests that the exclusion set is built correctly
-
-	excludePIDs := []string{"123", "456", "789"}
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
+func TestKillPaneProcessesExcluding_FilterArgumentsNoOp(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
 	}
 
-	// Test that excluded PIDs are in the set
-	for _, pid := range excludePIDs {
-		if !exclude[pid] {
-			t.Errorf("exclude[%q] = false, want true", pid)
-		}
+	tm := testTmux()
+	sessionName := "gt-test-killpaneexcl-multiple-" + t.Name()
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
 	}
+	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Test that non-excluded PIDs are not in the set
-	nonExcluded := []string{"111", "222", "333"}
-	for _, pid := range nonExcluded {
-		if exclude[pid] {
-			t.Errorf("exclude[%q] = true, want false", pid)
-		}
+	paneID, err := tm.GetPaneID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneID: %v", err)
 	}
-
-	// Test filtering logic
-	allPIDs := []string{"111", "123", "222", "456", "333", "789"}
-	var filtered []string
-	for _, pid := range allPIDs {
-		if !exclude[pid] {
-			filtered = append(filtered, pid)
-		}
+	panePID, err := tm.GetPanePID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPanePID: %v", err)
 	}
-
-	expectedFiltered := []string{"111", "222", "333"}
-	if len(filtered) != len(expectedFiltered) {
-		t.Fatalf("filtered = %v, want %v", filtered, expectedFiltered)
+	if err := tm.KillPaneProcessesExcluding(paneID, []string{panePID, "not-a-pid"}); err != nil {
+		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
-	for i, pid := range filtered {
-		if pid != expectedFiltered[i] {
-			t.Errorf("filtered[%d] = %q, want %q", i, pid, expectedFiltered[i])
-		}
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
 	}
 }
 
