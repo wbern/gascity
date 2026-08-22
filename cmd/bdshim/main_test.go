@@ -769,6 +769,42 @@ func TestRunPinnedRigScopeSummaryJSONEmitsBoundedEnvelope(t *testing.T) {
 	}
 }
 
+func TestRunPinnedRigScopeSummaryJSONAcceptsLeadingGlobalJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		verb string
+	}{
+		{name: "ready", args: []string{"--json", "ready", "--summary-json"}, verb: "ready"},
+		{name: "list", args: []string{"--json", "list", "--summary-json"}, verb: "list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"id":"gcw-1","title":"pinned bead","status":"open"}]`))
+			t.Setenv("GC_BDSHIM_LOG", "")
+			t.Setenv("GC_BD_HQ_GUARD", "")
+			t.Setenv("GC_STORE_SCOPE", "rig")
+			t.Setenv("GC_STORE_ROOT", "/some/rig")
+
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			var got struct {
+				Kind  string `json:"kind"`
+				Verb  string `json:"verb"`
+				Total int    `json:"total"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("summary output is not a JSON envelope: %v; output=%q", err, stdout.String())
+			}
+			if got.Kind != "gc.bead_summary" || got.Verb != tc.verb || got.Total != 1 {
+				t.Fatalf("summary envelope = %+v, want gc.bead_summary/%s/1", got, tc.verb)
+			}
+		})
+	}
+}
+
 func TestRunSummaryJSONRequiresJSON(t *testing.T) {
 	for _, verb := range []string{"ready", "list"} {
 		t.Run(verb, func(t *testing.T) {
