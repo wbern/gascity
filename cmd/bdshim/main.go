@@ -95,7 +95,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 	realBdArgs := stripShimPrivateFlags(bdArgs)
-	if summaryJSONRequested(verbArgs) && !hasJSONOutput(verbArgs) {
+	if (verb == "ready" || verb == "list") && summaryJSONRequested(verbArgs) && !hasJSONOutput(verbArgs) {
 		logDisposition(verb, rawBDArgs, "refuse", 1, start)
 		fmt.Fprintf(stderr, "bdshim: %s --summary-json requires --json\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
