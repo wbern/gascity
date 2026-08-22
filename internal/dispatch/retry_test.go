@@ -1737,7 +1737,7 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1798,7 +1798,6 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
@@ -1833,7 +1832,7 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 			"gc.formula_contract": "graph.v2",
 		},
 	})
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
+	mustCreateWorkflowBead(t, store, beads.Bead{
 		Title: "body",
 		Type:  "task",
 		Metadata: map[string]string{
@@ -1903,7 +1902,6 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 		},
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, iterationControl.ID, "blocks")
 	mustDepAdd(t, store, iterationControl.ID, iterationChild.ID, "blocks")
 
