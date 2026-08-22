@@ -328,6 +328,42 @@ esac
 		t.Fatalf("read missing-count mail log: %v", err)
 	}
 
+	// A capped structured entry without timestamps is also unknowable. If its
+	// owning rig is unavailable, the sweep cannot refresh it and pruning would
+	// otherwise treat the missing last_seen_at as epoch zero, erase the cap, and
+	// restart reminders when the rig returns.
+	incompleteCapped := `{"gate-unavailable":{"count":5}}`
+	if err := os.WriteFile(statePath, []byte(incompleteCapped), 0o600); err != nil {
+		t.Fatalf("write incomplete capped state: %v", err)
+	}
+	cmd = exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"MAIL_LOG="+mailLog,
+		"GC_CITY="+tmp,
+		"GC_PACK_STATE_DIR="+stateDir,
+		"GC_STALE_GATE_THRESHOLD=0s",
+		"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
+		"GC_STALE_GATE_MAX_RENUDGES=5",
+		"FAKE_RIG_UNAVAILABLE=1",
+	)
+	out, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "state is corrupt") {
+		t.Fatalf("incomplete capped state did not fail closed: err=%v out=%s", err, out)
+	}
+	unchanged, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read incomplete capped state after rejection: %v", err)
+	}
+	if string(unchanged) != incompleteCapped {
+		t.Fatalf("incomplete capped rejection rewrote ledger: got %s want %s", unchanged, incompleteCapped)
+	}
+	if mail, err := os.ReadFile(mailLog); err == nil && len(strings.TrimSpace(string(mail))) > 0 {
+		t.Fatalf("incomplete capped rejection sent mail: %s", mail)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read incomplete capped mail log: %v", err)
+	}
+
 	// Invalid timestamps are dangerous even when the JSON shape is otherwise
 	// valid: pruning must not reinterpret them as epoch zero and erase a cap.
 	invalidTimestamp := `{"gate-1":{"last_sent_at":"not-a-date","last_seen_at":"not-a-date","count":5}}`

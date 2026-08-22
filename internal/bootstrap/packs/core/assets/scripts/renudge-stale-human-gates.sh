@@ -183,12 +183,16 @@ elif ! printf '%s' "$STATE" | jq -e '
         elif type == "object" then
             (.last_sent_at // "") as $last_sent |
             (.last_seen_at // "") as $last_seen |
-            (($last_sent == "") or ($last_sent | valid_iso)) and
-            (($last_seen == "") or ($last_seen | valid_iso)) and
-            has("count") and
+            has("count") and has("last_seen_at") and
             (.count as $count |
                 ($count | type) == "number" and
-                $count >= 0 and ($count | floor) == $count)
+                $count >= 0 and ($count | floor) == $count and
+                ($last_seen | valid_iso) and
+                (if $count > 0 then
+                    ($last_sent | valid_iso)
+                 else
+                    (($last_sent == "") or ($last_sent | valid_iso))
+                 end))
         else false
         end
     )
