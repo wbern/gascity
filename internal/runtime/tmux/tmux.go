@@ -634,18 +634,18 @@ func validProcessPID(pid string) bool {
 }
 
 // KillPaneProcesses is an intentional no-op before a caller invokes
-// RespawnPane(-k), which owns named pane teardown.
+// RespawnPane, which owns named pane replacement.
 func (t *Tmux) KillPaneProcesses(pane string) error {
 	// A process-table identity check is not a capability to signal the PID:
-	// replacement can occur in the interval before delivery. RespawnPane's -k
-	// is the supported named tmux teardown. Detached-orphan cleanup is deferred
-	// until it has an ownership-safe mechanism.
+	// replacement can occur in the interval before delivery. RespawnPane uses a
+	// named tmux window replacement. Detached-orphan cleanup is deferred until
+	// it has an ownership-safe mechanism.
 	_ = pane
 	return nil
 }
 
 // KillPaneProcessesExcluding is the exclusion-shaped no-op counterpart of
-// KillPaneProcesses. The subsequent named RespawnPane(-k) owns teardown.
+// KillPaneProcesses. The subsequent named RespawnPane owns replacement.
 func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) error {
 	_ = excludePIDs
 	return t.KillPaneProcesses(pane)
@@ -3256,25 +3256,53 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 	return err
 }
 
-// RespawnPane kills all processes in a pane and starts a new command.
-// This is used for "hot reload" of agent sessions - instantly restart in place.
+// RespawnPane replaces a one-pane window with a newly started command.
 // The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
 func (t *Tmux) RespawnPane(pane, command string) error {
-	_, err := t.run("respawn-pane", "-k", "-t", pane, t.wrapPaneCommand(command))
-	return err
+	return t.replacePaneWindow(pane, "", command)
 }
 
-// RespawnPaneWithWorkDir kills all processes in a pane and starts a new command
+// RespawnPaneWithWorkDir replaces a one-pane window with a newly started command
 // in the specified working directory. Use this when the pane's current working
 // directory may have been deleted.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
-	args := []string{"respawn-pane", "-k", "-t", pane}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
+	return t.replacePaneWindow(pane, workDir, command)
+}
+
+// replacePaneWindow uses tmux new-window -d -k to atomically replace a
+// one-pane window at its existing index. Unlike tmux respawn-pane -k, this
+// does not replace a pane buffer and is safe while a control-mode client lags
+// behind on affected tmux releases. A multi-pane window is rejected rather
+// than silently losing its sibling panes.
+func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
+	metadata, err := t.run("display-message", "-p", "-t", pane,
+		"#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}")
+	if err != nil {
+		return fmt.Errorf("finding window metadata for pane %q: %w", pane, err)
 	}
-	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	return err
+	fields := strings.Split(strings.TrimSpace(metadata), "\t")
+	if len(fields) != 4 || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" {
+		return fmt.Errorf("finding window metadata for pane %q: malformed result %q", pane, metadata)
+	}
+	if workDir == "" {
+		workDir = fields[3]
+	}
+	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(command)}
+	_, err = t.run("if-shell", "-F", "-t", fields[0], "#{==:#{window_panes},1}",
+		tmuxCommandLine(replacement), "run-shell 'exit 77'")
+	if err != nil {
+		return fmt.Errorf("replacing window for pane %q: %w", pane, err)
+	}
+	return nil
+}
+
+// wrapReplacementCommand restores remain-on-exit from inside the new pane
+// before execing its agent command. A new tmux window does not inherit that
+// per-window option, and setting it from the new pane keeps an instant-exit
+// replacement from disappearing before callers can observe it.
+func (t *Tmux) wrapReplacementCommand(command string) string {
+	wrapped := shellquote.Quote(t.wrapPaneCommand(command))
+	return "sh -c " + shellquote.Quote(`tmux set-option -w -t "$TMUX_PANE" remain-on-exit on && exec sh -c `+wrapped)
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.
@@ -3286,9 +3314,9 @@ func (t *Tmux) ClearHistory(pane string) error {
 }
 
 // SetRemainOnExit controls whether a pane stays around after its process exits.
-// When on, the pane remains with "[Exited]" status, allowing respawn-pane to restart it.
+// When on, the pane remains with "[Exited]" status for diagnosis and replacement.
 // When off (default), the pane is destroyed when its process exits.
-// This is essential for handoff: set on before killing processes, so respawn-pane works.
+// This is essential for handoff: it preserves a diagnosable pane until replacement.
 func (t *Tmux) SetRemainOnExit(pane string, on bool) error {
 	value := "on"
 	if !on {
