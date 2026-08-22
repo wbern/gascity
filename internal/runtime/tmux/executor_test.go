@@ -70,6 +70,21 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 	}
 }
 
+func TestNewSessionWithCommandAndEnvKeepsSecretOutOfTmuxArgv(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	const canary = "secret-canary-not-a-credential"
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-secret-env", "/work", "claude", map[string]string{"OPENAI_API_KEY": canary}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	for _, call := range exec.calls {
+		if strings.Contains(strings.Join(call, "\x00"), canary) {
+			t.Fatal("secret environment value reached tmux argv")
+		}
+	}
+}
+
 type promptFooterExecutor struct {
 	calls [][]string
 }
