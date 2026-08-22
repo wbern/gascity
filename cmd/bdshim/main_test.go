@@ -130,6 +130,10 @@ func fakeBd(t *testing.T, dir, outFile string, code int) string {
 // It lets compatibility tests prove that the shim preserves the real CLI stream
 // rather than re-encoding a lossy controller projection.
 func fakeBdOutput(t *testing.T, dir, output string) string {
+	return fakeBdOutputExit(t, dir, output, 0)
+}
+
+func fakeBdOutputExit(t *testing.T, dir, output string, code int) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake bd shell script is POSIX-only")
@@ -139,7 +143,7 @@ func fakeBdOutput(t *testing.T, dir, output string) string {
 		t.Fatal(err)
 	}
 	p := filepath.Join(dir, "bd.real")
-	script := "#!/bin/sh\ncat \"" + fixture + "\"\n"
+	script := "#!/bin/sh\ncat \"" + fixture + "\"\nexit " + itoa(code) + "\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +199,7 @@ func TestRunPassthroughStripsShimPrivateFlags(t *testing.T) {
 	t.Setenv("GC_BDSHIM_LOG", "")
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"list", "--summary-json", "--limit", "1"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := run([]string{"log", "--summary-json", "--limit", "1"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("run() = %d, want passthrough success; stderr=%q", code, stderr.String())
 	}
 	got, err := os.ReadFile(out)
@@ -205,7 +209,7 @@ func TestRunPassthroughStripsShimPrivateFlags(t *testing.T) {
 	if strings.Contains(string(got), "--summary-json") {
 		t.Fatalf("real bd argv leaked shim-private flag: %q", got)
 	}
-	if !strings.Contains(string(got), "list --limit 1") {
+	if !strings.Contains(string(got), "log --limit 1") {
 		t.Fatalf("real bd argv = %q, want remaining args", got)
 	}
 }
@@ -729,6 +733,115 @@ func TestRunPinnedRigScopePassesThroughInsteadOfRouting(t *testing.T) {
 				t.Fatalf("a pinned rig scope must pass through to real bd; calls=%q", string(got))
 			}
 		})
+	}
+}
+
+func TestRunPinnedRigScopeSummaryJSONEmitsBoundedEnvelope(t *testing.T) {
+	for _, verb := range []string{"ready", "list"} {
+		t.Run(verb, func(t *testing.T) {
+			dir := t.TempDir()
+			secret := strings.Repeat("pinned evidence ", 8_000)
+			t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"id":"gcw-1","title":"pinned bead","status":"open","notes":"`+secret+`"}]`))
+			t.Setenv("GC_BDSHIM_LOG", "")
+			t.Setenv("GC_BD_HQ_GUARD", "")
+			t.Setenv("GC_STORE_SCOPE", "rig")
+			t.Setenv("GC_STORE_ROOT", "/some/rig")
+
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{verb, "--json", "--summary-json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() > 16<<10 || strings.Contains(stdout.String(), secret) {
+				t.Fatalf("summary output is not bounded: %d bytes", stdout.Len())
+			}
+			var got struct {
+				Kind  string `json:"kind"`
+				Verb  string `json:"verb"`
+				Total int    `json:"total"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("summary output is not a JSON envelope: %v; output=%q", err, stdout.String())
+			}
+			if got.Kind != "gc.bead_summary" || got.Verb != verb || got.Total != 1 {
+				t.Fatalf("summary envelope = %+v, want gc.bead_summary/%s/1", got, verb)
+			}
+		})
+	}
+}
+
+func TestRunPinnedRigScopeSummaryJSONAcceptsLeadingGlobalJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		verb string
+	}{
+		{name: "ready", args: []string{"--json", "ready", "--summary-json"}, verb: "ready"},
+		{name: "list", args: []string{"--json", "list", "--summary-json"}, verb: "list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("GC_BD_REAL", fakeBdOutput(t, dir, `[{"id":"gcw-1","title":"pinned bead","status":"open"}]`))
+			t.Setenv("GC_BDSHIM_LOG", "")
+			t.Setenv("GC_BD_HQ_GUARD", "")
+			t.Setenv("GC_STORE_SCOPE", "rig")
+			t.Setenv("GC_STORE_ROOT", "/some/rig")
+
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			var got struct {
+				Kind  string `json:"kind"`
+				Verb  string `json:"verb"`
+				Total int    `json:"total"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("summary output is not a JSON envelope: %v; output=%q", err, stdout.String())
+			}
+			if got.Kind != "gc.bead_summary" || got.Verb != tc.verb || got.Total != 1 {
+				t.Fatalf("summary envelope = %+v, want gc.bead_summary/%s/1", got, tc.verb)
+			}
+		})
+	}
+}
+
+func TestRunSummaryJSONRequiresJSON(t *testing.T) {
+	for _, verb := range []string{"ready", "list"} {
+		t.Run(verb, func(t *testing.T) {
+			dir := t.TempDir()
+			out := filepath.Join(dir, "calls.txt")
+			t.Setenv("GC_BD_REAL", fakeBd(t, dir, out, 0))
+			t.Setenv("GC_BDSHIM_LOG", "")
+			t.Setenv("GC_BD_HQ_GUARD", "")
+
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{verb, "--summary-json"}, strings.NewReader(""), &stdout, &stderr); code == 0 {
+				t.Fatalf("run(%s --summary-json) = 0, want refusal", verb)
+			}
+			if !strings.Contains(stderr.String(), "requires --json") {
+				t.Fatalf("stderr = %q, want missing --json explanation", stderr.String())
+			}
+			if _, err := os.Stat(out); !os.IsNotExist(err) {
+				t.Fatalf("real bd was invoked despite invalid summary request: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunPinnedRigScopeSummaryJSONPropagatesChildFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_BD_REAL", fakeBdOutputExit(t, dir, "child failure", 7))
+	t.Setenv("GC_BDSHIM_LOG", "")
+	t.Setenv("GC_BD_HQ_GUARD", "")
+	t.Setenv("GC_STORE_SCOPE", "rig")
+	t.Setenv("GC_STORE_ROOT", "/some/rig")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"ready", "--json", "--summary-json"}, strings.NewReader(""), &stdout, &stderr); code != 7 {
+		t.Fatalf("run() = %d, want child exit 7; stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != "child failure" || strings.Contains(stdout.String(), "gc.bead_summary") {
+		t.Fatalf("stdout = %q, want raw child failure without a summary", stdout.String())
 	}
 }
 

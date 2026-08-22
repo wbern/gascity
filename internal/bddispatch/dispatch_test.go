@@ -73,6 +73,19 @@ func TestBeadSummaryEnvelopeKeepsGiantReadyBeadActionableWithinBudget(t *testing
 	}
 }
 
+func TestWriteBeadSummaryOutputRejectsUnexpectedJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := WriteBeadSummaryOutput("ready", []byte(`{"items":[]}`), &stdout, &stderr); code == 0 {
+		t.Fatal("WriteBeadSummaryOutput() = 0, want invalid raw bd JSON failure")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no valid-looking summary", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "decoding ready JSON") {
+		t.Fatalf("stderr = %q, want decode error", stderr.String())
+	}
+}
+
 func TestBeadSummaryEnvelopeMarksOversizedIndexFieldsInsteadOfSilentlyTruncating(t *testing.T) {
 	envelope := NewBeadSummaryEnvelope("list", []beads.Bead{{
 		ID: "gcw-giant-title", Title: strings.Repeat("x", 1024), Status: "open",

@@ -95,8 +95,28 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	verb, verbArgs := bdshim.SplitGlobalFlags(bdArgs)
 	realBdArgs := stripShimPrivateFlags(bdArgs)
+	if (verb == "ready" || verb == "list") && summaryJSONRequested(verbArgs) && !hasJSONOutput(bdArgs) {
+		logDisposition(verb, rawBDArgs, "refuse", 1, start)
+		fmt.Fprintf(stderr, "bdshim: %s --summary-json requires --json\n", verb) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	passthrough := func() int {
+		if summaryJSONRequested(verbArgs) && (verb == "ready" || verb == "list") {
+			var staged bytes.Buffer
+			code := execRealBd(realBdArgs, nil, stdin, &staged, stderr)
+			if code != 0 {
+				_, _ = stdout.Write(staged.Bytes())
+				logDisposition(verb, rawBDArgs, "passthrough", code, start)
+				return code
+			}
+			if summaryCode := bddispatch.WriteBeadSummaryOutput(verb, staged.Bytes(), stdout, stderr); summaryCode != 0 {
+				logDisposition(verb, rawBDArgs, "passthrough", summaryCode, start)
+				return summaryCode
+			}
+			logDisposition(verb, rawBDArgs, "passthrough", 0, start)
+			return 0
+		}
 		if !allowUnbounded && bddispatch.ManagedOutputFirewallActive(verb) && managedPassthroughReadVerb(verb, verbArgs) {
 			var staged bytes.Buffer
 			code := execRealBd(realBdArgs, nil, stdin, &staged, stderr)
@@ -267,6 +287,15 @@ func managedPassthroughReadVerb(verb string, args []string) bool {
 func hasJSONOutput(args []string) bool {
 	for _, arg := range args {
 		if arg == "--json" || strings.HasPrefix(arg, "--format=json") {
+			return true
+		}
+	}
+	return false
+}
+
+func summaryJSONRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--summary-json" {
 			return true
 		}
 	}

@@ -1,7 +1,10 @@
 package bddispatch
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -114,6 +117,17 @@ func NewBeadSummaryEnvelope(verb string, input []beads.Bead, budget int) BeadSum
 		envelope = candidate
 	}
 	return envelope
+}
+
+// WriteBeadSummaryOutput decodes a successful raw bd discovery response and
+// emits the bounded discovery envelope used by controller-routed reads.
+func WriteBeadSummaryOutput(verb string, payload []byte, stdout, stderr io.Writer) int {
+	var beadsOut []beads.Bead
+	if err := json.Unmarshal(payload, &beadsOut); err != nil {
+		fmt.Fprintf(stderr, "bdshim: decoding %s JSON for summary: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return WriteManagedJSON(context.Background(), "managed_bd_summary", verb, NewBeadSummaryEnvelope(verb, beadsOut, DefaultBeadSummaryBudget), stdout, stderr)
 }
 
 func beadSummary(bead beads.Bead) BeadSummary {
