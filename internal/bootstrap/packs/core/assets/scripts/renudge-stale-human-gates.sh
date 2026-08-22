@@ -172,11 +172,15 @@ STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
 if [ -z "$STATE" ] && [ ! -e "$STATE_FILE" ]; then
     STATE='{}'
 elif ! printf '%s' "$STATE" | jq -e '
+    def valid_iso:
+        type == "string" and ((try fromdateiso8601 catch null) != null);
     type == "object" and all(.[];
-        if type == "string" then true
+        if type == "string" then valid_iso
         elif type == "object" then
-            (((.last_sent_at // "") | type) == "string") and
-            (((.last_seen_at // "") | type) == "string") and
+            (.last_sent_at // "") as $last_sent |
+            (.last_seen_at // "") as $last_seen |
+            (($last_sent == "") or ($last_sent | valid_iso)) and
+            (($last_seen == "") or ($last_seen | valid_iso)) and
             ((.count // 0) as $count |
                 ($count | type) == "number" and
                 $count >= 0 and ($count | floor) == $count)

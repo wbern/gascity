@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -38,10 +39,17 @@ func TestRenudgeStaleHumanGatesStopsAtReminderCap(t *testing.T) {
 set -euo pipefail
 case "$*" in
   "rig list --json")
-    printf '{"rigs":[]}'
+    if [ "${FAKE_RIG_UNAVAILABLE:-0}" = "1" ]; then
+      printf '{"rigs":[{"name":"unavailable"}]}'
+    else
+      printf '{"rigs":[]}'
+    fi
     ;;
   "bd gate list --limit 0 --json")
     printf '[{"id":"gate-1","created_at":"2020-01-01T00:00:00Z","await_type":"human","status":"open"}]'
+    ;;
+  bd\ --rig\ unavailable\ gate\ list*)
+    exit 91
     ;;
   "bd show gate-1 --json")
     printf '[{"id":"gate-1","created_at":"2020-01-01T00:00:00Z","await_type":"human","status":"open","assignee":"human","title":"Choose","description":"Decide"}]'
@@ -65,8 +73,12 @@ esac
 		t.Fatalf("write state: %v", err)
 	}
 
-	runScript := func(maxRenudges string) {
+	runScript := func(maxRenudges string, unavailableRig ...bool) {
 		t.Helper()
+		unavailable := "0"
+		if len(unavailableRig) > 0 && unavailableRig[0] {
+			unavailable = "1"
+		}
 		cmd := exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
 		cmd.Env = append(os.Environ(),
 			"PATH="+binDir+":"+os.Getenv("PATH"),
@@ -76,6 +88,7 @@ esac
 			"GC_STALE_GATE_THRESHOLD=0s",
 			"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
 			"GC_STALE_GATE_MAX_RENUDGES="+maxRenudges,
+			"FAKE_RIG_UNAVAILABLE="+unavailable,
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -93,10 +106,24 @@ esac
 	if err != nil {
 		t.Fatalf("read updated state: %v", err)
 	}
-	if !strings.Contains(string(updated), `"count": 3`) && !strings.Contains(string(updated), `"count":3`) {
-		t.Fatalf("capped reminder count changed or lost: %s", updated)
+	var cappedState struct {
+		Count      int    `json:"count"`
+		LastSeenAt string `json:"last_seen_at"`
 	}
-	if strings.Contains(string(updated), `"last_seen_at":"2020-01-01T00:00:00Z"`) {
+	if err := json.Unmarshal(updated, &map[string]json.RawMessage{}); err != nil {
+		t.Fatalf("updated reminder state is not JSON: %v", err)
+	}
+	var stateEntries map[string]json.RawMessage
+	if err := json.Unmarshal(updated, &stateEntries); err != nil {
+		t.Fatalf("decode updated reminder state: %v", err)
+	}
+	if err := json.Unmarshal(stateEntries["gate-1"], &cappedState); err != nil {
+		t.Fatalf("decode capped gate state: %v", err)
+	}
+	if cappedState.Count != 3 {
+		t.Fatalf("capped reminder count = %d, want 3: %s", cappedState.Count, updated)
+	}
+	if cappedState.LastSeenAt == "2020-01-01T00:00:00Z" || cappedState.LastSeenAt == "" {
 		t.Fatalf("capped open gate did not refresh last_seen_at: %s", updated)
 	}
 
@@ -218,5 +245,47 @@ esac
 	}
 	if !strings.Contains(string(out), "state is corrupt") {
 		t.Fatalf("invalid reminder entry failure was not diagnostic: %s", out)
+	}
+
+	// Invalid timestamps are dangerous even when the JSON shape is otherwise
+	// valid: pruning must not reinterpret them as epoch zero and erase a cap.
+	invalidTimestamp := `{"gate-1":{"last_sent_at":"not-a-date","last_seen_at":"not-a-date","count":5}}`
+	if err := os.WriteFile(statePath, []byte(invalidTimestamp), 0o600); err != nil {
+		t.Fatalf("write invalid timestamp state: %v", err)
+	}
+	cmd = exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"MAIL_LOG="+mailLog,
+		"GC_CITY="+tmp,
+		"GC_PACK_STATE_DIR="+stateDir,
+		"GC_STALE_GATE_THRESHOLD=0s",
+		"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
+		"GC_STALE_GATE_MAX_RENUDGES=5",
+	)
+	out, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "state is corrupt") {
+		t.Fatalf("invalid timestamp did not fail closed: err=%v out=%s", err, out)
+	}
+
+	// One rig can fail enumeration for a sweep. A recently seen capped gate in
+	// that rig must retain its ledger entry rather than reopening the budget.
+	recentSeen := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	unavailableState := `{"gate-1":{"last_sent_at":"` + recentSeen + `","last_seen_at":"` + recentSeen + `","count":5},` +
+		`"gate-unavailable":{"last_sent_at":"` + recentSeen + `","last_seen_at":"` + recentSeen + `","count":5}}`
+	if err := os.WriteFile(statePath, []byte(unavailableState), 0o600); err != nil {
+		t.Fatalf("write unavailable-rig state: %v", err)
+	}
+	runScript("5", true)
+	updated, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read unavailable-rig state: %v", err)
+	}
+	stateEntries = nil
+	if err := json.Unmarshal(updated, &stateEntries); err != nil {
+		t.Fatalf("decode unavailable-rig state: %v", err)
+	}
+	if _, ok := stateEntries["gate-unavailable"]; !ok {
+		t.Fatalf("unavailable sweep pruned capped gate ledger: %s", updated)
 	}
 }
