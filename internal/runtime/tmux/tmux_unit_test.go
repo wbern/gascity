@@ -12,6 +12,7 @@ func TestBuildKillTargetsFromSnapshotOrdersDescendantsAndFencesForeignGroupMembe
 		"200": {ppid: "100", pgid: "100", start: "child"},
 		"300": {ppid: "200", pgid: "100", start: "grandchild"},
 		"400": {ppid: "1", pgid: "100", start: "orphan"},
+		"450": {ppid: "900", pgid: "100", start: "subreaper orphan"},
 		"500": {ppid: "1", pgid: "999", start: "foreign"},
 	}
 
@@ -19,11 +20,34 @@ func TestBuildKillTargetsFromSnapshotOrdersDescendantsAndFencesForeignGroupMembe
 	if want := []string{"300", "200"}; !slices.Equal(descendants, want) {
 		t.Fatalf("descendants = %v, want deepest-first %v", descendants, want)
 	}
-	if want := []string{"400"}; !slices.Equal(reparented, want) {
+	if want := []string{"400", "450"}; !slices.Equal(reparented, want) {
 		t.Fatalf("reparented = %v, want %v", reparented, want)
 	}
 	if _, found := identities["500"]; found {
 		t.Fatal("foreign PGID member must never become a kill target")
+	}
+}
+
+func TestBuildKillTargetsFromSnapshotRejectsMissingOrSystemRoot(t *testing.T) {
+	snapshot := map[string]procIdentity{
+		"100": {ppid: "9", pgid: "100", start: "root"},
+		"200": {ppid: "404", pgid: "100", start: "would-be child"},
+	}
+	for _, root := range []string{"404", "1", "0", "bad"} {
+		descendants, reparented, identities := buildKillTargetsFromSnapshot(root, snapshot)
+		if len(descendants) != 0 || len(reparented) != 0 || len(identities) != 0 {
+			t.Fatalf("root %q produced targets descendants=%v reparented=%v identity=%v", root, descendants, reparented, identities)
+		}
+	}
+}
+
+func TestParseProcessTableSkipsMalformedAndSpecialPIDs(t *testing.T) {
+	snapshot := parseProcessTable("  0 1 0 bad\n  1 1 1 bad\n bad 1 2 bad\n  101 100 101 Mon Jul 6 08:00:00 2026\n  102 101 101\n")
+	if got := snapshot["101"]; got != (procIdentity{ppid: "100", pgid: "101", start: "Mon Jul 6 08:00:00 2026"}) {
+		t.Fatalf("snapshot[101] = %+v", got)
+	}
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot contains malformed or special PIDs: %+v", snapshot)
 	}
 }
 
@@ -55,6 +79,58 @@ func TestKillIdentityMatches(t *testing.T) {
 				t.Fatalf("killIdentityMatches(%q, %q) = %v, want %v", tt.current, tt.want, got, tt.match)
 			}
 		})
+	}
+}
+
+func TestTerminateVerifiedProcessSetExitsAfterTERM(t *testing.T) {
+	current := "start-a"
+	var signals []string
+	now := time.Unix(0, 0)
+	terminateVerifiedProcessSet(
+		[]string{"101"}, map[string]string{"101": "start-a"}, time.Second,
+		func(string) string { return current },
+		func(pid, signal string) { signals = append(signals, signal+":"+pid); current = "" },
+		func(time.Duration) { t.Fatal("must exit before sleeping after TERM") },
+		func() time.Time { return now },
+	)
+	if want := []string{"TERM:101"}; !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want %v", signals, want)
+	}
+}
+
+func TestTerminateVerifiedProcessSetSkipsReusedPIDBeforeKILL(t *testing.T) {
+	current := "start-a"
+	var signals []string
+	now := time.Unix(0, 0)
+	terminateVerifiedProcessSet(
+		[]string{"101"}, map[string]string{"101": "start-a"}, time.Second,
+		func(string) string { return current },
+		func(pid, signal string) {
+			signals = append(signals, signal+":"+pid)
+			if signal == "TERM" {
+				current = "reused-start"
+			}
+		},
+		func(time.Duration) { now = now.Add(processExitCheckInterval) },
+		func() time.Time { return now },
+	)
+	if want := []string{"TERM:101"}; !slices.Equal(signals, want) {
+		t.Fatalf("signals = %v, want PID-reuse guard to suppress KILL", signals)
+	}
+}
+
+func TestTerminateVerifiedProcessSetRefusesUnreadableAndAbsentSnapshotPIDs(t *testing.T) {
+	var signals []string
+	now := time.Unix(0, 0)
+	terminateVerifiedProcessSet(
+		[]string{"101", "102"}, map[string]string{"101": "start-a"}, time.Second,
+		func(string) string { return "" },
+		func(pid, signal string) { signals = append(signals, signal+":"+pid) },
+		func(time.Duration) { t.Fatal("unowned PIDs must not enter the grace loop") },
+		func() time.Time { return now },
+	)
+	if len(signals) != 0 {
+		t.Fatalf("signals = %v, want none", signals)
 	}
 }
 
@@ -256,46 +332,5 @@ func TestTerminateProcessSetCountsProbeTimeAgainstGracePeriod(t *testing.T) {
 	}
 	if slept != processExitCheckInterval {
 		t.Fatalf("slept = %s, want remaining grace budget %s after slow probe", slept, processExitCheckInterval)
-	}
-}
-
-// knownSet builds a descendant-set lookup from the given pids.
-func knownSet(pids ...string) map[string]bool {
-	m := make(map[string]bool, len(pids))
-	for _, p := range pids {
-		m[p] = true
-	}
-	return m
-}
-
-func TestReparentedOrphans_CollectsInitAndSubreaperOrphans(t *testing.T) {
-	// leader=100, one live descendant=200. Group also holds:
-	//   300 reparented to init (ppid 1) — classic case
-	//   400 reparented to systemd --user subreaper (ppid 900) — the case the
-	//        old PPID==1 test missed
-	//   500 still a child of a live descendant (ppid 200) — owned elsewhere
-	//   600 whose parent read failed ("") — must be skipped
-	known := knownSet("100", "200")
-	parents := map[string]string{
-		"300": "1",
-		"400": "900", // systemd --user pid, not init
-		"500": "200",
-		"600": "",
-	}
-	parentOf := func(pid string) string { return parents[pid] }
-
-	got := reparentedOrphans([]string{"200", "300", "400", "500", "600"}, known, parentOf)
-	slices.Sort(got)
-	want := []string{"300", "400"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("reparentedOrphans = %v, want %v", got, want)
-	}
-}
-
-func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
-	known := knownSet("100", "200", "300")
-	parentOf := func(string) string { return "1" }
-	if got := reparentedOrphans([]string{"200", "300"}, known, parentOf); len(got) != 0 {
-		t.Fatalf("reparentedOrphans = %v, want empty (all are known descendants)", got)
 	}
 }
