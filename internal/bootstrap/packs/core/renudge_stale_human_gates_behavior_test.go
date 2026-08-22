@@ -127,6 +127,53 @@ esac
 		t.Fatalf("capped open gate did not refresh last_seen_at: %s", updated)
 	}
 
+	// Zero retention makes a whole-second last_seen_at immediately older than
+	// jq's fractional `now`: the first sweep prunes the capped ledger entry and
+	// the next sweep starts its reminder budget over. Reject that configuration
+	// before either the state file or mailbox can change.
+	if err := os.Remove(mailLog); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reset mail log before zero-retention check: %v", err)
+	}
+	state = `{"gate-1":{"last_sent_at":"2020-01-01T00:00:00Z","last_seen_at":"2020-01-01T00:00:00Z","count":3}}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatalf("write capped zero-retention state: %v", err)
+	}
+	zeroRetention := func() ([]byte, error) {
+		cmd := exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
+		cmd.Env = append(os.Environ(),
+			"PATH="+binDir+":"+os.Getenv("PATH"),
+			"MAIL_LOG="+mailLog,
+			"GC_CITY="+tmp,
+			"GC_PACK_STATE_DIR="+stateDir,
+			"GC_STALE_GATE_THRESHOLD=0s",
+			"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
+			"GC_STALE_GATE_MAX_RENUDGES=3",
+			"GC_STALE_GATE_STATE_RETENTION=0s",
+		)
+		return cmd.CombinedOutput()
+	}
+	firstOut, firstErr := zeroRetention()
+	if firstErr == nil {
+		secondOut, secondErr := zeroRetention()
+		mail, _ := os.ReadFile(mailLog)
+		t.Fatalf("zero retention was accepted and can restart a capped gate: first=%s second_err=%v second=%s mail=%s", firstOut, secondErr, secondOut, mail)
+	}
+	if !strings.Contains(string(firstOut), "retention must be positive") {
+		t.Fatalf("zero-retention rejection was not diagnostic: %s", firstOut)
+	}
+	unchanged, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state after zero-retention rejection: %v", err)
+	}
+	if string(unchanged) != state {
+		t.Fatalf("zero-retention rejection mutated capped state: got %s want %s", unchanged, state)
+	}
+	if mail, err := os.ReadFile(mailLog); err == nil && len(strings.TrimSpace(string(mail))) > 0 {
+		t.Fatalf("zero-retention rejection sent mail: %s", mail)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read zero-retention mail log: %v", err)
+	}
+
 	// A legacy timestamp proves the gate was already being reminded under the
 	// unbounded policy, but cannot recover how many times. Migration therefore
 	// saturates the new budget instead of sending four more reminders to a gate
