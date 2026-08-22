@@ -116,7 +116,7 @@ func (pl *tmuxPlace) IsRunning(_ context.Context) (bool, error) {
 	return pl.p.IsRunning(pl.name), nil
 }
 
-// Teardown is Stop's where-half: destroy the session + its process tree (←Stop).
+// Teardown is Stop's where-half: destroy the named tmux session (←Stop).
 func (pl *tmuxPlace) Teardown(_ context.Context) error {
 	return pl.p.Stop(pl.name)
 }

@@ -247,17 +247,14 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	return nil
 }
 
-// Stop destroys the named session and kills its entire process tree.
+// Stop destroys the named session through tmux's named session operation.
 // Returns nil if it doesn't exist (idempotent).
 // Invalidates the state cache after a successful stop so subsequent
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
 	p.tm.CloseHiddenAttachClient(name)
-	// Exclude the calling process from the kill set. When `gc session close`
-	// runs from inside the pane it is tearing down (the self-close path), the
-	// caller is a descendant of the pane leader; without exclusion it would be
-	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
-	// Excluding a caller that lives outside the pane is a harmless no-op.
+	// The legacy exclusion argument is intentionally inert: teardown no longer
+	// sends direct PID signals, avoiding PID-reuse races.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil // idempotent

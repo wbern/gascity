@@ -4,11 +4,8 @@ package tmux
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -76,58 +73,4 @@ func parseProcessTable(output string) map[string]procIdentity {
 		}
 	}
 	return table
-}
-
-func processStartTimeWithProbe(pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
-	ctx, cancel := context.WithTimeout(context.Background(), processProbeTimeout)
-	defer cancel()
-	return processStartTimeWithContext(ctx, pid, run)
-}
-
-func processStartTimeWithContext(ctx context.Context, pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
-	out, err := run(ctx, "ps", "-o", "lstart=", "-p", pid)
-	if err != nil {
-		return ""
-	}
-	return strings.Join(strings.Fields(string(out)), " ")
-}
-
-// processStartTimeWithPhaseBudget gives each ps call at most one second while
-// preserving the enclosing phase deadline. Once the phase expires, the probe
-// is not launched and ownership fails closed.
-func processStartTimeWithPhaseBudget(ctx context.Context, pid string) string {
-	return processStartTimeWithPhaseBudgetWithProbe(ctx, pid, runProcessProbe)
-}
-
-func processStartTimeWithPhaseBudgetWithProbe(ctx context.Context, pid string, run func(context.Context, string, ...string) ([]byte, error)) string {
-	if ctx.Err() != nil {
-		return ""
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, processProbeTimeout)
-	defer cancel()
-	return processStartTimeWithContext(probeCtx, pid, run)
-}
-
-// signalVerifiedProcess sends a direct Unix signal after the caller has
-// identity-fenced the PID. It avoids a second external process between check
-// and signal; invalid or already-gone PIDs are ignored.
-func signalVerifiedProcess(pid, signal string) {
-	n, err := strconv.Atoi(pid)
-	if err != nil || n <= 1 {
-		return
-	}
-	process, err := os.FindProcess(n)
-	if err != nil {
-		return
-	}
-	var sig syscall.Signal
-	switch signal {
-	case "TERM":
-		sig = syscall.SIGTERM
-	case "KILL":
-		sig = syscall.SIGKILL
-	default:
-		return
-	}
-	_ = process.Signal(sig)
 }

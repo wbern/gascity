@@ -587,7 +587,7 @@ func (t *Tmux) EnsureSessionFresh(name, workDir string) error {
 
 	// Zombie session: tmux alive but agent dead
 	// Kill it so we can create a fresh one
-	// Use KillSessionWithProcesses to ensure all descendant processes are killed
+	// Use named session teardown; direct PID cleanup is intentionally disabled.
 	if err := t.KillSessionWithProcesses(name); err != nil {
 		return fmt.Errorf("killing zombie session: %w", err)
 	}
@@ -607,438 +607,49 @@ func (t *Tmux) KillSession(name string) error {
 	return err
 }
 
-// processKillGracePeriod is how long to wait after SIGTERM before sending SIGKILL.
-// 2 seconds gives processes time to clean up gracefully. The previous 100ms was too short
-// and caused Claude processes to become orphans when they couldn't shut down in time.
-const processKillGracePeriod = 2 * time.Second
-
-// processTeardownPhaseTimeout bounds one TERM/KILL phase. Discovery is
-// separately capped at one second; two teardown phases plus discovery remain
-// below the ten-second stop-operation budget.
-const processTeardownPhaseTimeout = 4 * time.Second
-
-// processExitCheckInterval bounds how long cleanup waits after observing that a
-// TERM-targeted process has exited. The full grace period is reserved for
-// processes that remain alive and may still be flushing state.
-const processExitCheckInterval = 25 * time.Millisecond
-
-func terminateVerifiedProcesses(pids []string, root string, identities map[string]string) {
-	ctx, cancel := context.WithTimeout(context.Background(), processTeardownPhaseTimeout)
-	defer cancel()
-	terminateVerifiedProcessSetForRoot(
-		ctx,
-		pids,
-		root,
-		identities,
-		processKillGracePeriod,
-		processStartTimeWithPhaseBudget,
-		signalVerifiedProcess,
-		time.Sleep,
-		time.Now,
-	)
-}
-
-// terminateVerifiedProcessSetForRoot refuses the whole teardown phase unless
-// the pane leader still has the identity captured with its descendants. A
-// recycled root means the snapshot no longer proves ownership of any child.
-func terminateVerifiedProcessSetForRoot(
-	ctx context.Context,
-	pids []string,
-	root string,
-	identities map[string]string,
-	gracePeriod time.Duration,
-	currentIdentity func(context.Context, string) string,
-	signalProcess func(string, string),
-	sleep func(time.Duration),
-	now func() time.Time,
-) {
-	if !killIdentityMatches(currentIdentity(ctx, root), identities[root]) {
-		return
-	}
-	terminateVerifiedProcessSet(ctx, pids, identities, gracePeriod, currentIdentity, signalProcess, sleep, now)
-}
-
-// terminateVerifiedProcessSet preserves terminateProcessSet's early-exit grace
-// loop while fencing every TERM and KILL with a fresh identity observation.
-// An exited, recycled, unreadable, or never-snapshotted PID is no longer owned
-// and is neither signaled nor kept alive for escalation.
-func terminateVerifiedProcessSet(
-	ctx context.Context,
-	pids []string,
-	identities map[string]string,
-	gracePeriod time.Duration,
-	currentIdentity func(context.Context, string) string,
-	signalProcess func(string, string),
-	sleep func(time.Duration),
-	now func() time.Time,
-) {
-	owned := func(pid string) bool {
-		if ctx.Err() != nil {
-			return false
-		}
-		current := currentIdentity(ctx, pid)
-		return ctx.Err() == nil && killIdentityMatches(current, identities[pid])
-	}
-	terminateProcessSet(
-		pids,
-		gracePeriod,
-		func(pid, signal string) {
-			if owned(pid) {
-				signalProcess(pid, signal)
-			}
-		},
-		owned,
-		sleep,
-		now,
-	)
-}
-
-// terminateProcessSet gives each process a graceful TERM window, but returns as
-// soon as every target is observed dead. KILL is reserved for the targets still
-// alive when the grace period expires. Injected side effects keep the timing and
-// escalation policy deterministic in unit tests.
-func terminateProcessSet(
-	pids []string,
-	gracePeriod time.Duration,
-	signalProcess func(pid, signal string),
-	isAlive func(pid string) bool,
-	sleep func(time.Duration),
-	now func() time.Time,
-) {
-	if len(pids) == 0 {
-		return
-	}
-	for _, pid := range pids {
-		signalProcess(pid, "TERM")
-	}
-
-	deadline := now().Add(gracePeriod)
-	remaining := liveProcessIDs(pids, isAlive)
-	for len(remaining) > 0 {
-		left := deadline.Sub(now())
-		if left <= 0 {
-			break
-		}
-		delay := processExitCheckInterval
-		if delay > left {
-			delay = left
-		}
-		sleep(delay)
-		remaining = liveProcessIDs(remaining, isAlive)
-	}
-	for _, pid := range remaining {
-		signalProcess(pid, "KILL")
-	}
-}
-
-func liveProcessIDs(pids []string, isAlive func(string) bool) []string {
-	live := make([]string, 0, len(pids))
-	for _, pid := range pids {
-		if pid != "" && isAlive(pid) {
-			live = append(live, pid)
-		}
-	}
-	return live
-}
-
-// KillSessionWithProcesses explicitly kills all processes in a session before terminating it.
-// This prevents orphan processes that survive tmux kill-session due to SIGHUP being ignored.
-//
-// Process:
-// 1. Get the pane's main process PID and its process group ID (PGID)
-// 2. Kill the entire process group (catches reparented processes that stayed in the group)
-// 3. Find all descendant processes recursively (catches any stragglers)
-// 4. Send SIGTERM/SIGKILL to descendants
-// 5. Kill the pane process itself
-// 6. Kill the tmux session
-//
-// The process group kill is critical because:
-// - pgrep -P only finds direct children (PPID matching)
-// - Processes that reparent to init (PID 1) are missed by pgrep
-// - But they typically stay in the same process group unless they call setsid()
-//
-// This ensures Claude processes and all their children are properly terminated.
+// KillSessionWithProcesses terminates the named tmux session. The legacy name
+// is retained for callers while direct PID teardown remains disabled.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
-	// Get the pane PID
-	pid, err := t.GetPanePID(name)
-	if err != nil {
-		// Session might not exist or server may have already gone away.
-		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
-			return nil
-		}
-		return killErr
-	}
-
-	if pid != "" {
-		// Atomic snapshot discovery + identity-verified kills. Replaces the
-		// live tree walk that raced PID reuse and caused the session massacre
-		// (see discoverKillTargets and terminateVerifiedProcesses).
-		descendants, reparented, identity := discoverKillTargets(pid)
-		killList := append([]string{}, descendants...)
-		killList = append(killList, reparented...)
-
-		terminateVerifiedProcesses(killList, pid, identity)
-		terminateVerifiedProcesses([]string{pid}, pid, identity)
-	}
-
-	// Kill the tmux session
-	// Ignore missing/dead-server errors - killing the pane process may have
-	// already caused tmux to destroy the session automatically.
-	err = t.KillSession(name)
+	// Direct PID TERM/KILL is deliberately disabled: a portable process-table
+	// start-time token cannot prove that a PID still denotes the observed process
+	// at signal delivery. Tmux owns session teardown by name; detached-orphan
+	// cleanup requires a separately designed ownership-safe mechanism.
+	err := t.KillSession(name)
 	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 		return nil
 	}
 	return err
 }
 
-// KillSessionWithProcessesExcluding is like KillSessionWithProcesses but excludes
-// specified PIDs from being killed. This is essential for self-kill scenarios where
-// the calling process (e.g., gt done) is running inside the session it's terminating.
-// Without exclusion, the caller would be killed before completing the cleanup.
+// KillSessionWithProcessesExcluding retains the legacy call shape. Named tmux
+// teardown performs no direct PID signaling, so the exclusion is unnecessary.
 func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []string) error {
-	// Build exclusion set for O(1) lookup
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
-	}
-
-	// Get the pane PID
-	pid, err := t.GetPanePID(name)
-	if err != nil {
-		// Session might not exist or server may have already gone away.
-		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
-			return nil
-		}
-		return killErr
-	}
-
-	if pid != "" {
-		// Atomic snapshot discovery + identity-verified kills (see
-		// discoverKillTargets and terminateVerifiedProcesses) — the same session-massacre fix,
-		// with the self-kill exclusion set honored via computeExcludingKillSet.
-		descendants, reparented, identity := discoverKillTargets(pid)
-
-		// Partition the discovered process set into the descendant/group PIDs to
-		// terminate and whether the pane leader should be killed, honoring the
-		// exclusion set. This decision is pure so it can be unit-tested without
-		// real processes (see computeExcludingKillSet).
-		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-
-		terminateVerifiedProcesses(killList, pid, identity)
-
-		// Kill the pane process itself (may have called setsid() and detached)
-		// Only if not excluded
-		if killPaneLeader {
-			terminateVerifiedProcesses([]string{pid}, pid, identity)
-		}
-	}
-
-	// Kill the tmux session - this will terminate the excluded process too.
-	// Ignore missing/dead-server errors - if we killed all non-excluded
-	// processes, tmux may have already destroyed the session automatically.
-	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-		return nil
-	}
-	return err
+	_ = excludePIDs
+	return t.KillSessionWithProcesses(name)
 }
 
-// computeExcludingKillSet partitions a discovered process set into the
-// descendant/group PIDs that should be terminated and whether the pane leader
-// itself should be terminated, honoring an exclusion set. It performs no I/O,
-// so the self-kill exclusion decision can be unit-tested without real
-// processes.
-//
-// exclude protects the calling process from being signaled before it finishes
-// its own cleanup. This is essential for the self-close path where
-// `gc session close` runs inside the very pane it is tearing down: the caller
-// is a descendant of the pane leader and, without exclusion, would receive
-// SIGTERM mid-cleanup — leaving the agent alive and the session bead un-closed.
-// Excluding a caller that lives outside the pane is a harmless no-op because it
-// is not present in the descendant or reparented sets.
-func computeExcludingKillSet(panePID string, descendants, reparented []string, exclude map[string]bool) (killList []string, killPaneLeader bool) {
-	seen := make(map[string]bool, len(descendants)+len(reparented))
-	add := func(pid string) {
-		if pid == "" || exclude[pid] || seen[pid] {
-			return
-		}
-		seen[pid] = true
-		killList = append(killList, pid)
-	}
-	for _, pid := range descendants {
-		add(pid)
-	}
-	for _, pid := range reparented {
-		add(pid)
-	}
-	return killList, !exclude[panePID]
-}
-
-// maxDescendantDepth bounds descendant discovery. Real process trees are shallow
-// (< 20 deep); this belt-and-suspenders cap only ever fires on a
-// pathological/cyclic walk, alongside the visited-set guard.
-const maxDescendantDepth = 40
-
-// discoverKillTargets atomically snapshots the process table ONCE and returns
-// root's descendants (deepest-first) plus process-group members reparented
-// outside the captured tree, together with an identity map (pid -> start time captured at the
-// snapshot instant). The kill paths MUST discover through here rather than the
-// live getAllDescendants + collectReparentedGroupMembers walk.
-//
-// Why this exists (the session massacre): the old kill paths walked the process
-// tree live — one `pgrep -P` exec per node, seconds under load — then looped
-// `kill -TERM <pid>` over the collected PIDs. During a stop/drain wave the very
-// agent trees being torn down are collapsing, so the kernel recycles their PIDs
-// onto unrelated processes (Finder, Dock, tmux, editors, other agent panes)
-// inside the walk→kill window, and the kill landed on the innocent new owner.
-// Two changes close it: (1) one atomic snapshot removes the multi-second
-// discovery window and makes the descendant/PGID view internally consistent;
-// (2) every target carries the start time it had at snapshot instant, so
-// teardown can re-check identity immediately before signaling and skip a PID
-// that has since been recycled. Returns empty on snapshot failure, so callers
-// signal nothing and rely on tmux kill-session (safe degradation).
-func discoverKillTargets(root string) (descendants []string, reparented []string, identity map[string]string) {
-	return buildKillTargetsFromSnapshot(root, snapshotProcessTable())
-}
-
-// buildKillTargetsFromSnapshot is the pure core of discoverKillTargets: given an
-// already-captured process snapshot it derives root's deepest-first descendants,
-// reparented group members, and the identity map — performing no
-// I/O, so the discovery decision can be unit-tested with a hand-built snapshot
-// (like computeExcludingKillSet). Returns empty for an empty snapshot.
-func buildKillTargetsFromSnapshot(root string, snap map[string]procIdentity) (descendants []string, reparented []string, identity map[string]string) {
-	rootInfo, rootFound := snap[root]
-	if len(snap) == 0 || !rootFound || !validProcessPID(root) || rootInfo.start == "" {
-		return nil, nil, nil
-	}
-
-	identity = make(map[string]string, len(snap))
-	childrenOf := make(map[string][]string, len(snap))
-	for pid, info := range snap {
-		if !validProcessPID(pid) {
-			continue
-		}
-		childrenOf[info.ppid] = append(childrenOf[info.ppid], pid)
-	}
-	for _, children := range childrenOf {
-		sort.Strings(children)
-	}
-
-	// Deepest-first descendant walk over the snapshot (no live process calls).
-	// visited dedups PID-reuse cycles; maxDescendantDepth is the second stop.
-	visited := map[string]bool{root: true}
-	var walk func(string, int)
-	walk = func(p string, depth int) {
-		if depth > maxDescendantDepth {
-			return
-		}
-		for _, child := range childrenOf[p] {
-			if visited[child] {
-				continue
-			}
-			visited[child] = true
-			walk(child, depth+1) // grandchildren first
-			descendants = append(descendants, child)
-			identity[child] = snap[child].start
-		}
-	}
-	walk(root, 0)
-	identity[root] = rootInfo.start
-
-	// Add same-group members whose parent is outside the captured tree. This
-	// includes init adoption and user-session subreapers. Sourcing both the root
-	// and members from one snapshot keeps foreign-PGID PPID-1 processes out.
-	rootPGID := rootInfo.pgid
-	if rootPGID != "" && rootPGID != "0" && rootPGID != "1" {
-		members := make([]string, 0)
-		for pid, info := range snap {
-			if validProcessPID(pid) && info.pgid == rootPGID {
-				members = append(members, pid)
-			}
-		}
-		sort.Strings(members)
-		for _, pid := range members {
-			parent := snap[pid].ppid
-			if visited[pid] || parent == "" || (parent != "1" && !validProcessPID(parent)) || visited[parent] {
-				continue
-			}
-			reparented = append(reparented, pid)
-			identity[pid] = snap[pid].start
-		}
-	}
-	return descendants, reparented, identity
-}
-
-// validProcessPID excludes the sentinel/system PIDs and malformed ps output.
-// Identity-fenced teardown only owns ordinary positive process IDs.
+// validProcessPID excludes sentinel/system PIDs and malformed ps output.
 func validProcessPID(pid string) bool {
 	n, err := strconv.Atoi(pid)
 	return err == nil && n > 1
 }
 
-func killIdentityMatches(current, want string) bool {
-	return want != "" && current != "" && current == want
-}
-
-// KillPaneProcesses terminates only processes still proven to belong to the
-// pane snapshot, then leaves tmux to reap the pane itself on respawn.
+// KillPaneProcesses is an intentional no-op before a caller invokes
+// RespawnPane(-k), which owns named pane teardown.
 func (t *Tmux) KillPaneProcesses(pane string) error {
-	// Get the pane PID
-	pid, err := t.GetPanePID(pane)
-	if err != nil {
-		return fmt.Errorf("getting pane PID: %w", err)
-	}
-
-	if pid == "" {
-		return fmt.Errorf("pane PID is empty")
-	}
-
-	descendants, reparented, identities := discoverKillTargets(pid)
-	killList := append([]string{}, descendants...)
-	killList = append(killList, reparented...)
-	terminateVerifiedProcesses(killList, pid, identities)
-	terminateVerifiedProcesses([]string{pid}, pid, identities)
-
+	// A process-table identity check is not a capability to signal the PID:
+	// replacement can occur in the interval before delivery. RespawnPane's -k
+	// is the supported named tmux teardown. Detached-orphan cleanup is deferred
+	// until it has an ownership-safe mechanism.
+	_ = pane
 	return nil
 }
 
-// KillPaneProcessesExcluding is like KillPaneProcesses but excludes specified PIDs
-// from being killed. This is essential for self-handoff scenarios where the calling
-// process (e.g., gt handoff running inside Claude Code) needs to survive long enough
-// to call RespawnPane. Without exclusion, the caller would be killed before completing.
-//
-// The excluded PIDs should include the calling process and any ancestors that must
-// survive. After this function returns, RespawnPane's -k flag will send SIGHUP to
-// clean up the remaining processes.
+// KillPaneProcessesExcluding is the exclusion-shaped no-op counterpart of
+// KillPaneProcesses. The subsequent named RespawnPane(-k) owns teardown.
 func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) error {
-	// Build exclusion set for O(1) lookup
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
-	}
-
-	// Get the pane PID
-	pid, err := t.GetPanePID(pane)
-	if err != nil {
-		return fmt.Errorf("getting pane PID: %w", err)
-	}
-
-	if pid == "" {
-		return fmt.Errorf("pane PID is empty")
-	}
-
-	descendants, reparented, identities := discoverKillTargets(pid)
-	killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-	terminateVerifiedProcesses(killList, pid, identities)
-
-	// Kill the pane process itself only if not excluded
-	if killPaneLeader {
-		terminateVerifiedProcesses([]string{pid}, pid, identities)
-	}
-
-	return nil
+	_ = excludePIDs
+	return t.KillPaneProcesses(pane)
 }
 
 // KillServer terminates the entire tmux server and all sessions.
