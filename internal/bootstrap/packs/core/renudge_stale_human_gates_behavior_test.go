@@ -294,6 +294,40 @@ esac
 		t.Fatalf("invalid reminder entry failure was not diagnostic: %s", out)
 	}
 
+	// A structured entry proves the new bounded ledger format is in use. If its
+	// count is absent, the prior reminder depth is unknowable; treating that as
+	// zero would reopen the budget just like a corrupt count value.
+	missingCount := `{"gate-1":{"last_sent_at":"2020-01-01T00:00:00Z","last_seen_at":"2020-01-01T00:00:00Z"}}`
+	if err := os.WriteFile(statePath, []byte(missingCount), 0o600); err != nil {
+		t.Fatalf("write missing-count state: %v", err)
+	}
+	cmd = exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"MAIL_LOG="+mailLog,
+		"GC_CITY="+tmp,
+		"GC_PACK_STATE_DIR="+stateDir,
+		"GC_STALE_GATE_THRESHOLD=0s",
+		"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
+		"GC_STALE_GATE_MAX_RENUDGES=5",
+	)
+	out, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "state is corrupt") {
+		t.Fatalf("missing reminder count did not fail closed: err=%v out=%s", err, out)
+	}
+	unchanged, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read missing-count state after rejection: %v", err)
+	}
+	if string(unchanged) != missingCount {
+		t.Fatalf("missing-count rejection rewrote ledger: got %s want %s", unchanged, missingCount)
+	}
+	if mail, err := os.ReadFile(mailLog); err == nil && len(strings.TrimSpace(string(mail))) > 0 {
+		t.Fatalf("missing-count rejection sent mail: %s", mail)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read missing-count mail log: %v", err)
+	}
+
 	// Invalid timestamps are dangerous even when the JSON shape is otherwise
 	// valid: pruning must not reinterpret them as epoch zero and erase a cap.
 	invalidTimestamp := `{"gate-1":{"last_sent_at":"not-a-date","last_seen_at":"not-a-date","count":5}}`

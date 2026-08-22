@@ -185,7 +185,8 @@ elif ! printf '%s' "$STATE" | jq -e '
             (.last_seen_at // "") as $last_seen |
             (($last_sent == "") or ($last_sent | valid_iso)) and
             (($last_seen == "") or ($last_seen | valid_iso)) and
-            ((.count // 0) as $count |
+            has("count") and
+            (.count as $count |
                 ($count | type) == "number" and
                 $count >= 0 and ($count | floor) == $count)
         else false
