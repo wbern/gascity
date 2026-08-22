@@ -6,6 +6,58 @@ import (
 	"time"
 )
 
+func TestBuildKillTargetsFromSnapshotOrdersDescendantsAndFencesForeignGroupMembers(t *testing.T) {
+	snapshot := map[string]procIdentity{
+		"100": {ppid: "9", pgid: "100", start: "root"},
+		"200": {ppid: "100", pgid: "100", start: "child"},
+		"300": {ppid: "200", pgid: "100", start: "grandchild"},
+		"400": {ppid: "1", pgid: "100", start: "orphan"},
+		"500": {ppid: "1", pgid: "999", start: "foreign"},
+	}
+
+	descendants, reparented, identities := buildKillTargetsFromSnapshot("100", snapshot)
+	if want := []string{"300", "200"}; !slices.Equal(descendants, want) {
+		t.Fatalf("descendants = %v, want deepest-first %v", descendants, want)
+	}
+	if want := []string{"400"}; !slices.Equal(reparented, want) {
+		t.Fatalf("reparented = %v, want %v", reparented, want)
+	}
+	if _, found := identities["500"]; found {
+		t.Fatal("foreign PGID member must never become a kill target")
+	}
+}
+
+func TestBuildKillTargetsFromSnapshotTerminatesCycles(t *testing.T) {
+	snapshot := map[string]procIdentity{
+		"100": {ppid: "200", pgid: "100", start: "root"},
+		"200": {ppid: "100", pgid: "100", start: "child"},
+	}
+
+	descendants, _, _ := buildKillTargetsFromSnapshot("100", snapshot)
+	if want := []string{"200"}; !slices.Equal(descendants, want) {
+		t.Fatalf("descendants = %v, want cycle-safe %v", descendants, want)
+	}
+}
+
+func TestKillIdentityMatches(t *testing.T) {
+	for _, tt := range []struct {
+		name, current, want string
+		match               bool
+	}{
+		{"exact", "start-a", "start-a", true},
+		{"recycled", "start-b", "start-a", false},
+		{"gone", "", "start-a", false},
+		{"absent snapshot", "start-a", "", false},
+		{"both empty", "", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := killIdentityMatches(tt.current, tt.want); got != tt.match {
+				t.Fatalf("killIdentityMatches(%q, %q) = %v, want %v", tt.current, tt.want, got, tt.match)
+			}
+		})
+	}
+}
+
 func TestProviderEnvSkipsEscapeForPiAlias(t *testing.T) {
 	if !providerEnvSkipsEscape("my-pi/tmux") {
 		t.Fatal("pi provider alias should skip pre-enter Escape")
