@@ -1495,14 +1495,15 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 		t.Fatalf("GetPaneID: %v", err)
 	}
 
-	// Kill pane processes with empty excludePIDs (should kill all processes)
+	// Pane-process teardown is intentionally a no-op: the following named
+	// RespawnPane(-k) operation owns teardown without direct PID signals.
 	if err := tm.KillPaneProcessesExcluding(paneID, nil); err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
 
-	// Session may still exist (pane respawns as dead), but processes should be gone
-	// Check that we can still get info about the session (verifies we didn't panic)
-	_, _ = tm.HasSession(sessionName)
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
+	}
 }
 
 func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
@@ -1537,17 +1538,15 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 		t.Skip("could not get pane PID")
 	}
 
-	// Kill pane processes with the pane PID excluded
-	// The function should NOT kill the excluded PID
+	// Exclusions are accepted for API compatibility; pane-process teardown is
+	// a no-op until named RespawnPane(-k) runs.
 	err = tm.KillPaneProcessesExcluding(paneID, []string{panePID})
 	if err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
 
-	// The session/pane should still exist since we excluded the main process
-	has, _ := tm.HasSession(sessionName)
-	if !has {
-		t.Log("Session was destroyed - this may happen if tmux auto-cleaned after descendants died")
+	if has, err := tm.HasSession(sessionName); err != nil || !has {
+		t.Fatalf("session after no-op = (%v, %v), want (true, nil)", has, err)
 	}
 }
 
@@ -1558,10 +1557,9 @@ func TestKillPaneProcessesExcluding_NonexistentPane(t *testing.T) {
 
 	tm := testTmux()
 
-	// Killing nonexistent pane should return an error but not panic
-	err := tm.KillPaneProcessesExcluding("%99999", []string{"12345"})
-	if err == nil {
-		t.Error("expected error for nonexistent pane")
+	// A no-op neither looks up nor signals the pane, so an unknown ID is safe.
+	if err := tm.KillPaneProcessesExcluding("%99999", []string{"12345"}); err != nil {
+		t.Fatalf("KillPaneProcessesExcluding nonexistent pane: %v, want nil no-op", err)
 	}
 }
 
