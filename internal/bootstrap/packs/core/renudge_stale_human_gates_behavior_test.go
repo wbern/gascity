@@ -174,6 +174,40 @@ esac
 		t.Fatalf("read zero-retention mail log: %v", err)
 	}
 
+	// Nonzero is not sufficient: retention shorter than the configured reminder
+	// interval can prune a capped open gate during the same sweep and restart its
+	// budget on the next one. Enforce the documented strict relationship.
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatalf("write capped short-retention state: %v", err)
+	}
+	shortRetentionCmd := exec.Command("bash", filepath.Join(scriptDir, "renudge-stale-human-gates.sh"))
+	shortRetentionCmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"MAIL_LOG="+mailLog,
+		"GC_CITY="+tmp,
+		"GC_PACK_STATE_DIR="+stateDir,
+		"GC_STALE_GATE_THRESHOLD=0s",
+		"GC_STALE_GATE_RENUDGE_INTERVAL=1h",
+		"GC_STALE_GATE_MAX_RENUDGES=3",
+		"GC_STALE_GATE_STATE_RETENTION=1s",
+	)
+	shortRetentionOut, shortRetentionErr := shortRetentionCmd.CombinedOutput()
+	if shortRetentionErr == nil || !strings.Contains(string(shortRetentionOut), "retention must exceed reminder interval") {
+		t.Fatalf("short retention did not fail closed: err=%v out=%s", shortRetentionErr, shortRetentionOut)
+	}
+	unchanged, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state after short-retention rejection: %v", err)
+	}
+	if string(unchanged) != state {
+		t.Fatalf("short-retention rejection mutated capped state: got %s want %s", unchanged, state)
+	}
+	if mail, err := os.ReadFile(mailLog); err == nil && len(strings.TrimSpace(string(mail))) > 0 {
+		t.Fatalf("short-retention rejection sent mail: %s", mail)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read short-retention mail log: %v", err)
+	}
+
 	// A legacy timestamp proves the gate was already being reminded under the
 	// unbounded policy, but cannot recover how many times. Migration therefore
 	// saturates the new budget instead of sending four more reminders to a gate

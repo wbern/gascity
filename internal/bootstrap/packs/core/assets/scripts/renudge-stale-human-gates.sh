@@ -153,6 +153,10 @@ done
     echo "renudge-stale-human-gates: retention must be positive" >&2
     exit 1
 }
+[ "$RETENTION_S" -gt "$RENUDGE_INTERVAL_S" ] || {
+    echo "renudge-stale-human-gates: retention must exceed reminder interval" >&2
+    exit 1
+}
 
 # Build the list of scopes to sweep: HQ (empty scope, bare gc bd) plus every
 # non-HQ rig. `gc bd gate list` without --rig is HQ-scoped from the city cwd,
