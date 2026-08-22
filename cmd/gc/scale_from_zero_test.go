@@ -2,9 +2,11 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -15,6 +17,75 @@ type localMockProvider struct {
 }
 
 func (m *localMockProvider) IsRunning(_ string) bool { return false }
+
+func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanonical(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "rig-A")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	minSess, maxSess := 0, 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "planner",
+			Scope:             "city",
+			MinActiveSessions: &minSess,
+			MaxActiveSessions: &maxSess,
+			ScaleCheck:        "printf 0",
+			Provider:          "mock",
+		}},
+		Rigs:      []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	_, err := rigStore.Create(beads.Bead{
+		ID:       "rig-work",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "planner"},
+	})
+	if err != nil {
+		t.Fatalf("create routed rig work: %v", err)
+	}
+
+	snapshot := &sessionBeadSnapshot{}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now(), cfg, &localMockProvider{},
+		cityStore, map[string]beads.Store{"rig-A": rigStore}, snapshot, nil, os.Stderr,
+	)
+
+	if got := result.ScaleCheckCounts["planner"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[planner] = %d, want 1", got)
+	}
+	if len(result.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(result.State))
+	}
+	for _, desired := range result.State {
+		for _, key := range []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+			if got := desired.Env[key]; got != "rig:rig-A" {
+				t.Fatalf("%s = %q, want canonical rig:rig-A", key, got)
+			}
+		}
+	}
+
+	sessions := snapshot.OpenInfos()
+	if len(sessions) != 1 {
+		t.Fatalf("created session beads = %d, want 1", len(sessions))
+	}
+	stored, err := cityStore.Get(sessions[0].ID)
+	if err != nil {
+		t.Fatalf("get created session bead: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:rig-A" {
+		t.Fatalf("persisted trigger store ref = %q, want canonical rig:rig-A", got)
+	}
+	if got, err := hookTriggerStoreDir(cityPath, cfg, &cfg.Agents[0], stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); err != nil || got != rigPath {
+		t.Fatalf("hookTriggerStoreDir(produced ref) = %q, %v; want %q, nil", got, err, rigPath)
+	}
+}
 
 func TestBuildDesiredState_ScaleFromZero_CrossRig(t *testing.T) {
 	tmpDir := t.TempDir()
