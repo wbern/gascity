@@ -65,6 +65,7 @@ func TestResolveRealBd_ComposesShimbinDir(t *testing.T) {
 		t.Skip("exec-bit semantics differ on windows")
 	}
 	city := t.TempDir()
+	t.Setenv(RealBdEnvVar, "")
 	shimDir := ShimbinDir(city)
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatalf("mkdir shim dir: %v", err)
@@ -80,5 +81,30 @@ func TestResolveRealBd_ComposesShimbinDir(t *testing.T) {
 	}
 	if got != realBd {
 		t.Fatalf("ResolveRealBd = %q, want %q", got, realBd)
+	}
+}
+
+func TestResolveRealBd_PreservesExplicitPassthrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit semantics differ on windows")
+	}
+	city := t.TempDir()
+	shimDir := ShimbinDir(city)
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	pathFirstDir := t.TempDir()
+	writeExecutable(t, pathFirstDir)
+	explicitDir := t.TempDir()
+	explicit := writeExecutable(t, explicitDir)
+	t.Setenv("PATH", pathFirstDir+string(os.PathListSeparator)+explicitDir)
+	t.Setenv(RealBdEnvVar, explicit)
+
+	got, err := ResolveRealBd(city)
+	if err != nil {
+		t.Fatalf("ResolveRealBd: %v", err)
+	}
+	if got != explicit {
+		t.Fatalf("ResolveRealBd = %q, want explicit passthrough %q", got, explicit)
 	}
 }

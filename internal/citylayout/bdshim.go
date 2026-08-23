@@ -44,7 +44,13 @@ func ShimInstalled(cityPath string) bool {
 // resolves to the shim has a passthrough target. Returns an error when no real
 // bd is found outside the shim dir.
 func ResolveRealBd(cityPath string) (string, error) {
-	return ResolveRealBdExcludingDir(ShimbinDir(cityPath))
+	shimDir := ShimbinDir(cityPath)
+	shimBd := filepath.Join(shimDir, "bd")
+	explicit := os.Getenv(RealBdEnvVar)
+	if isExecutableFile(explicit) && (!shimRoutesToThinClient(shimBd) || !sameExecutable(explicit, shimBd)) {
+		return explicit, nil
+	}
+	return ResolveRealBdExcludingDir(shimDir)
 }
 
 // ResolveRealBdExcludingDir finds the absolute path of the real bd binary by
@@ -54,12 +60,16 @@ func ResolveRealBd(cityPath string) (string, error) {
 // real bd is preserved behind the prepended shim dir.
 func ResolveRealBdExcludingDir(excludeDir string) (string, error) {
 	excludeClean := filepath.Clean(excludeDir)
+	shimBd := filepath.Join(excludeClean, "bd")
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" || filepath.Clean(dir) == excludeClean {
 			continue
 		}
 		candidate := filepath.Join(dir, "bd")
 		if !isExecutableFile(candidate) {
+			continue
+		}
+		if shimRoutesToThinClient(shimBd) && sameExecutable(candidate, shimBd) {
 			continue
 		}
 		abs, err := filepath.Abs(candidate)
@@ -69,6 +79,17 @@ func ResolveRealBdExcludingDir(excludeDir string) (string, error) {
 		return abs, nil
 	}
 	return "", fmt.Errorf("no executable bd found on PATH outside %s", excludeDir)
+}
+
+func sameExecutable(a, b string) bool {
+	ai, errA := os.Stat(a)
+	bi, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ai, bi)
+}
+
+func shimRoutesToThinClient(path string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && filepath.Base(resolved) == "bdshim"
 }
 
 // isExecutableFile reports whether path is a regular (symlinks followed) file

@@ -242,7 +242,12 @@ func sessionGCBinForCity(cityPath string, agentEnv map[string]string) string {
 	}
 	dir := cityBdShimbinDir(cityPath)
 	if isSymlink(filepath.Join(dir, "bd")) {
-		if realBd, err := resolveRealBdExcludingDir(dir); err == nil {
+		explicit := strings.TrimSpace(agentEnv[citylayout.RealBdEnvVar])
+		if isExecutableFile(explicit) && (!shimRoutesToThinClient(filepath.Join(dir, "bd")) || !sameExecutable(explicit, filepath.Join(dir, "bd"))) {
+			// Deployment/operator policy is authoritative. Rescanning PATH here
+			// can select a user-local alias to bdshim as its own passthrough.
+			agentEnv[citylayout.RealBdEnvVar] = explicit
+		} else if realBd, err := resolveRealBdExcludingDir(dir); err == nil {
 			agentEnv[citylayout.RealBdEnvVar] = realBd
 		}
 		// Point the worker's zsh at the gc-managed ZDOTDIR so the shim bin dir
@@ -264,12 +269,19 @@ func sessionGCBinForCity(cityPath string, agentEnv map[string]string) string {
 // preserved behind the prepended shim dir.
 func resolveRealBdExcludingDir(excludeDir string) (string, error) {
 	excludeClean := filepath.Clean(excludeDir)
+	shimBd := filepath.Join(excludeClean, "bd")
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" || filepath.Clean(dir) == excludeClean {
 			continue
 		}
 		candidate := filepath.Join(dir, "bd")
 		if !isExecutableFile(candidate) {
+			continue
+		}
+		// A second symlink to bdshim outside the city shimbin is still the
+		// shim, not a valid passthrough. Compare resolved file identity, not
+		// merely the containing directory.
+		if shimRoutesToThinClient(shimBd) && sameExecutable(candidate, shimBd) {
 			continue
 		}
 		abs, err := filepath.Abs(candidate)
@@ -279,6 +291,17 @@ func resolveRealBdExcludingDir(excludeDir string) (string, error) {
 		return abs, nil
 	}
 	return "", fmt.Errorf("no executable bd found on PATH outside %s", excludeDir)
+}
+
+func sameExecutable(a, b string) bool {
+	ai, errA := os.Stat(a)
+	bi, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ai, bi)
+}
+
+func shimRoutesToThinClient(path string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && filepath.Base(resolved) == "bdshim"
 }
 
 // isDir reports whether path is a directory (symlinks followed).

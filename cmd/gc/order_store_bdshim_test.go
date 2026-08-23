@@ -21,6 +21,7 @@ func TestOrderExecEnvInjectsGCBdReal(t *testing.T) {
 		t.Skip("exec-bit semantics differ on windows")
 	}
 	cityDir := t.TempDir()
+	t.Setenv(citylayout.RealBdEnvVar, "")
 	shimDir := citylayout.ShimbinDir(cityDir)
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatalf("mkdir shim dir: %v", err)
@@ -50,6 +51,44 @@ func TestOrderExecEnvInjectsGCBdReal(t *testing.T) {
 	if got[citylayout.RealBdEnvVar] != realBd {
 		t.Fatalf("env[%s] = %q, want the real bd %q (shim refuses without it)",
 			citylayout.RealBdEnvVar, got[citylayout.RealBdEnvVar], realBd)
+	}
+}
+
+func TestOrderExecEnvPreservesSupervisorGCBdReal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit semantics differ on windows")
+	}
+	cityDir := t.TempDir()
+	shimDir := citylayout.ShimbinDir(cityDir)
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	pathFirstDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathFirstDir, "bd"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write PATH-first bd: %v", err)
+	}
+	explicitDir := t.TempDir()
+	explicit := filepath.Join(explicitDir, "bd")
+	if err := os.WriteFile(explicit, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write explicit bd: %v", err)
+	}
+	t.Setenv("PATH", pathFirstDir+string(os.PathListSeparator)+explicitDir)
+	t.Setenv(citylayout.RealBdEnvVar, explicit)
+
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}
+	a := orders.Order{Name: "gate-sweep", Trigger: "condition", Exec: "true"}
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError: %v", err)
+	}
+	got := map[string]string{}
+	for _, entry := range envSlice {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			got[key] = value
+		}
+	}
+	if got[citylayout.RealBdEnvVar] != explicit {
+		t.Fatalf("env[%s] = %q, want supervisor passthrough %q", citylayout.RealBdEnvVar, got[citylayout.RealBdEnvVar], explicit)
 	}
 }
 
