@@ -161,3 +161,19 @@ func TestBuildT3BridgeStartupEnvelopeOnlyForT3Provider(t *testing.T) {
 		t.Fatal("buildT3BridgeStartupEnvelope(t3) = empty, want envelope")
 	}
 }
+
+func TestTemplateParamsToConfigFrontsBdShimPathForManagedCodexRuntime(t *testing.T) {
+	tp := TemplateParams{
+		Command: "codex",
+		Env: map[string]string{
+			"PATH":       "/usr/local/bin:/usr/bin",
+			"GC_BIN":     "/city/.gc/shimbin/gc",
+			"GC_BD_REAL": "/usr/local/bin/bd",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+	if got, want := cfg.Env["PATH"], "/city/.gc/shimbin:/usr/local/bin:/usr/bin"; got != want {
+		t.Fatalf("runtime PATH = %q, want %q (managed Codex must resolve bdshim before raw bd)", got, want)
+	}
+}
