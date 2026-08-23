@@ -173,7 +173,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// command executes only after the fresh pane's shell finishes
 		// initializing, so wait (bounded) for the launch to actually land —
 		// otherwise callers probing right after Start see a bare shell.
-		if err = p.c.paneRun(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
+		if err = p.c.paneRunCommand(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
 			p.waitPaneLaunched(ctx, paneID, spec.Raw)
 		}
 	default:
@@ -380,10 +380,22 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		if tail := strings.TrimSpace(out.String()); tail != "" {
-			if len(tail) > preStartOutputLimit {
-				tail = tail[len(tail)-preStartOutputLimit:]
-			}
+		// The command's own output can echo a credential back at us — `set -x`
+		// traces every expansion, and a failing curl prints the header it sent.
+		// This error is durable (logs, event bus, bead notes) for the same reason
+		// the client's are.
+		//
+		// Both environments it was given, not just the session env: c.Env starts
+		// from os.Environ() above, so the controller's own credentials are in
+		// scope for that echo as much as the session's.
+		//
+		// [runtime.RedactSecretsTail] scrubs before it truncates, which is the
+		// order that matters: redacting a cut tail would leave a straddling
+		// credential decapitated and no longer matching itself. Unlike tmux's
+		// bounded writer this holds the whole output already, so nothing has to
+		// be retained to make that work.
+		tail, _ := runtime.RedactSecretsTail(out.String(), preStartOutputLimit, runtime.SetupCommandSecrets(env))
+		if tail = strings.TrimSpace(tail); tail != "" {
 			return fmt.Errorf("%w: %s", err, tail)
 		}
 		return err
