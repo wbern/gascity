@@ -79,6 +79,38 @@ func TestBdStoreDirHandlesNilReceiver(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetPreservesNestedDependencyStatus(t *testing.T) {
+	// Live hook regression (gci-dpc3): bd show embeds the full blocker bead
+	// with status=closed, but BdStore's intermediate dependency projection used
+	// to discard status. The trigger readiness guard then mapped the satisfied
+	// blocker to unknown and refused a bead that bd ready correctly returned.
+	raw := `[{
+		"id":"crm-work","title":"work","status":"open","issue_type":"task",
+		"created_at":"2026-08-23T00:00:00Z","updated_at":"2026-08-23T00:00:00Z",
+		"dependencies":[{
+			"id":"crm-blocker","status":"closed","dependency_type":"blocks"
+		}]
+	}]`
+	store := beads.NewBdStore("/city", fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		"bd show --json crm-work": {out: []byte(raw)},
+	}))
+
+	got, err := store.Get("crm-work")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("Dependencies = %#v, want one", got.Dependencies)
+	}
+	dep := got.Dependencies[0]
+	if dep.DependsOnID != "crm-blocker" || dep.Type != "blocks" || dep.Status != "closed" {
+		t.Fatalf("dependency = %#v, want blocker/blocks/closed", dep)
+	}
+}
+
 func TestBdStoreAllowUnboundedReadsIsOptIn(t *testing.T) {
 	t.Run("control-plane store", func(t *testing.T) {
 		var gotArgs []string
