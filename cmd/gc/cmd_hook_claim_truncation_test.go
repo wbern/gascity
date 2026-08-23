@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,5 +191,35 @@ func TestHookClaimStoreOmitsUnboundedFlagWithoutTheShim(t *testing.T) {
 	}
 	if !reflect.DeepEqual(readArgs, []string{"show", "--json", "work-1"}) {
 		t.Fatalf("read args = %#v, want a plain bd read", readArgs)
+	}
+}
+
+// GC_BD_REAL can remain exported while PATH resolves bd directly to that raw
+// binary (for example during a supervisor rollout). In that mixed topology raw
+// bd must not receive the shim-only --allow-unbounded flag.
+func TestHookClaimStoreOmitsUnboundedFlagWhenPathResolvesRawBd(t *testing.T) {
+	dir := t.TempDir()
+	realBd := filepath.Join(dir, "bd")
+	if err := os.WriteFile(realBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(citylayout.RealBdEnvVar, realBd)
+	t.Setenv("PATH", dir)
+
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var readArgs []string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, args ...string) ([]byte, error) {
+			readArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1"}]`), nil
+		}
+	}
+
+	if _, _, err := hookResolveBeadWithBdStore(context.Background(), "/rig", nil, "work-1"); err != nil {
+		t.Fatalf("hookResolveBeadWithBdStore(): %v", err)
+	}
+	if slices.Contains(readArgs, "--allow-unbounded") {
+		t.Fatalf("raw bd read args = %#v, must omit shim-only --allow-unbounded", readArgs)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -343,7 +344,31 @@ func controlReadyFallbackQuery(query, dir string, runtimeEnv []string) ([]beads.
 // from rig-scoped control dispatchers, which is exactly where it is needed.
 func controlReadyShimmed(env map[string]string) bool {
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
-	return strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) != ""
+	realBd := strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar))
+	if realBd == "" {
+		return false
+	}
+	pathValue := envListValue(runtimeEnv, "PATH")
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, "bd")
+		candidateInfo, err := os.Stat(candidate)
+		if err != nil || candidateInfo.IsDir() || candidateInfo.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		realInfo, err := os.Stat(realBd)
+		if err != nil || realInfo.IsDir() {
+			return false
+		}
+		// GC_BD_REAL describes the shim's passthrough target, but it does not
+		// prove that this command runner will execute the shim. During rollout
+		// PATH may resolve bd directly to that raw binary, which rejects the
+		// shim-only --allow-unbounded flag.
+		return !os.SameFile(candidateInfo, realInfo)
+	}
+	return false
 }
 
 // controlReadyUsesSummary reports whether the worker environment is fronted

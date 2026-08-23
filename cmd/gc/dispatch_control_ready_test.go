@@ -316,6 +316,15 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
+func shimmedBdEnvForTest(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	realBd := filepath.Join(dir, "real-bd")
+	if err := os.WriteFile(realBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake real bd: %v", err)
+	}
+	return map[string]string{citylayout.RealBdEnvVar: realBd}
+}
+
 func TestControlReadyCachePrimeUsesUnboundedReadOnlyForShimmedDispatcher(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
@@ -339,7 +348,7 @@ esac
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	cache := controlReadyCacheFor(cityDir, cityDir, nil, shimmedBdEnvForTest(t, tmp))
 	if cache == nil {
 		t.Fatal("controlReadyCacheFor returned nil; shimmed control cache prime must decode its full read")
 	}
@@ -562,7 +571,7 @@ printf '%%s' "$*" > %q
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
+	result, err := controlReadyFallbackReady(t.TempDir(), shimmedBdEnvForTest(t, tmp), false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -599,10 +608,9 @@ func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityS
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{
-		citylayout.RealBdEnvVar: "/real/bd",
-		"GC_STORE_SCOPE":        "rig",
-	}, false)
+	env := shimmedBdEnvForTest(t, tmp)
+	env["GC_STORE_SCOPE"] = "rig"
+	result, err := controlReadyFallbackReady(t.TempDir(), env, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -645,7 +653,7 @@ printf '[{"id":"gcw-plain"}]'
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
+	result, err := controlReadyFallbackReady(t.TempDir(), shimmedBdEnvForTest(t, tmp), false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
