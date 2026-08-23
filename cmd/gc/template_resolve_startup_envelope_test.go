@@ -68,6 +68,7 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 			"ZDOTDIR":         "/tmp/city/.gc/shimzdotdir",
 			"GC_BIN":          "/tmp/city/.gc/shimbin/gc",
 			"GC_BEADS":        "bd",
+			"PATH":            "/tmp/city/.gc/shimbin:/usr/local/bin:/usr/bin",
 			// store-connection env: the load-bearing gap — without these the
 			// codex session's bd cannot reach the managed Dolt server -> no_work.
 			"GC_DOLT_PORT":           "49813",
@@ -97,7 +98,7 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 	// shim vars + the store-connection vars must all reach codex, or its bd
 	// resolves the wrong binary AND/OR cannot reach the managed Dolt store.
 	for _, k := range []string{
-		"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS",
+		"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS", "PATH",
 		"GC_DOLT_PORT", canonicalDoltPortEnv, "GC_DOLT_USER", "BEADS_DOLT_SERVER_PORT",
 		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR", "GC_SESSION_ID",
 	} {

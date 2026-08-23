@@ -88,6 +88,11 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 		"ZDOTDIR":    tp.Env["ZDOTDIR"],
 		"GC_BIN":     tp.Env["GC_BIN"],
 		"GC_BEADS":   tp.Env["GC_BEADS"],
+		// Codex does not inherit the tmux session environment directly. Preserve
+		// the controller-prepared PATH so .gc/shimbin stays ahead of the real bd;
+		// forwarding GC_BD_REAL while dropping this PATH makes gc hook pass
+		// shim-private flags to raw bd and fail before it can claim work.
+		"PATH": tp.Env["PATH"],
 	}
 	// Store-connection env (the load-bearing gap for gci-x8zo): the managed Dolt
 	// server coordinates + the bead scope/actor/session identity.
