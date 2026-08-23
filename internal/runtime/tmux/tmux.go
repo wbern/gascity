@@ -351,6 +351,20 @@ func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
 }
 
+// runNoStart connects only to an already-running named server. -N must precede
+// the socket-selection flags because tmux parses it as a global option.
+func (t *Tmux) runNoStart(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxSubprocessTimeout)
+	defer cancel()
+	allArgs := []string{"-N", "-u"}
+	if t.cfg.SocketName != "" {
+		allArgs = append(allArgs, "-L", t.cfg.SocketName)
+	}
+	allArgs = append(allArgs, args...)
+	_, err := t.exec.executeCtx(ctx, allArgs)
+	return err
+}
+
 // wrapError wraps tmux errors with context.
 func wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
@@ -400,8 +414,16 @@ func wrapError(err error, stderr string, args []string) error {
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
 func (t *Tmux) probeServerAlive() error {
+	_, err := t.probeServer()
+	return err
+}
+
+// probeServer reports whether a named tmux server answered the probe. A false
+// result is safe only when the named socket was observed absent or stale; it is
+// the one case where a session creation may start the server.
+func (t *Tmux) probeServer() (bool, error) {
 	if t.cfg.SocketName == "" {
-		return nil
+		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
 	defer cancel()
@@ -409,16 +431,16 @@ func (t *Tmux) probeServerAlive() error {
 	if err == nil {
 		// Server is alive and (improbably) actually has a session with the
 		// probe name. Still safe — server responded.
-		return nil
+		return true, nil
 	}
 	if errors.Is(err, ErrSessionNotFound) {
 		// Healthy server, just doesn't have the probe session. Safe.
-		return nil
+		return true, nil
 	}
 	if errors.Is(err, ErrNoCurrentTarget) {
 		// The server answered: it is alive with zero sessions, so new-session
 		// attaches rather than unlinking and rebinding. Never a stale socket.
-		return nil
+		return true, nil
 	}
 	if errors.Is(err, ErrNoServer) {
 		observer := t.serverSocketObserver
@@ -428,16 +450,16 @@ func (t *Tmux) probeServerAlive() error {
 		path := namedSocketPath(t.cfg.SocketName)
 		observationErr := observer(ctx, path)
 		if observationErr == nil {
-			return nil
+			return false, nil
 		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
 		// must not retry a guarded no-server result as an ordinary absence.
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
+		return false, fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
 	// fork into a parallel server.
-	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+	return false, fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
 }
 
 // NewSession creates a new detached tmux session.
@@ -445,14 +467,19 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if err := t.probeServerAlive(); err != nil {
+	serverPresent, err := t.probeServer()
+	if err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	_, err := t.run(args...)
+	if serverPresent {
+		err = t.runNoStart(args...)
+	} else {
+		_, err = t.run(args...)
+	}
 	if err != nil {
 		return err
 	}
@@ -473,7 +500,8 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if err := t.probeServerAlive(); err != nil {
+	serverPresent, err := t.probeServer()
+	if err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -482,7 +510,11 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
+	if serverPresent {
+		err = t.runNoStart(args...)
+	} else {
+		_, err = t.run(args...)
+	}
 	if err != nil {
 		return err
 	}
@@ -506,7 +538,8 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if err := t.probeServerAlive(); err != nil {
+	serverPresent, err := t.probeServer()
+	if err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -542,7 +575,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 	// Add the command as the last argument.
 	args = append(args, t.wrapPaneCommand(command))
-	if err := t.runNewSession(args, env); err != nil {
+	if err := t.runNewSession(args, env, serverPresent); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()

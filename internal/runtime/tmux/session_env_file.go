@@ -20,9 +20,14 @@ const (
 // values out of the process argument vector. An all-inert environment keeps
 // the plain argv path; when secret staging fails, it fails closed rather than
 // falling back to the argv leak this path prevents.
-func (t *Tmux) runNewSession(args []string, env map[string]string) error {
+func (t *Tmux) runNewSession(args []string, env map[string]string, serverPresent bool) error {
 	if !runtime.EnvHasArgvSecrets(env) {
-		_, err := t.run(args...)
+		var err error
+		if serverPresent {
+			err = t.runNoStart(args...)
+		} else {
+			_, err = t.run(args...)
+		}
 		return err
 	}
 	sweepStaleStagedDirs()
@@ -31,6 +36,10 @@ func (t *Tmux) runNewSession(args []string, env map[string]string) error {
 		return fmt.Errorf("staging tmux command file (session env holds secrets that must not reach argv): %w", err)
 	}
 	defer cleanup()
+	if serverPresent {
+		err = t.runNoStart("source-file", path)
+		return err
+	}
 	_, err = t.run("start-server", ";", "source-file", path)
 	return err
 }

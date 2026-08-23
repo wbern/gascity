@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -3144,6 +3145,76 @@ func TestSharedServerContinuityAfterHandoffStop(t *testing.T) {
 	}
 	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
 		t.Fatalf("sibling session/process did not survive already-gone target stop")
+	}
+}
+
+// TestSharedServerContinuityAfterAttendedHandoffStop matches the live handoff
+// shape: the target is attended by an ordinary terminal client, while sibling
+// sessions share the same server. Stopping the target must not replace that
+// server or disturb a sibling.
+func TestSharedServerContinuityAfterAttendedHandoffStop(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	socket := fmt.Sprintf("gctest-attended-handoff-%d-%d", os.Getpid(), time.Now().UnixNano())
+	cfg := DefaultConfig()
+	cfg.SocketName = socket
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	_ = provider.TeardownServer()
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const target = "attended-handoff-target"
+	const sibling = "attended-handoff-sibling"
+	for _, name := range []string{target, sibling} {
+		if err := provider.Start(context.Background(), name, runtimepkg.Config{Command: "sleep 600", Env: map[string]string{"OPENAI_API_KEY": "private-test-canary"}}); err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+	}
+
+	client := exec.Command("script", hiddenAttachScriptArgs(runtime.GOOS, []string{"-u", "-L", socket, "attach-session", "-t", target})...)
+	client.Env = append(client.Environ(), "TERM=xterm-256color")
+	client.Stdout = io.Discard
+	client.Stderr = io.Discard
+	if err := client.Start(); err != nil {
+		t.Fatalf("start attended client: %v", err)
+	}
+	t.Cleanup(func() {
+		if client.Process != nil {
+			_ = client.Process.Kill()
+		}
+		_ = client.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !tmux.IsSessionAttached(target) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !tmux.IsSessionAttached(target) {
+		t.Fatal("attended client did not attach")
+	}
+
+	serverPID := mustTmuxServerPID(t, tmux)
+	siblingPID := mustPanePID(t, tmux, sibling)
+	before := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if err := provider.Stop(target); err != nil {
+		t.Fatalf("stop attended handoff target: %v", err)
+	}
+	if err := provider.Start(context.Background(), target, runtimepkg.Config{Command: "sleep 600", Env: map[string]string{"OPENAI_API_KEY": "private-test-canary"}}); err != nil {
+		t.Fatalf("restart attended handoff target: %v", err)
+	}
+	if got := mustTmuxServerPID(t, tmux); got != serverPID {
+		t.Fatalf("tmux server pid changed after attended handoff: before=%s after=%s", serverPID, got)
+	}
+	after := handoffProcessSnapshot(t, siblingPID, serverPID)
+	if got := after.starts[serverPID]; got != before.starts[serverPID] {
+		t.Fatalf("tmux server start identity changed after attended handoff: before=%q after=%q", before.starts[serverPID], got)
+	}
+	if got := after.starts[siblingPID]; got != before.starts[siblingPID] {
+		t.Fatalf("sibling start identity changed after attended handoff: before=%q after=%q", before.starts[siblingPID], got)
+	}
+	if !provider.IsRunning(sibling) || !processAlive(siblingPID) {
+		t.Fatal("sibling session/process did not survive attended handoff")
 	}
 }
 
