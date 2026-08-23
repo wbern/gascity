@@ -190,3 +190,21 @@ func TestHookClaimStoreOmitsUnboundedFlagWithoutTheShim(t *testing.T) {
 		t.Fatalf("read args = %#v, want a plain bd read", readArgs)
 	}
 }
+
+func TestHookClaimCommandPathUsesDeclaredCityShimWithoutPATH(t *testing.T) {
+	env := map[string]string{
+		citylayout.RealBdEnvVar: "/usr/local/bin/bd",
+		"GC_BIN":                "/city/.gc/shimbin/gc",
+		"PATH":                  "/usr/local/bin:/usr/bin",
+	}
+	if got, want := hookClaimCommandPath("bd", env), "/city/.gc/shimbin/bd"; got != want {
+		t.Fatalf("hookClaimCommandPath(bd) = %q, want %q", got, want)
+	}
+	if got := hookClaimCommandPath("git", env); got != "git" {
+		t.Fatalf("hookClaimCommandPath(git) = %q, want git", got)
+	}
+	delete(env, citylayout.RealBdEnvVar)
+	if got := hookClaimCommandPath("bd", env); got != "bd" {
+		t.Fatalf("hookClaimCommandPath(raw bd) = %q, want PATH lookup", got)
+	}
+}
