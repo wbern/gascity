@@ -788,26 +788,22 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 }
 
-// restampWorkBeadRouting stamps gc.routed_to on the work bead a graph workflow
-// was attached to. gc.routed_to on the WORK bead is what the claim path reads;
-// the cooked workflow root carries the graph-routing metadata instead, so an
-// attach that routes only the root leaves the work bead looking unrouted to
-// anything reading gc.routed_to directly. Failures are reported as metadata
-// errors rather than failing the launch: by this point the workflow is already
-// running, and unwinding it over a routing restamp would be worse than a
-// surfaced warning.
+// restampWorkBeadRouting records the execution route on the work bead a graph
+// workflow was attached to. The source is tracked through the input convoy;
+// making it independently claimable through gc.routed_to would create a second
+// worker authority beside the workflow's routed executable steps.
 func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" || deps.Store == nil || result == nil {
 		return
 	}
-	target := strings.TrimSpace(agentutil.RoutedToIdentity(&a))
+	target := agentutil.NormalizePoolRouteTarget(deps.Cfg, strings.TrimSpace(agentutil.RoutedToIdentity(&a)))
 	if target == "" {
 		return
 	}
-	if err := deps.Store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, target); err != nil {
+	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
-			fmt.Sprintf("setting %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
+			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
 	}
 }
 
