@@ -14,7 +14,8 @@ import (
 )
 
 type ciCriticalPathWorkflow struct {
-	Jobs map[string]ciCriticalPathJob `yaml:"jobs"`
+	Permissions map[string]string            `yaml:"permissions"`
+	Jobs        map[string]ciCriticalPathJob `yaml:"jobs"`
 }
 
 type ciCriticalPathJob struct {
@@ -1134,6 +1135,49 @@ func TestForkVerifyRunsOnlyInForks(t *testing.T) {
 	const want = "${{ github.repository != 'gastownhall/gascity' }}"
 	if strings.TrimSpace(job.If) != want {
 		t.Fatalf("fork verify job condition = %q, want %q so canonical PRs do not duplicate CI", job.If, want)
+	}
+}
+
+func TestForkVerifyCompilesChangedRuntimeTmuxIntegrationPackage(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "fork-verify.yml")
+	if got := wf.Permissions["pull-requests"]; got != "read" {
+		t.Fatalf("fork-verify pull-requests permission = %q, want read for dorny/paths-filter pull-request diff lookup", got)
+	}
+	job, ok := wf.Jobs["verify"]
+	if !ok {
+		t.Fatal("fork-verify workflow has no verify job")
+	}
+
+	var filter, compile *ciCriticalPathStep
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		switch step.ID {
+		case "runtime-tmux":
+			filter = step
+		case "compile-runtime-tmux-integration":
+			compile = step
+		}
+	}
+	if filter == nil {
+		t.Fatal("fork-verify has no runtime-tmux path filter")
+	}
+	if !strings.Contains(filter.Uses, "dorny/paths-filter@") {
+		t.Fatalf("runtime-tmux filter uses %q, want pinned dorny/paths-filter action", filter.Uses)
+	}
+	for _, path := range []string{"internal/runtime/tmux/**", "scripts/runtime-tmux-tests.manifest"} {
+		if !strings.Contains(filter.With["filters"], path) {
+			t.Errorf("runtime-tmux filter paths = %q, want %q", filter.With["filters"], path)
+		}
+	}
+
+	if compile == nil {
+		t.Fatal("fork-verify has no runtime-tmux integration compile step")
+	}
+	if strings.TrimSpace(compile.If) != "${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}" {
+		t.Fatalf("runtime-tmux compile condition = %q, want conditional path-filter output", compile.If)
+	}
+	if strings.TrimSpace(compile.Run) != "go test -tags=integration -run '^$' ./internal/runtime/tmux" {
+		t.Fatalf("runtime-tmux compile command = %q, want compile-only integration test command", compile.Run)
 	}
 }
 

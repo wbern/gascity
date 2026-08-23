@@ -20,6 +20,9 @@ on:
 
 permissions:
   contents: read
+  # dorny/paths-filter reads the pull-request file list when this workflow
+  # runs for a PR; contents: read alone is insufficient for that API call.
+  pull-requests: read
 
 jobs:
   verify:
@@ -33,6 +36,16 @@ jobs:
       BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # The upstream CI graph owns real tmux integration coverage. This narrow
+      # fork-only fence only compiles integration-tagged files when they change,
+      # catching missing test-only helpers without starting a tmux server.
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: runtime-tmux
+        with:
+          filters: |
+            runtime_tmux:
+              - 'internal/runtime/tmux/**'
+              - 'scripts/runtime-tmux-tests.manifest'
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -40,6 +53,10 @@ jobs:
           install-claude-cli: "false"
       - name: Build (compiles the whole tree — catches compile errors the macOS ICU break hides)
         run: go build ./...
+      - name: Compile changed tmux integration package
+        id: compile-runtime-tmux-integration
+        if: ${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}
+        run: go test -tags=integration -run '^$' ./internal/runtime/tmux
       - name: Vet changed package
         run: go vet ./cmd/gc/...
       - name: Unit tests — cross-store work delivery
