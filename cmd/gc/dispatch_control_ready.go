@@ -351,7 +351,9 @@ func controlReadyShimmed(env map[string]string) bool {
 	pathValue := envListValue(runtimeEnv, "PATH")
 	for _, dir := range filepath.SplitList(pathValue) {
 		if dir == "" {
-			continue
+			// Match os/exec's Unix PATH semantics: an empty component means
+			// the current directory, so "bd" resolves as "./bd" here.
+			dir = "."
 		}
 		candidate := filepath.Join(dir, "bd")
 		candidateInfo, err := os.Stat(candidate)

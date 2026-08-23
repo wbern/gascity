@@ -325,6 +325,32 @@ func shimmedBdEnvForTest(t *testing.T, dir string) map[string]string {
 	return map[string]string{citylayout.RealBdEnvVar: realBd}
 }
 
+func TestControlReadyShimmedTreatsEmptyPathEntryAsCurrentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "bd")
+	realBd := filepath.Join(dir, "real-bd")
+	for _, path := range []string{shim, realBd} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	if !controlReadyShimmed(map[string]string{
+		citylayout.RealBdEnvVar: realBd,
+		"PATH":                  string(os.PathListSeparator),
+	}) {
+		t.Fatal("empty PATH component resolving ./bd shim was not recognized")
+	}
+}
+
 func TestControlReadyCachePrimeUsesUnboundedReadOnlyForShimmedDispatcher(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
