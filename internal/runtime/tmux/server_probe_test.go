@@ -130,6 +130,32 @@ func TestNewSessionErrNoServerObservedSafeAllowsCreation(t *testing.T) {
 	}
 }
 
+func TestNewSessionRefusesToCreateOverWitnessedServer(t *testing.T) {
+	tm := &Tmux{
+		cfg:  Config{SocketName: "gc-existing"},
+		exec: probeAssertSet([]string{"", "", ""}, []error{ErrSessionNotFound, nil, nil}),
+	}
+	if err := tm.NewSession("gc-safe-create", ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if got := tm.exec.(*fakeExecutor).calls[1]; len(got) < 5 || got[0] != "-N" || got[4] != "new-session" {
+		t.Fatalf("create args = %#v, want -N new-session after successful server probe", got)
+	}
+}
+
+func TestNewSessionWithSecretEnvRefusesToCreateOverWitnessedServer(t *testing.T) {
+	tm := &Tmux{
+		cfg:  Config{SocketName: "gc-existing"},
+		exec: probeAssertSet([]string{"", "", ""}, []error{ErrSessionNotFound, nil, nil}),
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-safe-secret-create", "", "sleep 600", map[string]string{"OPENAI_API_KEY": "test-secret"}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if got := tm.exec.(*fakeExecutor).calls[1]; len(got) < 5 || got[0] != "-N" || got[4] != "source-file" {
+		t.Fatalf("secret create args = %#v, want -N source-file after successful server probe", got)
+	}
+}
+
 func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 	t.Run("unknown observer", func(t *testing.T) {
 		fe := &fakeExecutor{err: ErrNoServer}
@@ -405,8 +431,8 @@ func TestNewSessionProbesBeforeCreatingWhenSocketSet(t *testing.T) {
 		}
 	}
 	create := fe.calls[1]
-	if create[3] != "new-session" {
-		t.Fatalf("second call should be new-session, got %v", create)
+	if len(create) < 5 || create[0] != "-N" || create[4] != "new-session" {
+		t.Fatalf("second call should use -N new-session after a healthy probe, got %v", create)
 	}
 }
 
