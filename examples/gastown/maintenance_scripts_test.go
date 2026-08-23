@@ -8838,6 +8838,47 @@ func TestJsonlExportReusesMaintenancePackArchiveRepo(t *testing.T) {
 	}
 }
 
+func TestJsonlExportDisablesAutomaticMaintenanceForFreshAndExistingArchive(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveRepo := filepath.Join(cityDir, "archive")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+	assertGitConfig := func(key, want string) {
+		t.Helper()
+		out, err := exec.Command("git", "-C", archiveRepo, "config", "--local", "--get", key).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git config %s: %v\n%s", key, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Fatalf("git config %s = %q, want %q", key, got, want)
+		}
+	}
+	assertGitConfig("maintenance.auto", "false")
+	assertGitConfig("gc.auto", "0")
+
+	for _, mutation := range [][]string{
+		{"maintenance.auto", "true"},
+		{"gc.auto", "6700"},
+	} {
+		out, err := exec.Command("git", "-C", archiveRepo, "config", "--local", mutation[0], mutation[1]).CombinedOutput()
+		if err != nil {
+			t.Fatalf("mutate git config %s: %v\n%s", mutation[0], err, out)
+		}
+	}
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+	assertGitConfig("maintenance.auto", "false")
+	assertGitConfig("gc.auto", "0")
+}
+
 func TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

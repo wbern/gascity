@@ -337,6 +337,19 @@ get_archive_mode() {
     echo "$ARCHIVE_MODE"
 }
 
+# Archive snapshots replace large JSONL blobs on every commit. Git's default
+# porcelain post-command hook may therefore launch `git maintenance run --auto
+# --detach`, whose gc/repack path can require memory proportional to the loose
+# object corpus. Keep automatic maintenance disabled for this purpose-built
+# repository; explicit, resource-bounded maintenance remains an operator task.
+# Re-apply on every export so an install/reconcile or manual config edit cannot
+# silently re-arm unbounded maintenance.
+disable_unbounded_archive_maintenance() {
+    [ -d "$ARCHIVE_REPO/.git" ] || return 0
+    git -C "$ARCHIVE_REPO" config --local maintenance.auto false
+    git -C "$ARCHIVE_REPO" config --local gc.auto 0
+}
+
 should_attempt_push() {
     resolve_archive_mode
     [ "$ARCHIVE_MODE" = "push" ]
@@ -750,6 +763,8 @@ fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
 mkdir -p "$(dirname "$STATE_FILE")"
 
+disable_unbounded_archive_maintenance
+
 log_archive_mode_if_needed
 retry_pending_spike_alert
 
@@ -808,6 +823,7 @@ if [ ! -d "$ARCHIVE_REPO/.git" ]; then
     mkdir -p "$ARCHIVE_REPO"
     git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
 fi
+disable_unbounded_archive_maintenance
 
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
