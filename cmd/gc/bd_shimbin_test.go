@@ -342,6 +342,32 @@ func TestSessionEnvSetsGCBDRealToRealBdNotShim(t *testing.T) {
 	}
 }
 
+// An operator/deployment may pin the known raw passthrough explicitly (for
+// example in the supervisor environment). Session resolution must honor that
+// authority instead of rescanning PATH, where a user-local bdshim can appear
+// ahead of raw bd and be selected as its own passthrough.
+func TestSessionEnvPreservesExplicitGCBDReal(t *testing.T) {
+	cityPath := t.TempDir()
+	bootstrapDir := t.TempDir()
+	writeFakeBd(t, bootstrapDir)
+	t.Setenv("PATH", bootstrapDir)
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	userLocalDir := t.TempDir()
+	writeFakeBd(t, userLocalDir)
+	explicitRawDir := t.TempDir()
+	explicitRaw := writeFakeBd(t, explicitRawDir)
+	t.Setenv("PATH", userLocalDir+string(os.PathListSeparator)+explicitRawDir)
+	env := map[string]string{citylayout.RealBdEnvVar: explicitRaw}
+	_ = sessionGCBinForCity(cityPath, env)
+
+	if got := env[citylayout.RealBdEnvVar]; got != explicitRaw {
+		t.Fatalf("GC_BD_REAL = %q, want explicit passthrough %q", got, explicitRaw)
+	}
+}
+
 func TestResolveRealBdExcludingDirSkipsShimbin(t *testing.T) {
 	cityPath := t.TempDir()
 	shimbin := cityBdShimbinDir(cityPath)
@@ -358,6 +384,44 @@ func TestResolveRealBdExcludingDirSkipsShimbin(t *testing.T) {
 	}
 	if got != realBd {
 		t.Fatalf("resolved bd = %q, want the real bd %q (not the shimbin one)", got, realBd)
+	}
+}
+
+func TestResolveRealBdExcludingDirSkipsAliasToShimTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	bootstrapDir := t.TempDir()
+	writeFakeBd(t, bootstrapDir)
+	t.Setenv("PATH", bootstrapDir)
+	if err := ensureCityBdShimbin(cityPath, config.BdShimModeAuto, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	thinDir := t.TempDir()
+	thin := filepath.Join(thinDir, "bdshim")
+	if err := os.WriteFile(thin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake bdshim: %v", err)
+	}
+	shimBd := filepath.Join(cityBdShimbinDir(cityPath), "bd")
+	if err := os.Remove(shimBd); err != nil {
+		t.Fatalf("remove bootstrap bd link: %v", err)
+	}
+	if err := os.Symlink(thin, shimBd); err != nil {
+		t.Fatalf("link fake bdshim: %v", err)
+	}
+
+	aliasDir := t.TempDir()
+	if err := os.Symlink(shimBd, filepath.Join(aliasDir, "bd")); err != nil {
+		t.Fatalf("alias shim bd: %v", err)
+	}
+	realBdDir := t.TempDir()
+	realBd := writeFakeBd(t, realBdDir)
+	t.Setenv("PATH", aliasDir+string(os.PathListSeparator)+realBdDir)
+
+	got, err := resolveRealBdExcludingDir(cityBdShimbinDir(cityPath))
+	if err != nil {
+		t.Fatalf("resolveRealBdExcludingDir: %v", err)
+	}
+	if got != realBd {
+		t.Fatalf("resolved bd = %q, want raw bd %q (not alias to shim target)", got, realBd)
 	}
 }
 
