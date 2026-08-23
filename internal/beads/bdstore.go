@@ -696,6 +696,7 @@ type bdIssueDep struct {
 	DependsOnID    string `json:"depends_on_id"`
 	Type           string `json:"type"`
 	ID             string `json:"id"`
+	Status         string `json:"status"`
 	DependencyType string `json:"dependency_type"`
 }
 
@@ -877,6 +878,7 @@ func (b *bdIssue) normalizedDependencies() []Dep {
 			IssueID:     issueID,
 			DependsOnID: dependsOnID,
 			Type:        depType,
+			Status:      strings.TrimSpace(raw.Status),
 		})
 	}
 	return deps
