@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime/t3bridge"
@@ -64,6 +65,12 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 	if provider == "" {
 		provider = tp.Env["GC_PROVIDER"]
 	}
+	projectedPATH := tp.Env["PATH"]
+	if strings.TrimSpace(tp.Env[citylayout.RealBdEnvVar]) != "" {
+		pathEnv := map[string]string{"PATH": projectedPATH}
+		prependGCBinDirToPATH(pathEnv, citylayout.ShimbinGCPath(tp.CityPath))
+		projectedPATH = pathEnv["PATH"]
+	}
 	// gcEnv is the env the t3bridge runtime projects onto the codex process.
 	// It MUST carry the same store-connection env the tmux/claude path gives its
 	// sessions (template_resolve.go Step 8), or a codex session's bd cannot reach
@@ -92,7 +99,7 @@ func buildT3BridgeStartupEnvelope(tp TemplateParams, startupPrompt string) json.
 		// the controller-prepared PATH so .gc/shimbin stays ahead of the real bd;
 		// forwarding GC_BD_REAL while dropping this PATH makes gc hook pass
 		// shim-private flags to raw bd and fail before it can claim work.
-		"PATH": tp.Env["PATH"],
+		"PATH": projectedPATH,
 	}
 	// Store-connection env (the load-bearing gap for gci-x8zo): the managed Dolt
 	// server coordinates + the bead scope/actor/session identity.
