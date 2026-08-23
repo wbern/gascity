@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -33,7 +34,30 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
-var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
+var hookClaimCommandRunnerWithEnvContext = managedHookClaimCommandRunnerWithEnvContext
+
+// managedHookClaimCommandRunnerWithEnvContext makes hook-owned bd reads select
+// the city bdshim from GC_BIN directly. T3/Codex preserves GC_BIN and
+// GC_BD_REAL but intentionally rebuilds PATH, so PATH lookup can otherwise run
+// raw bd while the hook enables shim-only flags such as --allow-unbounded.
+func managedHookClaimCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) beads.CommandRunner {
+	runner := beads.ExecCommandRunnerWithEnvContext(ctx, env)
+	return func(dir, name string, args ...string) ([]byte, error) {
+		return runner(dir, hookClaimCommandPath(name, env), args...)
+	}
+}
+
+func hookClaimCommandPath(name string, env map[string]string) string {
+	if name != "bd" || strings.TrimSpace(env[citylayout.RealBdEnvVar]) == "" {
+		return name
+	}
+	gcBin := strings.TrimSpace(env["GC_BIN"])
+	shimDir := filepath.Dir(gcBin)
+	if !filepath.IsAbs(gcBin) || filepath.Base(shimDir) != "shimbin" {
+		return name
+	}
+	return filepath.Join(shimDir, "bd")
+}
 
 type hookClaimOptions struct {
 	Context            context.Context
