@@ -20,6 +20,9 @@ on:
 
 permissions:
   contents: read
+  # dorny/paths-filter reads the pull-request file list when this workflow
+  # runs for a PR; contents: read alone is insufficient for that API call.
+  pull-requests: read
 
 jobs:
   verify:

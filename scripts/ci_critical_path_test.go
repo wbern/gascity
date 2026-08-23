@@ -14,7 +14,8 @@ import (
 )
 
 type ciCriticalPathWorkflow struct {
-	Jobs map[string]ciCriticalPathJob `yaml:"jobs"`
+	Permissions map[string]string            `yaml:"permissions"`
+	Jobs        map[string]ciCriticalPathJob `yaml:"jobs"`
 }
 
 type ciCriticalPathJob struct {
@@ -1139,6 +1140,9 @@ func TestForkVerifyRunsOnlyInForks(t *testing.T) {
 
 func TestForkVerifyCompilesChangedRuntimeTmuxIntegrationPackage(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "fork-verify.yml")
+	if got := wf.Permissions["pull-requests"]; got != "read" {
+		t.Fatalf("fork-verify pull-requests permission = %q, want read for dorny/paths-filter pull-request diff lookup", got)
+	}
 	job, ok := wf.Jobs["verify"]
 	if !ok {
 		t.Fatal("fork-verify workflow has no verify job")
