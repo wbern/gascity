@@ -52,6 +52,7 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 	// controller-fresh/federated routed work, and `gc hook --claim` returns
 	// no_work -> pool spawn-loop. Claude sessions (tmux) already receive these.
 	tp := TemplateParams{
+		CityPath:                 "/tmp/city",
 		TemplateName:             "gas-city-infra/codex-polecat",
 		InstanceName:             "gas-city-infra/codex-polecat-1",
 		SessionName:              "codex-polecat-gc2-nhr6q",
@@ -66,9 +67,8 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 			"GC_SESSION_NAME": "codex-polecat-gc2-nhr6q",
 			"GC_BD_REAL":      "/home/u/go/bin/bd",
 			"ZDOTDIR":         "/tmp/city/.gc/shimzdotdir",
-			"GC_BIN":          "/tmp/city/.gc/shimbin/gc",
 			"GC_BEADS":        "bd",
-			"PATH":            "/tmp/city/.gc/shimbin:/usr/local/bin:/usr/bin",
+			"PATH":            "/usr/local/bin:/usr/bin",
 			// store-connection env: the load-bearing gap — without these the
 			// codex session's bd cannot reach the managed Dolt server -> no_work.
 			"GC_DOLT_PORT":           "49813",
@@ -98,13 +98,19 @@ func TestBuildT3BridgeStartupEnvelope_ForwardsBdShimEnvSoCodexRoutesThroughContr
 	// shim vars + the store-connection vars must all reach codex, or its bd
 	// resolves the wrong binary AND/OR cannot reach the managed Dolt store.
 	for _, k := range []string{
-		"GC_BD_REAL", "ZDOTDIR", "GC_BIN", "GC_BEADS", "PATH",
+		"GC_BD_REAL", "ZDOTDIR", "GC_BEADS",
 		"GC_DOLT_PORT", canonicalDoltPortEnv, "GC_DOLT_USER", "BEADS_DOLT_SERVER_PORT",
 		"GC_BEADS_SCOPE_ROOT", "BEADS_DIR", "BEADS_ACTOR", "GC_SESSION_ID",
 	} {
 		if got, _ := gcEnv[k].(string); got != tp.Env[k] {
 			t.Fatalf("gcEnv[%q] = %#v, want %q (codex must receive the store/shim env or gc hook --claim -> no_work)", k, gcEnv[k], tp.Env[k])
 		}
+	}
+	if got, want := gcEnv["PATH"], "/tmp/city/.gc/shimbin:/usr/local/bin:/usr/bin"; got != want {
+		t.Fatalf("gcEnv[PATH] = %#v, want %q (t3bridge must derive the shim prefix before launching Codex)", got, want)
+	}
+	if got := gcEnv["GC_BIN"]; got != "" {
+		t.Fatalf("gcEnv[GC_BIN] = %#v, want empty fixture input (PATH safety must not depend on later GC_BIN injection)", got)
 	}
 }
 
