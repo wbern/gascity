@@ -916,12 +916,17 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	promptFlag := delivery.PromptFlag
 	nudge := delivery.Nudge
 	env := maps.Clone(tp.Env)
-	// The controller prepares GC_BIN under the per-city shimbin directory, but
 	// T3/Codex launches from runtime.Config.Env rather than inheriting the tmux
-	// process environment. Reassert the PATH front at this final materialization
-	// seam so `bd` resolves to bdshim whenever GC_BD_REAL is advertised.
+	// process environment. GC_BIN is added later by the controller, so derive
+	// the same authoritative shimbin path from CityPath at this materialization
+	// seam. Otherwise a config carrying GC_BD_REAL can still launch with raw bd
+	// ahead of the city shim.
 	if strings.TrimSpace(env[citylayout.RealBdEnvVar]) != "" {
-		prependGCBinDirToPATH(env, env["GC_BIN"])
+		gcBin := env["GC_BIN"]
+		if strings.TrimSpace(tp.CityPath) != "" {
+			gcBin = citylayout.ShimbinGCPath(tp.CityPath)
+		}
+		prependGCBinDirToPATH(env, gcBin)
 	}
 	if delivery.Delivered {
 		if env == nil {

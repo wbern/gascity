@@ -164,10 +164,10 @@ func TestBuildT3BridgeStartupEnvelopeOnlyForT3Provider(t *testing.T) {
 
 func TestTemplateParamsToConfigFrontsBdShimPathForManagedCodexRuntime(t *testing.T) {
 	tp := TemplateParams{
-		Command: "codex",
+		CityPath: "/city",
+		Command:  "codex",
 		Env: map[string]string{
 			"PATH":       "/usr/local/bin:/usr/bin",
-			"GC_BIN":     "/city/.gc/shimbin/gc",
 			"GC_BD_REAL": "/usr/local/bin/bd",
 		},
 	}
