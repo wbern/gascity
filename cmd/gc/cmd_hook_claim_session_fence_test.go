@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -36,26 +38,204 @@ name = "worker"
 // newFenceSessionBead creates a session bead in the city store with the given
 // runtime state and instance token, returning its id.
 func newFenceSessionBead(t *testing.T, cityDir string, state session.State, instanceToken string) string {
+	return newFenceSessionBeadWithMetadata(t, cityDir, state, instanceToken, nil)
+}
+
+func newFenceSessionBeadWithMetadata(t *testing.T, cityDir string, state session.State, instanceToken string, metadata map[string]string) string {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	beadMetadata := map[string]string{
+		"session_name":   "worker-1",
+		"template":       "worker",
+		"state":          string(state),
+		"instance_token": instanceToken,
+	}
+	for key, value := range metadata {
+		beadMetadata[key] = value
+	}
 	bead, err := store.Create(beads.Bead{
-		Title:  "worker-1",
-		Type:   session.BeadType,
-		Labels: []string{"gc:session", "agent:worker-1"},
-		Metadata: map[string]string{
-			"session_name":   "worker-1",
-			"template":       "worker",
-			"state":          string(state),
-			"instance_token": instanceToken,
-		},
+		Title:    "worker-1",
+		Type:     session.BeadType,
+		Labels:   []string{"gc:session", "agent:worker-1"},
+		Metadata: beadMetadata,
 	})
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
 	return bead.ID
+}
+
+// TestHookCommandClaimReadsCurrentSessionTrigger verifies that a pooled reviewer
+// claims the trigger currently bound to its session bead. Its process environment
+// is only startup-time state, so a warm rebind must not let an old trigger/store
+// pair redirect the claim into the prior rig.
+func TestHookCommandClaimReadsCurrentSessionTrigger(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigA := filepath.Join(cityDir, "rig-a")
+	rigB := filepath.Join(cityDir, "rig-b")
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	for _, dir := range []string{filepath.Join(cityDir, ".gc"), rigA, rigB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityTOML := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "old"
+path = %q
+
+[[rigs]]
+name = "new"
+path = %q
+
+[[agent]]
+name = "pr-reviewer"
+scope = "city"
+`, rigA, rigB)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	triggerStore, err := openStoreAtForCity(rigB, cityDir)
+	if err != nil {
+		t.Fatalf("open rig-b trigger store: %v", err)
+	}
+	trigger, err := triggerStore.Create(beads.Bead{
+		Title:    "current trigger",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": "pr-reviewer"},
+	})
+	if err != nil {
+		t.Fatalf("create rig-b trigger: %v", err)
+	}
+	sessionID := newFenceSessionBeadWithMetadata(t, cityDir, session.StateActive, "current-token", map[string]string{
+		"template":                              "pr-reviewer",
+		beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig:new",
+	})
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	stored, err := cliSessionFrontDoor(store, cfg, cityDir).Get(sessionID)
+	if err != nil {
+		t.Fatalf("load current session: %v", err)
+	}
+	if stored.TriggerBeadID != trigger.ID || stored.TriggerBeadStoreRef != "rig:new" {
+		t.Fatalf("stored trigger = (%q, %q), want (%q, rig:new)", stored.TriggerBeadID, stored.TriggerBeadStoreRef, trigger.ID)
+	}
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'pwd=%%s args=%%s\n' "$(pwd)" "$*" >> %q
+case "$*" in
+  *"show --json %s"*)
+    printf '[{"id":%q,"status":"open","metadata":{"gc.routed_to":"pr-reviewer"}}]'
+    ;;
+  *"update %s --claim --json"*)
+    printf '[{"id":%q,"status":"in_progress","assignee":"reviewer-1","metadata":{"gc.routed_to":"pr-reviewer"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`, logPath, trigger.ID, trigger.ID, trigger.ID, trigger.ID)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "pr-reviewer")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_SESSION_NAME", "reviewer-1")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_SESSION_ORIGIN", "pool")
+	t.Setenv("GC_INSTANCE_TOKEN", "current-token")
+	// These are the stale values inherited when this warm slot first started.
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "old-trigger")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:old")
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
+		return func(dir, name string, args ...string) ([]byte, error) {
+			if dir != rigB {
+				t.Fatalf("trigger store dir = %q, want %q", dir, rigB)
+			}
+			if name != "bd" {
+				t.Fatalf("trigger command name = %q, want bd", name)
+			}
+			switch {
+			case len(args) == 3 && args[0] == "show" && args[1] == "--json" && args[2] == trigger.ID:
+				bead, err := triggerStore.Get(trigger.ID)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal([]beads.Bead{bead})
+			case len(args) == 4 && args[0] == "update" && args[1] == trigger.ID && args[2] == "--claim" && args[3] == "--json":
+				actor := env["BEADS_ACTOR"]
+				if actor != "reviewer-1" {
+					t.Fatalf("BEADS_ACTOR = %q, want reviewer-1", actor)
+				}
+				status := "in_progress"
+				if err := triggerStore.Update(trigger.ID, beads.UpdateOpts{Status: &status, Assignee: &actor}); err != nil {
+					return nil, err
+				}
+				bead, err := triggerStore.Get(trigger.ID)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal([]beads.Bead{bead})
+			case len(args) == 7 && args[0] == "update" && args[1] == "--json" && args[2] == trigger.ID &&
+				args[3] == "--set-metadata" && args[4] == "gc.session_id="+sessionID &&
+				args[5] == "--set-metadata" && args[6] == "gc.session_name=reviewer-1":
+				if err := triggerStore.Update(trigger.ID, beads.UpdateOpts{Metadata: map[string]string{
+					"gc.session_id":   sessionID,
+					"gc.session_name": "reviewer-1",
+				}}); err != nil {
+					return nil, err
+				}
+				bead, err := triggerStore.Get(trigger.ID)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal([]beads.Bead{bead})
+			default:
+				t.Fatalf("unexpected trigger command: %v", args)
+				return nil, nil
+			}
+		}
+	}
+	triggerID, triggerRef, _, handled := currentHookClaimTrigger(cityDir, cfg, sessionID, hookCommandOptions{Claim: true, JSON: true}, io.Discard, io.Discard)
+	if handled || triggerID != trigger.ID || triggerRef != "rig:new" {
+		t.Fatalf("current session trigger = (%q, %q, handled=%t), want (%q, rig:new, false)", triggerID, triggerRef, handled, trigger.ID)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, DrainAck: true, JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim) = %d, want 0; stdout=%q stderr=%s bd log=%s", code, stdout.String(), stderr.String(), readFileString(t, logPath))
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.BeadID != trigger.ID || result.Reason != "claimed_trigger" {
+		t.Fatalf("claim result = %+v, want current %s", result, trigger.ID)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("generic discovery ran after the terminal trigger claim; stat error = %v", err)
+	}
 }
 
 // installFenceWorkQueryProbe puts a fake `bd` on PATH that records each
