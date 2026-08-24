@@ -28,8 +28,8 @@ func TestTeardownNeverUsesDirectPIDSignalsAfterReplacement(t *testing.T) {
 			if err := tm.KillSessionWithProcessesExcluding("managed", []string{"101"}); err != nil {
 				t.Fatalf("KillSessionWithProcessesExcluding: %v", err)
 			}
-			if want := [][]string{{"-u", "kill-session", "-t", "managed"}}; !slices.EqualFunc(fe.calls, want, slices.Equal) {
-				t.Fatalf("tmux calls = %v, want named session teardown only %v", fe.calls, want)
+			if want := [][]string{{"-u", "show-environment", "-t", "managed", ownedScopeEnv}, {"-u", "kill-session", "-t", "managed"}}; !slices.EqualFunc(fe.calls, want, slices.Equal) {
+				t.Fatalf("tmux calls = %v, want scope-record lookup then named session teardown %v", fe.calls, want)
 			}
 		})
 	}
@@ -62,6 +62,7 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 	want := [][]string{
 		{"-u", "display-message", "-p", "-t", "managed", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}"},
 		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("agent --resume")}), "run-shell 'exit 77'"},
+		{"-u", "show-environment", "-t", "managed", "GC_INSTANCE_TOKEN"},
 	}
 	if !slices.EqualFunc(fe.calls, want, slices.Equal) {
 		t.Fatalf("tmux calls = %v, want atomic window replacement without respawn-pane %v", fe.calls, want)
