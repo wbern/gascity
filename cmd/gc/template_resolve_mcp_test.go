@@ -90,6 +90,51 @@ args = ["notes-mcp"]
 		}
 	})
 
+	t.Run("non scope root injects cleanup prestart for empty catalog", func(t *testing.T) {
+		emptyCityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(emptyCityPath, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		emptyCity := &config.City{
+			Workspace: config.Workspace{Provider: "gemini"},
+			Providers: map[string]config.ProviderSpec{
+				"gemini": {Command: "echo", PromptMode: "none"},
+			},
+		}
+		params := &agentBuildParams{
+			city:            emptyCity,
+			cityName:        "city",
+			cityPath:        emptyCityPath,
+			workspace:       &emptyCity.Workspace,
+			providers:       emptyCity.Providers,
+			lookPath:        stubLookPath,
+			fs:              fsys.OSFS{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			sessionProvider: "tmux",
+		}
+		agent := &config.Agent{
+			Name:     "worker",
+			Scope:    "city",
+			Provider: "gemini",
+			WorkDir:  ".gc/worktrees/worker-empty",
+		}
+		tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:gemini"] == "" {
+			t.Fatalf("expected empty MCP fingerprint entry, got %+v", tp.FPExtra)
+		}
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal project-mcp") {
+				return
+			}
+		}
+		t.Fatalf("expected cleanup project-mcp PreStart, got %v", tp.Hints.PreStart)
+	})
+
 	t.Run("non acp runtime excludes mcp servers", func(t *testing.T) {
 		agent := &config.Agent{Name: "mayor", Scope: "city", Provider: "gemini"}
 		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)

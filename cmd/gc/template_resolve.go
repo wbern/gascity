@@ -688,7 +688,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			qualifiedName, len(mcpCatalog.Servers),
 		)
 	}
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
+	if mcpProjection.Provider != "" {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
 		switch {
@@ -699,6 +699,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
 			}
 		default:
+			if len(mcpCatalog.Servers) == 0 {
+				break
+			}
 			return TemplateParams{}, fmt.Errorf(
 				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
 				qualifiedName, workDir, p.sessionProvider,
