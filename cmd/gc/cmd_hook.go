@@ -459,14 +459,20 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
 		triggerBeadID := ""
 		triggerStoreDir := ""
+		triggerStoreRef := ""
 		if sessionTemplateContext {
-			triggerBeadID = strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID"))
-		}
-		if triggerBeadID != "" {
-			triggerStoreDir, err = hookTriggerStoreDir(cityPath, cfg, &a, os.Getenv("GC_TRIGGER_WORK_STORE_REF"))
-			if err != nil {
-				fmt.Fprintf(stderr, "gc hook --claim: resolving trigger store: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
+			var code int
+			var handled bool
+			triggerBeadID, triggerStoreRef, code, handled = currentHookClaimTrigger(cityPath, cfg, sessionID, opts, stdout, stderr)
+			if handled {
+				return code
+			}
+			if triggerBeadID != "" {
+				triggerStoreDir, err = hookTriggerStoreDir(cityPath, cfg, &a, triggerStoreRef)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc hook --claim: resolving trigger store: %v\n", err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
 			}
 		}
 		claimOpts := hookClaimOptions{
@@ -563,15 +569,55 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
+	_, verdict, reason := loadHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	return verdict, reason
+}
+
+// loadHookClaimSessionInfo reads the current persisted session projection and
+// classifies whether the runtime may act on it. The returned Info is valid only
+// for hookClaimSessionEligible; callers must not consume it for stale or
+// unavailable outcomes.
+func loadHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (session.Info, hookClaimSessionVerdict, string) {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
-		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
+		return session.Info{}, hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
 	}
 	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
 	if err != nil {
-		return classifyHookClaimSessionLookupError(err)
+		verdict, reason := classifyHookClaimSessionLookupError(err)
+		return session.Info{}, verdict, reason
 	}
-	return hookClaimSessionEligibility(info, instanceToken)
+	verdict, reason := hookClaimSessionEligibility(info, instanceToken)
+	return info, verdict, reason
+}
+
+// currentHookClaimTrigger reloads the current session after the early identity
+// fence, because a warm pool slot's process environment belongs to its startup,
+// not necessarily to its presently rebound work. A verified current session
+// supplies the trigger fields; a transient store fault falls back to generic
+// federated claiming without trusting stale environment values. A session that
+// became stale between the two reads drains fail-closed.
+func currentHookClaimTrigger(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (triggerBeadID, triggerStoreRef string, code int, handled bool) {
+	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	if sessionID == "" || instanceToken == "" {
+		// Legacy/tokenless runtimes have no authoritative identity fence. Preserve
+		// their established startup-environment behavior for compatibility.
+		return strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID")), strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_STORE_REF")), 0, false
+	}
+	info, verdict, reason := loadHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	switch verdict {
+	case hookClaimSessionEligible:
+		return strings.TrimSpace(info.TriggerBeadID), strings.TrimSpace(info.TriggerBeadStoreRef), 0, false
+	case hookClaimSessionStale:
+		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck // best-effort stderr
+		return "", "", writeHookClaimStaleSessionDrain(opts, stdout, stderr), true
+	default:
+		// Do not revive a potentially stale trigger from the environment. The
+		// generic federated claim path remains the safe fallback for a transient
+		// session-store fault, matching the early fence's fail-open behavior.
+		fmt.Fprintf(stderr, "gc hook --claim: current session trigger unavailable for %s: %s; proceeding without trigger\n", sessionID, reason) //nolint:errcheck // best-effort stderr
+		return "", "", 0, false
+	}
 }
 
 // classifyHookClaimSessionLookupError maps a session Store.Get error to a fence
