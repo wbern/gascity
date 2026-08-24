@@ -83,7 +83,7 @@ func ComputePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -93,28 +93,38 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
+	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
+		// Store refs are provenance, not optional positional hints. A malformed
+		// non-empty slice could bind a session to another rig, so drop this
+		// assigned-work snapshot rather than guessing. Nil remains the legacy
+		// single-store fallback and intentionally continues to work.
+		assignedWorkBeads = nil
+		assignedWorkStoreRefs = nil
+	}
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, alias, or
 	// a prior alias preserved in alias_history. Resume-tier dispatch
@@ -165,7 +175,11 @@ func computePoolDesiredStates(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for _, wb := range assignedWorkBeads {
+		for workIndex, wb := range assignedWorkBeads {
+			workStoreRef := ""
+			if len(assignedWorkStoreRefs) == len(assignedWorkBeads) && len(assignedWorkStoreRefs) > 0 {
+				workStoreRef = strings.TrimSpace(assignedWorkStoreRefs[workIndex])
+			}
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
@@ -217,6 +231,7 @@ func computePoolDesiredStates(
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					WorkStoreRef:   workStoreRef,
 					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 				})
 				continue
@@ -251,6 +266,7 @@ func computePoolDesiredStates(
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+				WorkStoreRef:   workStoreRef,
 				BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
 			})
 			if trace != nil {
