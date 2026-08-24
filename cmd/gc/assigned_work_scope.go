@@ -13,7 +13,7 @@ func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *c
 	if cfg == nil || agentCfg == nil {
 		return ""
 	}
-	return configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	return canonicalAssignedWorkStoreRef(configuredRigName(cityPath, agentCfg, cfg.Rigs))
 }
 
 // agentIsCrossStoreEligible reports whether an agent may discover and serve work
