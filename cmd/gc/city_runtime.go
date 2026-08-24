@@ -2092,7 +2092,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if err := checkSkillCollisions(nextCfg, cr.cityPath); err != nil {
 		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
 	} else {
-		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+		if err := runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr); err != nil {
+			appendWarning(fmt.Sprintf("skill materialization skipped: %v", err))
+		}
 	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",

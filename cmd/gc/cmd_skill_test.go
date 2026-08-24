@@ -167,6 +167,21 @@ func TestSkillListAgentCityScopedDirMatchingRigDoesNotShowRigSharedSkills(t *tes
 	}
 }
 
+func TestSkillListAgentAppliesIncludeThenExclude(t *testing.T) {
+	cityDir := t.TempDir()
+	for _, name := range []string{"keep", "drop", "excluded"} {
+		writeCatalogFile(t, cityDir, filepath.Join("skills", name, "SKILL.md"), name)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "reviewer", Scope: "city", SkillInclude: []string{"keep", "excluded"}, SkillExclude: []string{"excluded"}}}}
+	entries, err := listVisibleSkillEntries(cityDir, cfg, nil, "reviewer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "keep" {
+		t.Fatalf("entries = %+v, want only keep", entries)
+	}
+}
+
 func TestSkillListSessionCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()

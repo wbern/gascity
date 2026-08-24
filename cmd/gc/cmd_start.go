@@ -870,9 +870,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Stage-1 skill materialization — runs for every eligible agent
 	// at its scope root before sessions spawn. Non-fatal: per-agent
-	// errors are logged inline by runStage1SkillMaterialization
-	// itself; it never returns a non-nil error to its caller.
-	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
+	// Per-agent I/O errors remain best-effort, but an unsafe filtered agent
+	// sharing the stage-1 sink is a configuration error and must block start.
+	if err := runStage1SkillMaterialization(cityPath, cfg, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's
 	// active runtime config surface. Conflicting shared targets or projection

@@ -460,6 +460,24 @@
               "null"
             ]
           },
+          "SkillExclude": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "SkillInclude": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Skills": {
             "items": {
               "type": "string"
@@ -555,6 +573,8 @@
           "MCPAppend",
           "HooksInstalled",
           "InjectAssignedSkills",
+          "SkillInclude",
+          "SkillExclude",
           "SessionSetup",
           "SessionSetupScript",
           "SessionLive",

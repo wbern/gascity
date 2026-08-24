@@ -50,6 +50,24 @@ func TestRunStage1SkillMaterializationCityScoped(t *testing.T) {
 	}
 }
 
+func TestRunStage1FilteredAgentRequiresPrivateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Session: config.SessionConfig{Provider: "tmux"}, Agents: []config.Agent{{
+		Name: "reviewer", Scope: "city", Provider: "codex", SkillExclude: []string{"unused"},
+	}}}
+	err := runStage1SkillMaterialization(cityPath, cfg, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "distinct work_dir") {
+		t.Fatalf("error = %v, want distinct work_dir guard", err)
+	}
+	cfg.Agents[0].WorkDir = filepath.Join(cityPath, "private-reviewer")
+	if err := runStage1SkillMaterialization(cityPath, cfg, &bytes.Buffer{}); err != nil {
+		t.Fatalf("private filtered agent should skip stage 1: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".codex", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("filtered agent mutated shared stage1 sink: %v", err)
+	}
+}
+
 func TestRunStage1CityScopedDirMatchingRigDoesNotGetRigSharedSkills(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()

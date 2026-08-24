@@ -753,6 +753,12 @@ type AgentOverride struct {
 	// InjectAssignedSkills overrides Agent.InjectAssignedSkills
 	// (see that field for semantics).
 	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
+	// SkillInclude and SkillExclude filter the combined shared and agent-local
+	// skill catalog. An empty include list admits all skills; exclusion is
+	// applied after inclusion. A filtered agent must use a distinct work_dir so
+	// its private materialization cannot mutate a shared skill sink.
+	SkillInclude *[]string `toml:"skill_include,omitempty"`
+	SkillExclude *[]string `toml:"skill_exclude,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
@@ -3679,6 +3685,11 @@ type Agent struct {
 	//   *false -> disable; the template is responsible for rendering
 	//             any skill guidance itself
 	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
+	// SkillInclude and SkillExclude filter the effective combined catalog.
+	// Empty SkillInclude means all; SkillExclude is applied last. A filtered
+	// agent must use a distinct work_dir for its private materialized sink.
+	SkillInclude []string `toml:"skill_include,omitempty"`
+	SkillExclude []string `toml:"skill_exclude,omitempty"`
 	// Attach controls whether the agent's session supports interactive
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
@@ -3772,6 +3783,8 @@ func (a Agent) Clone() Agent {
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
+	out.SkillInclude = append([]string(nil), a.SkillInclude...)
+	out.SkillExclude = append([]string(nil), a.SkillExclude...)
 	out.Attach = copyBoolPtr(a.Attach)
 	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
 	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)

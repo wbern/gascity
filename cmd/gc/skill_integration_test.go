@@ -216,6 +216,43 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	})
 }
 
+func TestEffectiveSkillsForAgentFiltersCombinedCatalog(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agent")
+	for _, name := range []string{"local-keep", "local-drop"} {
+		mustCreateSkill(t, filepath.Join(agentDir, name))
+	}
+	shared := materialize.CityCatalog{Entries: []materialize.SkillEntry{
+		{Name: "shared-keep"}, {Name: "shared-drop"}, {Name: "excluded"},
+	}}
+	agent := &config.Agent{
+		Provider: "codex", SkillsDir: agentDir,
+		SkillInclude: []string{"shared-keep", "local-keep", "excluded"},
+		SkillExclude: []string{"excluded"},
+	}
+	got := namesOf(effectiveSkillsForAgent(&shared, agent, "", nil, nil))
+	if !reflect.DeepEqual(got, []string{"local-keep", "shared-keep"}) {
+		t.Fatalf("filtered names = %v", got)
+	}
+	fp := mergeSkillFingerprintEntries(nil, effectiveSkillsForAgent(&shared, agent, "", nil, nil))
+	if len(fp) != 2 || fp["skills:shared-drop"] != "" || fp["skills:excluded"] != "" {
+		t.Fatalf("filtered fingerprint = %#v", fp)
+	}
+	frag := buildAssignedSkillsPromptFragment(agent, &shared, materialize.AgentCatalog{Entries: []materialize.SkillEntry{{Name: "local-keep"}, {Name: "local-drop"}}})
+	if !strings.Contains(frag, "`shared-keep`") || !strings.Contains(frag, "`local-keep`") || strings.Contains(frag, "shared-drop") || strings.Contains(frag, "local-drop") || strings.Contains(frag, "excluded") {
+		t.Fatalf("filtered prompt fragment:\n%s", frag)
+	}
+}
+
+func TestAssignedSkillsPromptExcludedLocalOverrideDoesNotRevealSharedShadow(t *testing.T) {
+	agent := &config.Agent{Name: "reviewer", SkillExclude: []string{"same"}}
+	city := &materialize.CityCatalog{Entries: []materialize.SkillEntry{{Name: "same", Origin: "city"}}}
+	local := materialize.AgentCatalog{Entries: []materialize.SkillEntry{{Name: "same"}}}
+	if got := buildAssignedSkillsPromptFragment(agent, city, local); got != "" {
+		t.Fatalf("excluded local override allowed shared skill to reappear:\n%s", got)
+	}
+}
+
 func TestSharedSkillCatalogForAgentDoesNotFallBackWhenRigCatalogFails(t *testing.T) {
 	t.Parallel()
 

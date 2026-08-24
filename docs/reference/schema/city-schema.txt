@@ -332,6 +332,19 @@
           "type": "boolean",
           "description": "InjectAssignedSkills controls whether gc appends an\n\"assigned skills\" appendix to the agent's rendered prompt. The\nappendix lists every skill visible to this agent, partitioned\ninto (assigned-to-you, shared-with-every-agent), so agents\nsharing a scope-root sink can tell which skills are their\nspecialization vs which are the city-wide set.\n\nPointer tri-state:\n  nil   -\u003e inherit: inject when the agent has a vendor sink\n  *true -\u003e explicitly inject (equivalent to the default)\n  *false -\u003e disable; the template is responsible for rendering\n            any skill guidance itself"
         },
+        "skill_include": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillInclude and SkillExclude filter the effective combined catalog.\nEmpty SkillInclude means all; SkillExclude is applied last. A filtered\nagent must use a distinct work_dir for its private materialized sink."
+        },
+        "skill_exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "attach": {
           "type": "boolean",
           "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
@@ -590,6 +603,19 @@
         "inject_assigned_skills": {
           "type": "boolean",
           "description": "InjectAssignedSkills overrides Agent.InjectAssignedSkills\n(see that field for semantics)."
+        },
+        "skill_include": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillInclude and SkillExclude filter the combined shared and agent-local\nskill catalog. An empty include list admits all skills; exclusion is\napplied after inclusion. A filtered agent must use a distinct work_dir so\nits private materialization cannot mutate a shared skill sink."
+        },
+        "skill_exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "session_setup": {
           "items": {
@@ -901,6 +927,18 @@
         "inject_assigned_skills": {
           "type": "boolean",
           "description": "InjectAssignedSkills overrides per-agent appendix injection\n(see Agent.InjectAssignedSkills)."
+        },
+        "skill_include": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skill_exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "session_setup": {
           "items": {

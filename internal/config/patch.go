@@ -111,7 +111,9 @@ type AgentPatch struct {
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// InjectAssignedSkills overrides per-agent appendix injection
 	// (see Agent.InjectAssignedSkills).
-	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
+	InjectAssignedSkills *bool     `toml:"inject_assigned_skills,omitempty"`
+	SkillInclude         *[]string `toml:"skill_include,omitempty"`
+	SkillExclude         *[]string `toml:"skill_exclude,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
@@ -532,6 +534,12 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.InjectAssignedSkills != nil {
 		a.InjectAssignedSkills = p.InjectAssignedSkills
+	}
+	if p.SkillInclude != nil {
+		a.SkillInclude = append([]string(nil), (*p.SkillInclude)...)
+	}
+	if p.SkillExclude != nil {
+		a.SkillExclude = append([]string(nil), (*p.SkillExclude)...)
 	}
 	if len(p.SessionSetup) > 0 {
 		a.SessionSetup = append([]string(nil), p.SessionSetup...)
