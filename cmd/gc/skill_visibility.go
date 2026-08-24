@@ -36,8 +36,33 @@ func listVisibleSkillEntries(cityPath string, cfg *config.City, sessFront *sessi
 	// skills. No attachment filtering.
 	entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, agentRigScopeName(agent, cfg.Rigs)))...)
 	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
+	entries = filterVisibilityEntries(entries, agent.SkillInclude, agent.SkillExclude)
 	sortVisibilityEntries(entries)
 	return entries, nil
+}
+
+func filterVisibilityEntries(entries []visibilityEntry, include, exclude []string) []visibilityEntry {
+	inc := make(map[string]struct{}, len(include))
+	exc := make(map[string]struct{}, len(exclude))
+	for _, name := range include {
+		inc[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, name := range exclude {
+		exc[strings.TrimSpace(name)] = struct{}{}
+	}
+	out := make([]visibilityEntry, 0, len(entries))
+	for _, entry := range entries {
+		if len(inc) > 0 {
+			if _, ok := inc[entry.Name]; !ok {
+				continue
+			}
+		}
+		if _, ok := exc[entry.Name]; ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func resolveVisibilityAgent(cityPath string, cfg *config.City, sessFront *session.Store, agentName, sessionID string) (*config.Agent, error) {

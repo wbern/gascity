@@ -421,6 +421,23 @@ mcp = ["city-mcp"]
 	}
 }
 
+func TestParseAgentSkillFilters(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test"
+[[agent]]
+name = "reviewer"
+skill_include = ["review", "mail"]
+skill_exclude = ["mail"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Agents[0].SkillInclude, []string{"review", "mail"}) || !reflect.DeepEqual(cfg.Agents[0].SkillExclude, []string{"mail"}) {
+		t.Fatalf("filters = include:%v exclude:%v", cfg.Agents[0].SkillInclude, cfg.Agents[0].SkillExclude)
+	}
+}
+
 func TestParseWorkspaceEnv(t *testing.T) {
 	data := []byte(`
 [workspace]

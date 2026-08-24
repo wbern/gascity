@@ -107,6 +107,8 @@ export type AgentPatch = {
     SessionSetup: Array<string> | null;
     SessionSetupAppend: Array<string> | null;
     SessionSetupScript: string | null;
+    SkillExclude: Array<string> | null;
+    SkillInclude: Array<string> | null;
     Skills: Array<string> | null;
     SkillsAppend: Array<string> | null;
     SleepAfterIdle: string | null;

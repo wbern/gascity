@@ -36,6 +36,25 @@ func TestApplyPatches_AgentSuspend(t *testing.T) {
 	}
 }
 
+func TestApplyPatchesAgentSkillFiltersReplaceAndClear(t *testing.T) {
+	include := []string{"review"}
+	exclude := []string{"unused"}
+	cfg := &City{Agents: []Agent{{Name: "reviewer", SkillInclude: []string{"old"}}}}
+	if err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "reviewer", SkillInclude: &include, SkillExclude: &exclude}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents[0].SkillInclude) != 1 || cfg.Agents[0].SkillInclude[0] != "review" || len(cfg.Agents[0].SkillExclude) != 1 {
+		t.Fatalf("filters = %+v", cfg.Agents[0])
+	}
+	empty := []string{}
+	if err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{Name: "reviewer", SkillInclude: &empty}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents[0].SkillInclude) != 0 {
+		t.Fatalf("include not cleared: %v", cfg.Agents[0].SkillInclude)
+	}
+}
+
 func TestApplyPatches_AgentPool(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{

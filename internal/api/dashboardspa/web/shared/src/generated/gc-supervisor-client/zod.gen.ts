@@ -1093,6 +1093,8 @@ export const zAgentPatch = z.object({
     SessionSetup: z.array(z.string()).nullable(),
     SessionSetupAppend: z.array(z.string()).nullable(),
     SessionSetupScript: z.string().nullable(),
+    SkillExclude: z.array(z.string()).nullable(),
+    SkillInclude: z.array(z.string()).nullable(),
     Skills: z.array(z.string()).nullable(),
     SkillsAppend: z.array(z.string()).nullable(),
     SleepAfterIdle: z.string().nullable(),

@@ -8,8 +8,34 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 )
+
+func TestMaterializeSkillsIntoWorkdirAppliesFilter(t *testing.T) {
+	cityDir := t.TempDir()
+	workdir := t.TempDir()
+	sharedRoot := filepath.Join(cityDir, "skills")
+	for _, name := range []string{"keep", "drop", "excluded"} {
+		writeSkillSource(t, filepath.Join(sharedRoot, name))
+	}
+	shared := materialize.CityCatalog{OwnedRoots: []string{sharedRoot}}
+	for _, name := range []string{"keep", "drop", "excluded"} {
+		shared.Entries = append(shared.Entries, materialize.SkillEntry{Name: name, Source: filepath.Join(sharedRoot, name), Origin: "city"})
+	}
+	agent := &config.Agent{Name: "reviewer", Provider: "codex", SkillInclude: []string{"keep", "excluded"}, SkillExclude: []string{"excluded"}}
+	if err := materializeSkillsIntoWorkdir(&config.City{}, agent, cityDir, workdir, &shared, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".agents", "skills", "keep")); err != nil {
+		t.Fatalf("keep missing: %v", err)
+	}
+	for _, name := range []string{"drop", "excluded"} {
+		if _, err := os.Lstat(filepath.Join(workdir, ".agents", "skills", name)); !os.IsNotExist(err) {
+			t.Fatalf("%s unexpectedly materialized: %v", name, err)
+		}
+	}
+}
 
 // TestInternalMaterializeSkillsMaterializesClaude exercises the happy
 // path: a claude-provider agent in a city with a pack skill ends up

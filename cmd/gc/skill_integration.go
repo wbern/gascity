@@ -248,11 +248,41 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 	if city != nil {
 		sharedCatalog = *city
 	}
-	desired := materialize.EffectiveSet(sharedCatalog, agentCat)
+	desired := filterSkillEntries(materialize.EffectiveSet(sharedCatalog, agentCat), agent.SkillInclude, agent.SkillExclude)
 	if len(desired) == 0 {
 		return nil
 	}
 	return desired
+}
+
+func hasSkillFilter(agent *config.Agent) bool {
+	return agent != nil && (len(agent.SkillInclude) > 0 || len(agent.SkillExclude) > 0)
+}
+
+// filterSkillEntries applies the supported per-agent filter to a combined,
+// post-precedence catalog. Empty include admits all; exclude always wins.
+func filterSkillEntries(entries []materialize.SkillEntry, include, exclude []string) []materialize.SkillEntry {
+	inc := make(map[string]struct{}, len(include))
+	exc := make(map[string]struct{}, len(exclude))
+	for _, name := range include {
+		inc[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, name := range exclude {
+		exc[strings.TrimSpace(name)] = struct{}{}
+	}
+	out := make([]materialize.SkillEntry, 0, len(entries))
+	for _, entry := range entries {
+		if len(inc) > 0 {
+			if _, ok := inc[entry.Name]; !ok {
+				continue
+			}
+		}
+		if _, ok := exc[entry.Name]; ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // skillFingerprintPresenceMarker is the stable value stored for every
@@ -331,16 +361,20 @@ func buildAssignedSkillsPromptFragment(
 	if agent == nil {
 		return ""
 	}
+	// Shadowing is determined before filtering: an agent-local override remains
+	// authoritative even when the filter removes it, so the same-name shared
+	// skill cannot reappear through the appendix's partitioning logic.
+	byAgentName := make(map[string]struct{}, len(agentCat.Entries))
+	for _, e := range agentCat.Entries {
+		byAgentName[e.Name] = struct{}{}
+	}
+	agentCat.Entries = filterSkillEntries(agentCat.Entries, agent.SkillInclude, agent.SkillExclude)
 	var shared []materialize.SkillEntry
 	if city != nil {
 		// Exclude entries that the agent-local catalog overrides —
 		// the agent's own entry wins precedence and will appear in
 		// the "assigned to you" section instead.
-		byAgentName := make(map[string]struct{}, len(agentCat.Entries))
-		for _, e := range agentCat.Entries {
-			byAgentName[e.Name] = struct{}{}
-		}
-		for _, e := range city.Entries {
+		for _, e := range filterSkillEntries(city.Entries, agent.SkillInclude, agent.SkillExclude) {
 			if _, shadowed := byAgentName[e.Name]; shadowed {
 				continue
 			}

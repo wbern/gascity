@@ -2816,6 +2816,8 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MCPAppend:                ov.MCPAppend,
 		HooksInstalled:           ov.HooksInstalled,
 		InjectAssignedSkills:     ov.InjectAssignedSkills,
+		SkillInclude:             ov.SkillInclude,
+		SkillExclude:             ov.SkillExclude,
 		SessionSetup:             ov.SessionSetup,
 		SessionSetupScript:       ov.SessionSetupScript,
 		SessionLive:              ov.SessionLive,

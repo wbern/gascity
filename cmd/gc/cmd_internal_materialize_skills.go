@@ -196,7 +196,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, cityPat
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 		return errExit
 	}
-	desired := materialize.EffectiveSet(cityCat, agentCat)
+	desired := filterSkillEntries(materialize.EffectiveSet(cityCat, agentCat), agent.SkillInclude, agent.SkillExclude)
 
 	owned := append([]string{}, cityCat.OwnedRoots...)
 	if agentCat.OwnedRoot != "" {

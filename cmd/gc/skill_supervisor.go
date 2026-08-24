@@ -64,6 +64,21 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
+		if hasSkillFilter(agent) {
+			if !isStage2EligibleSession(cfg.Session.Provider, agent) {
+				return fmt.Errorf("gc: filtered agent %q requires a stage-2-eligible runtime and distinct private work_dir", agent.QualifiedName())
+			}
+			scopeRoot := resolveAgentScopeRoot(agent, cityPath, cfg.Rigs)
+			workDir, err := resolveWorkDir(cityPath, cfg, agent)
+			if err != nil {
+				return fmt.Errorf("gc: filtered agent %q requires a distinct private work_dir: %w", agent.QualifiedName(), err)
+			}
+			if canonicaliseFilePath(workDir, cityPath) == canonicaliseFilePath(scopeRoot, cityPath) {
+				return fmt.Errorf("gc: filtered agent %q cannot use shared stage-1 skill sink at %s; configure a distinct work_dir so stage 2 materializes its private sink", agent.QualifiedName(), scopeRoot)
+			}
+			// A filtered catalog must never reconcile the shared scope-root sink.
+			continue
+		}
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
 			continue
 		}
