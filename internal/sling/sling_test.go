@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
@@ -47,6 +48,34 @@ type getErrStore struct {
 
 func (s *getErrStore) Get(_ string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
+}
+
+type routedToClearErrStore struct {
+	beads.Store
+	err error
+}
+
+type executionRouteErrStore struct {
+	beads.Store
+	err          error
+	clearAttempt bool
+}
+
+func (s *executionRouteErrStore) SetMetadata(id, key, value string) error {
+	if key == beadmeta.ExecutionRoutedToMetadataKey {
+		return s.err
+	}
+	if key == beadmeta.RoutedToMetadataKey && value == "" {
+		s.clearAttempt = true
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *routedToClearErrStore) SetMetadata(id, key, value string) error {
+	if key == beadmeta.RoutedToMetadataKey && value == "" {
+		return s.err
+	}
+	return s.Store.SetMetadata(id, key, value)
 }
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{} }
@@ -2590,6 +2619,108 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 	if got := sourceAfter.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
 		t.Fatalf("source gc.routed_to = %q, want empty", got)
+	}
+}
+
+func TestRestampWorkBeadRoutingReportsClaimRouteCleanupFailure(t *testing.T) {
+	backing := beads.NewMemStore()
+	source, err := backing.Create(beads.Bead{
+		Title:  "work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearErr := errors.New("clear routed_to")
+	store := &routedToClearErrStore{Store: backing, err: clearErr}
+	result := SlingResult{}
+
+	restampWorkBeadRouting(SlingDeps{Store: store}, source.ID, config.Agent{Name: "worker"}, &result)
+
+	after, err := backing.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.execution_routed_to = %q, want worker before claim-route cleanup", got)
+	}
+	if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want original route preserved after cleanup failure", got)
+	}
+	if len(result.MetadataErrors) != 1 || !strings.Contains(result.MetadataErrors[0], clearErr.Error()) {
+		t.Fatalf("MetadataErrors = %v, want routed_to cleanup failure", result.MetadataErrors)
+	}
+}
+
+func TestRestampWorkBeadRoutingPreservesClaimRouteWhenExecutionRouteFails(t *testing.T) {
+	backing := beads.NewMemStore()
+	source, err := backing.Create(beads.Bead{
+		Title:  "work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeErr := errors.New("write execution route")
+	store := &executionRouteErrStore{Store: backing, err: writeErr}
+	result := SlingResult{}
+
+	restampWorkBeadRouting(SlingDeps{Store: store}, source.ID, config.Agent{Name: "worker"}, &result)
+
+	after, err := backing.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want original route preserved", got)
+	}
+	if store.clearAttempt {
+		t.Fatal("gc.routed_to clear attempted after gc.execution_routed_to write failed")
+	}
+	if len(result.MetadataErrors) != 1 || !strings.Contains(result.MetadataErrors[0], writeErr.Error()) {
+		t.Fatalf("MetadataErrors = %v, want execution-route write failure", result.MetadataErrors)
+	}
+}
+
+func TestRestampWorkBeadRoutingCollapsesResolvedPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "fixture"}},
+		Agents: []config.Agent{{Name: "worker", Dir: "fixture", MaxActiveSessions: intPtr(4)}},
+	}
+	target := "fixture/worker-2"
+	a, ok := agentutil.ResolveAgent(cfg, target, agentutil.ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatalf("ResolveAgent(%q) failed", target)
+	}
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := SlingResult{}
+
+	restampWorkBeadRouting(SlingDeps{Store: store, Cfg: cfg}, source.ID, a, &result)
+
+	after, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "fixture/worker" {
+		t.Fatalf("gc.execution_routed_to = %q, want fixture/worker (collapsed from %s)", got, target)
+	}
+	if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty", got)
+	}
+	if len(result.MetadataErrors) != 0 {
+		t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
 	}
 }
 
