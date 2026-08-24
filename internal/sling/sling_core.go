@@ -789,9 +789,11 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 }
 
 // restampWorkBeadRouting records the execution route on the work bead a graph
-// workflow was attached to. The source is tracked through the input convoy;
-// making it independently claimable through gc.routed_to would create a second
-// worker authority beside the workflow's routed executable steps.
+// workflow was attached to, then clears any claim route left by an earlier raw
+// sling. The source is tracked through the input convoy; making it independently
+// claimable through gc.routed_to would create a second worker authority beside
+// the workflow's routed executable steps. The execution route is written first
+// so a failed write preserves the source's prior claim route for recovery.
 func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" || deps.Store == nil || result == nil {
@@ -804,6 +806,11 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
 			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+		return
+	}
+	if err := deps.Store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, ""); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("clearing %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
 	}
 }
 

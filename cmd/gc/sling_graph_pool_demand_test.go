@@ -34,7 +34,7 @@ title = "Do work"
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := beads.NewMemStoreFrom(1, []beads.Bead{
-		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
 	}, nil)
 	deps.Store = store
 	config.InjectImplicitAgents(cfg)
