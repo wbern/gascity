@@ -27,6 +27,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookFormat string
 	var claim bool
 	var drainAck bool
+	var skipTrigger bool
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
@@ -41,11 +42,12 @@ With --claim: runs the standard startup claim protocol for one work item.
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			opts := hookCommandOptions{
-				Inject:     inject,
-				HookFormat: hookFormat,
-				Claim:      claim,
-				DrainAck:   drainAck,
-				JSON:       jsonOut,
+				Inject:      inject,
+				HookFormat:  hookFormat,
+				Claim:       claim,
+				DrainAck:    drainAck,
+				SkipTrigger: skipTrigger,
+				JSON:        jsonOut,
 			}
 			if cmdHookWithOptionsContext(c.Context(), args, opts, stdout, stderr) != 0 {
 				return errExit
@@ -57,6 +59,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
+	cmd.Flags().BoolVar(&skipTrigger, "skip-trigger", false, "with --claim, skip session trigger priority and claim from work_query")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "with --claim, emit a JSON protocol result")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
@@ -219,11 +222,12 @@ func drainHookStdin(ctx context.Context, stdin io.Reader) []byte {
 }
 
 type hookCommandOptions struct {
-	Inject     bool
-	HookFormat string
-	Claim      bool
-	DrainAck   bool
-	JSON       bool
+	Inject      bool
+	HookFormat  string
+	Claim       bool
+	DrainAck    bool
+	SkipTrigger bool
+	JSON        bool
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -250,6 +254,10 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 	_ = opts.HookFormat
 	if opts.DrainAck && !opts.Claim {
 		fmt.Fprintln(stderr, "gc hook: --drain-ack requires --claim") //nolint:errcheck
+		return 1
+	}
+	if opts.SkipTrigger && !opts.Claim {
+		fmt.Fprintln(stderr, "gc hook: --skip-trigger requires --claim") //nolint:errcheck
 		return 1
 	}
 
@@ -460,7 +468,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		triggerBeadID := ""
 		triggerStoreDir := ""
 		triggerStoreRef := ""
-		if sessionTemplateContext {
+		if sessionTemplateContext && !opts.SkipTrigger {
 			var code int
 			var handled bool
 			triggerBeadID, triggerStoreRef, code, handled = currentHookClaimTrigger(cityPath, cfg, sessionID, opts, stdout, stderr)
