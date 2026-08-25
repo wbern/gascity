@@ -76,6 +76,9 @@ func (systemdUserScopes) stop(scope ownedScope) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("systemd user scopes unsupported on %s", runtime.GOOS)
 	}
+	if !isGasCityPaneScope(scope.unit) {
+		return fmt.Errorf("scope %q is not in the dedicated Gas City pane scope namespace", scope.unit)
+	}
 	if scope.unit == "" || scope.invocationID == "" {
 		return fmt.Errorf("incomplete scope ownership record")
 	}

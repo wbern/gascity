@@ -724,7 +724,7 @@ func (t *Tmux) stopOwnedScope(name string) {
 		return
 	}
 	unit, err := t.GetEnvironment(name, ownedScopeEnv)
-	if err != nil || strings.TrimSpace(unit) == "" {
+	if err != nil || !isGasCityPaneScope(unit) {
 		return
 	}
 	invocationID, err := t.GetEnvironment(name, ownedScopeInvocationEnv)

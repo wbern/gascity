@@ -64,6 +64,26 @@ func TestSystemdUserScopesStopRetainsCommandFailure(t *testing.T) {
 	}
 }
 
+func TestSystemdUserScopesStopRejectsForeignScopeBeforeProbe(t *testing.T) {
+	oldShow, oldStop := systemdShowProperty, systemdStopUnit
+	t.Cleanup(func() {
+		systemdShowProperty, systemdStopUnit = oldShow, oldStop
+	})
+	systemdShowProperty = func(string, string) (string, error) {
+		t.Fatal("systemd show called for a scope outside the dedicated pane namespace")
+		return "", nil
+	}
+	systemdStopUnit = func(string) error {
+		t.Fatal("systemd stop called for a scope outside the dedicated pane namespace")
+		return nil
+	}
+
+	err := (systemdUserScopes{}).stop(ownedScope{unit: "tmux-spawn-123.scope", invocationID: "original"})
+	if err == nil || !strings.Contains(err.Error(), "dedicated Gas City pane scope") {
+		t.Fatalf("stop error = %v, want dedicated pane namespace rejection", err)
+	}
+}
+
 type fakeOwnedScopes struct {
 	captured ownedScope
 	stopped  ownedScope
@@ -101,14 +121,40 @@ func TestOwnedScopeStopUsesRecordedInvocation(t *testing.T) {
 	tm := NewTmux()
 	tm.ownedScopes = fs
 	tm.exec = &fakeExecutor{outs: []string{
-		ownedScopeEnv + "=scope",
+		ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 		ownedScopeInvocationEnv + "=invocation",
 		ownedScopeTokenEnv + "=token",
 		"GC_INSTANCE_TOKEN=token",
 	}}
 	tm.stopOwnedScope("managed")
-	if got, want := fs.stopped, (ownedScope{unit: "scope", invocationID: "invocation"}); got != want {
+	if got, want := fs.stopped, (ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "invocation"}); got != want {
 		t.Fatalf("stopped = %+v, want %+v", got, want)
+	}
+}
+
+func TestOwnedScopeStopRetainsLegacyOrMalformedScopeWithoutStopping(t *testing.T) {
+	for _, unit := range []string{
+		"tmux-spawn-123.scope",
+		"gascity-pane-0123456789abcdef0123456789abcdef.service",
+		"gascity-pane-0123456789ABCDEF0123456789abcdef.scope",
+		"gascity-pane-0123456789abcdef0123456789abcde.scope",
+	} {
+		t.Run(unit, func(t *testing.T) {
+			fs := &fakeOwnedScopes{}
+			tm := NewTmux()
+			tm.ownedScopes = fs
+			tm.exec = &fakeExecutor{outs: []string{
+				ownedScopeEnv + "=" + unit,
+				ownedScopeInvocationEnv + "=invocation",
+				ownedScopeTokenEnv + "=token",
+				"GC_INSTANCE_TOKEN=token",
+			}}
+
+			tm.stopOwnedScope("managed")
+			if fs.stopped != (ownedScope{}) {
+				t.Fatalf("stopped = %+v, want legacy metadata retained without stop", fs.stopped)
+			}
+		})
 	}
 }
 
@@ -117,13 +163,13 @@ func TestOwnedScopeStopFailureRetainsScope(t *testing.T) {
 	tm := NewTmux()
 	tm.ownedScopes = fs
 	tm.exec = &fakeExecutor{outs: []string{
-		ownedScopeEnv + "=scope",
+		ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 		ownedScopeInvocationEnv + "=invocation",
 		ownedScopeTokenEnv + "=token",
 		"GC_INSTANCE_TOKEN=token",
 	}}
 	tm.stopOwnedScope("managed")
-	if fs.stopped.unit != "scope" {
+	if fs.stopped.unit != "gascity-pane-0123456789abcdef0123456789abcdef.scope" {
 		t.Fatalf("stop did not receive witnessed scope: %+v", fs.stopped)
 	}
 }
