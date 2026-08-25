@@ -20,8 +20,12 @@ func (m *localMockProvider) IsRunning(_ string) bool { return false }
 
 func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanonical(t *testing.T) {
 	cityPath := t.TempDir()
-	rigPath := filepath.Join(cityPath, "rigs", "rig-A")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+	rigAPath := filepath.Join(cityPath, "rigs", "rig-A")
+	rigBPath := filepath.Join(cityPath, "rigs", "rig-B")
+	if err := os.MkdirAll(rigAPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigBPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -29,23 +33,27 @@ func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanon
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:              "planner",
+			Name:              "pr-reviewer",
 			Scope:             "city",
 			MinActiveSessions: &minSess,
 			MaxActiveSessions: &maxSess,
 			ScaleCheck:        "printf 0",
 			Provider:          "mock",
 		}},
-		Rigs:      []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigAPath},
+			{Name: "rig-B", Path: rigBPath},
+		},
 		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
 	}
 	cityStore := beads.NewMemStore()
-	rigStore := beads.NewMemStore()
-	_, err := rigStore.Create(beads.Bead{
+	rigAStore := beads.NewMemStore()
+	rigBStore := beads.NewMemStore()
+	_, err := rigAStore.Create(beads.Bead{
 		ID:       "rig-work",
 		Status:   "open",
 		Type:     "task",
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "planner"},
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pr-reviewer"},
 	})
 	if err != nil {
 		t.Fatalf("create routed rig work: %v", err)
@@ -54,11 +62,11 @@ func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanon
 	snapshot := &sessionBeadSnapshot{}
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", cityPath, time.Now(), cfg, &localMockProvider{},
-		cityStore, map[string]beads.Store{"rig-A": rigStore}, snapshot, nil, os.Stderr,
+		cityStore, map[string]beads.Store{"rig-A": rigAStore, "rig-B": rigBStore}, snapshot, nil, os.Stderr,
 	)
 
-	if got := result.ScaleCheckCounts["planner"]; got != 1 {
-		t.Fatalf("ScaleCheckCounts[planner] = %d, want 1", got)
+	if got := result.ScaleCheckCounts["pr-reviewer"]; got != 1 {
+		t.Fatalf("ScaleCheckCounts[pr-reviewer] = %d, want 1", got)
 	}
 	if len(result.State) != 1 {
 		t.Fatalf("desired sessions = %d, want 1", len(result.State))
@@ -82,8 +90,53 @@ func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanon
 	if got := stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:rig-A" {
 		t.Fatalf("persisted trigger store ref = %q, want canonical rig:rig-A", got)
 	}
-	if got, err := hookTriggerStoreDir(cityPath, cfg, &cfg.Agents[0], stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); err != nil || got != rigPath {
-		t.Fatalf("hookTriggerStoreDir(produced ref) = %q, %v; want %q, nil", got, err, rigPath)
+	if got, err := hookTriggerStoreDir(cityPath, cfg, &cfg.Agents[0], stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); err != nil || got != rigAPath {
+		t.Fatalf("hookTriggerStoreDir(produced ref) = %q, %v; want %q, nil", got, err, rigAPath)
+	}
+	if err := cityStore.Update(sessions[0].ID, beads.UpdateOpts{Metadata: map[string]string{"state": "active"}}); err != nil {
+		t.Fatalf("mark cold-spawned slot active: %v", err)
+	}
+	snapshot, err = loadSessionBeadSnapshot(cityStore)
+	if err != nil {
+		t.Fatalf("reload active session snapshot: %v", err)
+	}
+
+	// The pool is now warm and its custom scale_check still returns zero. A
+	// newly assigned rig-B bead must therefore drive the resume path, carrying
+	// its store ref all the way from assigned-work filtering through desired
+	// state computation. Without that propagation, the rebind clears the
+	// cold-spawned rig-A ref and gc hook falls back to the wrong store.
+	rigBWork, err := rigBStore.Create(beads.Bead{
+		ID:       "rig-b-assigned-work",
+		Status:   "open",
+		Type:     "task",
+		Assignee: sessions[0].ID,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pr-reviewer"},
+	})
+	if err != nil {
+		t.Fatalf("create assigned rig-B work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigBStore.Update(rigBWork.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark assigned rig-B work in progress: %v", err)
+	}
+
+	result = buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now(), cfg, &localMockProvider{},
+		cityStore, map[string]beads.Store{"rig-A": rigAStore, "rig-B": rigBStore}, snapshot, nil, os.Stderr,
+	)
+	if len(result.State) != 1 {
+		t.Fatalf("warm desired sessions = %d, want 1", len(result.State))
+	}
+	stored, err = cityStore.Get(sessions[0].ID)
+	if err != nil {
+		t.Fatalf("get rebound session bead: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != rigBWork.ID {
+		t.Fatalf("rebound trigger bead = %q, want %q", got, rigBWork.ID)
+	}
+	if got := stored.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; got != "rig:rig-B" {
+		t.Fatalf("rebound trigger store ref = %q, want rig:rig-B", got)
 	}
 }
 

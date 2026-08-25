@@ -115,12 +115,23 @@ func filterAssignedWorkBeadsForPoolDemand(
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
-) []beads.Bead {
-	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+) ([]beads.Bead, []string) {
+	if len(assignedWorkBeads) == 0 {
+		return assignedWorkBeads, assignedWorkStoreRefs
+	}
+	if len(assignedWorkStoreRefs) == 0 {
+		// Legacy single-store callers have no provenance to propagate. Keep
+		// their generic fallback behavior; a non-empty malformed slice below
+		// is deliberately not treated as that fallback.
+		return assignedWorkBeads, nil
+	}
+	if len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
+		// A shifted ref could bind a session to another rig's work store. Do not
+		// make demand decisions from a provenance-corrupt snapshot.
+		return nil, nil
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
@@ -140,6 +151,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredStoreRefs := make([]string, 0, len(assignedWorkStoreRefs))
 	for i, wb := range assignedWorkBeads {
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
@@ -160,9 +172,10 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 		if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i) {
 			filtered = append(filtered, wb)
+			filteredStoreRefs = append(filteredStoreRefs, assignedWorkStoreRefs[i])
 		}
 	}
-	return filtered
+	return filtered, filteredStoreRefs
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment

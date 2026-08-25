@@ -455,6 +455,58 @@ func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssigne
 	}
 }
 
+func TestComputePoolDesiredStatesWithDemandTracedCanonicalizesAssignedRigStoreRef(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("requests = %+v, want one resume request", result)
+	}
+	if got := result[0].Requests[0].WorkStoreRef; got != "rig:rig-b" {
+		t.Fatalf("resume WorkStoreRef = %q, want canonical rig:rig-b", got)
+	}
+}
+
+func TestComputePoolDesiredStatesWithDemandTracedRejectsMalformedAssignedStoreRef(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"other:rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	for _, state := range result {
+		if len(state.Requests) != 0 {
+			t.Fatalf("malformed store ref produced requests: %+v", result)
+		}
+	}
+}
+
+func TestComputePoolDesiredStatesWithDemandTracedRejectsMisalignedAssignedStoreRefs(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"rig-a", "rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	for _, state := range result {
+		if len(state.Requests) != 0 {
+			t.Fatalf("misaligned store refs produced requests: %+v", result)
+		}
+	}
+}
+
 // TestComputePoolDesiredStates_SkipsDeferredOpenAssignedBead is the gcw-ehvg P1a
 // hardening: the resume/wake tiers must NOT wake a session for an OPEN assigned
 // bead hidden from claim by a future defer_until. The worker would find nothing
@@ -558,7 +610,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -1091,7 +1143,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1544,7 +1596,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1577,7 +1629,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)

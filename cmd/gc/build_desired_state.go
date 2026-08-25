@@ -851,14 +851,14 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkStoreRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		if len(poolRespawnBackoffTemplates) > 0 {
 			bp.poolRespawnBackoffTemplates = poolRespawnBackoffTemplates[0]
 		}
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
