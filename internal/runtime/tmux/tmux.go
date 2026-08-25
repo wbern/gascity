@@ -275,6 +275,12 @@ type Tmux struct {
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
 
+	// ownedScopes fences detached-descendant cleanup to the transient scope
+	// tmux created for this pane. It never discovers or signals individual PIDs.
+	ownedScopes        scopeLifecycle
+	ownedScopeMu       sync.Mutex
+	pendingOwnedScopes map[string]string
+
 	// serverSocketObserver observes a named socket only after tmux reports
 	// ErrNoServer during the new-session preflight. Nil selects the production
 	// observer; tests inject a deterministic observation without opening a
@@ -313,12 +319,12 @@ type hiddenAttachClient struct {
 
 // NewTmux creates a new Tmux wrapper with default configuration.
 func NewTmux() *Tmux {
-	return &Tmux{cfg: DefaultConfig(), exec: realExecutor{}}
+	return &Tmux{cfg: DefaultConfig(), exec: realExecutor{}, ownedScopes: systemdUserScopes{}}
 }
 
 // NewTmuxWithConfig creates a new Tmux wrapper with the given configuration.
 func NewTmuxWithConfig(cfg Config) *Tmux {
-	return &Tmux{cfg: cfg, exec: realExecutor{}}
+	return &Tmux{cfg: cfg, exec: realExecutor{}, ownedScopes: systemdUserScopes{}}
 }
 
 func (t *Tmux) approvalDedup() *approvalDedup {
@@ -483,6 +489,7 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err != nil {
 		return err
 	}
+	t.recordOwnedScope(name, "")
 	_ = t.ConfigureServer()
 	// tmux 3.3+ sets window-size=manual on detached sessions, locking them
 	// at 80x24 even after a client attaches. Reset to "latest" so the window
@@ -509,15 +516,17 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 		args = append(args, "-c", workDir)
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
-	args = append(args, t.wrapPaneCommand(command))
+	args = append(args, t.wrapPaneCommand(name, command))
 	if serverPresent {
 		err = t.runNoStart(args...)
 	} else {
 		_, err = t.run(args...)
 	}
 	if err != nil {
+		t.discardPendingOwnedScope(name)
 		return err
 	}
+	t.recordOwnedScope(name, "")
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
@@ -574,10 +583,12 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		command = "env" + prefix + " " + command
 	}
 	// Add the command as the last argument.
-	args = append(args, t.wrapPaneCommand(command))
+	args = append(args, t.wrapPaneCommand(name, command))
 	if err := t.runNewSession(args, env, serverPresent); err != nil {
+		t.discardPendingOwnedScope(name)
 		return err
 	}
+	t.recordOwnedScope(name, env["GC_INSTANCE_TOKEN"])
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
@@ -642,15 +653,97 @@ func (t *Tmux) KillSession(name string) error {
 // KillSessionWithProcesses terminates the named tmux session. The legacy name
 // is retained for callers while direct PID teardown remains disabled.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
-	// Direct PID TERM/KILL is deliberately disabled: a portable process-table
-	// start-time token cannot prove that a PID still denotes the observed process
-	// at signal delivery. Tmux owns session teardown by name; detached-orphan
-	// cleanup requires a separately designed ownership-safe mechanism.
+	// Direct PID TERM/KILL is deliberately disabled. A session-owned systemd
+	// scope is the sole additional teardown capability, and is fail-closed.
+	t.stopOwnedScope(name)
 	err := t.KillSession(name)
 	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 		return nil
 	}
 	return err
+}
+
+func (t *Tmux) recordOwnedScope(name, token string) {
+	if t.ownedScopes == nil {
+		return
+	}
+	unit := t.takePendingOwnedScope(name)
+	if unit == "" {
+		return
+	}
+	if token == "" {
+		var err error
+		token, err = t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
+		if err != nil || strings.TrimSpace(token) == "" {
+			return
+		}
+	}
+	scope, err := t.ownedScopes.capture(unit)
+	if err != nil {
+		return
+	}
+	// Tmux session environment persists across provider reconstruction and is
+	// destroyed with the session, unlike an in-memory PID observation.
+	if err := t.SetEnvironment(name, ownedScopeEnv, scope.unit); err != nil {
+		return
+	}
+	if err := t.SetEnvironment(name, ownedScopeInvocationEnv, scope.invocationID); err != nil {
+		return
+	}
+	_ = t.SetEnvironment(name, ownedScopeTokenEnv, token)
+}
+
+func (t *Tmux) rememberPendingOwnedScope(target, unit string) {
+	if unit == "" {
+		return
+	}
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	if t.pendingOwnedScopes == nil {
+		t.pendingOwnedScopes = make(map[string]string)
+	}
+	t.pendingOwnedScopes[target] = unit
+}
+
+func (t *Tmux) takePendingOwnedScope(target string) string {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	unit := t.pendingOwnedScopes[target]
+	delete(t.pendingOwnedScopes, target)
+	return unit
+}
+
+func (t *Tmux) discardPendingOwnedScope(target string) {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	delete(t.pendingOwnedScopes, target)
+}
+
+func (t *Tmux) stopOwnedScope(name string) {
+	if t.ownedScopes == nil {
+		return
+	}
+	unit, err := t.GetEnvironment(name, ownedScopeEnv)
+	if err != nil || !isGasCityPaneScope(unit) {
+		return
+	}
+	invocationID, err := t.GetEnvironment(name, ownedScopeInvocationEnv)
+	if err != nil || strings.TrimSpace(invocationID) == "" {
+		return
+	}
+	recordedToken, err := t.GetEnvironment(name, ownedScopeTokenEnv)
+	if err != nil || strings.TrimSpace(recordedToken) == "" {
+		return
+	}
+	liveToken, err := t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
+	if err != nil || liveToken != recordedToken {
+		return
+	}
+	if err := t.ownedScopes.stop(ownedScope{unit: unit, invocationID: invocationID}); err != nil {
+		// The named tmux teardown remains safe, but never turn an unproven
+		// scope into a PID cleanup. Keep this diagnostic observable for reaping.
+		fmt.Fprintf(os.Stderr, "gc: retained descendant scope for %q: %v\n", name, err)
+	}
 }
 
 // KillSessionWithProcessesExcluding retains the legacy call shape. Named tmux
@@ -3320,12 +3413,17 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	if workDir == "" {
 		workDir = fields[3]
 	}
-	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(command)}
+	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(pane, command)}
 	_, err = t.run("if-shell", "-F", "-t", fields[0], "#{==:#{window_panes},1}",
 		tmuxCommandLine(replacement), "run-shell 'exit 77'")
 	if err != nil {
+		t.discardPendingOwnedScope(pane)
 		return fmt.Errorf("replacing window for pane %q: %w", pane, err)
 	}
+	// Replacement materializes a new pane and therefore a new transient scope.
+	// Refresh the durable record; an old invocation may never authorize a later
+	// lifecycle teardown.
+	t.recordOwnedScope(pane, "")
 	return nil
 }
 
@@ -3333,8 +3431,8 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 // before execing its agent command. A new tmux window does not inherit that
 // per-window option, and setting it from the new pane keeps an instant-exit
 // replacement from disappearing before callers can observe it.
-func (t *Tmux) wrapReplacementCommand(command string) string {
-	wrapped := shellquote.Quote(t.wrapPaneCommand(command))
+func (t *Tmux) wrapReplacementCommand(pane, command string) string {
+	wrapped := shellquote.Quote(t.wrapPaneCommand(pane, command))
 	return "sh -c " + shellquote.Quote(`tmux set-option -w -t "$TMUX_PANE" remain-on-exit on && exec sh -c `+wrapped)
 }
 
