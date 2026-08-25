@@ -61,8 +61,7 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 
 	want := [][]string{
 		{"-u", "display-message", "-p", "-t", "managed", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}"},
-		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("agent --resume")}), "run-shell 'exit 77'"},
-		{"-u", "show-environment", "-t", "managed", "GC_INSTANCE_TOKEN"},
+		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("managed", "agent --resume")}), "run-shell 'exit 77'"},
 	}
 	if !slices.EqualFunc(fe.calls, want, slices.Equal) {
 		t.Fatalf("tmux calls = %v, want atomic window replacement without respawn-pane %v", fe.calls, want)
@@ -112,7 +111,7 @@ func TestRespawnPaneDoesNotRetireOriginalWindowWhenReplacementFails(t *testing.T
 
 func TestWrapReplacementCommandPreservesShellOperators(t *testing.T) {
 	tm := NewTmux()
-	wrapped := tm.wrapReplacementCommand("false || printf recovered > result")
+	wrapped := tm.wrapReplacementCommand("managed", "false || printf recovered > result")
 	if !strings.Contains(wrapped, "exec sh -c") || !strings.Contains(wrapped, "false || printf recovered > result") {
 		t.Fatalf("replacement command = %q, want a quoted shell preserving operators", wrapped)
 	}

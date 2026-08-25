@@ -1,14 +1,12 @@
 package tmux
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -27,32 +25,51 @@ type ownedScope struct {
 // scopeLifecycle isolates the systemd boundary so ownership decisions remain
 // fast and deterministic in unit tests.
 type scopeLifecycle interface {
-	capture(pid string) (ownedScope, error)
+	capture(unit string) (ownedScope, error)
 	stop(scope ownedScope) error
 }
 
 type systemdUserScopes struct{}
 
-func (systemdUserScopes) capture(pid string) (ownedScope, error) {
+const (
+	ownedScopeCaptureTimeout  = time.Second
+	ownedScopeCaptureInterval = 25 * time.Millisecond
+)
+
+var systemdShowProperty = systemdShow
+
+var systemdStopUnit = func(unit string) error {
+	cmd := exec.CommandContext(context.Background(), "systemctl", "--user", "stop", unit)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (systemdUserScopes) capture(unit string) (ownedScope, error) {
 	if runtime.GOOS != "linux" {
 		return ownedScope{}, fmt.Errorf("systemd user scopes unsupported on %s", runtime.GOOS)
 	}
-	b, err := os.ReadFile("/proc/" + pid + "/cgroup")
-	if err != nil {
-		return ownedScope{}, fmt.Errorf("reading pane cgroup: %w", err)
+	if !isGasCityPaneScope(unit) {
+		return ownedScope{}, fmt.Errorf("pane is not in a dedicated Gas City pane scope")
 	}
-	unit := tmuxSpawnScope(string(b))
-	if unit == "" {
-		return ownedScope{}, fmt.Errorf("pane is not in a tmux-spawn scope")
+	deadline := time.Now().Add(ownedScopeCaptureTimeout)
+	for {
+		invocationID, err := systemdShowProperty(unit, "InvocationID")
+		if err == nil && invocationID != "" {
+			return ownedScope{unit: unit, invocationID: invocationID}, nil
+		}
+		if err != nil && !systemdUnitGone(err) {
+			return ownedScope{}, fmt.Errorf("reading scope %q invocation identity: %w", unit, err)
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return ownedScope{}, fmt.Errorf("reading scope %q invocation identity: %w", unit, err)
+			}
+			return ownedScope{}, fmt.Errorf("scope %q has no invocation identity", unit)
+		}
+		time.Sleep(ownedScopeCaptureInterval)
 	}
-	invocationID, err := systemdShow(unit, "InvocationID")
-	if err != nil {
-		return ownedScope{}, fmt.Errorf("reading scope %q invocation identity: %w", unit, err)
-	}
-	if invocationID == "" {
-		return ownedScope{}, fmt.Errorf("scope %q has no invocation identity", unit)
-	}
-	return ownedScope{unit: unit, invocationID: invocationID}, nil
 }
 
 func (systemdUserScopes) stop(scope ownedScope) error {
@@ -62,7 +79,7 @@ func (systemdUserScopes) stop(scope ownedScope) error {
 	if scope.unit == "" || scope.invocationID == "" {
 		return fmt.Errorf("incomplete scope ownership record")
 	}
-	liveID, err := systemdShow(scope.unit, "InvocationID")
+	liveID, err := systemdShowProperty(scope.unit, "InvocationID")
 	if err != nil {
 		if systemdUnitGone(err) {
 			return nil
@@ -72,9 +89,8 @@ func (systemdUserScopes) stop(scope ownedScope) error {
 	if liveID != scope.invocationID {
 		return fmt.Errorf("scope %q invocation changed", scope.unit)
 	}
-	cmd := exec.CommandContext(context.Background(), "systemctl", "--user", "stop", scope.unit)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("stopping scope %q: %w: %s", scope.unit, err, strings.TrimSpace(string(out)))
+	if err := systemdStopUnit(scope.unit); err != nil {
+		return fmt.Errorf("stopping scope %q: %w", scope.unit, err)
 	}
 	return nil
 }
@@ -94,19 +110,4 @@ func systemdShow(unit, property string) (string, error) {
 		return "", fmt.Errorf("systemctl show: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-func tmuxSpawnScope(cgroup string) string {
-	s := bufio.NewScanner(strings.NewReader(cgroup))
-	for s.Scan() {
-		fields := strings.SplitN(s.Text(), ":", 3)
-		if len(fields) != 3 {
-			continue
-		}
-		unit := path.Base(fields[2])
-		if strings.HasPrefix(unit, "tmux-spawn-") && strings.HasSuffix(unit, ".scope") {
-			return unit
-		}
-	}
-	return ""
 }

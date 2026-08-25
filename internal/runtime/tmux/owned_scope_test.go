@@ -2,17 +2,9 @@ package tmux
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
-
-func TestTmuxSpawnScope(t *testing.T) {
-	if got := tmuxSpawnScope("0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-8123.scope\n"); got != "tmux-spawn-8123.scope" {
-		t.Fatalf("tmuxSpawnScope = %q", got)
-	}
-	if got := tmuxSpawnScope("0::/user.slice/user-1000.slice/user@1000.service/app.slice/other.scope\n"); got != "" {
-		t.Fatalf("tmuxSpawnScope unrelated = %q, want empty", got)
-	}
-}
 
 func TestSystemdUnitGone(t *testing.T) {
 	if !systemdUnitGone(errors.New("systemctl show: Unit tmux-spawn-1.scope not found")) {
@@ -23,14 +15,68 @@ func TestSystemdUnitGone(t *testing.T) {
 	}
 }
 
+func TestSystemdUserScopesStopFailsClosedOnReusedInvocation(t *testing.T) {
+	oldShow, oldStop := systemdShowProperty, systemdStopUnit
+	t.Cleanup(func() {
+		systemdShowProperty, systemdStopUnit = oldShow, oldStop
+	})
+	systemdShowProperty = func(string, string) (string, error) { return "replacement", nil }
+	systemdStopUnit = func(string) error {
+		t.Fatal("stop called for a scope whose invocation was reused")
+		return nil
+	}
+
+	err := (systemdUserScopes{}).stop(ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "original"})
+	if err == nil || !strings.Contains(err.Error(), "invocation changed") {
+		t.Fatalf("stop error = %v, want invocation mismatch", err)
+	}
+}
+
+func TestSystemdUserScopesStopTreatsGoneUnitAsIdempotent(t *testing.T) {
+	oldShow, oldStop := systemdShowProperty, systemdStopUnit
+	t.Cleanup(func() {
+		systemdShowProperty, systemdStopUnit = oldShow, oldStop
+	})
+	systemdShowProperty = func(string, string) (string, error) {
+		return "", errors.New("Unit gascity-pane-0123456789abcdef0123456789abcdef.scope not found")
+	}
+	systemdStopUnit = func(string) error {
+		t.Fatal("stop called for an already-gone scope")
+		return nil
+	}
+
+	if err := (systemdUserScopes{}).stop(ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "original"}); err != nil {
+		t.Fatalf("stop already-gone scope: %v", err)
+	}
+}
+
+func TestSystemdUserScopesStopRetainsCommandFailure(t *testing.T) {
+	oldShow, oldStop := systemdShowProperty, systemdStopUnit
+	t.Cleanup(func() {
+		systemdShowProperty, systemdStopUnit = oldShow, oldStop
+	})
+	systemdShowProperty = func(string, string) (string, error) { return "original", nil }
+	systemdStopUnit = func(string) error { return errors.New("access denied") }
+
+	err := (systemdUserScopes{}).stop(ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "original"})
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("stop error = %v, want command failure", err)
+	}
+}
+
 type fakeOwnedScopes struct {
 	captured ownedScope
 	stopped  ownedScope
 	err      error
 }
 
-func (f *fakeOwnedScopes) capture(string) (ownedScope, error) { return f.captured, f.err }
-func (f *fakeOwnedScopes) stop(scope ownedScope) error        { f.stopped = scope; return f.err }
+func (f *fakeOwnedScopes) capture(unit string) (ownedScope, error) {
+	if f.captured == (ownedScope{}) && f.err == nil {
+		return ownedScope{unit: unit, invocationID: "invocation"}, nil
+	}
+	return f.captured, f.err
+}
+func (f *fakeOwnedScopes) stop(scope ownedScope) error { f.stopped = scope; return f.err }
 
 func TestOwnedScopeStopRejectsChangedSessionIncarnation(t *testing.T) {
 	// A replacement session may reuse the tmux name. Its current instance token

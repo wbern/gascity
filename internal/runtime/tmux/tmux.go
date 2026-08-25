@@ -277,7 +277,9 @@ type Tmux struct {
 
 	// ownedScopes fences detached-descendant cleanup to the transient scope
 	// tmux created for this pane. It never discovers or signals individual PIDs.
-	ownedScopes scopeLifecycle
+	ownedScopes        scopeLifecycle
+	ownedScopeMu       sync.Mutex
+	pendingOwnedScopes map[string]string
 
 	// serverSocketObserver observes a named socket only after tmux reports
 	// ErrNoServer during the new-session preflight. Nil selects the production
@@ -514,13 +516,14 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 		args = append(args, "-c", workDir)
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
-	args = append(args, t.wrapPaneCommand(command))
+	args = append(args, t.wrapPaneCommand(name, command))
 	if serverPresent {
 		err = t.runNoStart(args...)
 	} else {
 		_, err = t.run(args...)
 	}
 	if err != nil {
+		t.discardPendingOwnedScope(name)
 		return err
 	}
 	t.recordOwnedScope(name, "")
@@ -580,8 +583,9 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		command = "env" + prefix + " " + command
 	}
 	// Add the command as the last argument.
-	args = append(args, t.wrapPaneCommand(command))
+	args = append(args, t.wrapPaneCommand(name, command))
 	if err := t.runNewSession(args, env, serverPresent); err != nil {
+		t.discardPendingOwnedScope(name)
 		return err
 	}
 	t.recordOwnedScope(name, env["GC_INSTANCE_TOKEN"])
@@ -663,6 +667,10 @@ func (t *Tmux) recordOwnedScope(name, token string) {
 	if t.ownedScopes == nil {
 		return
 	}
+	unit := t.takePendingOwnedScope(name)
+	if unit == "" {
+		return
+	}
 	if token == "" {
 		var err error
 		token, err = t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
@@ -670,11 +678,7 @@ func (t *Tmux) recordOwnedScope(name, token string) {
 			return
 		}
 	}
-	pid, err := t.GetPanePID(name)
-	if err != nil {
-		return
-	}
-	scope, err := t.ownedScopes.capture(pid)
+	scope, err := t.ownedScopes.capture(unit)
 	if err != nil {
 		return
 	}
@@ -687,6 +691,32 @@ func (t *Tmux) recordOwnedScope(name, token string) {
 		return
 	}
 	_ = t.SetEnvironment(name, ownedScopeTokenEnv, token)
+}
+
+func (t *Tmux) rememberPendingOwnedScope(target, unit string) {
+	if unit == "" {
+		return
+	}
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	if t.pendingOwnedScopes == nil {
+		t.pendingOwnedScopes = make(map[string]string)
+	}
+	t.pendingOwnedScopes[target] = unit
+}
+
+func (t *Tmux) takePendingOwnedScope(target string) string {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	unit := t.pendingOwnedScopes[target]
+	delete(t.pendingOwnedScopes, target)
+	return unit
+}
+
+func (t *Tmux) discardPendingOwnedScope(target string) {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	delete(t.pendingOwnedScopes, target)
 }
 
 func (t *Tmux) stopOwnedScope(name string) {
@@ -3383,10 +3413,11 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	if workDir == "" {
 		workDir = fields[3]
 	}
-	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(command)}
+	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(pane, command)}
 	_, err = t.run("if-shell", "-F", "-t", fields[0], "#{==:#{window_panes},1}",
 		tmuxCommandLine(replacement), "run-shell 'exit 77'")
 	if err != nil {
+		t.discardPendingOwnedScope(pane)
 		return fmt.Errorf("replacing window for pane %q: %w", pane, err)
 	}
 	// Replacement materializes a new pane and therefore a new transient scope.
@@ -3400,8 +3431,8 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 // before execing its agent command. A new tmux window does not inherit that
 // per-window option, and setting it from the new pane keeps an instant-exit
 // replacement from disappearing before callers can observe it.
-func (t *Tmux) wrapReplacementCommand(command string) string {
-	wrapped := shellquote.Quote(t.wrapPaneCommand(command))
+func (t *Tmux) wrapReplacementCommand(pane, command string) string {
+	wrapped := shellquote.Quote(t.wrapPaneCommand(pane, command))
 	return "sh -c " + shellquote.Quote(`tmux set-option -w -t "$TMUX_PANE" remain-on-exit on && exec sh -c `+wrapped)
 }
 

@@ -19,6 +19,7 @@ func newSliceTestTmux(t *testing.T) (*Tmux, *fakeExecutor) {
 	exec := &fakeExecutor{}
 	tm := NewTmux()
 	tm.exec = exec
+	tm.ownedScopes = &fakeOwnedScopes{}
 	tm.agentSlice.probe = func(string) error { return nil }
 	tm.agentSlice.warn = &strings.Builder{}
 	return tm, exec
@@ -36,9 +37,9 @@ func TestAgentSliceWrapsNewSessionWithCommand(t *testing.T) {
 	}
 	args := exec.calls[0]
 	got := args[len(args)-1]
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'exec env GT_ROLE=crew claude'"
-	if got != want {
-		t.Fatalf("pane command = %q, want %q", got, want)
+	if !strings.Contains(got, "systemd-run --user --scope --unit=gascity-pane-") ||
+		!strings.Contains(got, ".scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'exec env GT_ROLE=crew claude'") {
+		t.Fatalf("pane command = %q, want a named Gas City pane scope", got)
 	}
 }
 
@@ -57,9 +58,9 @@ func TestAgentSliceWrapsNewSessionWithCommandAndEnv(t *testing.T) {
 	got := args[len(args)-1]
 	// The env -u prefix must end up INSIDE the scope wrapper so the unset
 	// still applies to the agent process.
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'env -u LC_ALL claude'"
-	if got != want {
-		t.Fatalf("pane command = %q, want %q", got, want)
+	if !strings.Contains(got, "--unit=gascity-pane-") ||
+		!strings.Contains(got, ".scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'env -u LC_ALL claude'") {
+		t.Fatalf("pane command = %q, want a named Gas City pane scope", got)
 	}
 	// The -e session env flags must survive wrapping.
 	joined := strings.Join(args, "\x00")
@@ -72,8 +73,8 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 	exec.outs = []string{
-		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "123",
-		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "123",
+		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "", "", "",
+		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "", "", "",
 	}
 
 	if err := tm.RespawnPane("%0", "claude --resume"); err != nil {
@@ -84,14 +85,104 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	if !strings.Contains(got, "--slice=gascity-agents.slice") || !strings.Contains(got, "claude --resume") || !strings.Contains(got, `tmux set-option -w -t "$TMUX_PANE" remain-on-exit on`) {
 		t.Fatalf("replacement command = %q, want remain-on-exit setup and agent slice", got)
 	}
+	firstScope := scopeUnitInText(t, got)
 
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
-	args = exec.calls[5]
+	args = exec.calls[7]
 	if got := args[6]; !strings.Contains(got, "--slice=gascity-agents.slice") || !strings.Contains(got, "claude --resume") {
 		t.Fatalf("respawn-with-workdir command = %q, want embedded agent slice", got)
+	} else if secondScope := scopeUnitInText(t, got); secondScope == firstScope {
+		t.Fatalf("respawn reused scope %q instead of creating a fresh pane identity", firstScope)
 	}
+}
+
+func TestAgentSliceUsesFreshGasCityScopeForEachPane(t *testing.T) {
+	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
+	tm, exec := newSliceTestTmux(t)
+
+	if err := tm.NewSessionWithCommand("gc-test-slice-one", "/work", "claude"); err != nil {
+		t.Fatalf("first NewSessionWithCommand: %v", err)
+	}
+	if err := tm.NewSessionWithCommand("gc-test-slice-two", "/work", "claude"); err != nil {
+		t.Fatalf("second NewSessionWithCommand: %v", err)
+	}
+	var commands []string
+	for _, call := range exec.calls {
+		if slices.Contains(call, "new-session") {
+			commands = append(commands, call[len(call)-1])
+		}
+	}
+	if len(commands) != 2 {
+		t.Fatalf("new-session command count = %d, want 2; calls = %v", len(commands), exec.calls)
+	}
+	first := scopeUnitFromCommand(t, commands[0])
+	second := scopeUnitFromCommand(t, commands[1])
+	if first == second {
+		t.Fatalf("scope units collide: both pane commands used %q", first)
+	}
+	for _, unit := range []string{first, second} {
+		if !isGasCityPaneScope(unit) {
+			t.Fatalf("scope unit %q is not in the Gas City pane namespace", unit)
+		}
+	}
+}
+
+func TestAgentSliceCommandFailureDoesNotRecordScope(t *testing.T) {
+	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
+	tm, exec := newSliceTestTmux(t)
+	exec.errs = []error{errors.New("systemd-run collision")}
+
+	if err := tm.NewSessionWithCommand("gc-test-slice-failure", "/work", "claude"); err == nil {
+		t.Fatal("NewSessionWithCommand succeeded despite command failure")
+	}
+	for _, call := range exec.calls {
+		if slices.Contains(call, "set-environment") && slices.Contains(call, ownedScopeEnv) {
+			t.Fatalf("recorded a scope after failed pane command: %v", call)
+		}
+	}
+}
+
+func TestAgentSliceScopeNameRejectsForeignOrUnsafeUnits(t *testing.T) {
+	for _, unit := range []string{
+		"tmux-spawn-123.scope",
+		"gascity-pane-../../other.scope",
+		"gascity-pane-abc.service",
+		"gascity-pane-.scope",
+	} {
+		if isGasCityPaneScope(unit) {
+			t.Fatalf("isGasCityPaneScope(%q) = true, want false", unit)
+		}
+	}
+}
+
+func scopeUnitFromCommand(t *testing.T, command string) string {
+	t.Helper()
+	for _, field := range strings.Fields(command) {
+		if unit, ok := strings.CutPrefix(field, "--unit="); ok {
+			return unit
+		}
+	}
+	t.Fatalf("command %q has no --unit", command)
+	return ""
+}
+
+func scopeUnitInText(t *testing.T, text string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(text, "--unit=")
+	if !ok {
+		t.Fatalf("text %q has no Gas City pane scope", text)
+	}
+	end := strings.Index(after, ".scope")
+	if end < 0 {
+		t.Fatalf("text %q has no Gas City pane scope suffix", text)
+	}
+	unit := after[:end+len(".scope")]
+	if !isGasCityPaneScope(unit) {
+		t.Fatalf("text %q has unsafe Gas City pane scope %q", text, unit)
+	}
+	return unit
 }
 
 func TestAgentSliceUnsetLeavesCommandPlain(t *testing.T) {
@@ -177,9 +268,8 @@ func TestAgentSliceQuotesEmbeddedSingleQuotes(t *testing.T) {
 	}
 	args := exec.calls[0]
 	got := args[len(args)-1]
-	want := `systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'claude --msg '\''hi there'\'''`
-	if got != want {
-		t.Fatalf("pane command = %q, want %q", got, want)
+	if !strings.Contains(got, "--unit=gascity-pane-") || !strings.Contains(got, `--slice=gascity-agents.slice --collect --quiet -- sh -c 'claude --msg '\''hi there'\'''`) {
+		t.Fatalf("pane command = %q, want a quoted command in a named Gas City pane scope", got)
 	}
 }
 

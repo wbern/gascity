@@ -2,11 +2,14 @@ package tmux
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +21,7 @@ import (
 // user slice (e.g. "gascity-agents.slice"), makes the tmux provider wrap
 // every pane's initial command in a transient systemd user scope:
 //
-//	systemd-run --user --scope --slice=<slice> --collect --quiet -- sh -c '<command>'
+//	systemd-run --user --scope --unit=gascity-pane-<random>.scope --slice=<slice> --collect --quiet -- sh -c '<command>'
 //
 // Rationale: systemd-enabled tmux builds (stock Ubuntu) move every pane into
 // a transient tmux-spawn-*.scope under the default user slice, so agent
@@ -31,6 +34,23 @@ const AgentSliceEnv = "GC_AGENT_SLICE"
 // agentSliceProbeTimeout bounds the one-time systemd-run availability probe.
 // Test-overridable.
 var agentSliceProbeTimeout = 5 * time.Second
+
+var gasCityPaneScopePattern = regexp.MustCompile(`^gascity-pane-[a-f0-9]{32}\.scope$`)
+
+// newGasCityPaneScope returns a collision-resistant scope name for one pane
+// incarnation. It intentionally has its own namespace rather than borrowing
+// tmux's outer transient scope, which may contain sibling panes.
+func newGasCityPaneScope() (string, error) {
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", fmt.Errorf("creating pane scope identity: %w", err)
+	}
+	return "gascity-pane-" + hex.EncodeToString(entropy[:]) + ".scope", nil
+}
+
+func isGasCityPaneScope(unit string) bool {
+	return gasCityPaneScopePattern.MatchString(unit)
+}
 
 // wrapperCommands lists pane-root wrapper binaries produced by pane-command
 // wrapping. A wrapped pane reports the wrapper as pane_current_command for
@@ -92,9 +112,9 @@ type agentSliceWrapper struct {
 // wrap returns command wrapped for the given slice, or command unchanged
 // when slice is empty, command is empty, or transient user scopes are
 // unavailable on this host.
-func (w *agentSliceWrapper) wrap(slice, command string) string {
+func (w *agentSliceWrapper) wrap(slice, command string) (string, string) {
 	if slice == "" || command == "" {
-		return command
+		return command, ""
 	}
 	w.once.Do(func() {
 		probe := w.probe
@@ -114,18 +134,30 @@ func (w *agentSliceWrapper) wrap(slice, command string) string {
 		w.ok = true
 	})
 	if !w.ok {
-		return command
+		return command, ""
+	}
+	unit, err := newGasCityPaneScope()
+	if err != nil {
+		msg := fmt.Sprintf("creating a dedicated pane scope failed; pane command runs unwrapped: %v", err)
+		if w.warn != nil {
+			_, _ = fmt.Fprintln(w.warn, "gc: "+msg)
+		} else {
+			log.Printf("tmux agent slice: %s", msg)
+		}
+		return command, ""
 	}
 	return shellquote.Join([]string{
-		"systemd-run", "--user", "--scope", "--slice=" + slice,
+		"systemd-run", "--user", "--scope", "--unit=" + unit, "--slice=" + slice,
 		"--collect", "--quiet", "--", "sh", "-c", command,
-	})
+	}), unit
 }
 
 // wrapPaneCommand applies the GC_AGENT_SLICE systemd user-scope wrapper to a
 // pane's initial command. See [AgentSliceEnv]. The environment variable is
 // read per call but the availability probe result is cached, so the first
 // non-empty slice value decides whether wrapping is active for this Tmux.
-func (t *Tmux) wrapPaneCommand(command string) string {
-	return t.agentSlice.wrap(os.Getenv(AgentSliceEnv), command)
+func (t *Tmux) wrapPaneCommand(target, command string) string {
+	wrapped, unit := t.agentSlice.wrap(os.Getenv(AgentSliceEnv), command)
+	t.rememberPendingOwnedScope(target, unit)
+	return wrapped
 }
