@@ -56,6 +56,40 @@ func TestHookSkipTriggerRequiresClaim(t *testing.T) {
 	}
 }
 
+func TestHookQueryTargetRequiresClaim(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{QueryTarget: "reviewer"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--query-target) = %d, want 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--query-target requires --claim") {
+		t.Fatalf("stderr = %q, want --query-target validation", got)
+	}
+}
+
+func TestHookQueryTargetRejectsPositionalAgent(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions([]string{"caller-supplied"}, hookCommandOptions{Claim: true, QueryTarget: "reviewer"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(positional + --query-target) = %d, want 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--query-target cannot be combined with positional agent identity") {
+		t.Fatalf("stderr = %q, want positional/query-target rejection", got)
+	}
+}
+
+func TestHookQueryTargetRequiresRuntimeIdentity(t *testing.T) {
+	clearGCEnv(t)
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, QueryTarget: "reviewer"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--query-target without runtime) = %d, want 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--query-target requires concrete runtime session identity") {
+		t.Fatalf("stderr = %q, want runtime identity rejection", got)
+	}
+}
+
 func TestHookClaimJSONPassesRootJSONContract(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

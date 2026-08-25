@@ -1728,7 +1728,108 @@ gc github
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc github comment-issue](#gc-github-comment-issue) | Post an issue comment using the workspace GitHub App installation |
+| [gc github create-pr](#gc-github-create-pr) | Create a pull request using the workspace GitHub App installation |
+| [gc github import-app](#gc-github-import-app) | Import an existing GitHub App into the pack state |
+| [gc github map-repo](#gc-github-map-repo) | Map a GitHub repository to slash-command dispatch targets |
 | [gc github pr](#gc-github-pr) | GitHub pull-request monitor commands |
+| [gc github push-branch](#gc-github-push-branch) | Push the current branch to GitHub using the workspace GitHub App installation |
+| [gc github release-workflow](#gc-github-release-workflow) | Release a stuck workflow lock so the same GitHub issue can be retried |
+| [gc github status](#gc-github-status) | Show GitHub intake status, URLs, mappings, and recent requests |
+| [gc github sync-app](#gc-github-sync-app) | Sync GitHub App configuration from the configured identity resolver |
+
+## gc github comment-issue
+
+Post an issue comment using the workspace-owned GitHub App installation.
+
+Example:
+  gc github comment-issue owner/repo 42 \
+    --installation-id 123456 \
+    --github-app-identity mayor \
+    --body "Started work on this issue"
+
+Arguments:
+  &lt;repository&gt;   owner/repo
+  &lt;issue-number&gt; GitHub issue number
+
+Flags:
+  --installation-id &lt;id&gt;          GitHub App installation id, unless identity resolves one
+  --github-app-identity &lt;identity&gt;     GitHub App identity for the comment author; see docs/github-app-identity.md
+  --body &lt;text&gt;                   inline markdown body
+  --body-file &lt;path&gt;              read markdown body from file
+
+```
+gc github comment-issue
+```
+
+## gc github create-pr
+
+Create a pull request using the workspace-owned GitHub App installation.
+
+Example:
+  gc github create-pr owner/repo \
+    --installation-id 123456 \
+    --base main \
+    --head fix-42 \
+    --title "fix: correct widget behavior" \
+    --body-file /tmp/pr.md
+
+Arguments:
+  &lt;repository&gt; owner/repo
+
+Flags:
+  --installation-id &lt;id&gt;    GitHub App installation id
+  --base &lt;branch&gt;           base branch for the PR
+  --head &lt;branch&gt;           head branch for the PR
+  --title &lt;text&gt;            PR title
+  --body &lt;text&gt;             inline PR body
+  --body-file &lt;path&gt;        read PR body from file
+
+```
+gc github create-pr
+```
+
+## gc github import-app
+
+Import an existing GitHub App into the shared intake state.
+
+Examples:
+  gc github import-app \
+    --app-id 123456 \
+    --client-id Iv1.example \
+    --webhook-secret "$GITHUB_WEBHOOK_SECRET" \
+    --private-key-file ./github-app.private-key.pem
+
+Optional fields:
+  --client-secret &lt;secret&gt;
+  --slug &lt;app-slug&gt;
+  --html-url &lt;https://github.com/apps/...&gt;
+
+This is the manual fallback for environments where the hosted manifest flow is
+not used.
+
+```
+gc github import-app
+```
+
+## gc github map-repo
+
+Map one GitHub repository to the issue-backed `/gc fix` workflow target.
+
+Examples:
+  gc github map-repo owner/repo rig/polecat \
+    --fix-formula mol-github-fix-issue
+
+Arguments:
+  &lt;repository&gt;  owner/repo
+  &lt;target&gt;      gc sling target, for example rig/polecat
+
+Flags:
+  --fix-formula &lt;name&gt;       formula for /gc fix
+
+```
+gc github map-repo
+```
 
 ## gc github pr
 
@@ -1762,6 +1863,87 @@ gc github pr backfill [monitor-name] [flags]
 | `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
 | `--json` | bool |  | emit JSON |
 | `--timeout` | duration | `45s` | GitHub query timeout |
+
+## gc github push-branch
+
+Push the current git HEAD to a named GitHub branch using the workspace-owned
+GitHub App installation.
+
+Example:
+  gc github push-branch owner/repo \
+    --installation-id 123456 \
+    --branch fix-42
+
+Arguments:
+  &lt;repository&gt; owner/repo
+
+Flags:
+  --installation-id &lt;id&gt;    GitHub App installation id
+  --branch &lt;name&gt;           branch name to create or update
+  --ref &lt;spec&gt;              source ref to push (default: HEAD)
+
+```
+gc github push-branch
+```
+
+## gc github release-workflow
+
+Release a stuck workflow lock for a GitHub issue.
+
+This is an operator recovery command. It does not touch the bead or the pull
+request; it only clears the intake-side workflow lock so `/gc fix` can be
+accepted again for the same issue.
+
+Example:
+  gc github release-workflow owner/repo 42
+
+Arguments:
+  &lt;repository&gt;    owner/repo
+  &lt;issue_number&gt;  GitHub issue number
+
+Flags:
+  --command &lt;name&gt;  slash command to unlock, default: fix
+  --force           release even if the previous bead already posted GitHub side effects
+
+```
+gc github release-workflow
+```
+
+## gc github status
+
+Show the current GitHub intake configuration and recent webhook requests.
+
+Examples:
+  gc github status
+  gc github status --json
+
+The output includes:
+  - published admin and webhook URLs when available
+  - imported GitHub App metadata
+  - repository command mappings
+  - recent request state transitions
+
+```
+gc github status
+```
+
+## gc github sync-app
+
+Sync the GitHub intake App configuration from the configured identity resolver.
+
+Examples:
+  gc github sync-app
+  gc github sync-app --identity mayor
+  gc github sync-app --json
+
+By default the command reads `GITHUB_INTAKE_APP_IDENTITY` from the city
+workspace environment, resolves it through `GITHUB_INTAKE_IDENTITY_RESOLVER`,
+and writes the redacted App metadata plus secret material into the pack state.
+Secret values are not printed.
+
+```
+gc github sync-app
+```
 
 ## gc graph
 
@@ -1881,6 +2063,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--query-target` | string |  | with --claim, select this configured agent's work_query while claiming as the current runtime session |
 | `--skip-trigger` | bool |  | with --claim, skip session trigger priority and claim from work_query |
 
 | Subcommand | Description |

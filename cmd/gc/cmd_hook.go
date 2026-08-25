@@ -28,6 +28,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var claim bool
 	var drainAck bool
 	var skipTrigger bool
+	var queryTarget string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
@@ -47,6 +48,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 				Claim:       claim,
 				DrainAck:    drainAck,
 				SkipTrigger: skipTrigger,
+				QueryTarget: queryTarget,
 				JSON:        jsonOut,
 			}
 			if cmdHookWithOptionsContext(c.Context(), args, opts, stdout, stderr) != 0 {
@@ -60,6 +62,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&skipTrigger, "skip-trigger", false, "with --claim, skip session trigger priority and claim from work_query")
+	cmd.Flags().StringVar(&queryTarget, "query-target", "", "with --claim, select this configured agent's work_query while claiming as the current runtime session")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "with --claim, emit a JSON protocol result")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
@@ -227,6 +230,7 @@ type hookCommandOptions struct {
 	Claim       bool
 	DrainAck    bool
 	SkipTrigger bool
+	QueryTarget string
 	JSON        bool
 }
 
@@ -260,13 +264,30 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		fmt.Fprintln(stderr, "gc hook: --skip-trigger requires --claim") //nolint:errcheck
 		return 1
 	}
+	queryTarget := strings.TrimSpace(opts.QueryTarget)
+	if queryTarget != "" && !opts.Claim {
+		fmt.Fprintln(stderr, "gc hook: --query-target requires --claim") //nolint:errcheck
+		return 1
+	}
+	if queryTarget != "" && len(args) > 0 {
+		fmt.Fprintln(stderr, "gc hook: --query-target cannot be combined with positional agent identity") //nolint:errcheck
+		return 1
+	}
+	if queryTarget != "" && (strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) == "" || strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "") {
+		fmt.Fprintln(stderr, "gc hook: --query-target requires concrete runtime session identity (GC_SESSION_NAME and GC_SESSION_ID)") //nolint:errcheck
+		return 1
+	}
 
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
 	sessionTemplateContext := false
-	if len(args) == 0 {
+	if queryTarget != "" {
+		agentName = queryTarget
+		sessionTemplateContext = true
+	}
+	if queryTarget == "" && len(args) == 0 {
 		template := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
 		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
 			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
@@ -275,7 +296,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 			sessionTemplateContext = true
 		}
 	}
-	if len(args) > 0 {
+	if queryTarget == "" && len(args) > 0 {
 		agentName = args[0]
 		hasSessionContext := strings.TrimSpace(os.Getenv("GC_SESSION_NAME")) != "" ||
 			strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != ""
@@ -415,7 +436,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		overrides["GC_TEMPLATE"] = ""
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
-	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
+	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0 || queryTarget != "", sessionTemplateContext, a.QualifiedName())
 
 	// A cross-store-eligible (city-scoped) agent federates its work query across
 	// all stores — its own first, then every rig store — matched on its own
