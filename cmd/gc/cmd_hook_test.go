@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -3679,5 +3680,104 @@ func TestFilterUnreadyHookCandidatesExcludesClosedBeadsFromReworkDrift(t *testin
 	}
 	if len(items) != 0 {
 		t.Fatalf("filterUnreadyHookCandidates returned %d items for closed bead, want 0; got %q", len(items), got)
+	}
+}
+
+func TestHookCandidateClaimableExcludesDispatchHeldWork(t *testing.T) {
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		t.Run(hold, func(t *testing.T) {
+			candidate := beads.Bead{
+				ID:       "held-work",
+				Status:   "open",
+				Labels:   []string{hold},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+			}
+			if hookCandidateClaimable(candidate, []string{"crm/gastown.polecat"}) {
+				t.Fatalf("hookCandidateClaimable() = true for %s, want false", hold)
+			}
+		})
+	}
+
+	eligible := beads.Bead{
+		ID:       "eligible-work",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+	}
+	if !hookCandidateClaimable(eligible, []string{"crm/gastown.polecat"}) {
+		t.Fatal("hookCandidateClaimable() = false for eligible routed work, want true")
+	}
+}
+
+func TestDoHookTriggerClaimExcludesDispatchHeldWork(t *testing.T) {
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		t.Run(hold, func(t *testing.T) {
+			claims := 0
+			ops := hookClaimOps{
+				ResolveBead: func(context.Context, string, []string, string) (beads.Bead, bool, error) {
+					return beads.Bead{
+						ID: "held-trigger", Status: "open", Labels: []string{hold},
+						Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+					}, true, nil
+				},
+				Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+					claims++
+					return beads.Bead{}, true, nil
+				},
+			}
+			result := doHookTriggerClaim("held-trigger", "city", hookClaimOptions{
+				Assignee: "worker-1", RouteTargets: []string{"crm/gastown.polecat"},
+			}, ops, io.Discard, io.Discard)
+			if result.terminal {
+				t.Fatalf("doHookTriggerClaim() returned terminal result for %s, want pool fallthrough", hold)
+			}
+			if claims != 0 {
+				t.Fatalf("claims = %d, want 0 for %s", claims, hold)
+			}
+		})
+	}
+}
+
+// A dispatch hold stops an unassigned automatic claim, but it must not steal
+// work a restarting session already owns. Holds deliberately park fresh route
+// demand; they are transparent to crash recovery and assigned-ready adoption.
+func TestDoHookTriggerClaimRecoversOwnHeldAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		reason string
+	}{
+		{status: "in_progress", reason: "existing_assignment"},
+		{status: "open", reason: "ready_assignment"},
+	} {
+		for _, hold := range beadmeta.DispatchHoldLabels {
+			t.Run(tc.status+"/"+hold, func(t *testing.T) {
+				ops := hookClaimOps{
+					ResolveBead: func(context.Context, string, []string, string) (beads.Bead, bool, error) {
+						return beads.Bead{
+							ID: "held-owned-trigger", Status: tc.status, Assignee: "worker-1", Labels: []string{hold},
+							Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+						}, true, nil
+					},
+					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+						t.Fatal("claim must not run for an existing assignment")
+						return beads.Bead{}, false, nil
+					},
+					ResolveWorkBranch: func(string) string { return "" },
+				}
+				var stdout, stderr bytes.Buffer
+				result := doHookTriggerClaim("held-owned-trigger", "city", hookClaimOptions{
+					Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"crm/gastown.polecat"}, JSON: true,
+				}, ops, &stdout, &stderr)
+				if !result.terminal || result.code != 0 {
+					t.Fatalf("doHookTriggerClaim() = %+v, want successful terminal recovery; stderr=%s", result, stderr.String())
+				}
+				var got hookClaimJSONResult
+				if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+					t.Fatalf("stdout is not JSON: %v\\nraw: %s", err, stdout.String())
+				}
+				if got.Action != "work" || got.Reason != tc.reason || got.BeadID != "held-owned-trigger" {
+					t.Fatalf("result = %+v, want %s for held trigger", got, tc.reason)
+				}
+			})
+		}
 	}
 }

@@ -53,6 +53,27 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 }
 
+func TestControllerDemandRouteTargetExcludesDispatchHeldWork(t *testing.T) {
+	templates := map[string]struct{}{"crm/gastown.polecat": {}}
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		t.Run(hold, func(t *testing.T) {
+			got := controllerDemandRouteTarget(&config.City{}, beads.Bead{
+				ID: "held-work", Labels: []string{hold},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+			}, templates)
+			if got != "" {
+				t.Fatalf("controllerDemandRouteTarget() = %q, want empty for %s", got, hold)
+			}
+		})
+	}
+
+	if got := controllerDemandRouteTarget(&config.City{}, beads.Bead{
+		ID: "eligible-work", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+	}, templates); got != "crm/gastown.polecat" {
+		t.Fatalf("controllerDemandRouteTarget() = %q, want eligible route", got)
+	}
+}
+
 // liveOpenListErrorStore fails the LIVE open List — the exact read
 // collectOpenUnassignedRoutedWork uses via listOpenForControllerDemandLive — and
 // delegates every other read to the embedded store, modeling a transient

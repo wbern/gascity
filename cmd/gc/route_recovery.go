@@ -23,6 +23,9 @@ import (
 // (ZFC): it copies a route the bead already declares and never invents a target.
 // Idempotent: a bead that already carries gc.routed_to yields "".
 func carriedPoolRoute(b beads.Bead) string {
+	if beadHasDispatchHold(b) {
+		return ""
+	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
 	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
 	if route := legacyWorkflowRunTarget(b); route != "" {
@@ -39,6 +42,19 @@ func carriedPoolRoute(b beads.Bead) string {
 		return ""
 	}
 	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
+}
+
+// beadHasDispatchHold reports whether a bead is deliberately parked from
+// automatic dispatch. It is shared by route materialization, demand, and
+// claiming so an explicit hold cannot be bypassed by a stale route in any
+// controller path.
+func beadHasDispatchHold(b beads.Bead) bool {
+	for _, label := range beadmeta.DispatchHoldLabels {
+		if beadLabelsContain(b.Labels, label) {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreCarriedWorkRoutes re-stamps gc.routed_to from the route a bead already

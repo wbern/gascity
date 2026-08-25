@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -112,6 +113,69 @@ func TestRestoreCarriedWorkRoutesNilStore(t *testing.T) {
 	}
 	if restored != 0 {
 		t.Errorf("restored = %d, want 0 for nil store", restored)
+	}
+}
+
+// TestRestoreCarriedWorkRoutesDoesNotRematerializeHeldWork reproduces the
+// controller patrol regression behind gci-3d8nv: a held bead may retain its
+// legacy run target, but that provenance must not be promoted back into an
+// actionable gc.routed_to route on every reconcile tick.
+func TestRestoreCarriedWorkRoutesDoesNotRematerializeHeldWork(t *testing.T) {
+	const pool = "crm/gastown.polecat"
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		t.Run(hold, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(0, []beads.Bead{{
+				ID: "held-work", Type: "task", Status: "open",
+				Labels:   []string{hold},
+				Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+			}}, nil)
+
+			// Several patrol passes model the recurring exact-trigger route
+			// materialization, not merely one fortunate skipped write.
+			for pass := 0; pass < 8; pass++ {
+				restored, err := restoreCarriedWorkRoutes(store)
+				if err != nil {
+					t.Fatalf("pass %d: restoreCarriedWorkRoutes: %v", pass, err)
+				}
+				if restored != 0 {
+					t.Fatalf("pass %d: restored = %d, want 0 for %s", pass, restored, hold)
+				}
+				if got := mustRoutedTo(t, store, "held-work"); got != "" {
+					t.Fatalf("pass %d: gc.routed_to = %q, want empty for %s", pass, got, hold)
+				}
+			}
+		})
+	}
+}
+
+// TestRestoreCarriedWorkRoutesSkipsWorkHeldAfterSnapshot proves the live
+// re-read closes the reconcile race where a hold is added after route recovery
+// has captured its open-work snapshot but before it tries to materialize a
+// route.
+func TestRestoreCarriedWorkRoutesSkipsWorkHeldAfterSnapshot(t *testing.T) {
+	const pool = "crm/gastown.polecat"
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		t.Run(hold, func(t *testing.T) {
+			live := beads.NewMemStoreFrom(0, []beads.Bead{{
+				ID: "work", Type: "task", Status: "open", Labels: []string{hold},
+				Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+			}}, nil)
+			store := staleOpenListStore{Store: live, openSnapshot: []beads.Bead{{
+				ID: "work", Type: "task", Status: "open",
+				Metadata: map[string]string{beadmeta.RunTargetMetadataKey: pool},
+			}}}
+
+			restored, err := restoreCarriedWorkRoutes(store)
+			if err != nil {
+				t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+			}
+			if restored != 0 {
+				t.Fatalf("restored = %d, want 0 after %s was added", restored, hold)
+			}
+			if got := mustRoutedTo(t, live, "work"); got != "" {
+				t.Fatalf("gc.routed_to = %q, want empty after %s was added", got, hold)
+			}
+		})
 	}
 }
 

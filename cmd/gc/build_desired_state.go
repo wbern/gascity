@@ -1861,6 +1861,9 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // dropped, so the pool never scales up. The returned value is the normalized
 // template name, since callers use it as the counts/demand map key.
 func controllerDemandRouteTarget(cfg *config.City, b beads.Bead, templates map[string]struct{}) string {
+	if beadHasDispatchHold(b) {
+		return ""
+	}
 	for _, candidate := range controllerDemandRouteCandidates(b) {
 		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
 		if _, ok := templates[normalized]; ok {

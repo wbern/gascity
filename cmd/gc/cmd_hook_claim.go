@@ -545,7 +545,6 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s not found; falling through to the pool\n", triggerID) //nolint:errcheck
 		return hookClaimResult{}
 	}
-
 	status := strings.ToLower(strings.TrimSpace(bead.Status))
 	if hookClaimHasIdentity(bead.Assignee, opts.IdentityCandidates) {
 		reason := ""
@@ -569,6 +568,10 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)}
 		}
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but status=%q; falling through to the pool\n", triggerID, status) //nolint:errcheck
+		return hookClaimResult{}
+	}
+	if beadHasDispatchHold(bead) {
+		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s is held; falling through to the pool\n", triggerID) //nolint:errcheck
 		return hookClaimResult{}
 	}
 
@@ -676,6 +679,7 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
+		!beadHasDispatchHold(candidate) &&
 		hookClaimMatchesRoute(candidate, routeTargets)
 }
 
