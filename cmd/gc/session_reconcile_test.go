@@ -1830,6 +1830,57 @@ func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackL
 	}
 }
 
+// gcf-ru0 regression: once a bead has migrated to state=start-pending (see
+// TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackLeaseExpires),
+// the rollback gate in healStatePatchWithRollbackInfo only fired for
+// info.MetadataState == "creating" — never for "start-pending", even though
+// pendingCreateLeaseExpiredForRollbackInfo itself already understands
+// start-pending via pendingCreateRollbackState. A never-started pending-create
+// lease that aged past pendingCreateNeverStartedTimeout (10m) while sitting in
+// start-pending was therefore never rolled back: projectRuntimeProjection's
+// BaseStateStartPending branch has no staleness check of its own and just
+// keeps re-projecting start-pending forever, so the bead wedged indefinitely
+// with no self-heal.
+func TestHealState_StartPendingNeverStartedRollsBackToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 18, 20, 0, 0, 0, time.UTC)}
+
+	// Past pendingCreateNeverStartedTimeout (10m) with no last_woke_at ever
+	// recorded — this create attempt never even reached a provider Start call.
+	startedAt := clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute))
+	session := makeBead("b1", map[string]string{
+		"state":                                  string(sessionpkg.StateStartPending),
+		"pending_create_claim":                   "true",
+		"pending_create_started_at":              pendingCreateStartedAtNow(startedAt),
+		"session_key":                            "stale-session",
+		"started_config_hash":                    "stale-config",
+		sessionpkg.PrimedAtMetadataKey:           "stale-primed-at",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "stale-priming-attempt",
+		sessionpkg.PromptHashMetadataKey:         "stale-prompt-hash",
+	})
+	session.CreatedAt = startedAt
+
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Fatalf("state = %q, want asleep (expired start-pending lease must roll back)", got)
+	}
+	if got := session.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	for key, want := range map[string]string{
+		"session_key":                            "",
+		"started_config_hash":                    "",
+		"continuation_reset_pending":             "true",
+		sessionpkg.PrimedAtMetadataKey:           "",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "",
+		sessionpkg.PromptHashMetadataKey:         "",
+	} {
+		if got := session.Metadata[key]; got != want {
+			t.Fatalf("%s = %q, want %q after rollback continuation reset", key, got, want)
+		}
+	}
+}
+
 func TestHealState_PreservesFreshCreatingWithoutPendingClaim(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
