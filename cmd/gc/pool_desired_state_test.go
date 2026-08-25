@@ -455,6 +455,58 @@ func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssigne
 	}
 }
 
+func TestComputePoolDesiredStatesWithDemandTracedCanonicalizesAssignedRigStoreRef(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("requests = %+v, want one resume request", result)
+	}
+	if got := result[0].Requests[0].WorkStoreRef; got != "rig:rig-b" {
+		t.Fatalf("resume WorkStoreRef = %q, want canonical rig:rig-b", got)
+	}
+}
+
+func TestComputePoolDesiredStatesWithDemandTracedRejectsMalformedAssignedStoreRef(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"other:rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	for _, state := range result {
+		if len(state.Requests) != 0 {
+			t.Fatalf("malformed store ref produced requests: %+v", result)
+		}
+	}
+}
+
+func TestComputePoolDesiredStatesWithDemandTracedRejectsMisalignedAssignedStoreRefs(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{poolAgent("worker", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{workBead("rig-work", "worker", "session-1", "in_progress", 0)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, work, []string{"rig-a", "rig-b"}, sessionInfosFromBeads(sessions), nil, nil, nil)
+
+	for _, state := range result {
+		if len(state.Requests) != 0 {
+			t.Fatalf("misaligned store refs produced requests: %+v", result)
+		}
+	}
+}
+
 // TestComputePoolDesiredStates_SkipsDeferredOpenAssignedBead is the gcw-ehvg P1a
 // hardening: the resume/wake tiers must NOT wake a session for an OPEN assigned
 // bead hidden from claim by a future defer_until. The worker would find nothing

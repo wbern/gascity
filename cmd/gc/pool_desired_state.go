@@ -178,7 +178,15 @@ func computePoolDesiredStates(
 		for workIndex, wb := range assignedWorkBeads {
 			workStoreRef := ""
 			if len(assignedWorkStoreRefs) == len(assignedWorkBeads) && len(assignedWorkStoreRefs) > 0 {
-				workStoreRef = strings.TrimSpace(assignedWorkStoreRefs[workIndex])
+				var valid bool
+				workStoreRef, valid = canonicalContinuationClaimStoreRef(cfg.Workspace.Name, assignedWorkStoreRefs[workIndex])
+				if !valid {
+					// A non-empty aligned provenance value that cannot name a
+					// canonical city or rig store must not be propagated into a
+					// session request. Treating it as a generic fallback could
+					// claim work from the wrong store.
+					continue
+				}
 			}
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {

@@ -85,7 +85,7 @@ type DesiredStateResult struct {
 	// independent stores produce overlapping bead IDs.
 	AssignedWorkStores []beads.Store
 	// AssignedWorkStoreRefs is aligned by index with AssignedWorkBeads.
-	// The empty string means city store; non-empty values are canonical rig refs.
+	// The empty string means city store; non-empty values are rig names.
 	// Consumers that decide whether a specific agent should run must use
 	// this scope before treating a bead as reachable work for that agent.
 	AssignedWorkStoreRefs []string
@@ -1318,7 +1318,6 @@ func collectAssignedWorkBeadsWithStores(
 	var wg sync.WaitGroup
 	for idx, source := range stores {
 		idx, source := idx, source
-		source.ref = canonicalAssignedWorkStoreRef(source.ref)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -4845,18 +4844,6 @@ func canonicalContinuationClaimStoreRef(cityName, storeRef string) (string, bool
 	default:
 		return "rig:" + storeRef, true
 	}
-}
-
-// canonicalAssignedWorkStoreRef turns the assigned-work collector's bare rig
-// key into the canonical ref propagated to session requests. The city store's
-// empty key remains the legacy city-store representation because callers that
-// need a city name canonicalize it at their own boundary.
-func canonicalAssignedWorkStoreRef(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || strings.HasPrefix(storeRef, "rig:") || strings.HasPrefix(storeRef, "city:") {
-		return storeRef
-	}
-	return "rig:" + storeRef
 }
 
 // Keep migration writes within the same budget used for other reconciler
