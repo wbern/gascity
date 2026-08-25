@@ -1849,9 +1849,14 @@ func TestHealState_StartPendingNeverStartedRollsBackToAsleep(t *testing.T) {
 	// recorded — this create attempt never even reached a provider Start call.
 	startedAt := clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute))
 	session := makeBead("b1", map[string]string{
-		"state":                     string(sessionpkg.StateStartPending),
-		"pending_create_claim":      "true",
-		"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+		"state":                                  string(sessionpkg.StateStartPending),
+		"pending_create_claim":                   "true",
+		"pending_create_started_at":              pendingCreateStartedAtNow(startedAt),
+		"session_key":                            "stale-session",
+		"started_config_hash":                    "stale-config",
+		sessionpkg.PrimedAtMetadataKey:           "stale-primed-at",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "stale-priming-attempt",
+		sessionpkg.PromptHashMetadataKey:         "stale-prompt-hash",
 	})
 	session.CreatedAt = startedAt
 
@@ -1861,6 +1866,18 @@ func TestHealState_StartPendingNeverStartedRollsBackToAsleep(t *testing.T) {
 	}
 	if got := session.Metadata["pending_create_claim"]; got != "" {
 		t.Fatalf("pending_create_claim = %q, want empty after rollback", got)
+	}
+	for key, want := range map[string]string{
+		"session_key":                            "",
+		"started_config_hash":                    "",
+		"continuation_reset_pending":             "true",
+		sessionpkg.PrimedAtMetadataKey:           "",
+		sessionpkg.PrimingAttemptedAtMetadataKey: "",
+		sessionpkg.PromptHashMetadataKey:         "",
+	} {
+		if got := session.Metadata[key]; got != want {
+			t.Fatalf("%s = %q, want %q after rollback continuation reset", key, got, want)
+		}
 	}
 }
 
