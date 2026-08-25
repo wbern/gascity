@@ -129,10 +129,16 @@ func (p *Provider) cancellationError(ctxErr error, stderr string, args []string)
 	return fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
 }
 
+// startCollisionPhrases are adapter stderr idioms that mean a live session
+// already owns the requested name. The exec provider infers
+// [runtime.ErrSessionExists] from adapter stderr, so cleanup must recognize
+// each supported phrasing before it can safely tear down a failed start.
+var startCollisionPhrases = []string{"already exists", "already running"}
+
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
 // provider's contract: exit code 2 is an unknown operation treated as success
-// (forward compatible, nil error), a "start ... already exists" collision maps
-// to [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
+// (forward compatible, nil error), a start-op name collision maps to
+// [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
 func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
@@ -142,10 +148,22 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	if errMsg == "" {
 		errMsg = runErr.Error()
 	}
-	if len(args) > 0 && args[0] == "start" && strings.Contains(strings.ToLower(errMsg), "already exists") {
+	if len(args) > 0 && args[0] == "start" && isStartCollision(errMsg) {
 		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
 	}
 	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+}
+
+// isStartCollision reports whether a failed start operation says the name is
+// already owned by a live session.
+func isStartCollision(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	for _, phrase := range startCollisionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // runWithTTY executes the script with the terminal inherited (for Attach).
@@ -170,20 +188,27 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-		return err
+		return p.cleanupAfterStartFailure(name, err)
 	}
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		if stopErr := p.Stop(name); stopErr != nil {
-			return errors.Join(
-				fmt.Errorf("exec provider: dismissing startup dialogs: %w", err),
-				fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr),
-			)
-		}
-		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err))
 	}
 
 	return nil
+}
+
+// cleanupAfterStartFailure tears down the box an adapter may have created
+// before a start failure. Name collisions are excluded because that box belongs
+// to the already-running session, not this failed attempt.
+func (p *Provider) cleanupAfterStartFailure(name string, startErr error) error {
+	if errors.Is(startErr, runtime.ErrSessionExists) {
+		return startErr
+	}
+	if stopErr := p.Stop(name); stopErr != nil {
+		return errors.Join(startErr, fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr))
+	}
+	return startErr
 }
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the

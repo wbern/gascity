@@ -246,6 +246,85 @@ func TestStart(t *testing.T) {
 	}
 }
 
+// startFailureScript fails the start operation after creating the box and logs
+// each stop call. It models an adapter that provisions before readiness fails.
+func startFailureScript(createFile, stopFile, startStderr string) string {
+	return `
+op="$1"
+name="$2"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    echo "$name" >> "` + createFile + `"
+    echo "` + startStderr + `" >&2
+    exit 1
+    ;;
+  stop) echo "stop $name" >> "` + stopFile + `" ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func TestStartTearsDownCreatedBoxWhenStartOpFails(t *testing.T) {
+	dir := t.TempDir()
+	createFile := filepath.Join(dir, "create.log")
+	stopFile := filepath.Join(dir, "stop.log")
+	p := NewProvider(writeScript(t, dir, startFailureScript(createFile, stopFile, "readiness timeout")))
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Fatalf("Start error = %v, want adapter start failure", err)
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want adapter-created box", got)
+	}
+	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
+		t.Fatalf("stop log = %q, want only the created box torn down", got)
+	}
+}
+
+func TestStartDoesNotTearDownBoxOwnedByExistingSession(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	p := NewProvider(writeScript(t, dir, startFailureScript(filepath.Join(dir, "create.log"), stopFile, `session "test-sess" already running`)))
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start error = %v, want ErrSessionExists", err)
+	}
+	if got := readLog(t, stopFile); got != "" {
+		t.Fatalf("stop log = %q, want no teardown of an existing session box", got)
+	}
+}
+
+func TestStartReportsCleanupFailureAlongsideStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProvider(writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null; echo "readiness timeout" >&2; exit 1 ;;
+  stop)  echo "sandbox delete refused" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`))
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Errorf("Start error = %v, want original start failure", err)
+	}
+	if !strings.Contains(err.Error(), "sandbox delete refused") {
+		t.Errorf("Start error = %v, want cleanup failure", err)
+	}
+}
+
 func TestStart_ReturnsDialogDismissalError(t *testing.T) {
 	dir := t.TempDir()
 	stopFile := filepath.Join(dir, "stop.log")
