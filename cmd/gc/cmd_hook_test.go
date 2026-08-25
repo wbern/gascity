@@ -45,6 +45,17 @@ func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
 	}
 }
 
+func TestHookSkipTriggerRequiresClaim(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{SkipTrigger: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithOptions(--skip-trigger) = %d, want 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--skip-trigger requires --claim") {
+		t.Fatalf("stderr = %q, want --skip-trigger validation", got)
+	}
+}
+
 func TestHookClaimJSONPassesRootJSONContract(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

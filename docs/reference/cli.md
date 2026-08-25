@@ -1881,6 +1881,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--skip-trigger` | bool |  | with --claim, skip session trigger priority and claim from work_query |
 
 | Subcommand | Description |
 |------------|-------------|

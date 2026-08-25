@@ -238,6 +238,152 @@ esac
 	}
 }
 
+// TestHookCommandClaimSkipTriggerUsesConfiguredWorkQuery proves that a
+// tokened warm session can deliberately opt out of its authoritative trigger
+// without weakening its instance-token fence. This is needed by consumers
+// whose configured query is more specific than the session's launch trigger.
+func TestHookCommandClaimSkipTriggerUsesConfiguredWorkQuery(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	queryMarker := filepath.Join(t.TempDir(), "work-query-ran")
+	cityTOML := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reviewer"
+work_query = "touch %s; printf '[{\"id\":\"review-work\",\"status\":\"open\",\"metadata\":{\"gc.routed_to\":\"reviewer\"}}]'"
+`, queryMarker)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	if got := loaded.Agents[0].WorkQuery; !strings.Contains(got, "review-work") {
+		t.Fatalf("work_query = %q, want review-work", got)
+	}
+	sessionID := newFenceSessionBeadWithMetadata(t, cityDir, session.StateActive, "current-token", map[string]string{
+		"template":                              "reviewer",
+		beadmeta.TriggerBeadIDMetadataKey:       "authoritative-trigger",
+		beadmeta.TriggerBeadStoreRefMetadataKey: "city:test-city",
+	})
+
+	fakeBin := t.TempDir()
+	triggerMarker := filepath.Join(t.TempDir(), "trigger-claimed")
+	reviewMarker := filepath.Join(t.TempDir(), "review-claimed")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"show --json authoritative-trigger"*) printf '[{"id":"authoritative-trigger","status":"open","metadata":{"gc.routed_to":"reviewer"}}]' ;;
+  *"update authoritative-trigger --claim --json"*) : > %q; printf '[{"id":"authoritative-trigger","status":"in_progress","assignee":"reviewer-1","metadata":{"gc.routed_to":"reviewer"}}]' ;;
+  *"show --json review-work"*) if [ -f %q ]; then printf '[{"id":"review-work","status":"in_progress","assignee":"reviewer-1","metadata":{"gc.routed_to":"reviewer"}}]'; else printf '[{"id":"review-work","status":"open","metadata":{"gc.routed_to":"reviewer"}}]'; fi ;;
+  *"update review-work --claim --json"*) : > %q; printf '[{"id":"review-work","status":"in_progress","assignee":"reviewer-1","metadata":{"gc.routed_to":"reviewer"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, bdLog, triggerMarker, reviewMarker, reviewMarker)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setFenceClaimEnv(t, cityDir, sessionID, "current-token")
+	t.Setenv("GC_TEMPLATE", "reviewer")
+	t.Setenv("GC_ALIAS", "reviewer-1")
+	t.Setenv("GC_SESSION_NAME", "reviewer-1")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "stale-startup-trigger")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "city:test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "hook", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc hook --claim --skip-trigger = %d, want 0; stdout=%q stderr=%s bd log=%s", code, stdout.String(), stderr.String(), readFileString(t, bdLog))
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.BeadID != "review-work" || result.Reason != "claimed" {
+		t.Fatalf("result = %+v, want configured-query claim of review-work", result)
+	}
+	if _, err := os.Stat(queryMarker); err != nil {
+		t.Fatalf("configured work_query did not run: %v; bd log=%s", err, readFileString(t, bdLog))
+	}
+	if _, err := os.Stat(triggerMarker); !os.IsNotExist(err) {
+		t.Fatalf("authoritative trigger was claimed despite --skip-trigger; stat error = %v", err)
+	}
+}
+
+// TestHookCommandClaimSkipTriggerIgnoresTokenlessEnvironmentTrigger preserves
+// the same query-only behavior for legacy runtimes, which obtain trigger data
+// directly from GC_TRIGGER_WORK_* rather than a session projection.
+func TestHookCommandClaimSkipTriggerIgnoresTokenlessEnvironmentTrigger(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	queryMarker := filepath.Join(t.TempDir(), "work-query-ran")
+	cityTOML := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "touch %s; printf '[{\"id\":\"query-work\",\"status\":\"open\",\"metadata\":{\"gc.routed_to\":\"worker\"}}]'"
+`, queryMarker)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	triggerMarker := filepath.Join(t.TempDir(), "trigger-claimed")
+	queryClaimMarker := filepath.Join(t.TempDir(), "query-claimed")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"show --json env-trigger"*) printf '[{"id":"env-trigger","status":"open","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *"update env-trigger --claim --json"*) : > %q; printf '[{"id":"env-trigger","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *"show --json query-work"*) if [ -f %q ]; then printf '[{"id":"query-work","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]'; else printf '[{"id":"query-work","status":"open","metadata":{"gc.routed_to":"worker"}}]'; fi ;;
+  *"update query-work --claim --json"*) : > %q; printf '[{"id":"query-work","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, triggerMarker, queryClaimMarker, queryClaimMarker)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_ALIAS", "worker-1")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+	t.Setenv("GC_SESSION_ID", "legacy-session")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "env-trigger")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "city:test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "hook", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc hook --claim --skip-trigger = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.BeadID != "query-work" || result.Reason != "claimed" {
+		t.Fatalf("result = %+v, want configured-query claim of query-work", result)
+	}
+	if _, err := os.Stat(queryMarker); err != nil {
+		t.Fatalf("configured work_query did not run: %v", err)
+	}
+	if _, err := os.Stat(triggerMarker); !os.IsNotExist(err) {
+		t.Fatalf("environment trigger was claimed despite --skip-trigger; stat error = %v", err)
+	}
+}
+
 // installFenceWorkQueryProbe puts a fake `bd` on PATH that records each
 // invocation by touching the returned marker path and prints an empty
 // work-query result, so a test can assert whether the claim fence reached the
@@ -428,6 +574,35 @@ func TestHookCommandClaimTokenlessRuntimeSkipsFence(t *testing.T) {
 	}
 	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
 		t.Fatalf("result = %+v, want action=drain reason=no_work (probe returns no work)", result)
+	}
+}
+
+// TestHookCommandClaimSkipTriggerStillFencesStaleSession proves query-only
+// claim mode bypasses priority selection only; an obsolete instance must still
+// drain before it can run a configured query or attempt a CAS claim.
+func TestHookCommandClaimSkipTriggerStillFencesStaleSession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateFailedCreate, "failed-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "failed-token")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, SkipTrigger: true, JSON: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("query-only stale claim code = %d, want 1; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work_query ran for stale query-only session; stat error = %v", err)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonStaleSession {
+		t.Fatalf("result = %+v, want stale-session drain", result)
 	}
 }
 
