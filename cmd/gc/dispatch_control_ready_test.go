@@ -513,6 +513,101 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
+func shimmedBdEnvForTest(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	realBd := filepath.Join(dir, "real-bd")
+	if err := os.WriteFile(realBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake real bd: %v", err)
+	}
+	shimDir := filepath.Join(dir, "shimbin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shimbin: %v", err)
+	}
+	shimBd := filepath.Join(shimDir, "bd")
+	if err := os.WriteFile(shimBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake shim bd: %v", err)
+	}
+	gcBin := filepath.Join(shimDir, "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
+	}
+	return map[string]string{
+		citylayout.RealBdEnvVar: realBd,
+		"GC_BIN":                gcBin,
+	}
+}
+
+// A real-bd marker alone is insufficient to authorize shim-only flags: the
+// command runner still resolves `bd` through PATH, which can point directly to
+// that raw binary during a partial shim rollout.
+func TestControlReadyShimmedRejectsRawBdOnPath(t *testing.T) {
+	dir := t.TempDir()
+	rawBd := filepath.Join(dir, "bd")
+	if err := os.WriteFile(rawBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write raw bd: %v", err)
+	}
+
+	if controlReadyShimmed(map[string]string{
+		citylayout.RealBdEnvVar: rawBd,
+		"PATH":                  dir,
+	}) {
+		t.Fatal("controlReadyShimmed accepted raw bd on PATH")
+	}
+}
+
+func TestControlReadyShimmedRejectsDistinctRawBdOnPath(t *testing.T) {
+	dir := t.TempDir()
+	realBd := filepath.Join(dir, "real-bd")
+	if err := os.WriteFile(realBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake real bd: %v", err)
+	}
+	rawDir := filepath.Join(dir, "raw-bin")
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		t.Fatalf("mkdir raw-bin: %v", err)
+	}
+	distinctRawBd := filepath.Join(rawDir, "bd")
+	if err := os.WriteFile(distinctRawBd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write distinct raw bd: %v", err)
+	}
+
+	if controlReadyShimmed(map[string]string{
+		citylayout.RealBdEnvVar: realBd,
+		"PATH":                  rawDir,
+	}) {
+		t.Fatal("controlReadyShimmed accepted distinct raw bd on PATH")
+	}
+}
+
+func TestControlReadyShimmedAcceptsPositiveShimOnPath(t *testing.T) {
+	dir := t.TempDir()
+	env := shimmedBdEnvForTest(t, dir)
+	shimDir := filepath.Dir(env["GC_BIN"])
+	env["PATH"] = shimDir
+
+	if !controlReadyShimmed(env) {
+		t.Fatal("controlReadyShimmed rejected positive shim on PATH")
+	}
+}
+
+func TestControlReadyShimmedTreatsEmptyPathEntryAsCurrentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	env := shimmedBdEnvForTest(t, dir)
+	shimDir := filepath.Dir(env["GC_BIN"])
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(shimDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	env["PATH"] = string(os.PathListSeparator)
+	if !controlReadyShimmed(env) {
+		t.Fatal("empty PATH component resolving ./bd shim was not recognized")
+	}
+}
+
 func TestControlReadyCachePrimeUsesBoundedSummaryForShimmedDispatcher(t *testing.T) {
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
@@ -761,7 +856,7 @@ printf '%%s' "$*" > %q
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
+	result, err := controlReadyFallbackReady(t.TempDir(), shimmedBdEnvForTest(t, tmp), false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -799,10 +894,9 @@ func TestControlReadyFallbackReadyUsesBoundedSummaryForPinnedRigScope(t *testing
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{
-		citylayout.RealBdEnvVar: "/real/bd",
-		"GC_STORE_SCOPE":        "rig",
-	}, false)
+	env := shimmedBdEnvForTest(t, tmp)
+	env["GC_STORE_SCOPE"] = "rig"
+	result, err := controlReadyFallbackReady(t.TempDir(), env, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
