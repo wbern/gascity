@@ -918,9 +918,16 @@ var hookWorkQueryTimeout = 150 * time.Second
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return runWorkQueryCommandWithEnv("sh", []string{"-c", command}, command, dir, env)
+}
+
+// runWorkQueryCommandWithEnv is the argv-safe process boundary shared by shell
+// work queries and control-plane reads that must select an exact executable.
+// display is used only in diagnostics; name and args remain separate argv.
+func runWorkQueryCommandWithEnv(name string, args []string, display, dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
@@ -940,23 +947,23 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		// "timed out after" text is preserved.
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
+			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", display, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
 		}
-		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("running work query %q: timed out after %s: %w", display, hookWorkQueryTimeout, context.DeadlineExceeded)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
-			return "", fmt.Errorf("running work query %q: %w: %s", command, err, msg)
+			return "", fmt.Errorf("running work query %q: %w: %s", display, err, msg)
 		}
-		return "", fmt.Errorf("running work query %q: %w", command, err)
+		return "", fmt.Errorf("running work query %q: %w", display, err)
 	}
 	// A withheld payload is a failed read, not an answer. Returning it would let
 	// normalizeWorkQueryOutput wrap the manifest into a one-element array and
 	// present a phantom candidate with no ID as this session's work
 	// (gcw-qap3.16).
 	if truncated := beads.OutputFirewallTruncation(out); truncated != nil {
-		return "", fmt.Errorf("running work query %q: %w", command, truncated)
+		return "", fmt.Errorf("running work query %q: %w", display, truncated)
 	}
 	return string(out), nil
 }

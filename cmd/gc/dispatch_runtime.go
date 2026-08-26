@@ -848,15 +848,22 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	if bare := controlDispatcherBareRoute(target); bare != "" {
 		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
 	}
+	gcExe, err := controlReadyExecutablePath()
+	if err != nil {
+		// Keep the generated query fail-closed without falling back to ambient
+		// PATH. The optimized path reports the same resolver error directly.
+		gcExe = "/__gascity_current_executable_unavailable__"
+	}
+	gcBD := shellquote.Quote(gcExe) + ` bd`
 	query := queryPrefix + ` sh -c '` +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`emit_ready ` + gcBD + ` --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + gcBD + ` --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready ` + gcBD + ` --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic` + controlReadyExcludeHoldLabelsShellArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
