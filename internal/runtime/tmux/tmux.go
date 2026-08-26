@@ -1704,7 +1704,13 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// #{pane_in_mode} keeps this a no-op on the happy path.
 	t.cancelCopyModeIfParked(target)
 
-	// 1. Send text in literal mode with retry on transient errors
+	// 1. Clear an earlier undelivered draft before pasting a new nudge.
+	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
