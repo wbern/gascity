@@ -141,11 +141,30 @@ func TestRespawnPaneRefusesWindowWithSiblingPanes(t *testing.T) {
 	tm.exec = fe
 
 	err := tm.RespawnPane("managed", "agent --resume")
-	if err == nil || !strings.Contains(err.Error(), "replacing window") {
+	if err == nil || !strings.Contains(err.Error(), "window has 2 panes") {
 		t.Fatalf("RespawnPane error = %v, want sibling-loss refusal", err)
 	}
-	if len(fe.calls) != 3 || !slices.Contains(fe.calls[2], "if-shell") {
-		t.Fatalf("tmux calls = %v, want atomic predicate and no replacement", fe.calls)
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %v, want metadata eligibility check and no replacement", fe.calls)
+	}
+}
+
+func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T) {
+	fs := &fakeOwnedScopes{}
+	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged"}}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.ownedScopes = fs
+
+	err := tm.RespawnPane("managed", "agent --resume")
+	if err == nil || !strings.Contains(err.Error(), "window has 2 panes") {
+		t.Fatalf("RespawnPane error = %v, want multi-pane refusal", err)
+	}
+	if fs.stopped != (ownedScope{}) {
+		t.Fatalf("stopped scope = %+v, want original scope preserved", fs.stopped)
+	}
+	if want := 1; len(fe.calls) != want {
+		t.Fatalf("tmux calls = %v, want only metadata eligibility check", fe.calls)
 	}
 }
 

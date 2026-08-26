@@ -95,15 +95,19 @@ func (systemdUserScopes) stop(scope ownedScope) error {
 	if err := systemdStopUnit(scope.unit); err != nil {
 		return fmt.Errorf("stopping scope %q: %w", scope.unit, err)
 	}
-	if liveID, err := systemdShowProperty(scope.unit, "InvocationID"); err != nil {
+	activeState, err := systemdShowProperty(scope.unit, "ActiveState")
+	if err != nil {
 		if systemdUnitGone(err) {
 			return nil
 		}
 		return fmt.Errorf("verifying stopped scope %q: %w", scope.unit, err)
-	} else if liveID == scope.invocationID {
-		return fmt.Errorf("scope %q remained active after stop", scope.unit)
 	}
-	return fmt.Errorf("scope %q invocation changed after stop", scope.unit)
+	switch strings.TrimSpace(activeState) {
+	case "inactive", "failed":
+		return nil
+	default:
+		return fmt.Errorf("scope %q remained active after stop (ActiveState=%q)", scope.unit, activeState)
+	}
 }
 
 func systemdUnitGone(err error) bool {
