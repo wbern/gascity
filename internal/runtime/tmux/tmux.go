@@ -719,31 +719,95 @@ func (t *Tmux) discardPendingOwnedScope(target string) {
 	delete(t.pendingOwnedScopes, target)
 }
 
-func (t *Tmux) stopOwnedScope(name string) {
+func (t *Tmux) movePendingOwnedScope(from, to string) {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	unit := t.pendingOwnedScopes[from]
+	delete(t.pendingOwnedScopes, from)
+	if unit != "" {
+		t.pendingOwnedScopes[to] = unit
+	}
+}
+
+func (t *Tmux) hasPendingOwnedScope(target string) bool {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	return t.pendingOwnedScopes[target] != ""
+}
+
+func (t *Tmux) recordOwnedScopeStrict(name string) error {
 	if t.ownedScopes == nil {
-		return
+		return nil
 	}
-	unit, err := t.GetEnvironment(name, ownedScopeEnv)
-	if err != nil || !isGasCityPaneScope(unit) {
-		return
+	unit := t.takePendingOwnedScope(name)
+	if unit == "" {
+		return nil
 	}
-	invocationID, err := t.GetEnvironment(name, ownedScopeInvocationEnv)
-	if err != nil || strings.TrimSpace(invocationID) == "" {
-		return
+	token, err := t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
+	if err != nil || strings.TrimSpace(token) == "" {
+		return fmt.Errorf("reading replacement session identity: %w", err)
 	}
-	recordedToken, err := t.GetEnvironment(name, ownedScopeTokenEnv)
-	if err != nil || strings.TrimSpace(recordedToken) == "" {
-		return
+	scope, err := t.ownedScopes.capture(unit)
+	if err != nil {
+		return fmt.Errorf("capturing replacement owned scope: %w", err)
 	}
-	liveToken, err := t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
-	if err != nil || liveToken != recordedToken {
-		return
+	cleanup := func(cause error) error {
+		if stopErr := t.ownedScopes.stop(scope); stopErr != nil {
+			return fmt.Errorf("%w; cleaning up replacement owned scope: %w", cause, stopErr)
+		}
+		return cause
 	}
-	if err := t.ownedScopes.stop(ownedScope{unit: unit, invocationID: invocationID}); err != nil {
+	if err := t.SetEnvironment(name, ownedScopeEnv, scope.unit); err != nil {
+		return cleanup(fmt.Errorf("recording replacement owned scope: %w", err))
+	}
+	if err := t.SetEnvironment(name, ownedScopeInvocationEnv, scope.invocationID); err != nil {
+		return cleanup(fmt.Errorf("recording replacement owned scope invocation: %w", err))
+	}
+	if err := t.SetEnvironment(name, ownedScopeTokenEnv, token); err != nil {
+		return cleanup(fmt.Errorf("recording replacement owned scope token: %w", err))
+	}
+	return nil
+}
+
+func (t *Tmux) stopOwnedScope(name string) {
+	if err := t.stopOwnedScopeStrict(name); err != nil {
 		// The named tmux teardown remains safe, but never turn an unproven
 		// scope into a PID cleanup. Keep this diagnostic observable for reaping.
 		fmt.Fprintf(os.Stderr, "gc: retained descendant scope for %q: %v\n", name, err)
 	}
+}
+
+// stopOwnedScopeStrict stops the scope recorded for one still-matching tmux
+// session incarnation. It returns an error rather than replacing a pane when
+// ownership evidence is incomplete or has changed.
+func (t *Tmux) stopOwnedScopeStrict(name string) error {
+	if t.ownedScopes == nil {
+		return nil
+	}
+	unit, err := t.GetEnvironment(name, ownedScopeEnv)
+	if err != nil {
+		// No prior owned scope is normal when GC_AGENT_SLICE is disabled.
+		return nil
+	}
+	if !isGasCityPaneScope(unit) {
+		return fmt.Errorf("invalid recorded owned scope %q", unit)
+	}
+	invocationID, err := t.GetEnvironment(name, ownedScopeInvocationEnv)
+	if err != nil || strings.TrimSpace(invocationID) == "" {
+		return fmt.Errorf("reading recorded owned scope invocation: %w", err)
+	}
+	recordedToken, err := t.GetEnvironment(name, ownedScopeTokenEnv)
+	if err != nil || strings.TrimSpace(recordedToken) == "" {
+		return fmt.Errorf("reading recorded owned scope token: %w", err)
+	}
+	liveToken, err := t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
+	if err != nil || liveToken != recordedToken {
+		return fmt.Errorf("recorded owned scope session identity changed")
+	}
+	if err := t.ownedScopes.stop(ownedScope{unit: unit, invocationID: invocationID}); err != nil {
+		return fmt.Errorf("stopping recorded owned scope: %w", err)
+	}
+	return nil
 }
 
 // KillSessionWithProcessesExcluding retains the legacy call shape. Named tmux
@@ -3421,16 +3485,19 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // than silently losing its sibling panes.
 func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	metadata, err := t.run("display-message", "-p", "-t", pane,
-		"#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}")
+		"#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}")
 	if err != nil {
 		return fmt.Errorf("finding window metadata for pane %q: %w", pane, err)
 	}
 	fields := strings.Split(strings.TrimSpace(metadata), "\t")
-	if len(fields) != 4 || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" {
+	if len(fields) != 5 || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" || fields[4] == "" {
 		return fmt.Errorf("finding window metadata for pane %q: malformed result %q", pane, metadata)
 	}
 	if workDir == "" {
 		workDir = fields[3]
+	}
+	if err := t.stopOwnedScopeStrict(pane); err != nil {
+		return fmt.Errorf("retiring owned scope before replacing pane %q: %w", pane, err)
 	}
 	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(pane, command)}
 	_, err = t.run("if-shell", "-F", "-t", fields[0], "#{==:#{window_panes},1}",
@@ -3439,10 +3506,21 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 		t.discardPendingOwnedScope(pane)
 		return fmt.Errorf("replacing window for pane %q: %w", pane, err)
 	}
+	if !t.hasPendingOwnedScope(pane) {
+		return nil
+	}
 	// Replacement materializes a new pane and therefore a new transient scope.
-	// Refresh the durable record; an old invocation may never authorize a later
-	// lifecycle teardown.
-	t.recordOwnedScope(pane, "")
+	// Resolve its new identity before replacing the durable ownership record.
+	newPane, err := t.GetPaneID(fields[4])
+	if err != nil {
+		t.discardPendingOwnedScope(pane)
+		return fmt.Errorf("resolving replacement pane identity for %q: %w", pane, err)
+	}
+	t.movePendingOwnedScope(pane, newPane)
+	if err := t.recordOwnedScopeStrict(newPane); err != nil {
+		_, _ = t.run("kill-window", "-t", fields[0])
+		return fmt.Errorf("recording replacement owned scope for pane %q: %w", newPane, err)
+	}
 	return nil
 }
 

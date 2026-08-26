@@ -73,14 +73,14 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 	exec.outs = []string{
-		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "", "", "",
-		"@1\tmain\t1\t/current", "", "GC_INSTANCE_TOKEN=token", "", "", "",
+		"@1\tmain\t1\t/current\t%0", "", "", "%1", "GC_INSTANCE_TOKEN=token", "", "", "",
+		"@1\tmain\t1\t/current\t%0", "", "", "%2", "GC_INSTANCE_TOKEN=token", "", "", "",
 	}
 
 	if err := tm.RespawnPane("%0", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPane: %v", err)
 	}
-	args := exec.calls[1]
+	args := exec.calls[2]
 	got := args[6]
 	if !strings.Contains(got, "--slice=gascity-agents.slice") || !strings.Contains(got, "claude --resume") || !strings.Contains(got, `tmux set-option -w -t "$TMUX_PANE" remain-on-exit on`) {
 		t.Fatalf("replacement command = %q, want remain-on-exit setup and agent slice", got)
@@ -90,7 +90,7 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
-	args = exec.calls[7]
+	args = exec.calls[10]
 	if got := args[6]; !strings.Contains(got, "--slice=gascity-agents.slice") || !strings.Contains(got, "claude --resume") {
 		t.Fatalf("respawn-with-workdir command = %q, want embedded agent slice", got)
 	} else if secondScope := scopeUnitInText(t, got); secondScope == firstScope {
