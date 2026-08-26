@@ -111,8 +111,10 @@ func TestDefaultRunNetworkGitErrorsCarryNoCredential(t *testing.T) {
 	remote := "https://gituser:" + token + "@packman.invalid/repo.git"
 
 	dir := t.TempDir()
-	// Echo the remote back the way git does, then fail as git does.
-	script := "#!/bin/sh\necho \"fatal: could not read from remote repository $*\" >&2\nexit 128\n"
+	// Echo the remote in an authentication diagnostic, then fail as git does.
+	// This must exercise the typed AuthError path: otherwise a later generic
+	// error wrapper could hide a credential leak before a reviewer sees it.
+	script := "#!/bin/sh\necho \"fatal: Authentication failed for '$*'\" >&2\nexit 128\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing git shim: %v", err)
 	}

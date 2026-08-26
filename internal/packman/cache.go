@@ -405,6 +405,7 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 	cmd.WaitDelay = networkGitWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		safeOutput := gitcred.ScrubSecrets(string(out), remoteURL)
 		// Auth classification runs first, and the deadline is the fallback.
 		// ClassifyAuthError needs an *exec.ExitError with code 128 AND a
 		// recognized auth diagnostic in the output. A killed process usually
@@ -416,13 +417,13 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 		// rejection landing in the last milliseconds before the deadline would
 		// be reported as a wedge and the credential hint the user needs
 		// suppressed.
-		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, string(out), err); authErr != nil {
+		if authErr := gitcred.ClassifyAuthError(remoteURL, inj, safeOutput, err); authErr != nil {
 			return "", authErr
 		}
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("git %s: %w after %s: %s", redactNetworkGitArgs(args), errNetworkGitTimeout, networkGitTimeout, gitcred.ScrubSecrets(strings.TrimSpace(string(out)), remoteURL))
+			return "", fmt.Errorf("git %s: %w after %s: %s", redactNetworkGitArgs(args), errNetworkGitTimeout, networkGitTimeout, strings.TrimSpace(safeOutput))
 		}
-		return "", fmt.Errorf("git %s: %s: %w", redactNetworkGitArgs(args), gitcred.ScrubSecrets(strings.TrimSpace(string(out)), remoteURL), err)
+		return "", fmt.Errorf("git %s: %s: %w", redactNetworkGitArgs(args), strings.TrimSpace(safeOutput), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
