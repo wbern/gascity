@@ -934,8 +934,20 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 	}
 	purged := 0
 	var deleteErr error
+	live := beads.HandlesFor(store.Store).Live
 	for _, entry := range entries {
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
+			continue
+		}
+		current, err := live.Get(entry.ID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("live re-verify of bead %q before delete: %w", entry.ID, err))
+			continue
+		}
+		if current.Metadata[mail.ReadMetadataKey] != "true" {
 			continue
 		}
 		if err := deleteMessageWispBead(store.Store, entry.ID); err != nil {
