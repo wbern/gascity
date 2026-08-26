@@ -48,9 +48,19 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 		return out, err
 	}
 	if slices.Contains(args, "show-environment") {
-		return "-" + args[len(args)-1], nil
+		return "", errors.New("unknown variable: " + args[len(args)-1])
 	}
 	return f.out, f.err
+}
+
+func TestGetEnvironmentClassifiesTmuxUnknownVariableAsUnset(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{}
+
+	_, err := tm.GetEnvironment("managed", "GC_UNSET")
+	if !errors.Is(err, errEnvironmentUnset) {
+		t.Fatalf("GetEnvironment error = %v, want errEnvironmentUnset", err)
+	}
 }
 
 func (f *fakeExecutor) executeCtx(_ context.Context, args []string) (string, error) {

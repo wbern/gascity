@@ -2679,6 +2679,9 @@ func (t *Tmux) RemoveEnvironment(session, key string) error {
 func (t *Tmux) GetEnvironment(session, key string) (string, error) {
 	out, err := t.run("show-environment", "-t", session, key)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unknown variable: "+strings.ToLower(key)) {
+			return "", fmt.Errorf("%w: %s", errEnvironmentUnset, key)
+		}
 		return "", err
 	}
 	if out == "-"+key {
@@ -3525,12 +3528,12 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // than silently losing its sibling panes.
 func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	metadata, err := t.run("display-message", "-p", "-t", pane,
-		"#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}")
+		"#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}")
 	if err != nil {
 		return fmt.Errorf("finding window metadata for pane %q: %w", pane, err)
 	}
 	fields := strings.Split(strings.TrimSpace(metadata), "\t")
-	if len(fields) != 5 || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" || fields[4] == "" {
+	if len(fields) != 6 || fields[0] == "" || fields[1] == "" || fields[2] == "" || fields[3] == "" || fields[4] == "" || fields[5] == "" {
 		return fmt.Errorf("finding window metadata for pane %q: malformed result %q", pane, metadata)
 	}
 	if workDir == "" {
@@ -3552,11 +3555,12 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	if !t.hasPendingOwnedScope(pane) {
 		return nil
 	}
+	replacementWindow := fields[4] + ":" + fields[5]
 	cleanupReplacement := func(target string, cause error) error {
 		if cleanupErr := t.stopPendingOwnedScopeStrict(target); cleanupErr != nil {
 			return fmt.Errorf("%w; cleaning up replacement owned scope: %w", cause, cleanupErr)
 		}
-		if _, cleanupErr := t.run("kill-window", "-t", fields[0]); cleanupErr != nil {
+		if _, cleanupErr := t.run("kill-window", "-t", replacementWindow); cleanupErr != nil {
 			return fmt.Errorf("%w; removing replacement window: %w", cause, cleanupErr)
 		}
 		return cause

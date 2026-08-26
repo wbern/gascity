@@ -68,7 +68,7 @@ func TestKillPaneProcessesAreNoOpsUntilNamedRespawn(t *testing.T) {
 }
 
 func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tbuild\t1\t/previous\tmanaged"}}
+	fe := &fakeExecutor{outs: []string{"@1\tbuild\t1\t/previous\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -77,7 +77,7 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"-u", "display-message", "-p", "-t", "managed", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}"},
+		{"-u", "display-message", "-p", "-t", "managed", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}"},
 		{"-u", "show-environment", "-t", "managed", ownedScopeEnv},
 		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("managed", "agent --resume")}), "run-shell 'exit 77'"},
 	}
@@ -153,7 +153,7 @@ func TestRespawnPaneCleansReplacementScopeWhenPaneIdentityLookupFails(t *testing
 	fs := &fakeOwnedScopes{}
 	fe := &fakeExecutor{
 		outs: []string{
-			"@1\tbuild\t1\t/previous\tmanaged",
+			"@1\tbuild\t1\t/previous\tmanaged\t0",
 			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 			ownedScopeInvocationEnv + "=old-invocation",
 			ownedScopeTokenEnv + "=instance-token",
@@ -177,8 +177,8 @@ func TestRespawnPaneCleansReplacementScopeWhenPaneIdentityLookupFails(t *testing
 	if got := fs.stops[1]; got.unit == "" || got.unit == fs.stops[0].unit {
 		t.Fatalf("replacement scope = %+v, want a distinct witnessed replacement scope", got)
 	}
-	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "@1"}) {
-		t.Fatalf("last tmux call = %v, want replacement window cleanup", got)
+	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "managed:0"}) {
+		t.Fatalf("last tmux call = %v, want stable replacement-window cleanup", got)
 	}
 }
 
@@ -187,7 +187,7 @@ func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
 	fs := &fakeOwnedScopes{}
 	fe := &fakeExecutor{
 		outs: []string{
-			"@1\tbuild\t1\t/previous\tmanaged",
+			"@1\tbuild\t1\t/previous\tmanaged\t0",
 			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 			ownedScopeInvocationEnv + "=old-invocation",
 			ownedScopeTokenEnv + "=instance-token",
@@ -210,8 +210,8 @@ func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
 	if got := len(fs.stops); got != 2 {
 		t.Fatalf("stopped scopes = %+v, want old and replacement scopes stopped", fs.stops)
 	}
-	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "@1"}) {
-		t.Fatalf("last tmux call = %v, want replacement window cleanup", got)
+	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "managed:0"}) {
+		t.Fatalf("last tmux call = %v, want stable replacement-window cleanup", got)
 	}
 }
 
