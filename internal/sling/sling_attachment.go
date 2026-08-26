@@ -452,8 +452,10 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
+	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		if b.Assignee == "" || b.Assignee == target ||
+			claimedByOwnPoolSession(deps.Cfg, a, deps.CityName, target, b.Assignee, isMulti) {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -461,7 +463,6 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
@@ -478,6 +479,27 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+func claimedByOwnPoolSession(cfg *config.City, a config.Agent, cityName, target, assignee string, isMulti bool) bool {
+	if !isMulti || assignee == "" {
+		return false
+	}
+	if strings.HasPrefix(assignee, target+"-") {
+		if cfg != nil {
+			for i := range cfg.Agents {
+				otherTarget := agentutil.RoutedToIdentity(&cfg.Agents[i])
+				if otherTarget != target && strings.HasPrefix(assignee, otherTarget+"-") {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	if cityName == "" || a.Name == "" {
+		return false
+	}
+	return strings.HasPrefix(assignee, a.Name+"-"+cityName+"-")
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing
