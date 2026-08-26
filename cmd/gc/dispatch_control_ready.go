@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -293,26 +294,53 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 // cache can't answer: dirty, still priming, or the rig's bd compatibility
 // mode requires --include-ephemeral (a tier CachedReady can't serve).
 func controlReadyFallbackReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+	args := []string{"bd", "--readonly", "--sandbox", "ready", "--json", "--exclude-type=" + controlReadyExcludeType, fmt.Sprintf("--limit=%d", controlReadyFallbackLimit)}
 	if includeEphemeral {
-		query += " --include-ephemeral"
+		args = append(args, "--include-ephemeral")
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	if controlReadyShimmed(env) {
-		query += " --allow-unbounded"
+		args = append(args, "--allow-unbounded")
 	}
 	if controlReadyUsesSummary(env) {
-		result, err := controlReadyFallbackQuery(query+" --summary-json", dir, runtimeEnv)
+		result, err := controlReadyFallbackQuery(append(append([]string(nil), args...), "--summary-json"), dir, runtimeEnv)
 		if err == nil {
 			return result, nil
 		}
 		log.Printf("control-ready fallback: summarized discovery unavailable (%v); retrying unsummarized", err)
 	}
-	return controlReadyFallbackQuery(query, dir, runtimeEnv)
+	return controlReadyFallbackQuery(args, dir, runtimeEnv)
 }
 
-func controlReadyFallbackQuery(query, dir string, runtimeEnv []string) ([]beads.Bead, error) {
-	output, err := shellWorkQueryWithEnv(query, dir, runtimeEnv)
+var controlReadyExecutable = os.Executable
+
+var controlReadyCommandRunner = runWorkQueryCommandWithEnv
+
+func controlReadyExecutablePath() (string, error) {
+	exe, err := controlReadyExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve current gc executable: %w", err)
+	}
+	if strings.TrimSpace(exe) == "" {
+		return "", fmt.Errorf("resolve current gc executable: empty path")
+	}
+	exe = filepath.Clean(exe)
+	if !filepath.IsAbs(exe) {
+		exe, err = filepath.Abs(exe)
+		if err != nil {
+			return "", fmt.Errorf("resolve absolute current gc executable: %w", err)
+		}
+	}
+	return exe, nil
+}
+
+func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string) ([]beads.Bead, error) {
+	exe, err := controlReadyExecutablePath()
+	if err != nil {
+		return nil, err
+	}
+	display := shellquote.Join(append([]string{exe}, args...))
+	output, err := controlReadyCommandRunner(exe, args, display, dir, runtimeEnv)
 	if err != nil {
 		return nil, err
 	}

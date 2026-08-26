@@ -3558,6 +3558,7 @@ func unsetTestEnv(t *testing.T, keys ...string) {
 // stripped them) -- and asserts bd still receives the ambient port via the
 // query string's own shell-prefix assignment.
 func TestWorkflowServeControlReadyQueryDeliversAmbientDoltPortAtExecution(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
 	t.Setenv("GC_DOLT_PORT", "29620")
 	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
@@ -3693,6 +3694,7 @@ func TestControlDispatcherBareRoute(t *testing.T) {
 }
 
 func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME":   "gascity--control-dispatcher",
@@ -3722,6 +3724,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryIncludesMetadataRoutedWorkAfterAssignedPending(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
@@ -3744,6 +3747,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryIncludesCanonicalRoutedControlWork(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
@@ -3763,6 +3767,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQuerySkipsInstantiatingBeads(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
@@ -3785,6 +3790,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME": "gascity--control-dispatcher",
@@ -3810,6 +3816,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualSession(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -3834,6 +3841,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryFailsFastOnBDReadyError(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -3875,6 +3883,7 @@ exit 1
 }
 
 func TestWorkflowServeControlReadyQueryKeepsSuccessfulBDStderrOutOfJSON(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -3910,6 +3919,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryFailsOnMalformedBDJSON(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -3940,6 +3950,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryPrioritizesConfiguredRuntimeName(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -3988,6 +3999,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryDeduplicatesAssigneeProbes(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
 		"gascity--control-dispatcher",
@@ -4033,6 +4045,7 @@ esac
 }
 
 func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "matched.args")
@@ -4075,6 +4088,7 @@ printf '[]'
 }
 
 func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME":   "gascity--control-dispatcher",

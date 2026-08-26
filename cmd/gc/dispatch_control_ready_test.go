@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,89 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+func usePathBDAsGCForControlReadyTest(t *testing.T) {
+	t.Helper()
+	envPath, err := exec.LookPath("env")
+	if err != nil {
+		t.Skip("env executable unavailable")
+	}
+	original := controlReadyExecutable
+	controlReadyExecutable = func() (string, error) { return envPath, nil }
+	t.Cleanup(func() { controlReadyExecutable = original })
+}
+
+func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
+	poison := t.TempDir()
+	if err := os.WriteFile(filepath.Join(poison, "bd"), []byte("#!/bin/sh\nexit 97\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", poison)
+
+	originalExecutable := controlReadyExecutable
+	originalRunner := controlReadyCommandRunner
+	t.Cleanup(func() {
+		controlReadyExecutable = originalExecutable
+		controlReadyCommandRunner = originalRunner
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
+	var gotName, gotDisplay, gotDir string
+	var gotArgs, gotEnv []string
+	controlReadyCommandRunner = func(name string, args []string, display, dir string, env []string) (string, error) {
+		gotName, gotDisplay, gotDir = name, display, dir
+		gotArgs, gotEnv = append([]string(nil), args...), append([]string(nil), env...)
+		return "[]", nil
+	}
+
+	dir := t.TempDir()
+	if _, err := controlReadyFallbackReady(dir, map[string]string{
+		citylayout.RealBdEnvVar: "/usr/local/bin/bd",
+		"GC_STORE_SCOPE":        "rig",
+	}, false); err != nil {
+		t.Fatalf("controlReadyFallbackReady: %v", err)
+	}
+	if gotName != "/opt/gascity/current/gc" {
+		t.Fatalf("executable = %q, want absolute current gc", gotName)
+	}
+	wantArgs := []string{"bd", "--readonly", "--sandbox", "ready", "--json", "--exclude-type=epic", "--limit=5000", "--allow-unbounded"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if gotDir != dir || !strings.Contains(gotDisplay, "/opt/gascity/current/gc bd") || len(gotEnv) == 0 {
+		t.Fatalf("runner = name:%q args:%#v display:%q dir:%q env:%#v", gotName, gotArgs, gotDisplay, gotDir, gotEnv)
+	}
+}
+
+func TestControlReadyExecutablePathRejectsEmptyWithoutAmbientFallback(t *testing.T) {
+	original := controlReadyExecutable
+	controlReadyExecutable = func() (string, error) { return "", nil }
+	t.Cleanup(func() { controlReadyExecutable = original })
+
+	if _, err := controlReadyExecutablePath(); err == nil || !strings.Contains(err.Error(), "empty path") {
+		t.Fatalf("controlReadyExecutablePath() error = %v, want empty-path refusal", err)
+	}
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
+	if strings.Contains(query, "emit_ready gc ") || strings.Contains(query, "emit_ready bd ") {
+		t.Fatalf("resolver failure fell back to ambient PATH: %s", query)
+	}
+	if !strings.Contains(query, "/__gascity_current_executable_unavailable__") || !strings.Contains(query, ` bd --readonly`) {
+		t.Fatalf("resolver failure is not fail-closed: %s", query)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryUsesAbsoluteCurrentGCAtEveryLegacySeam(t *testing.T) {
+	original := controlReadyExecutable
+	controlReadyExecutable = func() (string, error) { return "/opt/gas city/gc", nil }
+	t.Cleanup(func() { controlReadyExecutable = original })
+
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "fixture"})
+	if strings.Contains(query, "emit_ready bd ") {
+		t.Fatalf("query retains raw-bd seam: %s", query)
+	}
+	if got := strings.Count(query, `emit_ready '/opt/gas city/gc' bd `); got != 3 {
+		t.Fatalf("absolute gc bd seam count = %d, want 3: %s", got, query)
+	}
+}
 
 func TestParseControlReadyQueryRecognizesGeneratedQuery(t *testing.T) {
 	// Dir+Name shaped so QualifiedName is a rig-scoped, binding-qualified
@@ -475,6 +560,7 @@ esac
 // truncation signal (some candidate/route may have been starved of ready
 // beads that exist but didn't fit) and must be observable, not silent.
 func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 
@@ -522,6 +608,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 // batch below the limit is a complete result, not a truncation signal, and
 // must not log anything.
 func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	bdPath := filepath.Join(tmp, "bd")
@@ -548,6 +635,7 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 }
 
 func TestControlReadyFallbackReadyConsumesSummaryProjection(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
@@ -588,6 +676,7 @@ printf '%%s' "$*" > %q
 }
 
 func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityScope(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
@@ -628,6 +717,7 @@ func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityS
 }
 
 func TestControlReadyFallbackReadyDegradesWhenSummaryQueryFails(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
