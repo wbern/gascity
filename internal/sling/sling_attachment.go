@@ -226,9 +226,27 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 				continue
 			}
 		}
-		return fmt.Errorf("bead %s already has attached %s %s", beadID, AttachmentLabel(attached), attached.ID)
+		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
 	}
 	return nil
+}
+
+// MoleculeAttachedError reports that a bead already has a live, non-workflow
+// molecule/wisp attachment blocking a new formula attach. It is distinct from
+// sourceworkflow.ConflictError (a live graph.v2 workflow attachment) so
+// callers can use errors.As to tell the two conflict kinds apart: an implicit
+// default-formula sling may choose to fall back to plain routing on this
+// error, but must keep hard-failing on a workflow conflict or any other
+// error, since neither is the "unrelated molecule already attached" case the
+// fallback exists for.
+type MoleculeAttachedError struct {
+	BeadID       string
+	Label        string // AttachmentLabel(attached), e.g. "molecule" or "wisp"
+	AttachmentID string
+}
+
+func (e *MoleculeAttachedError) Error() string {
+	return fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
 }
 
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
@@ -452,8 +470,10 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	target := agentutil.RoutedToIdentity(&a)
+	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		if b.Assignee == "" || b.Assignee == target ||
+			claimedByOwnPoolSession(deps.Cfg, a, deps.CityName, target, b.Assignee, isMulti) {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -461,7 +481,6 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
@@ -478,6 +497,27 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+func claimedByOwnPoolSession(cfg *config.City, a config.Agent, cityName, target, assignee string, isMulti bool) bool {
+	if !isMulti || assignee == "" {
+		return false
+	}
+	if strings.HasPrefix(assignee, target+"-") {
+		if cfg != nil {
+			for i := range cfg.Agents {
+				otherTarget := agentutil.RoutedToIdentity(&cfg.Agents[i])
+				if otherTarget != target && strings.HasPrefix(assignee, otherTarget+"-") {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	if cityName == "" || a.Name == "" {
+		return false
+	}
+	return strings.HasPrefix(assignee, a.Name+"-"+cityName+"-")
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing
