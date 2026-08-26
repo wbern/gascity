@@ -105,7 +105,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	tm.ownedScopes = fs
 	tm.agentSlice.probe = func(string) error { return nil }
 
-	if err := tm.RespawnPaneWithWorkDir("managed", "/work", "agent --resume"); err != nil {
+	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "agent --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
 	if got, want := fs.stopped, (ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "old-invocation"}); got != want {

@@ -3532,7 +3532,7 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	if fields[2] != "1" {
 		return fmt.Errorf("refusing to replace window for pane %q: window has %s panes", pane, fields[2])
 	}
-	if err := t.stopOwnedScopeStrict(pane); err != nil {
+	if err := t.stopOwnedScopeStrict(fields[4]); err != nil {
 		return fmt.Errorf("retiring owned scope before replacing pane %q: %w", pane, err)
 	}
 	replacement := []string{"new-window", "-d", "-k", "-t", fields[0], "-n", fields[1], "-c", workDir, t.wrapReplacementCommand(pane, command)}
