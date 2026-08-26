@@ -14,15 +14,21 @@ import (
 // wrong thing and break on any reordering.
 type nudgeRoutingExecutor struct {
 	calls    [][]string
-	inMode   string // reply to the #{pane_in_mode} probe: "1" parked, "0" not
-	provider string // reply to show-environment GC_PROVIDER; "" = unset
-	pane     string // reply to capture-pane (the busy/idle footer)
+	inMode   string               // reply to the #{pane_in_mode} probe: "1" parked, "0" not
+	provider string               // reply to show-environment GC_PROVIDER; "" = unset
+	pane     string               // reply to capture-pane (the busy/idle footer)
+	errFor   func([]string) error // optional injected tmux command failure
 }
 
 func (e *nudgeRoutingExecutor) execute(args []string) (string, error) {
 	cp := make([]string, len(args))
 	copy(cp, args)
 	e.calls = append(e.calls, cp)
+	if e.errFor != nil {
+		if err := e.errFor(args); err != nil {
+			return "", err
+		}
+	}
 
 	joined := strings.Join(args, "\x00")
 	switch {
@@ -115,6 +121,47 @@ func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 			t.Fatalf("happy path must still deliver the nudge text; calls=%v", fe.calls)
 		}
 	})
+}
+
+func TestNudgeSessionClearsPendingInputBeforeLiteralPaste(t *testing.T) {
+	fe := &nudgeRoutingExecutor{inMode: "0", provider: "opencode"}
+	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+
+	if err := tm.NudgeSession("sess", "hello"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+
+	clearInput := callIndexWithTokens(fe.calls, "send-keys", "C-u")
+	literal := callIndexWithTokens(fe.calls, "send-keys", "-l", "hello")
+	if clearInput < 0 || literal < 0 {
+		t.Fatalf("expected clear and literal delivery; calls=%v", fe.calls)
+	}
+	if clearInput >= literal {
+		t.Fatalf("clear (idx %d) must precede literal delivery (idx %d); calls=%v", clearInput, literal, fe.calls)
+	}
+}
+
+func TestNudgeSessionStopsWhenClearingPendingInputFails(t *testing.T) {
+	want := errors.New("clear failed")
+	fe := &nudgeRoutingExecutor{
+		inMode:   "0",
+		provider: "opencode",
+		errFor: func(args []string) error {
+			if callHasTokens(args, "send-keys", "C-u") {
+				return want
+			}
+			return nil
+		},
+	}
+	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+
+	err := tm.NudgeSession("sess", "hello")
+	if !errors.Is(err, want) {
+		t.Fatalf("NudgeSession error = %v, want clear failure", err)
+	}
+	if literal := callIndexWithTokens(fe.calls, "send-keys", "-l", "hello"); literal >= 0 {
+		t.Fatalf("literal delivery ran after a failed clear (idx %d); calls=%v", literal, fe.calls)
+	}
 }
 
 // TestNudgePaneCancelsCopyModeBeforeDelivery pins the same defect on the

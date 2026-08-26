@@ -1704,7 +1704,13 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// #{pane_in_mode} keeps this a no-op on the happy path.
 	t.cancelCopyModeIfParked(target)
 
-	// 1. Send text in literal mode with retry on transient errors
+	// 1. Clear an earlier undelivered draft before pasting a new nudge.
+	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -3495,18 +3501,38 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 	return t.SetCycleBindings(session)
 }
 
+// selectBindingLine returns the exact key row from a full `list-keys -T` response.
+func selectBindingLine(output, key string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i, field := range fields {
+			if field == "-T" && i+2 < len(fields) {
+				if fields[i+2] == key {
+					return line
+				}
+				break
+			}
+		}
+	}
+	return ""
+}
+
 // isGTBinding checks if the given key already has a Gas Town if-shell binding.
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
 // preserving the user's original fallback captured on the first call.
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
+		return false
+	}
+	line := selectBindingLine(output, key)
+	if line == "" {
 		return false
 	}
 	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
 	// Require both "if-shell" and "gt " to avoid false positives on user
 	// bindings that happen to contain "gt " without the if-shell guard.
-	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+	return strings.Contains(line, "if-shell") && strings.Contains(line, "gt ")
 }
 
 // getKeyBinding returns the current tmux command bound to the given key in the
@@ -3529,16 +3555,20 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	//   bind-key [-r] -T <table> <key> <command...>
 	// If tmux changes this format, parsing fails safely (returns ""),
 	// which causes the caller to use its default fallback.
-	output, err := t.run("list-keys", "-T", table, key)
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
 		return ""
 	}
 
+	line := selectBindingLine(output, key)
+	if line == "" {
+		return ""
+	}
 	// If this is already a Gas Town binding (from a previous ConfigureGasTownSession call),
 	// don't capture it — we'd end up wrapping our own if-shell in another if-shell.
 	// We check for both "if-shell" and "gt " to avoid false-positiving on user
 	// bindings that happen to contain the substring "gt ".
-	if strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") {
+	if strings.Contains(line, "if-shell") && strings.Contains(line, "gt ") {
 		return ""
 	}
 
@@ -3546,7 +3576,7 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	// Format: "bind-key [-r] -T <table> <key> <command...>"
 	// We need everything after the key name.
 	// Find the key in the output and take everything after it.
-	fields := strings.Fields(output)
+	fields := strings.Fields(line)
 	keyIdx := -1
 	for i, f := range fields {
 		if f == "-T" && i+2 < len(fields) {
@@ -3562,11 +3592,11 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 	// Everything after the key is the command
 	// Rejoin from keyIdx+1 onward, but we need to preserve the original spacing.
 	// Find the key token in the original string and take everything after it.
-	idx := strings.Index(output, " "+fields[keyIdx]+" ")
+	idx := strings.Index(line, " "+fields[keyIdx]+" ")
 	if idx < 0 {
 		return ""
 	}
-	cmd := strings.TrimSpace(output[idx+len(" "+fields[keyIdx]+" "):])
+	cmd := strings.TrimSpace(line[idx+len(" "+fields[keyIdx]+" "):])
 	if cmd == "" {
 		return ""
 	}

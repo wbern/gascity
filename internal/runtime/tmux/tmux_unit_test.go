@@ -8,6 +8,23 @@ import (
 	"testing"
 )
 
+func TestSelectBindingLine(t *testing.T) {
+	const table = "bind-key -T prefix C-g display-popup\nbind-key -T prefix n next-window\nbind-key -r -T prefix Up resize-pane -U\nbind-key malformed"
+	for _, tt := range []struct{ name, key, want string }{
+		{"exact", "n", "bind-key -T prefix n next-window"},
+		{"near", "g", ""},
+		{"repeat", "Up", "bind-key -r -T prefix Up resize-pane -U"},
+		{"absent", "z", ""},
+		{"malformed", "malformed", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectBindingLine(table, tt.key); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTeardownNeverUsesDirectPIDSignalsAfterReplacement(t *testing.T) {
 	// A same-token replacement (lstart has only second precision) and a
 	// replacement after verification are both indistinguishable from the old
