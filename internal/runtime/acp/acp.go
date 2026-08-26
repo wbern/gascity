@@ -77,20 +77,26 @@ var (
 // NewProvider returns an ACP [Provider] that stores socket files in
 // a default temporary directory.
 func NewProvider(cfg Config) *Provider {
-	dir := filepath.Join(os.TempDir(), "gc-acp")
-	_ = os.MkdirAll(dir, 0o755)
-	return &Provider{
-		dir:      dir,
-		conns:    make(map[string]*sessionConn),
-		workDirs: make(map[string]string),
-		cfg:      cfg,
-	}
+	return NewProviderWithDir(defaultProviderDir(), cfg)
+}
+
+// defaultProviderDir is the city-less state directory: one per user, because
+// the path is otherwise identical for everyone on the host and [os.MkdirAll]
+// succeeds on a directory someone else created first. The euid does not make
+// the directory private on its own — [runtime.EnsurePrivateDir] validates
+// ownership — but it keeps two legitimate users off one path so that validation
+// is a real check rather than a permanent outage for whoever logs in second.
+func defaultProviderDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-acp-%d", os.Geteuid()))
 }
 
 // NewProviderWithDir returns an ACP [Provider] that stores socket files
 // in the given directory. Useful for tests that need isolated state.
 func NewProviderWithDir(dir string, cfg Config) *Provider {
-	_ = os.MkdirAll(dir, 0o755)
+	// Best-effort here and verified at the write path: a constructor cannot
+	// report a squatted directory, and failing silently at construction would
+	// hand back a Provider that writes anyway.
+	_ = runtime.EnsurePrivateDir(dir)
 	return &Provider{
 		dir:      dir,
 		conns:    make(map[string]*sessionConn),
@@ -109,6 +115,13 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // optionally sends the initial nudge. Returns an error if a session with
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	// NewProviderWithDir cannot return a validation error, and the directory can
+	// be replaced after construction. Revalidate before any session state or
+	// child process can be created through it.
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return fmt.Errorf("validating private provider directory for %q: %w", name, err)
+	}
+
 	p.mu.Lock()
 
 	// Check in-memory tracking first.
@@ -645,8 +658,17 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // SetMeta stores a key-value pair for the named session in a sidecar file.
+//
+// The sidecar carries session identity and drain state, which a reader can use
+// to impersonate the session and a writer can use to forge a drain
+// acknowledgement, so it is owner-only. The directory is re-checked on every
+// write rather than trusted from construction: a squatted directory is not
+// something a constructor can report.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return os.WriteFile(p.metaPath(name, key), []byte(value), 0o644)
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
@@ -680,13 +702,16 @@ const lastActivityMetaKey = "gc_last_activity"
 // replacement prevents cross-process readers from observing a truncated or
 // partially-written timestamp.
 func (p *Provider) publishActivity(name string, t time.Time) error {
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
 	path := p.metaPath(name, lastActivityMetaKey)
 	data := []byte(t.UTC().Format(time.RFC3339Nano))
 	var err error
 	if p.activityWrite != nil {
 		err = p.activityWrite(path, data)
 	} else {
-		err = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
+		err = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o600)
 	}
 	if err != nil {
 		return fmt.Errorf("writing activity sidecar: %w", err)
@@ -848,11 +873,14 @@ func (p *Provider) socketNameForEntry(key string) string {
 
 // startControlSocket creates a unix socket for cross-process commands.
 func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return nil, err
+	}
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
 	_ = os.Remove(namePath)
-	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
+	if err := runtime.WritePrivateFile(namePath, []byte(name)); err != nil {
 		return nil, err
 	}
 	lis, err := net.Listen("unix", sp)
