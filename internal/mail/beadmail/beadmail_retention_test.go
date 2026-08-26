@@ -62,7 +62,15 @@ func (s listErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 type deleteTrackStore struct {
 	*beads.MemStore
 	failDelete map[string]error
+	getErrors  map[string]error
 	deleted    []string
+}
+
+func (s *deleteTrackStore) Get(id string) (beads.Bead, error) {
+	if err := s.getErrors[id]; err != nil {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *deleteTrackStore) Delete(id string) error {
@@ -298,6 +306,71 @@ func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 		if _, err := store.Get(id); err != nil {
 			t.Errorf("%s should be preserved: %v", id, err)
 		}
+	}
+}
+
+// staleListStore models a cached List snapshot while Get and Delete stay live.
+type staleListStore struct {
+	*deleteTrackStore
+	snapshot []beads.Bead
+}
+
+func (s *staleListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.snapshot, nil
+}
+
+func TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{{ID: "unread-after-snapshot", Type: "message", Status: "open", CreatedAt: now.Add(-2 * time.Hour), Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true}}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	if err := underlying.Update("unread-after-snapshot", beads.UpdateOpts{RemoveLabels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "false"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	purged, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("PurgeReadMessageWisps: %v", err)
+	}
+	if purged != 0 || len(underlying.deleted) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want retained unread message", purged, underlying.deleted)
+	}
+	if _, err := underlying.Get("unread-after-snapshot"); err != nil {
+		t.Fatalf("message should be preserved: %v", err)
+	}
+}
+
+func TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{{ID: "gone-after-snapshot", Type: "message", Status: "open", CreatedAt: now.Add(-2 * time.Hour), Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true}}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+	if err := underlying.MemStore.Delete("gone-after-snapshot"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	purged, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("PurgeReadMessageWisps: %v", err)
+	}
+	if purged != 0 || len(underlying.deleted) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want gone candidate skipped", purged, underlying.deleted)
+	}
+}
+
+func TestPurgeReadMessageWisps_SurfacesLiveRecheckError(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{{ID: "boom", Type: "message", Status: "open", CreatedAt: now.Add(-2 * time.Hour), Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true}}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}, getErrors: map[string]error{"boom": errors.New("backend down")}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	purged, err := PurgeReadMessageWisps(beads.MailStore{Store: store}, now.Add(-time.Hour))
+	if err == nil {
+		t.Fatal("PurgeReadMessageWisps: want live recheck error")
+	}
+	if purged != 0 || len(underlying.deleted) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want live-read failure surfaced without delete", purged, underlying.deleted)
 	}
 }
 

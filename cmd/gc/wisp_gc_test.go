@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -381,6 +382,89 @@ func TestWispGC_PurgesExpiredMoleculeChildrenWithRoot(t *testing.T) {
 		if _, err := store.Get(id); err == nil {
 			t.Fatalf("Get(%s) succeeded after GC delete", id)
 		}
+	}
+}
+
+func TestWispGC_ClosureSkipsRootReopenedAfterSnapshot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-reopen", now.Add(-2*time.Hour), "closed", "molecule"),
+		{ID: "mol-reopen.1", Status: "closed", Type: "task", CreatedAt: now.Add(-2 * time.Hour), ParentID: "mol-reopen"},
+	})
+	if err := store.DepAdd("mol-reopen.1", "mol-reopen", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+	if err := store.Reopen("mol-reopen"); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err != nil {
+		t.Fatalf("purgeExpiredBeadClosures: %v", err)
+	}
+	if purged != 0 || len(store.deletedIDs) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want reopened closure retained", purged, store.deletedIDs)
+	}
+	root, err := store.Get("mol-reopen")
+	if err != nil || root.Status != "open" {
+		t.Fatalf("reopened root = %#v, err = %v; want live open root", root, err)
+	}
+}
+
+func TestWispGC_ClosureSkipsRootGoneAfterSnapshot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-gone", now.Add(-2*time.Hour), "closed", "molecule"),
+		{ID: "mol-gone.1", Status: "closed", Type: "task", CreatedAt: now.Add(-2 * time.Hour), ParentID: "mol-gone"},
+	})
+	if err := store.DepAdd("mol-gone.1", "mol-gone", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+	if err := store.MemStore.Delete("mol-gone"); err != nil {
+		t.Fatalf("concurrent root delete: %v", err)
+	}
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err != nil {
+		t.Fatalf("purgeExpiredBeadClosures: %v", err)
+	}
+	if purged != 0 || len(store.deletedIDs) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want gone root skipped", purged, store.deletedIDs)
+	}
+	if _, err := store.Get("mol-gone.1"); err != nil {
+		t.Fatalf("descendant should remain when root is already gone: %v", err)
+	}
+}
+
+func TestWispGC_ClosureSurfacesLiveRecheckError(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-boom", now.Add(-2*time.Hour), "closed", "molecule"),
+		{ID: "mol-boom.1", Status: "closed", Type: "task", CreatedAt: now.Add(-2 * time.Hour), ParentID: "mol-boom"},
+	})
+	if err := store.DepAdd("mol-boom.1", "mol-boom", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	entries, err := closedWispGCEntries(store)
+	if err != nil {
+		t.Fatalf("closedWispGCEntries: %v", err)
+	}
+	store.getErrors["mol-boom"] = errors.New("backend down")
+
+	purged, err := purgeExpiredBeadClosures(store, entries, now, 0)
+	if err == nil {
+		t.Fatal("purgeExpiredBeadClosures: want live recheck error")
+	}
+	if purged != 0 || len(store.deletedIDs) != 0 {
+		t.Fatalf("purged = %d, deleted = %v; want live-read failure surfaced without delete", purged, store.deletedIDs)
 	}
 }
 
