@@ -96,30 +96,63 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
-func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := selector +
-		` | select(((.issue_type // .type // "") != "epic"))` +
-		` | select(([ (.dependencies // [])[]` +
-		` | select((.type // .dep_type // "") as $t | ($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))` +
-		` | select((.status // .depends_on_status // "") != "closed") ] | length) == 0)`
+func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) string {
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
 	if excludeHoldLabels {
 		body += excludeHoldLabelsJQClause()
 	}
-	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "")`
+	return body
+}
+
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+		` | select(((.dependency_count // 0) == 0))`
+	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
 	return filter
 }
 
+func ephemeralReadyCandidatesFilterJQ(selector string, excludeHoldLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels)
+	return `[.[] | ` + body + `] | sort_by(.created_at // "", .id // "")`
+}
+
+func ephemeralReadinessFilterShell(limit int, quiet bool) string {
+	limitFilter := `.`
+	if limit > 0 {
+		limitFilter = `.[:` + strconv.Itoa(limit) + `]`
+	}
+	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
+		`.dependency_type == "conditional-blocks") | {id, status}]`
+	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+	const enrichJQ = `. + {blocked_by: $bb}`
+	stderr := ""
+	onError := "exit $?"
+	if quiet {
+		stderr = ` 2>/dev/null`
+		onError = "continue"
+	}
+	return `{ candidate_lines=$(jq -c '.[]'` + stderr + ` | while IFS= read -r candidate; do ` +
+		`dependency_count=$(printf "%s" "$candidate" | jq -r '.dependency_count // 0'` + stderr + `) || ` + onError + `; ` +
+		`if [ "$dependency_count" = "0" ]; then printf '%s\n' "$candidate"; continue; fi; ` +
+		`bid=$(printf "%s" "$candidate" | jq -r '.id // empty'` + stderr + `) || ` + onError + `; [ -n "$bid" ] || ` + onError + `; ` +
+		`shown=$(bd show "$bid" --json` + stderr + `) || ` + onError + `; ` +
+		`bb=$(printf "%s" "$shown" | jq -ce ` + shellquote.Quote(blockingDepsJQ) + stderr + `) || ` + onError + `; ` +
+		`nblocked=$(printf "%s" "$bb" | jq -er ` + shellquote.Quote(openBlockerCountJQ) + stderr + `) || ` + onError + `; ` +
+		`if [ "$nblocked" = "0" ]; then printf "%s" "$candidate" | jq -c --argjson bb "$bb" ` + shellquote.Quote(enrichJQ) + stderr + ` || ` + onError + `; fi; ` +
+		`done) || exit $?; printf "%s\n" "$candidate_lines" | jq -s ` + shellquote.Quote(limitFilter) + stderr + `; }`
+}
+
 func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool) string {
 	if includeEphemeralReady {
 		return `printf "[]"`
 	}
-	filter := legacyEphemeralReadyFilterJQ(
+	filter := ephemeralReadyCandidatesFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
-		limit,
 		true,
 	)
 	query := bdQueryEphemeralStatusShell("open")
@@ -130,7 +163,12 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 	if quiet {
 		jqStderr = ` 2>/dev/null`
 	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+	if quiet {
+		return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + ` | ` + ephemeralReadinessFilterShell(limit, true) + `; } || printf "[]"`
+	}
+	return `ephemeral_source=$(` + query + `) || exit $?; ` +
+		`ephemeral_candidates=$(printf "%s" "$ephemeral_source" | jq --arg target "$target" ` + shellquote.Quote(filter) + `) || exit $?; ` +
+		`printf "%s" "$ephemeral_candidates" | ` + ephemeralReadinessFilterShell(limit, false)
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -202,7 +240,7 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r") +
+		inProgressBlockedByEnrichmentScript() +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
@@ -235,7 +273,7 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 // degrades to the stock behavior of serving the candidate unchanged, never to
 // dropping it, so a malformed or log-prefixed bd stdout can never disable
 // crash recovery.
-func inProgressBlockedByEnrichmentScript(shellVar string) string {
+func inProgressBlockedByEnrichmentScript() string {
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
 		`.dependency_type == "conditional-blocks") | {id, status}]`
@@ -243,11 +281,11 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 
 	const enrichJQ = `map(. + {blocked_by: $bb})`
 
-	v := `$` + shellVar
-	// The enriched payload lands in a scratch var derived from shellVar so the
+	v := `$r`
+	// The enriched payload lands in a scratch variable so the
 	// candidate itself is never clobbered: if jq fails (non-JSON or
 	// log-prefixed `bd list` stdout) the original is served unchanged.
-	enrichedVar := shellVar + `_enriched`
+	enrichedVar := `r_enriched`
 	e := `$` + enrichedVar
 	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		`bb="[]"; ` +
@@ -259,7 +297,7 @@ func inProgressBlockedByEnrichmentScript(shellVar string) string {
 		`if [ "$nblocked" = "0" ]; then ` +
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
-		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && r="` + e + `"; ` +
 		`printf "%s" "` + v + `" && exit 0; ` +
 		`fi; `
 }
@@ -286,7 +324,7 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript("r") +
+		inProgressBlockedByEnrichmentScript() +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
@@ -308,8 +346,10 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
+	filter := ephemeralReadyCandidatesFilterJQ(`select((.assignee // "") == $id)`, true)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
-		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null | ` +
+		ephemeralReadinessFilterShell(1, true) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
@@ -317,9 +357,10 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 	if includeEphemeralReady {
 		return ""
 	}
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	filter := ephemeralReadyCandidatesFilterJQ(`select((.assignee // "") == $id)`, false)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
-		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null | ` +
+		ephemeralReadinessFilterShell(1, true) + `); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
