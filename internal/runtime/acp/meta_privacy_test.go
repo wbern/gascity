@@ -1,10 +1,14 @@
 package acp
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // The ACP sidecar carries session identity and drain state. Unlike the herdr
@@ -88,5 +92,34 @@ func TestDefaultProviderDirIsPerEUID(t *testing.T) {
 	want := filepath.Join(os.TempDir(), fmt.Sprintf("gc-acp-%d", os.Geteuid()))
 	if got := defaultProviderDir(); got != want {
 		t.Errorf("default provider dir = %q, want %q", got, want)
+	}
+}
+
+// A provider is intentionally constructible with a path that later proves
+// unsafe: constructors cannot return an error. Start must nevertheless
+// validate again before it reserves a session, stages a worktree, or spawns a
+// child that could write control or metadata sidecars through that path.
+func TestStartRejectsUnsafeProviderDirectoryBeforeSpawn(t *testing.T) {
+	target := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "acp")
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatalf("create unsafe provider-dir symlink: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "spawned")
+	p := NewProviderWithDir(dir, Config{})
+
+	err := p.Start(context.Background(), "unsafe-dir", runtime.Config{
+		Command: "touch " + marker,
+	})
+	if err == nil || !strings.Contains(err.Error(), "private provider directory") {
+		t.Fatalf("Start error = %v, want unsafe private directory error", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("child spawned despite unsafe provider directory: marker stat err = %v", err)
+	}
+	if entries, err := os.ReadDir(target); err != nil {
+		t.Fatalf("read target directory: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("unsafe directory target has sidecars: %v", entries)
 	}
 }

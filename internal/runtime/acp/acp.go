@@ -115,6 +115,13 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // optionally sends the initial nudge. Returns an error if a session with
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	// NewProviderWithDir cannot return a validation error, and the directory can
+	// be replaced after construction. Revalidate before any session state or
+	// child process can be created through it.
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return fmt.Errorf("validating private provider directory for %q: %w", name, err)
+	}
+
 	p.mu.Lock()
 
 	// Check in-memory tracking first.
@@ -695,6 +702,9 @@ const lastActivityMetaKey = "gc_last_activity"
 // replacement prevents cross-process readers from observing a truncated or
 // partially-written timestamp.
 func (p *Provider) publishActivity(name string, t time.Time) error {
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
 	path := p.metaPath(name, lastActivityMetaKey)
 	data := []byte(t.UTC().Format(time.RFC3339Nano))
 	var err error
@@ -863,6 +873,9 @@ func (p *Provider) socketNameForEntry(key string) string {
 
 // startControlSocket creates a unix socket for cross-process commands.
 func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return nil, err
+	}
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
