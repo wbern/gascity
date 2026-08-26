@@ -99,7 +99,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 		"%9",
 		"GC_INSTANCE_TOKEN=instance-token",
 		"", "", "",
-	}}
+	}, rejectPaneSessionTargets: true}
 	tm := NewTmux()
 	tm.exec = fe
 	tm.ownedScopes = fs
@@ -117,8 +117,15 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	if got := fe.calls[6]; !slices.Contains(got, "managed:^.0") {
 		t.Fatalf("replacement identity lookup = %v, want stable session identity", got)
 	}
-	if got := fe.calls[7]; !slices.Contains(got, "%9") {
-		t.Fatalf("replacement scope record = %v, want newly resolved pane identity", got)
+	for _, call := range fe.calls[7:] {
+		if !slices.Contains(call, "show-environment") && !slices.Contains(call, "set-environment") {
+			continue
+		}
+		for i, arg := range call[:len(call)-1] {
+			if arg == "-t" && strings.HasPrefix(call[i+1], "%") {
+				t.Fatalf("session environment call = %v, want stable session target", call)
+			}
+		}
 	}
 }
 

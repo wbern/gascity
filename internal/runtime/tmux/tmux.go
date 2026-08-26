@@ -763,15 +763,18 @@ func (t *Tmux) stopPendingOwnedScopeStrict(target string) error {
 	return nil
 }
 
-func (t *Tmux) recordOwnedScopeStrict(name string) error {
+// recordOwnedScopeStrict persists a pending pane scope in its owning session's
+// environment. Tmux environment commands require a session target; pane IDs
+// are retained only as the key for the transient pending scope.
+func (t *Tmux) recordOwnedScopeStrict(pane, session string) error {
 	if t.ownedScopes == nil {
 		return nil
 	}
-	unit := t.pendingOwnedScope(name)
+	unit := t.pendingOwnedScope(pane)
 	if unit == "" {
 		return nil
 	}
-	token, err := t.GetEnvironment(name, "GC_INSTANCE_TOKEN")
+	token, err := t.GetEnvironment(session, "GC_INSTANCE_TOKEN")
 	if err != nil || strings.TrimSpace(token) == "" {
 		return fmt.Errorf("reading replacement session identity: %w", err)
 	}
@@ -783,19 +786,19 @@ func (t *Tmux) recordOwnedScopeStrict(name string) error {
 		if stopErr := t.ownedScopes.stop(scope); stopErr != nil {
 			return fmt.Errorf("%w; cleaning up replacement owned scope: %w", cause, stopErr)
 		}
-		t.discardPendingOwnedScope(name)
+		t.discardPendingOwnedScope(pane)
 		return cause
 	}
-	if err := t.SetEnvironment(name, ownedScopeEnv, scope.unit); err != nil {
+	if err := t.SetEnvironment(session, ownedScopeEnv, scope.unit); err != nil {
 		return cleanup(fmt.Errorf("recording replacement owned scope: %w", err))
 	}
-	if err := t.SetEnvironment(name, ownedScopeInvocationEnv, scope.invocationID); err != nil {
+	if err := t.SetEnvironment(session, ownedScopeInvocationEnv, scope.invocationID); err != nil {
 		return cleanup(fmt.Errorf("recording replacement owned scope invocation: %w", err))
 	}
-	if err := t.SetEnvironment(name, ownedScopeTokenEnv, token); err != nil {
+	if err := t.SetEnvironment(session, ownedScopeTokenEnv, token); err != nil {
 		return cleanup(fmt.Errorf("recording replacement owned scope token: %w", err))
 	}
-	t.discardPendingOwnedScope(name)
+	t.discardPendingOwnedScope(pane)
 	return nil
 }
 
@@ -3558,7 +3561,7 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 		return cleanupReplacement(pane, fmt.Errorf("resolving replacement pane identity for %q: %w", pane, err))
 	}
 	t.movePendingOwnedScope(pane, newPane)
-	if err := t.recordOwnedScopeStrict(newPane); err != nil {
+	if err := t.recordOwnedScopeStrict(newPane, fields[4]); err != nil {
 		return cleanupReplacement(newPane, fmt.Errorf("recording replacement owned scope for pane %q: %w", newPane, err))
 	}
 	return nil
