@@ -115,6 +115,14 @@ func newProvider(dir string) *Provider {
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	// NewProviderWithDir cannot return a validation error, and the directory can
+	// be replaced after construction. Revalidate before staging or spawning so
+	// neither a child nor its durable state can be created through an unsafe
+	// path.
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return fmt.Errorf("validating private provider directory for %q: %w", name, err)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()
@@ -606,7 +614,7 @@ func ensurePrivateSocketDir(path string, euid int) error {
 
 func (p *Provider) ensureSocketDir(dir string, euid int) error {
 	if !p.isPrivateFallbackDir(dir, euid) {
-		return os.MkdirAll(dir, 0o755)
+		return runtime.EnsurePrivateDir(dir)
 	}
 	if err := ensurePrivateSocketDir(filepath.Dir(dir), euid); err != nil {
 		return err
