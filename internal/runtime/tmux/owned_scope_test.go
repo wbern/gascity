@@ -126,6 +126,7 @@ func TestSystemdUserScopesStopRejectsForeignScopeBeforeProbe(t *testing.T) {
 type fakeOwnedScopes struct {
 	captured ownedScope
 	stopped  ownedScope
+	stops    []ownedScope
 	err      error
 }
 
@@ -135,7 +136,12 @@ func (f *fakeOwnedScopes) capture(unit string) (ownedScope, error) {
 	}
 	return f.captured, f.err
 }
-func (f *fakeOwnedScopes) stop(scope ownedScope) error { f.stopped = scope; return f.err }
+
+func (f *fakeOwnedScopes) stop(scope ownedScope) error {
+	f.stopped = scope
+	f.stops = append(f.stops, scope)
+	return f.err
+}
 
 func TestOwnedScopeStopRejectsChangedSessionIncarnation(t *testing.T) {
 	// A replacement session may reuse the tmux name. Its current instance token

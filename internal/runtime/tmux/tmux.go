@@ -735,11 +735,39 @@ func (t *Tmux) hasPendingOwnedScope(target string) bool {
 	return t.pendingOwnedScopes[target] != ""
 }
 
+func (t *Tmux) pendingOwnedScope(target string) string {
+	t.ownedScopeMu.Lock()
+	defer t.ownedScopeMu.Unlock()
+	return t.pendingOwnedScopes[target]
+}
+
+// stopPendingOwnedScopeStrict retires a replacement scope before its durable
+// tmux record exists. A pending scope remains available when identity capture
+// or the exact stop fails, so failure never silently discards ownership proof.
+func (t *Tmux) stopPendingOwnedScopeStrict(target string) error {
+	if t.ownedScopes == nil {
+		return nil
+	}
+	unit := t.pendingOwnedScope(target)
+	if unit == "" {
+		return nil
+	}
+	scope, err := t.ownedScopes.capture(unit)
+	if err != nil {
+		return fmt.Errorf("capturing replacement owned scope: %w", err)
+	}
+	if err := t.ownedScopes.stop(scope); err != nil {
+		return fmt.Errorf("stopping replacement owned scope: %w", err)
+	}
+	t.discardPendingOwnedScope(target)
+	return nil
+}
+
 func (t *Tmux) recordOwnedScopeStrict(name string) error {
 	if t.ownedScopes == nil {
 		return nil
 	}
-	unit := t.takePendingOwnedScope(name)
+	unit := t.pendingOwnedScope(name)
 	if unit == "" {
 		return nil
 	}
@@ -755,6 +783,7 @@ func (t *Tmux) recordOwnedScopeStrict(name string) error {
 		if stopErr := t.ownedScopes.stop(scope); stopErr != nil {
 			return fmt.Errorf("%w; cleaning up replacement owned scope: %w", cause, stopErr)
 		}
+		t.discardPendingOwnedScope(name)
 		return cause
 	}
 	if err := t.SetEnvironment(name, ownedScopeEnv, scope.unit); err != nil {
@@ -766,6 +795,7 @@ func (t *Tmux) recordOwnedScopeStrict(name string) error {
 	if err := t.SetEnvironment(name, ownedScopeTokenEnv, token); err != nil {
 		return cleanup(fmt.Errorf("recording replacement owned scope token: %w", err))
 	}
+	t.discardPendingOwnedScope(name)
 	return nil
 }
 
@@ -3512,17 +3542,24 @@ func (t *Tmux) replacePaneWindow(pane, workDir, command string) error {
 	if !t.hasPendingOwnedScope(pane) {
 		return nil
 	}
+	cleanupReplacement := func(target string, cause error) error {
+		if cleanupErr := t.stopPendingOwnedScopeStrict(target); cleanupErr != nil {
+			return fmt.Errorf("%w; cleaning up replacement owned scope: %w", cause, cleanupErr)
+		}
+		if _, cleanupErr := t.run("kill-window", "-t", fields[0]); cleanupErr != nil {
+			return fmt.Errorf("%w; removing replacement window: %w", cause, cleanupErr)
+		}
+		return cause
+	}
 	// Replacement materializes a new pane and therefore a new transient scope.
 	// Resolve its new identity before replacing the durable ownership record.
 	newPane, err := t.GetPaneID(fields[4])
 	if err != nil {
-		t.discardPendingOwnedScope(pane)
-		return fmt.Errorf("resolving replacement pane identity for %q: %w", pane, err)
+		return cleanupReplacement(pane, fmt.Errorf("resolving replacement pane identity for %q: %w", pane, err))
 	}
 	t.movePendingOwnedScope(pane, newPane)
 	if err := t.recordOwnedScopeStrict(newPane); err != nil {
-		_, _ = t.run("kill-window", "-t", fields[0])
-		return fmt.Errorf("recording replacement owned scope for pane %q: %w", newPane, err)
+		return cleanupReplacement(newPane, fmt.Errorf("recording replacement owned scope for pane %q: %w", newPane, err))
 	}
 	return nil
 }

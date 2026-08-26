@@ -122,6 +122,73 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	}
 }
 
+func TestRespawnPaneCleansReplacementScopeWhenPaneIdentityLookupFails(t *testing.T) {
+	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
+	fs := &fakeOwnedScopes{}
+	fe := &fakeExecutor{
+		outs: []string{
+			"@1\tbuild\t1\t/previous\tmanaged",
+			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
+			ownedScopeInvocationEnv + "=old-invocation",
+			ownedScopeTokenEnv + "=instance-token",
+			"GC_INSTANCE_TOKEN=instance-token",
+			"",
+		},
+		errs: []error{nil, nil, nil, nil, nil, nil, errors.New("replacement pane unavailable")},
+	}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.ownedScopes = fs
+	tm.agentSlice.probe = func(string) error { return nil }
+
+	err := tm.RespawnPaneWithWorkDir("managed", "/work", "agent --resume")
+	if err == nil || !strings.Contains(err.Error(), "resolving replacement pane identity") {
+		t.Fatalf("RespawnPaneWithWorkDir error = %v, want replacement pane identity failure", err)
+	}
+	if got := len(fs.stops); got != 2 {
+		t.Fatalf("stopped scopes = %+v, want old and replacement scopes stopped", fs.stops)
+	}
+	if got := fs.stops[1]; got.unit == "" || got.unit == fs.stops[0].unit {
+		t.Fatalf("replacement scope = %+v, want a distinct witnessed replacement scope", got)
+	}
+	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "@1"}) {
+		t.Fatalf("last tmux call = %v, want replacement window cleanup", got)
+	}
+}
+
+func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
+	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
+	fs := &fakeOwnedScopes{}
+	fe := &fakeExecutor{
+		outs: []string{
+			"@1\tbuild\t1\t/previous\tmanaged",
+			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
+			ownedScopeInvocationEnv + "=old-invocation",
+			ownedScopeTokenEnv + "=instance-token",
+			"GC_INSTANCE_TOKEN=instance-token",
+			"",
+			"%9",
+			"GC_INSTANCE_TOKEN=instance-token",
+		},
+		errs: []error{nil, nil, nil, nil, nil, nil, nil, nil, errors.New("record unavailable")},
+	}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.ownedScopes = fs
+	tm.agentSlice.probe = func(string) error { return nil }
+
+	err := tm.RespawnPaneWithWorkDir("managed", "/work", "agent --resume")
+	if err == nil || !strings.Contains(err.Error(), "recording replacement owned scope") {
+		t.Fatalf("RespawnPaneWithWorkDir error = %v, want replacement record failure", err)
+	}
+	if got := len(fs.stops); got != 2 {
+		t.Fatalf("stopped scopes = %+v, want old and replacement scopes stopped", fs.stops)
+	}
+	if got := fe.calls[len(fe.calls)-1]; !slices.Equal(got, []string{"-u", "kill-window", "-t", "@1"}) {
+		t.Fatalf("last tmux call = %v, want replacement window cleanup", got)
+	}
+}
+
 func TestRespawnPanePreservesCurrentWorkDir(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{"@2\tmain\t1\t/current\tmanaged"}}
 	tm := NewTmux()
