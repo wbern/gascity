@@ -73,8 +73,8 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 	exec.outs = []string{
-		"@1\tmain\t1\t/current\t%0", "", "", "%1", "GC_INSTANCE_TOKEN=token", "", "", "",
-		"@1\tmain\t1\t/current\t%0", "", "", "%2", "GC_INSTANCE_TOKEN=token", "", "", "",
+		"@1\tmain\t1\t/current\t%0", "-" + ownedScopeEnv, "", "%1", "GC_INSTANCE_TOKEN=token", "", "", "",
+		"@1\tmain\t1\t/current\t%0", "-" + ownedScopeEnv, "", "%2", "GC_INSTANCE_TOKEN=token", "", "", "",
 	}
 
 	if err := tm.RespawnPane("%0", "claude --resume"); err != nil {

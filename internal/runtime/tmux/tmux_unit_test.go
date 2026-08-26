@@ -129,6 +129,25 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	}
 }
 
+func TestRespawnPaneFailsClosedWhenOwnedScopeLookupFails(t *testing.T) {
+	fe := &fakeExecutor{
+		outs: []string{"@1\tbuild\t1\t/previous\tmanaged"},
+		errs: []error{nil, errors.New("tmux connection lost")},
+	}
+	tm := NewTmux()
+	tm.exec = fe
+
+	err := tm.RespawnPaneWithWorkDir("managed", "/work", "agent --resume")
+	if err == nil || !strings.Contains(err.Error(), "reading recorded owned scope") {
+		t.Fatalf("RespawnPaneWithWorkDir error = %v, want owned-scope lookup failure", err)
+	}
+	for _, call := range fe.calls {
+		if slices.Contains(call, "if-shell") {
+			t.Fatalf("tmux calls = %v, want no replacement after owned-scope lookup failure", fe.calls)
+		}
+	}
+}
+
 func TestRespawnPaneCleansReplacementScopeWhenPaneIdentityLookupFails(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	fs := &fakeOwnedScopes{}
@@ -243,7 +262,7 @@ func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T)
 }
 
 func TestRespawnPaneDoesNotRetireOriginalWindowWhenReplacementFails(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t1\t/work\tmanaged", "", ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
+	fe := &fakeExecutor{outs: []string{"@1\tmain\t1\t/work\tmanaged", "-" + ownedScopeEnv, ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
 	tm := NewTmux()
 	tm.exec = fe
 

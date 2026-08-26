@@ -47,6 +47,9 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 		f.idx++
 		return out, err
 	}
+	if slices.Contains(args, "show-environment") {
+		return "-" + args[len(args)-1], nil
+	}
 	return f.out, f.err
 }
 

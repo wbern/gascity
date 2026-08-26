@@ -142,6 +142,7 @@ var (
 	ErrNoServer           = errors.New("no tmux server running")
 	ErrSessionExists      = errors.New("session already exists")
 	ErrSessionNotFound    = errors.New("session not found")
+	errEnvironmentUnset   = errors.New("tmux environment variable unset")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
 	// ErrNudgeSubmitUnconfirmed indicates the submit Enter was handed to tmux
@@ -818,9 +819,12 @@ func (t *Tmux) stopOwnedScopeStrict(name string) error {
 		return nil
 	}
 	unit, err := t.GetEnvironment(name, ownedScopeEnv)
-	if err != nil {
+	if errors.Is(err, errEnvironmentUnset) {
 		// No prior owned scope is normal when GC_AGENT_SLICE is disabled.
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading recorded owned scope: %w", err)
 	}
 	if !isGasCityPaneScope(unit) {
 		return fmt.Errorf("invalid recorded owned scope %q", unit)
@@ -2676,6 +2680,9 @@ func (t *Tmux) GetEnvironment(session, key string) (string, error) {
 	out, err := t.run("show-environment", "-t", session, key)
 	if err != nil {
 		return "", err
+	}
+	if out == "-"+key {
+		return "", fmt.Errorf("%w: %s", errEnvironmentUnset, key)
 	}
 	// Output format: KEY=value
 	parts := strings.SplitN(out, "=", 2)
