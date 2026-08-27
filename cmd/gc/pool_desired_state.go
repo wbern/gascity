@@ -78,13 +78,39 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // Each bead's gc.routed_to determines which agent template it belongs to.
 // scaleCheckCounts maps agent template → new session demand from scale_check.
 // Pass nil for either when unavailable.
+//
+// The convenience wrappers below (ComputePoolDesiredStates,
+// ComputePoolDesiredStatesTraced, ComputePoolDesiredStatesWithDemandTraced)
+// each draw a fresh rotation seed from poolNewDemandInterleaveCounter for a
+// single, standalone call. When a tick calls this computation MORE THAN ONCE
+// on the same inputs — the reconciler builds desired state once to
+// materialize sessions and again to compute the wake-demand count
+// (city_runtime.go's paired buildDesiredState + PoolDesiredCounts calls) —
+// callers MUST use the "WithSeed" variants and thread the same seed through
+// both calls (typically stored once on DesiredStateResult). Otherwise the
+// two calls can round-robin-rotate to different splits on one tick and
+// disagree about which sessions exist versus which should be awake
+// (gcw-tuwx8.4 PR #126 review cycle 3).
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), nil)
+}
+
+// ComputePoolDesiredStatesWithSeed is ComputePoolDesiredStates for a caller
+// that must agree with another call on the same tick's rotation (see the
+// package doc above ComputePoolDesiredStates).
+func ComputePoolDesiredStatesWithSeed(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	seed uint64,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -94,7 +120,21 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), trace)
+}
+
+// ComputePoolDesiredStatesTracedWithSeed is ComputePoolDesiredStatesTraced
+// for a caller that must agree with another call on the same tick's
+// rotation (see the package doc above ComputePoolDesiredStates).
+func ComputePoolDesiredStatesTracedWithSeed(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	seed uint64,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -106,7 +146,38 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), trace)
+}
+
+// ComputePoolDesiredStatesWithDemandTracedWithSeed is
+// ComputePoolDesiredStatesWithDemandTraced for a caller that must agree with
+// another call on the same tick's rotation (see the package doc above
+// ComputePoolDesiredStates). This is the variant buildDesiredState uses: it
+// draws the seed itself, passes it here, and records it on DesiredStateResult
+// so the paired wake-count call later in the same tick can reuse it via
+// ComputePoolDesiredStatesTracedWithSeed.
+func ComputePoolDesiredStatesWithDemandTracedWithSeed(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	seed uint64,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, trace)
+}
+
+// nextPoolNewDemandInterleaveSeed draws the next rotation seed for a
+// standalone (unpaired) call. Advancing here, one layer above
+// computePoolDesiredStates, mirrors poolSessionCreateFairShareCounter's
+// placement (build_desired_state.go:201, advanced in
+// configurePoolSessionCreateFairShare — after desired state is computed, not
+// inside it) and keeps computePoolDesiredStates itself a pure function of a
+// given seed.
+func nextPoolNewDemandInterleaveSeed() uint64 {
+	return poolNewDemandInterleaveCounter.Add(1) - 1
 }
 
 func computePoolDesiredStates(
@@ -116,6 +187,7 @@ func computePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	newDemandInterleaveSeed uint64,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
@@ -343,40 +415,51 @@ func computePoolDesiredStates(
 			})
 		}
 
-		// Interleave each contending template's candidate requests one slot
-		// per round instead of appending one template's full demand block
-		// before the next. applyNestedCaps' admission sort is stable and
-		// ties (equal BeadPriority) fall back to insertion order, so
-		// block-appending in cfg.Agents declaration order let whichever
-		// template is declared first (pack.go:938 puts city-pack agents
-		// first) exhaust a shared cap — workspace or rig — before later
-		// templates were ever considered (gcw-tuwx8.4). Round-robin
-		// interleaving makes ties split evenly instead. Rotating the start
-		// each tick (reusing the pattern at build_desired_state.go:218)
-		// additionally keeps the same template from always winning an odd
-		// remainder; a hash of the (stable, often-identical) per-tick demand
-		// would not rotate at all under steady-state load, so the seed must
-		// come from a counter that actually advances every tick.
-		seed := poolNewDemandInterleaveCounter.Add(1) - 1
+		// Rotating the start of the interleave below (reusing the pattern at
+		// build_desired_state.go:218) keeps the same template from always
+		// winning an odd remainder; a hash of the (stable, often-identical)
+		// per-tick demand would not rotate at all under steady-state load,
+		// so the seed comes from newDemandInterleaveSeed, drawn once per
+		// tick by the caller (see the doc comment on ComputePoolDesiredStates)
+		// rather than inside this otherwise-pure function.
 		if n := len(demands); n > 0 {
-			start := int(seed % uint64(n))
+			start := int(newDemandInterleaveSeed % uint64(n))
 			demands = append(append([]templateDemand(nil), demands[start:]...), demands[:start]...)
 		}
 
+		// Emit every contending template's in-flight requests before any
+		// template's anonymous ones. An in-flight request carries
+		// SessionBeadID and stands for a session that already exists and is
+		// mid-create; sweepUndesiredPoolSessionBeads protects a still-leased
+		// pending_create_claim or non-stale creating session regardless of
+		// whether it appears in this tick's desired state, so dropping it
+		// from desired does not free its slot — the session survives the
+		// sweep either way. Interleaving an in-flight request against
+		// another template's anonymous one on equal terms would let the
+		// anonymous request win a shared cap and add a session on top of
+		// the in-flight one that the sweep keeps regardless, over-subscribing
+		// the cap (gcw-tuwx8.4 PR #126 review cycle 3). This mirrors
+		// build_desired_state.go:206-210, which excludes SessionBeadID != ""
+		// from fresh-create fair-share budget for the same reason.
+		for _, td := range demands {
+			for round := 0; round < len(td.inFlight) && round < td.ownCap; round++ {
+				allRequests = append(allRequests, td.inFlight[round])
+			}
+		}
+
+		// Interleave only the anonymous remainder, one slot per template per
+		// round, so a shared cap (workspace or rig) is divided across
+		// contention instead of exhausted by whichever template is
+		// processed first (gcw-tuwx8.4).
 		for round := 0; ; round++ {
 			progressed := false
 			for _, td := range demands {
-				if round >= td.ownCap {
+				index := len(td.inFlight) + round
+				if index >= td.ownCap {
 					continue
 				}
 				progressed = true
-				var req SessionRequest
-				if round < len(td.inFlight) {
-					req = td.inFlight[round]
-				} else {
-					req = newTierSessionRequest(td.template, scaleCheckDemand[td.template], round)
-				}
-				allRequests = append(allRequests, req)
+				allRequests = append(allRequests, newTierSessionRequest(td.template, scaleCheckDemand[td.template], index))
 			}
 			if !progressed {
 				break
@@ -421,9 +504,12 @@ func computePoolDesiredStates(
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
 }
 
-// poolNewDemandInterleaveCounter rotates which contending template's
-// new-tier scale_check demand is interleaved first each tick, mirroring
-// poolSessionCreateFairShareCounter (build_desired_state.go:201).
+// poolNewDemandInterleaveCounter backs nextPoolNewDemandInterleaveSeed, used
+// only by the standalone convenience wrappers above. computePoolDesiredStates
+// itself never reads this counter directly — it takes the seed as an
+// explicit parameter, so a caller that must call it twice on one tick (see
+// the doc comment on ComputePoolDesiredStates) can hold the rotation fixed
+// across both calls instead of each call silently advancing it independently.
 var poolNewDemandInterleaveCounter atomic.Uint64
 
 // newTierSessionRequest builds the anonymous "new" tier SessionRequest for
@@ -723,13 +809,19 @@ func newNestedCapUsage() nestedCapUsage {
 	}
 }
 
-// usageExcludingTemplateNew returns a copy of base with template's own
-// acceptedNew "new" tier contribution removed from the agent, rig, and
-// workspace counts, and those requests filtered out of requests. Callers
-// that need to evaluate "would accepting newCount more requests for
-// template hit a cap" (as newDemandBlockingScope does) must pass a usage
-// that has not yet absorbed that template's own newCount, or the predicate
-// double-counts and can blame the wrong cap.
+// usageExcludingTemplateNew returns base with template's own acceptedNew
+// "new" tier contribution removed from the agent, rig, and workspace counts,
+// and those requests filtered out of requests. Callers that need to evaluate
+// "would accepting newCount more requests for template hit a cap" (as
+// newDemandBlockingScope does) must pass a usage that has not yet absorbed
+// that template's own newCount, or the predicate double-counts and can
+// blame the wrong cap.
+//
+// The returned value is base itself, unmodified, when acceptedNew <= 0
+// (nothing to exclude), and a value with freshly cloned agentCount,
+// rigCount, and requests otherwise. seenSessionBead is never read by
+// newDemandBlockingScope, so it is intentionally left aliased with base in
+// both cases rather than cloned.
 func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string, acceptedNew int) nestedCapUsage {
 	if acceptedNew <= 0 {
 		return base

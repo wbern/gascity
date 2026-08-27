@@ -1041,10 +1041,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
 	poolWorkBeads, _ := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	// Reuse dsResult's rotation seed: this recomputes desired state on the
+	// same run dsResult already built it for (see the comment at the paired
+	// wake-count call site in loadDemandSnapshot, city_runtime.go).
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStates(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
+		PoolDesiredCounts(ComputePoolDesiredStatesWithSeed(
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, dsResult.PoolNewDemandInterleaveSeed)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)

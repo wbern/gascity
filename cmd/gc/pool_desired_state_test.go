@@ -619,7 +619,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, 0, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -663,7 +663,7 @@ func TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling(t *te
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, 0, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("result = %#v, want 2 requests capped by the workspace max", result)
@@ -1194,7 +1194,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, 0, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1647,7 +1647,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1680,7 +1680,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -2092,21 +2092,24 @@ func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
 	}
 }
 
-// TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention proves an
-// already-existing in-flight session is never dropped in favor of an
-// anonymous new-tier request — same template or a contending one — when a
-// shared workspace cap binds (PR #126 review finding 2: threading real bead
-// priorities onto anonymous requests, whose store default is 2, would have
-// sorted every anonymous request above every in-flight request, priority 0,
-// under the admission comparator's descending sort, tearing down a
-// mid-create session so a fresh create could take its slot). With
-// BeadPriority threading dropped (finding 1's fix), ties are broken by
-// insertion order, and each template's in-flight requests always occupy its
-// own earliest interleave rounds, so this can no longer happen. Deterministic
-// regardless of poolNewDemandInterleaveCounter's rotation: whichever
-// template's round-0 slot goes first, round 0 always exhausts the cap-2
-// budget on the two round-0 candidates (a's in-flight, b's first anonymous),
-// so a's in-flight is never the one dropped.
+// TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention proves
+// one template's in-flight (mid-create) session is not dropped in favor of
+// ANOTHER contending template's anonymous new-tier request when a shared
+// workspace cap binds (PR #126 review finding 2 fix: computePoolDesiredStates
+// now emits every contending template's in-flight requests before opening
+// the interleave to any anonymous ones, since dropping an in-flight request
+// from desired state does not free its slot — sweepUndesiredPoolSessionBeads
+// keeps it regardless). This case demonstrates that property for exactly one
+// in-flight session (claude's) contending against another template (codex)
+// that has none; it does not prove in-flight survives an arbitrarily deep
+// anonymous queue, nor say anything about ordering AMONG MULTIPLE in-flight
+// requests from different templates.
+// Deterministic regardless of poolNewDemandInterleaveCounter's rotation:
+// claude's in-flight request is the only in-flight candidate, so it is
+// always emitted first (ahead of every anonymous candidate, from either
+// template) and is therefore always within the admitted set for any cap >=
+// 1, regardless of which template's anonymous requests the rotation
+// interleaves first afterward.
 func TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention(t *testing.T) {
 	wsMax := 2
 	cfg := &config.City{
@@ -2149,6 +2152,50 @@ func TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention(t *testing
 		if !found {
 			t.Fatalf("claude's in-flight session sess-inflight was evicted; requests=%#v", ds.Requests)
 		}
+	}
+}
+
+// TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed proves
+// computePoolDesiredStates is a pure function of its explicit seed argument:
+// two calls with the SAME seed on the SAME inputs must agree exactly on the
+// oversubscribed split (PR #126 review cycle 3, finding 1). This is exactly
+// the shape of the production bug — buildDesiredState computes desired
+// state once to materialize sessions
+// (ComputePoolDesiredStatesWithDemandTracedWithSeed) and loadDemandSnapshot
+// computes it again on the same tick's inputs to get the wake-demand count
+// (ComputePoolDesiredStatesTracedWithSeed) — so both call shapes are
+// exercised here with a shared seed. Also proves the test is not vacuous by
+// checking that at least one of two arbitrary distinct seeds produces a
+// DIFFERENT split for this same oversubscribed demand — if every seed
+// produced the same split, agreement would be trivial rather than proving
+// the seed is actually threaded through.
+func TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed(t *testing.T) {
+	wsMax := 3
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("a", "", nil, 0),
+			poolAgent("b", "", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"a": 2, "b": 2}
+
+	splitAtSeed := func(seed uint64) map[string]int {
+		buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, nil))
+		wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, nil))
+		if buildPlan["a"] != wakePlan["a"] || buildPlan["b"] != wakePlan["b"] {
+			t.Fatalf("seed %d: buildDesiredState's create plan %#v disagrees with loadDemandSnapshot's wake plan %#v on the same tick", seed, buildPlan, wakePlan)
+		}
+		return buildPlan
+	}
+
+	splitAtSeed(0)
+	splitAtSeed(1)
+
+	splitA := splitAtSeed(0)
+	splitB := splitAtSeed(1)
+	if splitA["a"] == splitB["a"] && splitA["b"] == splitB["b"] {
+		t.Fatalf("seed 0 and seed 1 produced the identical split %#v; this test needs demand that actually rotates with the seed to be meaningful", splitA)
 	}
 }
 
