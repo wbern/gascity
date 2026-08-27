@@ -398,7 +398,14 @@ func computePoolDesiredStates(
 		}
 		for _, td := range demands {
 			acceptedNew := acceptedNewByTemplate[td.template]
-			recordNewDemandCapTrace(trace, td.template, td.agent, limits, finalUsage, td.scaleCount, acceptedNew)
+			// newDemandBlockingScope's predicates (capMax - usage.count <=
+			// newCount) assume usage has not yet absorbed newCount — feeding
+			// it finalUsage, which already counts this template's own
+			// acceptedNew, double-counts and can blame the wrong cap.
+			// Exclude this template's own accepted new-tier contribution
+			// before handing it to the trace.
+			preAcceptUsage := usageExcludingTemplateNew(finalUsage, td.template, limits.agentRig[td.template], acceptedNew)
+			recordNewDemandCapTrace(trace, td.template, td.agent, limits, preAcceptUsage, td.scaleCount, acceptedNew)
 			if len(td.inFlight) > 0 && trace != nil {
 				reused := minInt(len(td.inFlight), acceptedNew)
 				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, td.template, "", traceRecordPayload{
@@ -421,7 +428,17 @@ var poolNewDemandInterleaveCounter atomic.Uint64
 
 // newTierSessionRequest builds the anonymous "new" tier SessionRequest for
 // the index-th slot of template's scale_check demand, threading the driving
-// work bead's identity and priority when scaleCheckDemand has it.
+// work bead's identity when scaleCheckDemand has it.
+//
+// Deliberately leaves BeadPriority at its zero value: admission's comparator
+// sorts BeadPriority descending (applyNestedCaps, acceptedNestedCapUsage),
+// but this repository's real bead priorities are ascending-urgent
+// (doltlite_read_store.go:396 orders ASC; TestCachingStoreReadyReturnsCanonicalOrder
+// pins it). Threading demand.Priorities here would let the least urgent bead
+// win a binding cap, and would let anonymous new-tier requests (store default
+// priority 2) evict already-spent in-flight requests (built with priority 0)
+// every tick. gcw-tuwx8.5 owns inverting the comparator to match real bead
+// priority direction; only after that lands should this thread demand.Priorities.
 func newTierSessionRequest(template string, demand scaleCheckDemand, index int) SessionRequest {
 	workBeadID := ""
 	workBeadTitle := ""
@@ -429,7 +446,6 @@ func newTierSessionRequest(template string, demand scaleCheckDemand, index int) 
 	workWorkspace := ""
 	workStoreRef := ""
 	workParentSID := ""
-	workBeadPriority := 0
 	if len(demand.WorkBeadIDs) > index {
 		workBeadID = strings.TrimSpace(demand.WorkBeadIDs[index])
 		if demand.Titles != nil {
@@ -447,13 +463,9 @@ func newTierSessionRequest(template string, demand scaleCheckDemand, index int) 
 		if demand.ParentSIDs != nil {
 			workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 		}
-		if demand.Priorities != nil {
-			workBeadPriority = demand.Priorities[workBeadID]
-		}
 	}
 	return SessionRequest{
 		Template:       template,
-		BeadPriority:   workBeadPriority,
 		Tier:           "new",
 		WorkBeadID:     workBeadID,
 		WorkBeadTitle:  workBeadTitle,
@@ -709,6 +721,41 @@ func newNestedCapUsage() nestedCapUsage {
 		rigCount:        make(map[string]int),
 		seenSessionBead: make(map[string]bool),
 	}
+}
+
+// usageExcludingTemplateNew returns a copy of base with template's own
+// acceptedNew "new" tier contribution removed from the agent, rig, and
+// workspace counts, and those requests filtered out of requests. Callers
+// that need to evaluate "would accepting newCount more requests for
+// template hit a cap" (as newDemandBlockingScope does) must pass a usage
+// that has not yet absorbed that template's own newCount, or the predicate
+// double-counts and can blame the wrong cap.
+func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string, acceptedNew int) nestedCapUsage {
+	if acceptedNew <= 0 {
+		return base
+	}
+	adjusted := base
+	adjusted.agentCount = make(map[string]int, len(base.agentCount))
+	for k, v := range base.agentCount {
+		adjusted.agentCount[k] = v
+	}
+	adjusted.agentCount[template] -= acceptedNew
+	adjusted.rigCount = make(map[string]int, len(base.rigCount))
+	for k, v := range base.rigCount {
+		adjusted.rigCount[k] = v
+	}
+	if rig != "" {
+		adjusted.rigCount[rig] -= acceptedNew
+	}
+	adjusted.workspaceCount -= acceptedNew
+	adjusted.requests = make([]SessionRequest, 0, len(base.requests))
+	for _, req := range base.requests {
+		if req.Template == template && req.Tier == "new" {
+			continue
+		}
+		adjusted.requests = append(adjusted.requests, req)
+	}
+	return adjusted
 }
 
 func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {

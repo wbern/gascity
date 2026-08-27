@@ -144,6 +144,15 @@ func poolTraceFieldInt(t *testing.T, fields map[string]any, key string) int {
 	return got
 }
 
+func poolTraceFieldString(t *testing.T, fields map[string]any, key string) string {
+	t.Helper()
+	got, ok := fields[key].(string)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want string", key, fields[key])
+	}
+	return got
+}
+
 func poolTraceFieldStrings(t *testing.T, fields map[string]any, key string) []string {
 	t.Helper()
 	got, ok := fields[key].([]string)
@@ -633,6 +642,46 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	}
 	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_work_beads"); len(got) != 1 || got[0] != "w-active" {
 		t.Fatalf("blocking_work_beads = %#v, want [w-active]", got)
+	}
+}
+
+// TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling
+// proves recordNewDemandCapTrace identifies which cap actually blocked new
+// demand even when a template's own per-agent ceiling has slack (PR #126
+// review finding 3): feeding it a usage snapshot that already includes this
+// template's own accepted new-tier requests double-counts and blames
+// whichever cap the double-counted subtraction happens to trip first,
+// regardless of which cap actually bound. Here agentMax=4 has slack (2 of 4
+// used) while the real workspace cap of 2 is what stops the remaining 6
+// requests; the buggy call site reported agent_cap with a self-contradictory
+// current(2) < max(4) while claiming 6 were blocked.
+func TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling(t *testing.T) {
+	wsMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents:    []config.Agent{poolAgent("claude", "", intPtr(4), 0)},
+	}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, trace)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want 2 requests capped by the workspace max", result)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolNewDemandCap)
+	if got := poolTraceFieldString(t, rec.Fields, "active_capacity_kind"); got != string(TraceReasonWorkspaceCap) {
+		t.Fatalf("active_capacity_kind = %q, want %q (workspace is what actually bound; agent_cap has slack)", got, TraceReasonWorkspaceCap)
+	}
+	for key, want := range map[string]int{
+		"scale_check":  8,
+		"accepted_new": 2,
+		"blocked_new":  6,
+		"current":      0,
+		"max":          wsMax,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d (current must be below max without contradicting blocked_new)", key, got, want)
+		}
 	}
 }
 
@@ -2043,12 +2092,76 @@ func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
 	}
 }
 
-// TestComputePoolDesiredStates_NewTierCarriesBeadPriority proves scale_check
-// demand threads the driving work bead's priority onto the new-tier session
-// request via scaleCheckDemand.Priorities, so the applyNestedCaps comparator
-// can differentiate between new-tier requests instead of treating every
-// scale_check-driven request as priority 0 (gcw-tuwx8.4).
-func TestComputePoolDesiredStates_NewTierCarriesBeadPriority(t *testing.T) {
+// TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention proves an
+// already-existing in-flight session is never dropped in favor of an
+// anonymous new-tier request — same template or a contending one — when a
+// shared workspace cap binds (PR #126 review finding 2: threading real bead
+// priorities onto anonymous requests, whose store default is 2, would have
+// sorted every anonymous request above every in-flight request, priority 0,
+// under the admission comparator's descending sort, tearing down a
+// mid-create session so a fresh create could take its slot). With
+// BeadPriority threading dropped (finding 1's fix), ties are broken by
+// insertion order, and each template's in-flight requests always occupy its
+// own earliest interleave rounds, so this can no longer happen. Deterministic
+// regardless of poolNewDemandInterleaveCounter's rotation: whichever
+// template's round-0 slot goes first, round 0 always exhausts the cap-2
+// budget on the two round-0 candidates (a's in-flight, b's first anonymous),
+// so a's in-flight is never the one dropped.
+func TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention(t *testing.T) {
+	wsMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("claude", "", nil, 0),
+			poolAgent("codex", "", nil, 0),
+		},
+	}
+	sessions := []beads.Bead{pendingPoolSessionBead("sess-inflight")}
+	scaleCheck := map[string]int{"claude": 2, "codex": 2}
+	demand := map[string]scaleCheckDemand{
+		"codex": {
+			Count:       2,
+			WorkBeadIDs: []string{"w-codex-high", "w-codex-low"},
+			Priorities:  map[string]int{"w-codex-high": 9, "w-codex-low": 9},
+		},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, nil, nil, sessionInfosFromBeads(sessions), scaleCheck, demand, nil)
+	got := PoolDesiredCounts(result)
+
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != wsMax {
+		t.Fatalf("total = %d, want %d", total, wsMax)
+	}
+	for _, ds := range result {
+		if ds.Template != "claude" {
+			continue
+		}
+		found := false
+		for _, req := range ds.Requests {
+			if req.SessionBeadID == "sess-inflight" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("claude's in-flight session sess-inflight was evicted; requests=%#v", ds.Requests)
+		}
+	}
+}
+
+// TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow pins that
+// new-tier requests do NOT thread scaleCheckDemand.Priorities onto
+// BeadPriority yet. Real bead priority is ascending-urgent
+// (doltlite_read_store.go:396 ASC), but applyNestedCaps' admission comparator
+// sorts BeadPriority descending, so threading it here would let the least
+// urgent bead win a binding cap and let anonymous new-tier requests (store
+// default priority 2) evict already-spent in-flight requests (priority 0)
+// every tick. gcw-tuwx8.5 owns inverting the comparator; only after that
+// lands should this thread demand.Priorities (gcw-tuwx8.4 PR #126 review).
+func TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
@@ -2065,14 +2178,9 @@ func TestComputePoolDesiredStates_NewTierCarriesBeadPriority(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 1 template with 2 requests, got %#v", result)
 	}
-	byWorkBead := make(map[string]int, 2)
 	for _, req := range result[0].Requests {
-		byWorkBead[req.WorkBeadID] = req.BeadPriority
-	}
-	if byWorkBead["w-high"] != 9 {
-		t.Errorf("w-high priority = %d, want 9", byWorkBead["w-high"])
-	}
-	if byWorkBead["w-low"] != 1 {
-		t.Errorf("w-low priority = %d, want 1", byWorkBead["w-low"])
+		if req.BeadPriority != 0 {
+			t.Errorf("request %+v: BeadPriority = %d, want 0 (threading deferred to gcw-tuwx8.5)", req, req.BeadPriority)
+		}
 	}
 }
