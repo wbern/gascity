@@ -90,7 +90,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	fs := &fakeOwnedScopes{}
 	fe := &fakeExecutor{outs: []string{
-		"@1\tbuild\t1\t/previous\tmanaged",
+		"@1\tbuild\t1\t/previous\tmanaged\t0",
 		ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 		ownedScopeInvocationEnv + "=old-invocation",
 		ownedScopeTokenEnv + "=instance-token",
@@ -131,7 +131,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 
 func TestRespawnPaneFailsClosedWhenOwnedScopeLookupFails(t *testing.T) {
 	fe := &fakeExecutor{
-		outs: []string{"@1\tbuild\t1\t/previous\tmanaged"},
+		outs: []string{"@1\tbuild\t1\t/previous\tmanaged\t0"},
 		errs: []error{nil, errors.New("tmux connection lost")},
 	}
 	tm := NewTmux()
@@ -216,7 +216,7 @@ func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
 }
 
 func TestRespawnPanePreservesCurrentWorkDir(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@2\tmain\t1\t/current\tmanaged"}}
+	fe := &fakeExecutor{outs: []string{"@2\tmain\t1\t/current\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -229,7 +229,7 @@ func TestRespawnPanePreservesCurrentWorkDir(t *testing.T) {
 }
 
 func TestRespawnPaneRefusesWindowWithSiblingPanes(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged", "", ""}, errs: []error{nil, nil, errors.New("exit 77")}}
+	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged\t0", "", ""}, errs: []error{nil, nil, errors.New("exit 77")}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -244,7 +244,7 @@ func TestRespawnPaneRefusesWindowWithSiblingPanes(t *testing.T) {
 
 func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T) {
 	fs := &fakeOwnedScopes{}
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged"}}
+	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 	tm.ownedScopes = fs
@@ -262,7 +262,7 @@ func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T)
 }
 
 func TestRespawnPaneDoesNotRetireOriginalWindowWhenReplacementFails(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t1\t/work\tmanaged", "-" + ownedScopeEnv, ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
+	fe := &fakeExecutor{outs: []string{"@1\tmain\t1\t/work\tmanaged\t0", "-" + ownedScopeEnv, ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
 	tm := NewTmux()
 	tm.exec = fe
 

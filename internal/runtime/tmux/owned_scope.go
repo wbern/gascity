@@ -89,6 +89,9 @@ func (systemdUserScopes) stop(scope ownedScope) error {
 		}
 		return fmt.Errorf("reading scope %q before stop: %w", scope.unit, err)
 	}
+	if strings.TrimSpace(liveID) == "" {
+		return nil
+	}
 	if liveID != scope.invocationID {
 		return fmt.Errorf("scope %q invocation changed", scope.unit)
 	}
