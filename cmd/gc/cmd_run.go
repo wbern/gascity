@@ -21,7 +21,7 @@ import (
 func newRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Inspect and manage graphv2 runs",
+		Short: "Manage graphv2 runs",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -95,10 +95,13 @@ var runAPIClient = func(cityPath string) (*api.Client, string) {
 // routeRunCancel dispatches `gc run cancel` to the supervisor API. Exit
 // codes: 0 on success, 2 when the supervisor is unreachable (no client, a
 // transport failure, or a read-only server — anything api.ShouldFallback
-// recognizes), 1 on a genuine API error (run not found, already terminal,
-// or otherwise). The 2/1 split matters for an incident-response command:
-// an operator retries on 2 (the supervisor may come back) and gives up on 1
-// (the run itself rejected the cancel).
+// recognizes), 1 on any other API error (run not found, already terminal,
+// or a mid-cancel store failure the run itself reported). The 2/1 split
+// matters for an incident-response command: exit 2 means the request never
+// reached a run to judge, so retrying is always sound; exit 1 means it did,
+// even for the retryable 503 case, since api.ShouldFallback does not treat
+// a generic server error as fallbackable for a mutation (see
+// routeMaintenanceDoltGC's identical split for the same tradeoff).
 func routeRunCancel(c *api.Client, nilReason, runID string, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "run cancel"
 	if c == nil {

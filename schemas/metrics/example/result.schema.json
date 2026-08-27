@@ -210,7 +210,8 @@
               "worktree-scan",
               "mcp-validate",
               "worktree-reap",
-              "events-reemit-execution"
+              "events-reemit-execution",
+              "run-cancel"
             ]
           },
           "event_id": {

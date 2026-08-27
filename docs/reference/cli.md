@@ -70,7 +70,7 @@ gc [flags]
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
-| [gc run](#gc-run) | Inspect and manage graphv2 runs |
+| [gc run](#gc-run) | Manage graphv2 runs |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
@@ -3559,7 +3559,7 @@ gc rig suspend [name] [flags]
 
 ## gc run
 
-Inspect and manage graphv2 runs
+Manage graphv2 runs
 
 ```
 gc run
