@@ -43,8 +43,25 @@ func beadPriority(b beads.Bead) int {
 	if b.Priority != nil {
 		return *b.Priority
 	}
-	return 0
+	// Match the store's own default for a nil priority (readySortPriority,
+	// internal/beads/query.go:420-424) rather than 0. Under the old
+	// descending comparator, a 0 default happened to sort last (least
+	// urgent) and looked harmless; under the ascending-urgent comparator
+	// (gcw-tuwx8.5) 0 is the HIGHEST urgency, so defaulting an unset
+	// priority to 0 would let unprioritized work jump ahead of every
+	// explicitly-prioritized P1-P4 bead.
+	return 2
 }
+
+// anonymousNewTierPriority is the BeadPriority assigned to "new" tier
+// SessionRequests that carry no real bead priority yet (anonymous
+// scale-check demand, in-flight reuse). Real bd priorities are 0-4
+// (ascending-urgent, 0=highest — doltlite_read_store.go:396). This sentinel
+// must sort as less urgent than every real priority so anonymous demand
+// never outranks resume/wake-tier requests built from actual in-progress
+// work; it only ties (and falls to the tier tie-break) against other
+// anonymous new-tier requests, preserving resume/wake-always-before-new.
+const anonymousNewTierPriority = 5
 
 // PoolDesiredState holds the desired state for a single agent template.
 type PoolDesiredState struct {
@@ -516,15 +533,17 @@ var poolNewDemandInterleaveCounter atomic.Uint64
 // the index-th slot of template's scale_check demand, threading the driving
 // work bead's identity when scaleCheckDemand has it.
 //
-// Deliberately leaves BeadPriority at its zero value: admission's comparator
-// sorts BeadPriority descending (applyNestedCaps, acceptedNestedCapUsage),
-// but this repository's real bead priorities are ascending-urgent
-// (doltlite_read_store.go:396 orders ASC; TestCachingStoreReadyReturnsCanonicalOrder
-// pins it). Threading demand.Priorities here would let the least urgent bead
-// win a binding cap, and would let anonymous new-tier requests (store default
-// priority 2) evict already-spent in-flight requests (built with priority 0)
-// every tick. gcw-tuwx8.5 owns inverting the comparator to match real bead
-// priority direction; only after that lands should this thread demand.Priorities.
+// Deliberately leaves BeadPriority at anonymousNewTierPriority rather than a
+// real bead priority. admission's comparator (applyNestedCaps,
+// acceptedNestedCapUsage) sorts BeadPriority ascending-urgent, matching real
+// bead priorities (doltlite_read_store.go:396 orders ASC;
+// TestCachingStoreReadyReturnsCanonicalOrder pins it) — gcw-tuwx8.5 fixed the
+// comparator's polarity. Threading demand.Priorities here is still deferred
+// to a follow-up: it needs its own reachability test proving two new-tier
+// requests with different priorities produce a different admission outcome
+// (scaleCheckDemand leaves BeadPriority at the anonymous sentinel today, so
+// the comparator's priority branch never fires between new requests — that
+// may not survive contact with how the clamps actually order work).
 func newTierSessionRequest(template string, demand scaleCheckDemand, index int) SessionRequest {
 	workBeadID := ""
 	workBeadTitle := ""
@@ -552,6 +571,7 @@ func newTierSessionRequest(template string, demand scaleCheckDemand, index int) 
 	}
 	return SessionRequest{
 		Template:       template,
+		BeadPriority:   anonymousNewTierPriority,
 		Tier:           "new",
 		WorkBeadID:     workBeadID,
 		WorkBeadTitle:  workBeadTitle,
@@ -640,6 +660,7 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 			}
 			requests[template] = append(requests[template], SessionRequest{
 				Template:       template,
+				BeadPriority:   anonymousNewTierPriority,
 				Tier:           "new",
 				SessionBeadID:  sb.ID,
 				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
@@ -668,10 +689,13 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
-	// Sort by priority DESC, resume tier first within same priority.
+	// Sort by priority ascending-urgent (bd: 0=highest), resume tier first
+	// within same priority. bd priority is NOT a "bigger number wins" scale —
+	// readySortPriority/doltlite_read_store.go:396 order beads ASC, so a P0
+	// bead is more urgent than a P4 bead. gcw-tuwx8.5.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
-			return requests[i].BeadPriority > requests[j].BeadPriority
+			return requests[i].BeadPriority < requests[j].BeadPriority
 		}
 		// Resume-like tiers before new tier at same priority.
 		if requests[i].Tier != requests[j].Tier {
@@ -853,9 +877,12 @@ func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string,
 func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
 	usage := newNestedCapUsage()
 	sorted := append([]SessionRequest(nil), requests...)
+	// Same ascending-urgent ordering as applyNestedCaps (gcw-tuwx8.5) — this
+	// mirror sort must agree with the one that produced requests, or usage
+	// simulated here diverges from what was actually accepted.
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].BeadPriority != sorted[j].BeadPriority {
-			return sorted[i].BeadPriority > sorted[j].BeadPriority
+			return sorted[i].BeadPriority < sorted[j].BeadPriority
 		}
 		if sorted[i].Tier != sorted[j].Tier {
 			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)

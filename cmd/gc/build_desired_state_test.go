@@ -3709,6 +3709,15 @@ func TestBuildDesiredState_MaxOneManualAssignedWorkPreservesManualIdentity(t *te
 	}
 }
 
+// TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWorkWinsCap
+// proves dedup between a stale and canonical duplicate under a singleton cap
+// defers to actual admission priority rather than blindly favoring the
+// canonical name — stale wins here because its driving work bead is the more
+// urgent one. Priorities are assigned accordingly: stale=1 (most urgent, bd
+// is 0=highest / ascending-urgent), canonical=10 (least urgent). Before
+// gcw-tuwx8.5 these were reversed (stale=10, canonical=1), which produced
+// the same winner only because the admission comparator sorted DESC at the
+// time — that polarity, not this test's intent, was the defect.
 func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWorkWinsCap(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -3745,7 +3754,7 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePriority := 10
+	stalePriority := 1
 	if _, err := store.Create(beads.Bead{
 		Title:    "stale assigned work",
 		Type:     "task",
@@ -3758,7 +3767,7 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	}); err != nil {
 		t.Fatal(err)
 	}
-	canonicalPriority := 1
+	canonicalPriority := 10
 	if _, err := store.Create(beads.Bead{
 		Title:    "canonical assigned work",
 		Type:     "task",
