@@ -277,7 +277,7 @@ assert_bead_still_claimed() {
     # (including empty) still blocks.
     local -a _pog_identities=()
     local _pog_ident
-    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}"; do
+    for _pog_ident in "${GC_SESSION_NAME:-}" "${GC_SESSION_ID:-}" "${GC_ALIAS:-}" "${GC_AGENT:-}" "${GC_TEMPLATE:-}"; do
         [[ -n "$_pog_ident" ]] && _pog_identities+=("$_pog_ident")
     done
     if [[ ${#_pog_identities[@]} -gt 0 ]]; then

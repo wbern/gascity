@@ -330,6 +330,21 @@ test_allow_when_assignee_is_session_name() {
     rm -rf "$repo" "$fbd"
 }
 
+test_allow_when_assignee_is_bare_pool_template() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "tmpl-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "sess-id-x" "sess-name-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/assignee-is-bare-pool-template (rc=0, instance identities differ)"
+    else
+        record_fail "allow/assignee-is-bare-pool-template" "expected rc=0, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_block_on_routed_to_changed() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -842,6 +857,7 @@ run_all() {
     test_block_on_reassigned
     test_allow_when_assignee_is_session_id
     test_allow_when_assignee_is_session_name
+    test_allow_when_assignee_is_bare_pool_template
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external
