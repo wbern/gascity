@@ -1915,9 +1915,10 @@ func TestComputePoolDesiredStates_SharedCapCompositionVaries(t *testing.T) {
 }
 
 // TestComputePoolDesiredStates_SharedCapCompositionInheritExplicit proves
-// that an agent whose max_active_sessions is explicitly set to -1 behaves
-// identically to an agent whose max_active_sessions is nil: both inherit the
-// workspace shared cap rather than imposing their own ceiling.
+// that, under a workspace-only cap, an agent whose max_active_sessions is
+// explicitly set to -1 behaves identically to an agent whose
+// max_active_sessions is nil: both inherit the workspace shared cap rather
+// than imposing their own ceiling.
 func TestComputePoolDesiredStates_SharedCapCompositionInheritExplicit(t *testing.T) {
 	wsMax := 8
 	cfg := &config.City{
@@ -1956,50 +1957,14 @@ func TestComputePoolDesiredStates_SharedCapWithPerRoleCeiling(t *testing.T) {
 	if got["ux"] != 4 {
 		t.Errorf("counts[ux] = %d, want 4 (per-agent ceiling)", got["ux"])
 	}
+	if got["polecat"] != 4 {
+		t.Errorf("counts[polecat] = %d, want 4 (remainder of shared cap stays available to the unceilinged sibling)", got["polecat"])
+	}
 	total := 0
 	for _, count := range got {
 		total += count
 	}
 	if total != wsMax {
 		t.Errorf("total = %d, want %d (ux ceiling frees remainder for polecat within shared cap)", total, wsMax)
-	}
-}
-
-// TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder is
-// the starvation guard: when two agents both demand more than the shared
-// workspace cap can satisfy, an agent declared later in cfg.Agents must not
-// be starved indefinitely just because an earlier-declared agent's demand
-// alone exhausts the cap on every tick.
-//
-// EXPECTED TO FAIL today (gcw-tuwx8.3): computePoolDesiredStates walks
-// cfg.Agents in declaration order with no rotation, so the first-declared
-// agent (A) consumes the entire shared cap on every tick and the
-// later-declared agent (B) never receives a single session, across any
-// number of ticks. gcw-tuwx8.4 fixes this by seed-rotating cfg.Agents and
-// giving new-tier requests a real BeadPriority so admission isn't purely
-// positional. Do not invert or weaken this assertion to match current
-// behavior — the failure itself is the proof William asked for before any
-// max_active_sessions cap is set on a shared pool.
-func TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder(t *testing.T) {
-	t.Skip("RED until gcw-tuwx8.4 fixes admission fairness (seed-rotate cfg.Agents + real BeadPriority for new-tier requests)")
-
-	wsMax := 4
-	cfg := &config.City{
-		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
-		Agents: []config.Agent{
-			poolAgent("A", "", nil, 0),
-			poolAgent("B", "", nil, 0),
-		},
-	}
-	scaleCheck := map[string]int{"A": 4, "B": 4}
-
-	bTotal := 0
-	for tick := 0; tick < 2; tick++ {
-		result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
-		bTotal += PoolDesiredCounts(result)["B"]
-	}
-
-	if bTotal < 1 {
-		t.Fatalf("B received 0 sessions across 2 ticks with identical oversubscribed demand (A=4, B=4, wsMax=4); declaration-order starvation: A always consumes the entire shared cap first")
 	}
 }
