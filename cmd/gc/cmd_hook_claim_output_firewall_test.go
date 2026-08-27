@@ -51,7 +51,7 @@ func TestDoHookReplacesOversizedManagedReadOutput(t *testing.T) {
 		return `[{"id":"gcw-1","status":"open","description":"` + strings.Repeat("hook-secret", 200) + `"}]`, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr); code != 0 {
+	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr, hookVisibility{}); code != 0 {
 		t.Fatalf("doHook() = %d, stderr=%q", code, stderr.String())
 	}
 	if stdout.Len() > 512 || !json.Valid(stdout.Bytes()) || strings.Contains(stdout.String(), "hook-secret") || !strings.Contains(stdout.String(), "gc.output_firewall") {
@@ -64,7 +64,7 @@ func TestDoHookReportsManagedOutputPublishFailure(t *testing.T) {
 	t.Setenv("GC_MANAGED_OUTPUT_FIREWALL_READ_VERBS", "hook")
 	runner := func(string, string) (string, error) { return `[{"id":"gcw-1","status":"open"}]`, nil }
 	var stderr bytes.Buffer
-	if code := doHook("bd ready --json", ".", false, runner, hookFirewallFailingWriter{}, &stderr); code != 1 {
+	if code := doHook("bd ready --json", ".", false, runner, hookFirewallFailingWriter{}, &stderr, hookVisibility{}); code != 1 {
 		t.Fatalf("doHook() = %d, want failed publish; stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "output firewall could not publish") {
