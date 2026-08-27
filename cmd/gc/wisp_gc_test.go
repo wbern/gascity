@@ -981,13 +981,74 @@ func TestWispGC_ReapBatchCapBoundsAttemptsNotJustSuccesses(t *testing.T) {
 	}
 }
 
-func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
+// TestWispGC_ReapsRootlessPlainTask is the port of upstream 599afe65b
+// (fix(wisp-gc): reap rootless plain-task wisps, #3780/#4927): a closed,
+// wisp-tier, PLAIN task (no gc.root_bead_id, no gc.kind, not type=molecule,
+// no graph.v2 contract) is never enumerated by wispGCRootSelectors (it is not
+// root-shaped) and never enumerated as a root-owned descendant (it carries no
+// root pointer), so nothing else in the sweep would ever collect it. This
+// used to be permanently skipped — see the removed
+// TestWispGC_ReapSkipsRowsWithoutRootPointer, whose premise this fix
+// reverses for exactly this shape.
+func TestWispGC_ReapsRootlessPlainTask(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
-	// Closed wisp-tier row with no gc.root_bead_id pointer: out of scope.
-	noRoot := makeGCBeadWithMetadata("no-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
-	noRoot.Ephemeral = true
-	store := newGCStore([]beads.Bead{noRoot})
+	plainTask := makeGCBeadWithMetadata("rootless-plain", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	plainTask.Ephemeral = true
+	store := newGCStore([]beads.Bead{plainTask})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1; a rootless plain task with no parent-child edge must be reaped", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "rootless-plain")
+}
+
+// TestWispGC_ReapSkipsRootlessRootShapedBead proves the orphan reaper does
+// NOT reach into the other selector's territory: a closed wisp-tier row that
+// is itself root-shaped (gc.kind=wisp) but happens to carry no
+// gc.root_bead_id (roots never point at themselves) is left for
+// closedWispGCEntries/purgeExpiredBeadClosures instead of being double-handled
+// here. Calls reapOrphanedClosedWisps directly (rather than the full
+// wg.runGC) so the closure-purge arm — which would legitimately collect this
+// same root-shaped bead via its own selector — never interferes with
+// isolating the orphan reaper's behavior.
+func TestWispGC_ReapSkipsRootlessRootShapedBead(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	wispRoot := makeGCBeadWithMetadata("rootless-wisp-root", now.Add(-2*time.Hour), "closed", "task", map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWisp,
+	})
+	wispRoot.Ephemeral = true
+	store := newGCStore([]beads.Bead{wispRoot})
+
+	reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0; a root-shaped bead belongs to the closed-root purge, not the orphan reaper", reaped)
+	}
+	if _, err := store.Get("rootless-wisp-root"); err != nil {
+		t.Fatalf("rootless-wisp-root must be preserved by the orphan reaper: %v", err)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessTaskWithParentID proves a rootless plain task
+// that is still structurally linked into a parent (via the ParentID field)
+// is never reaped, even though it has no gc.root_bead_id pointer — it may
+// still be a live step under an in-flight owner.
+func TestWispGC_ReapSkipsRootlessTaskWithParentID(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	child := makeGCBeadWithMetadata("rootless-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	child.Ephemeral = true
+	child.ParentID = "some-parent"
+	store := newGCStore([]beads.Bead{child})
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
 	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
@@ -995,10 +1056,37 @@ func TestWispGC_ReapSkipsRowsWithoutRootPointer(t *testing.T) {
 		t.Fatalf("runGC: %v", err)
 	}
 	if purged != 0 {
-		t.Fatalf("purged = %d, want 0; rows without a root pointer are out of scope", purged)
+		t.Fatalf("purged = %d, want 0; a rootless task with ParentID set must not be reaped", purged)
 	}
-	if _, err := store.Get("no-root"); err != nil {
-		t.Fatalf("no-root must be preserved: %v", err)
+	if _, err := store.Get("rootless-child"); err != nil {
+		t.Fatalf("rootless-child must be preserved: %v", err)
+	}
+}
+
+// TestWispGC_ReapSkipsRootlessTaskWithParentChildDepEdge mirrors
+// TestWispGC_ReapSkipsRootlessTaskWithParentID for the dependency-edge
+// (rather than ParentID field) shape of structural parentage.
+func TestWispGC_ReapSkipsRootlessTaskWithParentChildDepEdge(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	now := time.Now()
+	parent := makeGCBead("dep-parent", now.Add(-2*time.Hour), "closed", "task")
+	child := makeGCBeadWithMetadata("dep-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	child.Ephemeral = true
+	store := newGCStore([]beads.Bead{parent, child})
+	if err := store.DepAdd("dep-child", "dep-parent", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(dep-child->dep-parent): %v", err)
+	}
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0; a rootless task with a parent-child dep edge must not be reaped", purged)
+	}
+	if _, err := store.Get("dep-child"); err != nil {
+		t.Fatalf("dep-child must be preserved: %v", err)
 	}
 }
 

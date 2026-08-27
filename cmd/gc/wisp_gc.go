@@ -304,6 +304,59 @@ func enumerateWispGCRoots(store beads.Store, statuses ...string) ([]beads.Bead, 
 	return entries, nil
 }
 
+// isWispGCRootBead reports whether a bead's own shape matches one of
+// wispGCRootSelectors — i.e. it is itself a candidate root (v1 molecule,
+// gc.kind=wisp, graph.v2 workflow, or gc.kind=workflow), as opposed to a
+// non-root descendant. Roots never carry a gc.root_bead_id pointer to
+// themselves, so reapOrphanedClosedWisps uses this predicate to tell a
+// closed ROOT with no root pointer (already handled by
+// closedWispGCEntries/purgeExpiredBeadClosures) apart from a genuinely
+// rootless PLAIN task (upstream 599afe65b's target) that no other path in
+// the sweep will ever enumerate.
+func isWispGCRootBead(b beads.Bead) bool {
+	if b.Type == "molecule" {
+		return true
+	}
+	switch b.Metadata[beadmeta.KindMetadataKey] {
+	case beadmeta.KindWisp, beadmeta.KindWorkflow:
+		return true
+	}
+	return b.Metadata[beadmeta.FormulaContractMetadataKey] == beadmeta.FormulaContractGraphV2
+}
+
+// hasParentChildDepEdge reports whether a bead participates in any
+// parent-child structural relationship: its own ParentID field, a bead that
+// names it as ParentID (store.Children), or a "parent-child" typed
+// dependency edge in either direction. reapOrphanedClosedWisps uses this as
+// the safety gate before reaping a rootless closed wisp-tier row — a row
+// still linked into a molecule/workflow structure by any of these edges must
+// never be stripped out from under its (possibly still-open) owner, even
+// when that owner never stamped gc.root_bead_id on it.
+func hasParentChildDepEdge(store beads.Store, b beads.Bead) (bool, error) {
+	if b.ParentID != "" {
+		return true, nil
+	}
+	children, err := store.Children(b.ID, beads.IncludeClosed, beads.WithBothTiers)
+	if err != nil {
+		return false, fmt.Errorf("listing children for %q: %w", b.ID, err)
+	}
+	if len(children) > 0 {
+		return true, nil
+	}
+	for _, direction := range []string{"up", "down"} {
+		deps, err := store.DepList(b.ID, direction)
+		if err != nil {
+			return false, fmt.Errorf("listing %s dependencies for %q: %w", direction, b.ID, err)
+		}
+		for _, dep := range deps {
+			if dep.Type == "parent-child" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // closedWispGCEntries lists every CLOSED root across the full wisp GC root
 // universe (see wispGCRootSelectors). The closed-root purge deletes each whose
 // ownership closure has aged past the TTL. Enumerating graph.v2/workflow roots
@@ -317,15 +370,29 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
-// list). Candidates are closed wisp-tier rows carrying a gc.root_bead_id
-// pointer and older than cutoff.
+// list). Candidates are closed wisp-tier rows older than cutoff, split into
+// two disjoint shapes:
 //
-// Safety: a descendant is reaped only when its root is provably collectible —
-// the root Get returns ErrNotFound (root gone) or the root is terminal
-// (closed/tombstone). A live/open root, or any other (unreadable) Get error,
-// causes the descendant to be SKIPPED so an in-flight workflow is never
-// stripped of its closed steps. The per-root Get decision is cached so many
-// siblings sharing one dead root cost a single Get.
+//   - Rows carrying a gc.root_bead_id pointer: reaped once the pointed-to root
+//     is provably collectible (see the root-Get safety note below).
+//   - Rootless rows (no gc.root_bead_id at all): upstream 599afe65b's fix.
+//     wispGCRootSelectors never matches a plain task, so if it is not itself
+//     root-shaped (isWispGCRootBead) and carries no structural parent-child
+//     edge (hasParentChildDepEdge), NOTHING else in the sweep will ever
+//     enumerate it — neither as a root (closedWispGCEntries) nor as an
+//     owned descendant (this function's own root-pointer branch). Such a row
+//     is reaped directly.
+//
+// Safety: a rooted descendant is reaped only when its root is provably
+// collectible — the root Get returns ErrNotFound (root gone) or the root is
+// terminal (closed/tombstone). A live/open root, or any other (unreadable)
+// Get error, causes the descendant to be SKIPPED so an in-flight workflow is
+// never stripped of its closed steps. The per-root Get decision is cached so
+// many siblings sharing one dead root cost a single Get. A rootless row is
+// reaped only when hasParentChildDepEdge proves it carries no structural
+// link into any molecule/workflow, so a step still attached to an in-flight
+// owner (even one whose root ownership metadata was never stamped) is never
+// stripped out.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
@@ -365,34 +432,47 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			break
 		}
 
-		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
-		if rootID == "" {
-			// No root pointer — out of scope for orphan reaping.
-			continue
-		}
-
 		// Reuse the closure purge's age semantics: skip zero/recent rows.
 		if c.CreatedAt.IsZero() || !c.CreatedAt.Before(cutoff) {
 			continue
 		}
 
-		decision, cached := rootCollectible[rootID]
-		if !cached {
-			root, getErr := store.Get(rootID)
-			switch {
-			case errors.Is(getErr, beads.ErrNotFound):
-				decision = true // root gone
-			case getErr == nil && convoycore.IsTerminalStatus(root.Status):
-				decision = true // root terminal
-			case getErr == nil:
-				decision = false // root live/open — never reap its descendants
-			default:
-				// Any other Get error: cannot prove safe — skip without caching
-				// as collectible. Surface so the sweep records the failure.
-				decision = false
-				collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
+
+		var decision bool
+		if rootID == "" {
+			// Root-shaped rows (matching wispGCRootSelectors) belong to the
+			// closed-root purge (closedWispGCEntries/purgeExpiredBeadClosures);
+			// skip here so the two paths never race the same row.
+			if isWispGCRootBead(c) {
+				continue
 			}
-			rootCollectible[rootID] = decision
+			hasEdge, edgeErr := hasParentChildDepEdge(store, c)
+			if edgeErr != nil {
+				collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
+				continue
+			}
+			decision = !hasEdge
+		} else {
+			cached, ok := rootCollectible[rootID]
+			if !ok {
+				root, getErr := store.Get(rootID)
+				switch {
+				case errors.Is(getErr, beads.ErrNotFound):
+					cached = true // root gone
+				case getErr == nil && convoycore.IsTerminalStatus(root.Status):
+					cached = true // root terminal
+				case getErr == nil:
+					cached = false // root live/open — never reap its descendants
+				default:
+					// Any other Get error: cannot prove safe — skip without caching
+					// as collectible. Surface so the sweep records the failure.
+					cached = false
+					collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+				}
+				rootCollectible[rootID] = cached
+			}
+			decision = cached
 		}
 		if !decision {
 			continue
