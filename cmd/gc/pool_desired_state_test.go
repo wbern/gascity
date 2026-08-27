@@ -916,14 +916,22 @@ func TestComputePoolDesiredStates_DedupsResumeForSameSession(t *testing.T) {
 	}
 }
 
+// TestComputePoolDesiredStates_ResumePriorityOrder previously asserted that
+// priority 10 beats priority 5 under a cap — i.e. bigger number wins. That
+// encoded the comparator's old (wrong) polarity as intent: bd priority is
+// 0-4 with 0=highest (ascending-urgent, doltlite_read_store.go:396 ASC), so
+// a priority-1 bead is MORE urgent than a priority-10 or priority-5 one.
+// gcw-tuwx8.5 fixed the comparator; this test now asserts the correct
+// direction — lower priority number wins admission under the cap.
 func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
-	// 3 assigned beads with different priorities, max=2. Highest priority wins.
+	// 3 assigned beads with different priorities, max=2. Most urgent (lowest
+	// number) wins.
 	work := []beads.Bead{
-		workBead("w-low", "claude", "s1", "in_progress", 1),
-		workBead("w-high", "claude", "s2", "in_progress", 10),
+		workBead("w-low", "claude", "s1", "in_progress", 10),
+		workBead("w-high", "claude", "s2", "in_progress", 1),
 		workBead("w-mid", "claude", "s3", "in_progress", 5),
 	}
 	sessions := []beads.Bead{
@@ -937,12 +945,42 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
 	}
-	// Highest priority resume requests should be accepted.
-	if result[0].Requests[0].BeadPriority != 10 {
-		t.Errorf("first priority = %d, want 10", result[0].Requests[0].BeadPriority)
+	// Most urgent (lowest priority number) resume requests should be accepted.
+	if result[0].Requests[0].BeadPriority != 1 {
+		t.Errorf("first priority = %d, want 1", result[0].Requests[0].BeadPriority)
 	}
 	if result[0].Requests[1].BeadPriority != 5 {
 		t.Errorf("second priority = %d, want 5", result[0].Requests[1].BeadPriority)
+	}
+}
+
+// TestComputePoolDesiredStates_LowerPriorityNumberWinsAdmission is the
+// regression the reviewer asked for on PR #126 (finding 1, BLOCKING): a P0
+// work bead's session must be created over a P4 work bead's session when a
+// binding cap allows only one, since 0 is bd's highest priority. This is the
+// minimal reproduction of the comparator polarity defect — under the old
+// descending sort, the P4 resume would have won instead.
+func TestComputePoolDesiredStates_LowerPriorityNumberWinsAdmission(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w-p4", "claude", "s1", "in_progress", 4),
+		workBead("w-p0", "claude", "s2", "in_progress", 0),
+	}
+	sessions := []beads.Bead{
+		sessionBead("s1", "open"),
+		sessionBead("s2", "open"),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("expected exactly 1 admitted request under cap=1, got %#v", result)
+	}
+	admitted := result[0].Requests[0]
+	if admitted.WorkBeadID != "w-p0" || admitted.BeadPriority != 0 {
+		t.Errorf("admitted request = %+v, want the P0 bead (w-p0) admitted over the P4 bead", admitted)
 	}
 }
 
@@ -2201,13 +2239,12 @@ func TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed(t *testing.T) {
 
 // TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow pins that
 // new-tier requests do NOT thread scaleCheckDemand.Priorities onto
-// BeadPriority yet. Real bead priority is ascending-urgent
-// (doltlite_read_store.go:396 ASC), but applyNestedCaps' admission comparator
-// sorts BeadPriority descending, so threading it here would let the least
-// urgent bead win a binding cap and let anonymous new-tier requests (store
-// default priority 2) evict already-spent in-flight requests (priority 0)
-// every tick. gcw-tuwx8.5 owns inverting the comparator; only after that
-// lands should this thread demand.Priorities (gcw-tuwx8.4 PR #126 review).
+// BeadPriority yet; they carry the anonymousNewTierPriority sentinel
+// (gcw-tuwx8.5), which sorts as less urgent than every real bd priority
+// (0-4, ascending-urgent — doltlite_read_store.go:396 ASC) so anonymous
+// demand can never outrank resume/wake-tier requests built from real
+// in-progress work. Threading demand.Priorities here is deferred to a
+// follow-up that must prove reachability (gcw-tuwx8.4 PR #126 review).
 func TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
@@ -2226,8 +2263,35 @@ func TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow(t *testin
 		t.Fatalf("expected 1 template with 2 requests, got %#v", result)
 	}
 	for _, req := range result[0].Requests {
-		if req.BeadPriority != 0 {
-			t.Errorf("request %+v: BeadPriority = %d, want 0 (threading deferred to gcw-tuwx8.5)", req, req.BeadPriority)
+		if req.BeadPriority != anonymousNewTierPriority {
+			t.Errorf("request %+v: BeadPriority = %d, want %d (threading deferred to a follow-up)", req, req.BeadPriority, anonymousNewTierPriority)
 		}
+	}
+}
+
+// TestComputePoolDesiredStates_ResumeBeatsNewAtNonDefaultPriority is the
+// regression for the hazard the naive comparator flip introduced: "new"
+// tier requests default BeadPriority to Go's zero value unless given the
+// anonymousNewTierPriority sentinel, and 0 is bd's HIGHEST urgency under the
+// ascending comparator. A resume-tier request for real in-progress work at
+// any real priority (here P3, deliberately non-zero and non-default) must
+// still beat anonymous new-tier demand.
+func TestComputePoolDesiredStates_ResumeBeatsNewAtNonDefaultPriority(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "in_progress", 3),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+	scaleCheck := map[string]int{"claude": 1}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), scaleCheck)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("expected exactly 1 admitted request under cap=1, got %#v", result)
+	}
+	if result[0].Requests[0].Tier != "resume" {
+		t.Errorf("admitted tier = %q, want resume (real P3 in-progress work must beat anonymous new demand)", result[0].Requests[0].Tier)
 	}
 }
