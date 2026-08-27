@@ -57,6 +57,17 @@ jobs:
         id: compile-runtime-tmux-integration
         if: ${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}
         run: go test -tags=integration -run '^$' ./internal/runtime/tmux
+      # Runs the package's non-integration tests (isolated per-test tmux sockets
+      # via test/tmuxtest, never the default server). Integration-tagged tests
+      # stay excluded here: they gate on GC_TMUX_INTEGRATION=1 and are the
+      # upstream CI graph's job. Without this step the compile-only check above
+      # let PR #108 ship nine stale 5-field display-message fixtures that
+      # silently stopped exercising seven tests, including two destructive
+      # multi-pane guards, while CI stayed green (gcw-vmm00.32).
+      - name: Unit tests — tmux runtime (no live tmux server required)
+        id: test-runtime-tmux
+        if: ${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}
+        run: go test ./internal/runtime/tmux/... -count=1
       - name: Vet changed package
         run: go vet ./cmd/gc/...
       - name: Unit tests — cross-store work delivery
