@@ -304,6 +304,17 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// Disclose which store answers a read-only passthrough, so a zero-row
+	// result is distinguishable from a true empty (gastownhall/gascity#5170).
+	// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city
+	// > -C/--directory > GC_RIG env > cwd > city) silently picks a store on
+	// every one of those paths but the GC_RIG-mismatch warning above; the
+	// common cwd-auto-detect case reached bd with no diagnostic at all.
+	if len(bdArgs) > 0 && bdScopeDisclosureVerbs[bdArgs[0]] {
+		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+
 	endProviderPreflight := profiler.phase("provider_preflight")
 	provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath)
 	providerSupported := providerUsesBdStoreContract(provider)
@@ -827,6 +838,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
 	return target, nil
+}
+
+// bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose
+// resolved store gets announced on stderr (gastownhall/gascity#5170). Scoped
+// to reads: a write verb's effect is directly observable (the record it
+// touched can be re-read), while a read verb's silence is exactly what makes
+// an empty answer indistinguishable from "no matches in the store that was
+// asked."
+var bdScopeDisclosureVerbs = map[string]bool{
+	"list":   true,
+	"ready":  true,
+	"search": true,
+	"show":   true,
 }
 
 // scopeLabel renders a store target for operator-facing diagnostics, e.g.
