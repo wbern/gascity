@@ -17,6 +17,9 @@ func TestSystemdUnitGone(t *testing.T) {
 }
 
 func TestSystemdUserScopesStopFailsClosedOnReusedInvocation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user scopes require Linux")
+	}
 	oldShow, oldStop := systemdShowProperty, systemdStopUnit
 	t.Cleanup(func() {
 		systemdShowProperty, systemdStopUnit = oldShow, oldStop
@@ -34,6 +37,9 @@ func TestSystemdUserScopesStopFailsClosedOnReusedInvocation(t *testing.T) {
 }
 
 func TestSystemdUserScopesStopTreatsGoneUnitAsIdempotent(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user scopes require Linux")
+	}
 	oldShow, oldStop := systemdShowProperty, systemdStopUnit
 	t.Cleanup(func() {
 		systemdShowProperty, systemdStopUnit = oldShow, oldStop
@@ -90,6 +96,9 @@ func TestSystemdUserScopesStopAcceptsRetainedInactiveOrFailedUnit(t *testing.T) 
 }
 
 func TestSystemdUserScopesStopRetainsCommandFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user scopes require Linux")
+	}
 	oldShow, oldStop := systemdShowProperty, systemdStopUnit
 	t.Cleanup(func() {
 		systemdShowProperty, systemdStopUnit = oldShow, oldStop
@@ -104,6 +113,9 @@ func TestSystemdUserScopesStopRetainsCommandFailure(t *testing.T) {
 }
 
 func TestSystemdUserScopesStopRejectsForeignScopeBeforeProbe(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user scopes require Linux")
+	}
 	oldShow, oldStop := systemdShowProperty, systemdStopUnit
 	t.Cleanup(func() {
 		systemdShowProperty, systemdStopUnit = oldShow, oldStop
