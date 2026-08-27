@@ -93,8 +93,12 @@ var runAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // routeRunCancel dispatches `gc run cancel` to the supervisor API. Exit
-// codes: 0 on success, 2 when the supervisor is unreachable, 1 on any API
-// error (run not found, already terminal, or otherwise).
+// codes: 0 on success, 2 when the supervisor is unreachable (no client, a
+// transport failure, or a read-only server — anything api.ShouldFallback
+// recognizes), 1 on a genuine API error (run not found, already terminal,
+// or otherwise). The 2/1 split matters for an incident-response command:
+// an operator retries on 2 (the supervisor may come back) and gives up on 1
+// (the run itself rejected the cancel).
 func routeRunCancel(c *api.Client, nilReason, runID string, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "run cancel"
 	if c == nil {
@@ -104,6 +108,11 @@ func routeRunCancel(c *api.Client, nilReason, runID string, jsonOut bool, stdout
 	}
 	result, err := c.CancelRun(runID)
 	if err != nil {
+		if api.ShouldFallback(c, err) {
+			logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+			fmt.Fprintf(stderr, "gc run cancel: supervisor unavailable (%s)\n", api.FallbackReason(c, err)) //nolint:errcheck // best-effort stderr
+			return 2
+		}
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc run cancel: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -136,6 +145,6 @@ func renderRunCancel(result api.RunCancelResult, jsonOut bool, stdout io.Writer)
 		})
 		return 0
 	}
-	fmt.Fprintf(stdout, "Canceled run %s (status=%s, closed=%d)\n", result.RunID, result.Status, result.Closed) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Cancel accepted for run %s (status=%s, closed=%d)\n", result.RunID, result.Status, result.Closed) //nolint:errcheck // best-effort stdout
 	return 0
 }

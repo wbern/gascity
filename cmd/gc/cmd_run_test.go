@@ -136,3 +136,54 @@ func TestRouteRunCancel_NotFound(t *testing.T) {
 		t.Errorf("stderr missing detail:\n%s", stderr.String())
 	}
 }
+
+// TestRouteRunCancel_TransportFailure verifies a connection failure (the
+// supervisor died between client construction and the POST) exits 2, not 1.
+// This is the merge-blocking case from review: gc run cancel is reached for
+// precisely when the supervisor is flapping, so an operator must be able to
+// tell "unreachable, retry" (2) apart from "the run rejected the cancel" (1).
+// Collapsing both to 1 would make the one failure that warrants a retry look
+// identical to a genuine API rejection.
+func TestRouteRunCancel_TransportFailure(t *testing.T) {
+	srv := httptest.NewServer(okRunCancelHandler(t))
+	url := srv.URL
+	srv.Close() // closed before use: every request against it now fails at connect
+
+	c := api.NewCityScopedClient(url, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeRunCancel(c, "", "gcw-i5i90", false, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (transport failure must not collapse to a generic API error); stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "supervisor unavailable") {
+		t.Errorf("stderr missing fallback framing:\n%s", stderr.String())
+	}
+}
+
+// TestNewRunCmd_UnknownSubcommand verifies `gc run` with no or an unknown
+// subcommand exits non-zero via errExit rather than silently succeeding.
+func TestNewRunCmd_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newRunCmd(&stdout, &stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"bogus"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() with unknown subcommand: want error, got nil")
+	}
+	if !strings.Contains(stderr.String(), `unknown subcommand "bogus"`) {
+		t.Errorf("stderr missing unknown-subcommand message:\n%s", stderr.String())
+	}
+}
+
+// TestCmdRunCancel_ResolveCityFailure verifies a resolveCity failure (no
+// city context) exits 2 without attempting to reach an API client.
+func TestCmdRunCancel_ResolveCityFailure(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var stdout, stderr bytes.Buffer
+	code := cmdRunCancel("gcw-i5i90", false, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%q", code, stderr.String())
+	}
+}
