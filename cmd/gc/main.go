@@ -360,6 +360,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newHookCmd(stdout, stderr),
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
+		newRunCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
 		newMoleculeCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),

@@ -2173,6 +2173,38 @@ func (c *Client) DeleteBead(id string) error {
 	return checkMutation(resp, err)
 }
 
+// RunCancelResult is the wind-down outcome of Client.CancelRun.
+type RunCancelResult struct {
+	RunID  string
+	Status string
+	Closed int
+}
+
+// CancelRun tears down a stranded run via
+// POST /v0/city/{cityName}/runs/{run_id}/cancel — the same endpoint
+// humaHandleRunCancel uses to close a graphv2 subtree's root and every open
+// step, control and plain alike. This is the ONLY client-side path for run
+// cancel; it must not reimplement the teardown. The anti-CSRF X-GC-Request
+// header is attached by the client's request editor, so callers never
+// handle it directly.
+func (c *Client) CancelRun(runID string) (RunCancelResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return RunCancelResult{}, err
+	}
+	resp, err := c.cw.PostV0CityByCityNameRunsByRunIdCancelWithResponse(context.Background(), c.cityName, runID, nil)
+	if mutErr := checkMutation(resp, err); mutErr != nil {
+		return RunCancelResult{}, mutErr
+	}
+	if resp.JSON202 == nil {
+		return RunCancelResult{}, fmt.Errorf("run cancel: empty response body")
+	}
+	return RunCancelResult{
+		RunID:  resp.JSON202.RunId,
+		Status: string(resp.JSON202.Status),
+		Closed: int(resp.JSON202.Closed),
+	}, nil
+}
+
 // UpdateBead applies a field update via POST /v0/city/{cityName}/bead/{id}/update,
 // mapping beads.UpdateOpts onto the wire body. nil/empty fields are omitted so the
 // server leaves them unchanged.
