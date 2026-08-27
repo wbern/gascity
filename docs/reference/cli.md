@@ -70,6 +70,7 @@ gc [flags]
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
+| [gc run](#gc-run) | Manage graphv2 runs |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
@@ -1112,6 +1113,10 @@ with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
 remove them from the store via bd delete --cascade --force.
+
+This is destructive: it removes bead history. For a stranded graphv2 run,
+prefer "gc run cancel &lt;run-id&gt;" — it closes the same subtree (root and every
+step, control and plain) without deleting anything.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -3551,6 +3556,38 @@ gc rig suspend [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc run
+
+Manage graphv2 runs
+
+```
+gc run
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc run cancel](#gc-run-cancel) | Cancel a run, closing its root and every open step |
+
+## gc run cancel
+
+Cancel a run via the same endpoint the API uses internally
+(POST /v0/city/&#123;cityName&#125;/runs/&#123;run_id&#125;/cancel). Closes the run's root and
+every open step bead — control and plain alike — with a canceled outcome, so
+the dispatcher finds no more ready work and the run starves.
+
+This is the non-destructive alternative to "gc convoy delete --force" for a
+stranded workflow: it tears down the same subtree without deleting bead
+history. Requires a live controller or supervisor; there is no local
+fallback because the teardown logic lives server-side only.
+
+```
+gc run cancel <run-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc runtime
 

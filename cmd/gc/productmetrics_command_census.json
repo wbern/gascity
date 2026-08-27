@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 201,
+  "next_id": 202,
   "permanent_ids": [
     {
       "name": "help",
@@ -3303,6 +3303,39 @@
       "classification": "rig-suspend",
       "owner": "immediate",
       "id": 129
+    },
+    {
+      "path": "gc run",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "unknown",
+      "canonical_target": "@unknown",
+      "owner": "deferred",
+      "resolver": "group-dispatch",
+      "deferred_default": "unknown",
+      "id": 3
+    },
+    {
+      "path": "gc run cancel",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "run-cancel",
+      "owner": "immediate",
+      "id": 201
     },
     {
       "path": "gc runtime",

@@ -838,7 +838,11 @@ Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-remove them from the store via bd delete --cascade --force.`,
+remove them from the store via bd delete --cascade --force.
+
+This is destructive: it removes bead history. For a stranded graphv2 run,
+prefer "gc run cancel <run-id>" — it closes the same subtree (root and every
+step, control and plain) without deleting anything.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdWorkflowDelete(args[0], force, deleteBeads, stdout, stderr) != 0 {
