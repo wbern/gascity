@@ -1090,6 +1090,79 @@ func TestWispGC_ReapSkipsRootlessTaskWithParentChildDepEdge(t *testing.T) {
 	}
 }
 
+// TestWispGC_DryRunSkipsParentChildEdgeIO is the regression for PR #129's
+// review: hasParentChildDepEdge (1 Children plus up to 2 DepList calls per
+// rootless candidate) must never run under dry-run, because dry-run is the
+// production default (GC_WISP_GC_REAP_ORPHANS unset) and a long-closed
+// backlog can be the sweep's entire wisp-tier population — paying that cost
+// every tick, forever, on a backlog dry-run never shrinks is what made the
+// original port a regression rather than a fix. Proves zero Children/DepList
+// calls with several rootless candidates present, not just a passing count.
+func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	now := time.Now()
+	rootless1 := makeGCBeadWithMetadata("rootless-1", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	rootless1.Ephemeral = true
+	rootless2 := makeGCBeadWithMetadata("rootless-2", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	rootless2.Ephemeral = true
+	rootless3 := makeGCBeadWithMetadata("rootless-3", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	rootless3.Ephemeral = true
+	store := newGCStore([]beads.Bead{rootless1, rootless2, rootless3})
+
+	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	logOutput := captureWispGCLog(t, func() {
+		if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+			t.Fatalf("runGC: %v", err)
+		}
+	})
+	if store.childrenCalls != 0 {
+		t.Fatalf("childrenCalls = %d, want 0; dry-run must not call store.Children for the edge proof", store.childrenCalls)
+	}
+	if store.depListCalls != 0 {
+		t.Fatalf("depListCalls = %d, want 0; dry-run must not call store.DepList for the edge proof", store.depListCalls)
+	}
+	if !strings.Contains(logOutput, "up to 3 orphaned closed wisp(s) would be reaped (upper bound") {
+		t.Fatalf("log = %q, want an upper-bound dry-run notice for all 3 rootless candidates", logOutput)
+	}
+}
+
+// TestWispGC_HasParentChildDepEdgeUsesBatchedDownDeps proves the enforcing
+// path's edge gate reads DOWN edges from a pre-batched map — sourced via
+// wispGCBatchDownDeps, which itself uses the store's batch capability
+// (gcTestStore embeds *beads.MemStore, which implements
+// beads.DependencyBatchLister) — instead of issuing its own DepList("down")
+// call. This is the second half of PR #129's review remedy, alongside the
+// dry-run skip proven by TestWispGC_DryRunSkipsParentChildEdgeIO. Exercises
+// hasParentChildDepEdge directly (rather than the full sweep) because
+// deleteWorkflowBead's own unrelated, pre-existing DepList(down)+DepList(up)
+// cleanup on the actual delete would otherwise mask the one call this fix
+// removes.
+func TestWispGC_HasParentChildDepEdgeUsesBatchedDownDeps(t *testing.T) {
+	now := time.Now()
+	rootless := makeGCBeadWithMetadata("rootless-batched", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	rootless.Ephemeral = true
+	store := newGCStore([]beads.Bead{rootless})
+
+	downDeps, err := wispGCBatchDownDeps(store, []string{"rootless-batched"})
+	if err != nil {
+		t.Fatalf("wispGCBatchDownDeps: %v", err)
+	}
+	if store.depListCalls != 0 {
+		t.Fatalf("depListCalls after wispGCBatchDownDeps = %d, want 0 (must use the store's batch call)", store.depListCalls)
+	}
+
+	hasEdge, err := hasParentChildDepEdge(store, rootless, downDeps)
+	if err != nil {
+		t.Fatalf("hasParentChildDepEdge: %v", err)
+	}
+	if hasEdge {
+		t.Fatalf("hasEdge = true, want false; rootless-batched carries no parent-child edge")
+	}
+	if store.depListCalls != 1 {
+		t.Fatalf("depListCalls = %d, want 1 (only the \"up\" check; \"down\" must come from the pre-batched map)", store.depListCalls)
+	}
+}
+
 func TestWispGC_ReapDeleteErrorSurfacedAndContinues(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()
@@ -1629,6 +1702,11 @@ type gcTestStore struct {
 	// assert that a batch cap bounds delete ATTEMPTS and not merely successful
 	// deletes (a failed delete leaves no trace in deletedIDs).
 	deleteAttempts []string
+	// childrenCalls and depListCalls count edge-lookup I/O so tests can prove
+	// the orphan reaper's dry-run path skips hasParentChildDepEdge entirely
+	// instead of merely discarding its result.
+	childrenCalls int
+	depListCalls  int
 }
 
 func newGCStore(existing []beads.Bead) *gcTestStore {
@@ -1652,6 +1730,16 @@ func (s *gcTestStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, err
 	}
 	return s.MemStore.Get(id)
+}
+
+func (s *gcTestStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.childrenCalls++
+	return s.MemStore.Children(parentID, opts...)
+}
+
+func (s *gcTestStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.depListCalls++
+	return s.MemStore.DepList(id, direction)
 }
 
 func (s *gcTestStore) Delete(id string) error {

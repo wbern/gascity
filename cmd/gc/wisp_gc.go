@@ -332,7 +332,17 @@ func isWispGCRootBead(b beads.Bead) bool {
 // still linked into a molecule/workflow structure by any of these edges must
 // never be stripped out from under its (possibly still-open) owner, even
 // when that owner never stamped gc.root_bead_id on it.
-func hasParentChildDepEdge(store beads.Store, b beads.Bead) (bool, error) {
+//
+// downDeps, when non-nil, supplies every candidate's DOWN edges pre-fetched
+// by wispGCBatchDownDeps in one batched read, and the caller is trusted to
+// have included b.ID among the ids that batch call requested — so a miss
+// within a non-nil map means b genuinely has no down edges, not "unknown,
+// go fetch it." (A batch's absent-entry-means-none contract is documented on
+// beads.DependencyBatchLister; per-anchor DepList instead answers a missing
+// dep list with an empty slice and no error, so the two lookup paths already
+// agree on what "no edges" looks like.) A nil map falls back to fetching b's
+// own down edges directly.
+func hasParentChildDepEdge(store beads.Store, b beads.Bead, downDeps map[string][]beads.Dep) (bool, error) {
 	if b.ParentID != "" {
 		return true, nil
 	}
@@ -343,18 +353,61 @@ func hasParentChildDepEdge(store beads.Store, b beads.Bead) (bool, error) {
 	if len(children) > 0 {
 		return true, nil
 	}
-	for _, direction := range []string{"up", "down"} {
-		deps, err := store.DepList(b.ID, direction)
+	down := downDeps[b.ID]
+	if downDeps == nil {
+		down, err = store.DepList(b.ID, "down")
 		if err != nil {
-			return false, fmt.Errorf("listing %s dependencies for %q: %w", direction, b.ID, err)
+			return false, fmt.Errorf("listing down dependencies for %q: %w", b.ID, err)
 		}
-		for _, dep := range deps {
-			if dep.Type == "parent-child" {
-				return true, nil
-			}
+	}
+	for _, dep := range down {
+		if dep.Type == "parent-child" {
+			return true, nil
+		}
+	}
+	up, err := store.DepList(b.ID, "up")
+	if err != nil {
+		return false, fmt.Errorf("listing up dependencies for %q: %w", b.ID, err)
+	}
+	for _, dep := range up {
+		if dep.Type == "parent-child" {
+			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// wispGCBatchDownDeps fetches the DOWN edges for every id in one round trip
+// when the backing store supports it (beads.DependencyBatchLister), falling
+// back to one DepList("down") call per id otherwise. Used exclusively by the
+// ENFORCE path of reapOrphanedClosedWisps: batching the per-row edge lookups
+// there is what keeps enforcement efficient even though its own batch cap
+// already bounds delete attempts per tick (see wispGCReapOrphanBatchCap).
+func wispGCBatchDownDeps(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if batch, ok := beads.DepListBatchFor(store); ok {
+		deps, err := batch.DepListBatch(ids)
+		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			if err != nil {
+				return nil, fmt.Errorf("batch listing down deps for orphan candidates: %w", err)
+			}
+			if deps == nil {
+				deps = make(map[string][]beads.Dep, len(ids))
+			}
+			return deps, nil
+		}
+	}
+	deps := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		d, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("listing down dependencies for %q: %w", id, err)
+		}
+		deps[id] = d
+	}
+	return deps, nil
 }
 
 // closedWispGCEntries lists every CLOSED root across the full wisp GC root
@@ -388,16 +441,23 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // terminal (closed/tombstone). A live/open root, or any other (unreadable)
 // Get error, causes the descendant to be SKIPPED so an in-flight workflow is
 // never stripped of its closed steps. The per-root Get decision is cached so
-// many siblings sharing one dead root cost a single Get. A rootless row is
-// reaped only when hasParentChildDepEdge proves it carries no structural
-// link into any molecule/workflow, so a step still attached to an in-flight
-// owner (even one whose root ownership metadata was never stamped) is never
-// stripped out.
+// many siblings sharing one dead root cost a single Get. When enforcing, a
+// rootless row is reaped only when hasParentChildDepEdge proves it carries no
+// structural link into any molecule/workflow, so a step still attached to an
+// in-flight owner (even one whose root ownership metadata was never stamped)
+// is never stripped out.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
-// unset) the function mutates nothing: it counts the would-be reaps and logs a
-// dry-run notice. Per-bead delete errors are joined and never abort the sweep.
-// The batch cap bounds reaps per sweep so the backlog drains over multiple ticks.
+// unset) the function mutates nothing and logs a dry-run notice. The rootless
+// count in that notice is an UPPER BOUND, not a proof: dry-run deliberately
+// skips hasParentChildDepEdge (1 Children plus up to 2 DepList calls per
+// rootless row) because a long-closed backlog can be the sweep's entire
+// wisp-tier population, and a dry-run that never mutates the store also never
+// shrinks the backlog it just paid to measure — so proving each row exactly
+// would repeat that cost, unbounded, on every tick forever. An upper bound is
+// free and sufficient given dry-run deletes nothing. Per-bead delete errors
+// are joined and never abort the sweep. The batch cap bounds reaps per sweep
+// so the backlog drains over multiple ticks.
 func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")
@@ -412,6 +472,38 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	enforce := reapOrphansEnforced()
+
+	// downDeps batches the edge lookup that gates the rootless branch below.
+	// It is only populated when enforcing: hasParentChildDepEdge costs 1
+	// store.Children plus (without this) 2 store.DepList calls per rootless
+	// candidate, and a long-closed backlog can be the entire wisp-tier
+	// population (10k+ rows observed live). Computing it unconditionally would
+	// make dry-run — the default, since GC_WISP_GC_REAP_ORPHANS defaults
+	// unset — cost as much as enforcement on every tick, forever, since
+	// dry-run never shrinks the backlog it just measured. Dry-run instead
+	// reports the rootless population as an UPPER BOUND on what enforcement
+	// would reap (see the decision assignment below) without paying for the
+	// edge proof at all.
+	var downDeps map[string][]beads.Dep
+	if enforce {
+		var rootlessIDs []string
+		for _, c := range candidates {
+			if c.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+				continue
+			}
+			if c.CreatedAt.IsZero() || !c.CreatedAt.Before(cutoff) {
+				continue
+			}
+			if isWispGCRootBead(c) {
+				continue
+			}
+			rootlessIDs = append(rootlessIDs, c.ID)
+		}
+		downDeps, err = wispGCBatchDownDeps(store, rootlessIDs)
+		if err != nil {
+			return 0, err
+		}
+	}
 
 	// rootCollectible caches the per-root reap decision so many siblings
 	// sharing one dead root cost a single Get.
@@ -447,12 +539,18 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			if isWispGCRootBead(c) {
 				continue
 			}
-			hasEdge, edgeErr := hasParentChildDepEdge(store, c)
-			if edgeErr != nil {
-				collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
-				continue
+			if !enforce {
+				// Dry-run: count as an upper bound without proving the edge —
+				// see the downDeps comment above.
+				decision = true
+			} else {
+				hasEdge, edgeErr := hasParentChildDepEdge(store, c, downDeps)
+				if edgeErr != nil {
+					collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
+					continue
+				}
+				decision = !hasEdge
 			}
-			decision = !hasEdge
 		} else {
 			cached, ok := rootCollectible[rootID]
 			if !ok {
@@ -496,9 +594,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		case enforce:
 			log.Printf("wisp gc: reaped %d orphaned closed wisp(s)", reaped)
 		case batchCap > 0:
-			log.Printf("wisp gc: %d orphaned closed wisp(s) would be reaped (dry-run; set %s=1 to enforce; enforced sweeps reap up to %d per tick)", reaped, reapOrphansEnv, batchCap)
+			log.Printf("wisp gc: up to %d orphaned closed wisp(s) would be reaped (upper bound; dry-run skips the parent-child edge proof — set %s=1 to enforce; enforced sweeps reap up to %d per tick)", reaped, reapOrphansEnv, batchCap)
 		default:
-			log.Printf("wisp gc: %d orphaned closed wisp(s) would be reaped (dry-run; set %s=1 to enforce)", reaped, reapOrphansEnv)
+			log.Printf("wisp gc: up to %d orphaned closed wisp(s) would be reaped (upper bound; dry-run skips the parent-child edge proof — set %s=1 to enforce)", reaped, reapOrphansEnv)
 		}
 	}
 
