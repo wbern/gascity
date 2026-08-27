@@ -183,8 +183,23 @@ func TestNewRunCmd_UnknownSubcommand(t *testing.T) {
 // this asserts the "gc run cancel: " resolve-error prefix specifically —
 // the nil-client path instead prints "supervisor not running" — to pin the
 // resolveCity branch rather than passing on either.
+//
+// t.Chdir alone does not force resolveCity to fail: resolveContext's priority
+// chain consults explicit city env (GC_CITY/GC_CITY_PATH/GC_CITY_ROOT/GC_RIG),
+// a remote target (GC_CITY_URL/GC_CITY_CONTEXT), GC_DIR, and a sticky default
+// context file ahead of or independent of cwd. Every Gas City agent session
+// exports the city env vars, so without clearing them this test's asserted
+// branch is never reached and cmdRunCancel instead fires a live cancel
+// request at the ambient city. configureIsolatedRuntimeEnv sets GC_HOME to
+// isolate the sticky default context file; the explicit t.Setenv calls
+// neutralize every other tier so resolution genuinely fails regardless of
+// the environment the test runs in.
 func TestCmdRunCancel_ResolveCityFailure(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
 	t.Chdir(t.TempDir())
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_RIG", "GC_DIR", "GC_CITY_URL", "GC_CITY_CONTEXT"} {
+		t.Setenv(key, "")
+	}
 	var stdout, stderr bytes.Buffer
 	code := cmdRunCancel("gcw-i5i90", false, &stdout, &stderr)
 	if code != 2 {
