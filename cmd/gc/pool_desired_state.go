@@ -3,13 +3,13 @@ package main
 import (
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/poolplan"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -288,7 +288,7 @@ func computePoolDesiredStates(
 	}
 
 	limits := newNestedCapLimits(cfg)
-	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	resumeUsage := acceptedNestedCapUsage(limits, resumeRequests)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
 	for _, req := range resumeRequests {
@@ -305,7 +305,14 @@ func computePoolDesiredStates(
 	// represent already-spent new demand, so they occupy the first new-demand
 	// slots explicitly before anonymous creates are materialized.
 	if len(scaleCheckCounts) > 0 {
-		wsFairShare := workspaceFairShareByTemplate(cfg, limits, usage, scaleCheckCounts, aliasHeldTemplates)
+		type templateDemand struct {
+			agent      *config.Agent
+			template   string
+			scaleCount int
+			ownCap     int
+			inFlight   []SessionRequest
+		}
+		var demands []templateDemand
 		for i := range cfg.Agents {
 			agent := &cfg.Agents[i]
 			if agent.Suspended {
@@ -313,80 +320,148 @@ func computePoolDesiredStates(
 			}
 			template := agent.QualifiedName()
 			scaleCount, ok := scaleCheckCounts[template]
-			if !ok {
+			if !ok || scaleCount <= 0 {
 				continue
 			}
 			if _, ok := aliasHeldTemplates[template]; ok {
 				continue
 			}
-			fairDemand := scaleCount
-			if share, capped := wsFairShare[template]; capped && share < fairDemand {
-				fairDemand = share
+			// ownCap bounds candidate generation by what this template could
+			// use if it alone had the full remaining headroom (evaluated
+			// against the static resume-only baseline, not accumulated
+			// across templates below). It keeps a single oversubscribed
+			// template from materializing hundreds of doomed candidates
+			// when nothing else is contending for the same cap, while still
+			// letting the real, authoritative admission below decide who
+			// wins when two templates truly do share a binding cap.
+			demands = append(demands, templateDemand{
+				agent:      agent,
+				template:   template,
+				scaleCount: scaleCount,
+				ownCap:     capNewDemandCount(limits, resumeUsage, agent, scaleCount),
+				inFlight:   inFlightNewRequests[template],
+			})
+		}
+
+		// Interleave each contending template's candidate requests one slot
+		// per round instead of appending one template's full demand block
+		// before the next. applyNestedCaps' admission sort is stable and
+		// ties (equal BeadPriority) fall back to insertion order, so
+		// block-appending in cfg.Agents declaration order let whichever
+		// template is declared first (pack.go:938 puts city-pack agents
+		// first) exhaust a shared cap — workspace or rig — before later
+		// templates were ever considered (gcw-tuwx8.4). Round-robin
+		// interleaving makes ties split evenly instead. Rotating the start
+		// each tick (reusing the pattern at build_desired_state.go:218)
+		// additionally keeps the same template from always winning an odd
+		// remainder; a hash of the (stable, often-identical) per-tick demand
+		// would not rotate at all under steady-state load, so the seed must
+		// come from a counter that actually advances every tick.
+		seed := poolNewDemandInterleaveCounter.Add(1) - 1
+		if n := len(demands); n > 0 {
+			start := int(seed % uint64(n))
+			demands = append(append([]templateDemand(nil), demands[start:]...), demands[:start]...)
+		}
+
+		for round := 0; ; round++ {
+			progressed := false
+			for _, td := range demands {
+				if round >= td.ownCap {
+					continue
+				}
+				progressed = true
+				var req SessionRequest
+				if round < len(td.inFlight) {
+					req = td.inFlight[round]
+				} else {
+					req = newTierSessionRequest(td.template, scaleCheckDemand[td.template], round)
+				}
+				allRequests = append(allRequests, req)
 			}
-			newCount := capNewDemandCount(limits, usage, agent, fairDemand)
-			recordNewDemandCapTrace(trace, template, agent, limits, usage, scaleCount, newCount)
-			inFlight := inFlightNewRequests[template]
-			inFlightCount := minInt(len(inFlight), newCount)
-			if scaleCount > 0 && len(inFlight) > 0 && trace != nil {
-				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
-					"scale_check":   scaleCount,
-					"in_flight":     len(inFlight),
-					"reused":        inFlightCount,
-					"anonymous_new": newCount - inFlightCount,
+			if !progressed {
+				break
+			}
+		}
+
+		// applyNestedCaps below performs the real, authoritative admission
+		// (priority-sorted, all tiers together); replay the identical
+		// accept/reject algorithm here purely to explain it per template —
+		// generating the trace from the same final allRequests set this
+		// pass produced keeps the reported cap/current values accurate even
+		// when a shared cap (not a per-template one) is what actually binds.
+		finalUsage := acceptedNestedCapUsage(limits, allRequests)
+		acceptedNewByTemplate := make(map[string]int, len(demands))
+		for _, req := range finalUsage.requests {
+			if req.Tier == "new" {
+				acceptedNewByTemplate[req.Template]++
+			}
+		}
+		for _, td := range demands {
+			acceptedNew := acceptedNewByTemplate[td.template]
+			recordNewDemandCapTrace(trace, td.template, td.agent, limits, finalUsage, td.scaleCount, acceptedNew)
+			if len(td.inFlight) > 0 && trace != nil {
+				reused := minInt(len(td.inFlight), acceptedNew)
+				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, td.template, "", traceRecordPayload{
+					"scale_check":   td.scaleCount,
+					"in_flight":     len(td.inFlight),
+					"reused":        reused,
+					"anonymous_new": acceptedNew - reused,
 				})
-			}
-			for j := 0; j < inFlightCount; j++ {
-				req := inFlight[j]
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
-			}
-			for j := inFlightCount; j < newCount; j++ {
-				workBeadID := ""
-				workBeadTitle := ""
-				workPack := ""
-				workWorkspace := ""
-				workStoreRef := ""
-				workParentSID := ""
-				workBeadPriority := 0
-				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
-					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
-					if demand.Titles != nil {
-						workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-					}
-					if demand.Packs != nil {
-						workPack = strings.TrimSpace(demand.Packs[workBeadID])
-					}
-					if demand.Workspaces != nil {
-						workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-					}
-					if demand.StoreRefs != nil {
-						workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-					}
-					if demand.ParentSIDs != nil {
-						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-					}
-					if demand.Priorities != nil {
-						workBeadPriority = demand.Priorities[workBeadID]
-					}
-				}
-				req := SessionRequest{
-					Template:       template,
-					BeadPriority:   workBeadPriority,
-					Tier:           "new",
-					WorkBeadID:     workBeadID,
-					WorkBeadTitle:  workBeadTitle,
-					WorkPack:       workPack,
-					WorkWorkspace:  workWorkspace,
-					WorkStoreRef:   workStoreRef,
-					BrainParentSID: workParentSID,
-				}
-				allRequests = append(allRequests, req)
-				usage.accept(req, limits)
 			}
 		}
 	}
 
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+// poolNewDemandInterleaveCounter rotates which contending template's
+// new-tier scale_check demand is interleaved first each tick, mirroring
+// poolSessionCreateFairShareCounter (build_desired_state.go:201).
+var poolNewDemandInterleaveCounter atomic.Uint64
+
+// newTierSessionRequest builds the anonymous "new" tier SessionRequest for
+// the index-th slot of template's scale_check demand, threading the driving
+// work bead's identity and priority when scaleCheckDemand has it.
+func newTierSessionRequest(template string, demand scaleCheckDemand, index int) SessionRequest {
+	workBeadID := ""
+	workBeadTitle := ""
+	workPack := ""
+	workWorkspace := ""
+	workStoreRef := ""
+	workParentSID := ""
+	workBeadPriority := 0
+	if len(demand.WorkBeadIDs) > index {
+		workBeadID = strings.TrimSpace(demand.WorkBeadIDs[index])
+		if demand.Titles != nil {
+			workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+		}
+		if demand.Packs != nil {
+			workPack = strings.TrimSpace(demand.Packs[workBeadID])
+		}
+		if demand.Workspaces != nil {
+			workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+		}
+		if demand.StoreRefs != nil {
+			workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+		}
+		if demand.ParentSIDs != nil {
+			workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+		}
+		if demand.Priorities != nil {
+			workBeadPriority = demand.Priorities[workBeadID]
+		}
+	}
+	return SessionRequest{
+		Template:       template,
+		BeadPriority:   workBeadPriority,
+		Tier:           "new",
+		WorkBeadID:     workBeadID,
+		WorkBeadTitle:  workBeadTitle,
+		WorkPack:       workPack,
+		WorkWorkspace:  workWorkspace,
+		WorkStoreRef:   workStoreRef,
+		BrainParentSID: workParentSID,
+	}
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
@@ -656,69 +731,12 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 	return usage
 }
 
-// workspaceFairShareByTemplate splits the shared workspace headroom across
-// contending templates' new-tier scale_check demand using the same pure
-// fair-share policy poolplan already uses for session-create tokens
-// (build_desired_state.go:218), with a fixed seed so fairness holds within a
-// single tick without this pure function depending on process-level state.
-//
-// Without this split, the scale-check merge loop's capNewDemandCount calls
-// consume the shared nestedCapUsage struct in cfg.Agents declaration order,
-// so whichever template is declared first exhausts the entire workspace
-// headroom before later templates are ever considered — permanent
-// declaration-order starvation (gcw-tuwx8.4).
-//
-// Returns nil when the workspace has no shared cap, so callers fall back to
-// each template's raw scale_check demand unmodified.
-func workspaceFairShareByTemplate(
-	cfg *config.City,
-	limits nestedCapLimits,
-	usage nestedCapUsage,
-	scaleCheckCounts map[string]int,
-	aliasHeldTemplates map[string]struct{},
-) map[string]int {
-	if limits.workspaceMax < 0 {
-		return nil
-	}
-	headroom := limits.workspaceMax - usage.workspaceCount
-
-	var demands []poolplan.Demand
-	for i := range cfg.Agents {
-		agent := &cfg.Agents[i]
-		if agent.Suspended {
-			continue
-		}
-		template := agent.QualifiedName()
-		scaleCount, ok := scaleCheckCounts[template]
-		if !ok || scaleCount <= 0 {
-			continue
-		}
-		if _, ok := aliasHeldTemplates[template]; ok {
-			continue
-		}
-		demands = append(demands, poolplan.Demand{Template: template, FreshCreates: scaleCount})
-	}
-
-	shares := make(map[string]int, len(demands))
-	for _, d := range demands {
-		shares[d.Template] = 0
-	}
-	if headroom <= 0 || len(demands) == 0 {
-		return shares
-	}
-
-	budget := poolplan.NewCreateBudget(headroom)
-	budget.ConfigureFairShare(demands, 0)
-	for _, d := range demands {
-		claimed := 0
-		for claimed < d.FreshCreates && budget.TryClaim(d.Template) {
-			claimed++
-		}
-		shares[d.Template] = claimed
-	}
-	return shares
-}
-
+// capNewDemandCount bounds demand by agent, rig, and workspace headroom
+// remaining against usage. Callers evaluating multiple templates that may
+// share a rig or workspace cap must pass a static, unmutated usage snapshot
+// per template (not one accumulated across templates in declaration order)
+// so the result reflects this template's own headroom rather than whatever
+// an earlier template already consumed (gcw-tuwx8.4).
 func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {
 	if demand <= 0 {
 		return 0

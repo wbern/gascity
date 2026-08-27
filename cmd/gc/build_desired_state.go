@@ -1796,7 +1796,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 			}
 		}
 		if incoming.Priorities != nil {
-			existing.Priorities[id] = incoming.Priorities[id]
+			if p, ok := incoming.Priorities[id]; ok {
+				existing.Priorities[id] = p
+			}
 		}
 	}
 	existing.Count = len(existing.WorkBeadIDs)

@@ -790,12 +790,14 @@ func TestComputePoolDesiredStates_NestedCaps(t *testing.T) {
 	if total != 3 {
 		t.Errorf("total = %d, want 3 (rig cap)", total)
 	}
-	// Claude gets 2 (its max), codex gets 1 (rig cap - claude's 2).
-	if perAgent["rig/claude"] != 2 {
-		t.Errorf("claude = %d, want 2", perAgent["rig/claude"])
+	// Identical demand under a shared rig cap is fair-shared, not resolved
+	// by cfg.Agents declaration order, so either template may take the
+	// extra slot within its own 2-session ceiling (gcw-tuwx8.4).
+	if perAgent["rig/claude"] < 1 || perAgent["rig/claude"] > 2 {
+		t.Errorf("claude = %d, want 1 or 2", perAgent["rig/claude"])
 	}
-	if perAgent["rig/codex"] != 1 {
-		t.Errorf("codex = %d, want 1", perAgent["rig/codex"])
+	if perAgent["rig/codex"] < 1 || perAgent["rig/codex"] > 2 {
+		t.Errorf("codex = %d, want 1 or 2", perAgent["rig/codex"])
 	}
 }
 
@@ -2007,9 +2009,13 @@ func TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder(t *te
 // workspace-only equivalence claim in the composition tests only holds
 // because the inherited workspace value happened to equal the cap under
 // test; this case makes fairness hold against a tighter, distinct rig cap).
+// rigMax is set equal to a single template's raw demand so a
+// declaration-order-only allocator (the pre-fix behavior) saturates the rig
+// on the first-declared template and leaves the second with zero — this
+// case is a genuine fail-to-pass guard against b2030d79 (PR #124 review).
 func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
 	wsMax := 6
-	rigMax := 5
+	rigMax := 4
 	cfg := &config.City{
 		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
 		Rigs:      []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: &rigMax}},
@@ -2023,8 +2029,10 @@ func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
 	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
 	got := PoolDesiredCounts(result)
 
-	if got["rig/b"] < 1 {
-		t.Fatalf("rig/b received %d sessions with identical oversubscribed demand under a rig cap (full counts: %#v)", got["rig/b"], got)
+	// Identical demand under an evenly-divisible rig cap must split evenly,
+	// not skew toward whichever template cfg.Agents declares first.
+	if got["rig/a"] != 2 || got["rig/b"] != 2 {
+		t.Fatalf("got %#v, want rig/a=2 rig/b=2 (even split of rig cap %d)", got, rigMax)
 	}
 	total := 0
 	for _, count := range got {
