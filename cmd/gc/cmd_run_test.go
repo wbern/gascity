@@ -178,12 +178,19 @@ func TestNewRunCmd_UnknownSubcommand(t *testing.T) {
 }
 
 // TestCmdRunCancel_ResolveCityFailure verifies a resolveCity failure (no
-// city context) exits 2 without attempting to reach an API client.
+// city context) exits 2 without attempting to reach an API client. Both
+// branches of cmdRunCancel return 2 (resolveCity failure and nil-client), so
+// this asserts the "gc run cancel: " resolve-error prefix specifically —
+// the nil-client path instead prints "supervisor not running" — to pin the
+// resolveCity branch rather than passing on either.
 func TestCmdRunCancel_ResolveCityFailure(t *testing.T) {
 	t.Chdir(t.TempDir())
 	var stdout, stderr bytes.Buffer
 	code := cmdRunCancel("gcw-i5i90", false, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2; stderr=%q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "gc run cancel: ") || strings.Contains(stderr.String(), "supervisor not running") {
+		t.Fatalf("stderr did not come from the resolveCity branch: %q", stderr.String())
 	}
 }

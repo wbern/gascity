@@ -269,6 +269,7 @@ func TestOddballRootJSONSchemaManifests(t *testing.T) {
 		{"skill", "list", "--json-schema"},
 		{"build-image", "--json-schema"},
 		{"version", "--json-schema"},
+		{"run", "cancel", "--json-schema"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := run(args, &stdout, &stderr)
