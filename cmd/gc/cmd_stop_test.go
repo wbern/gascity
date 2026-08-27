@@ -761,6 +761,63 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	}
 }
 
+// TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFailsUncapped is
+// the sibling of TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails
+// on the DEFAULT dispatch path: plain `gc stop` with no --timeout, which takes
+// the uncapped arm in cmdStopJSON. Before the fix, that arm let
+// unregisterCityFromSupervisorWithOptions own and commit its transaction
+// immediately, so a managed-provider shutdown failure occurring after the
+// commit left the city unregistered from the supervisor with nothing to
+// restore.
+func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFailsUncapped(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	gcHome := os.Getenv("GC_HOME")
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		return nil
+	}
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		assertSameTestPath(t, path, cityDir)
+		return fmt.Errorf("provider-stop-failed")
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, did not want success message", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
+		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityDir) || entries[0].EffectiveName() != "invalid-supervisor-city" {
+		t.Fatalf("registry after managed-provider stop failure = %v, want exact original entry", entries)
+	}
+	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
+		t.Fatalf("stderr = %q, want registration rollback after managed-provider stop failure", stderr.String())
+	}
+}
+
 func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
