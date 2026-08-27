@@ -1,6 +1,7 @@
 package dolt_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,5 +98,55 @@ func TestCompactScriptQuarantineRenotifiesAfterBackstopElapses(t *testing.T) {
 	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
 	if len(eventLines) != 3 {
 		t.Fatalf("each compact cycle should still emit a dolt.compact.quarantine event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
+	}
+}
+
+// TestCompactScriptBareGCExistingQuarantineDoesNotRemailEveryCycle pins the
+// bare-GC half of gcw-vmm00.39 that the original port missed: bare_gc_database
+// called the ungated send_compact_quarantine_alert wrapper directly, which has
+// no marker_should_notify dedup and no record_marker_notify_state bookkeeping.
+// Because --bare-gc and flatten are mutually exclusive run modes, a
+// --bare-gc-only deployment against an unresolved quarantine mailed the mayor
+// on every single cycle forever, with seen_count/notify_count frozen since
+// they were never bumped. Measured on GC3: 57 mails over 31 hours from one
+// marker. bare_gc_database must now share report_existing_quarantine with
+// flatten_database so it dedups and its bookkeeping actually advances.
+func TestCompactScriptBareGCExistingQuarantineDoesNotRemailEveryCycle(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	const reason = "manual repair pending"
+	if err := os.WriteFile(marker, []byte("db=beads\nreason="+reason+"\ncreated_at=2026-05-01T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+
+	firstOut, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("bare-gc must fail when quarantine marker exists:\n%s", firstOut)
+	}
+	secondOut, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("bare-gc must fail when quarantine marker exists:\n%s", secondOut)
+	}
+
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 1 {
+		t.Fatalf("two --bare-gc cycles over an unresolved marker within the backstop window should send exactly one operator mail, got %d\nlog:\n%s", len(mailLines), log)
+	}
+	eventLines := compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")
+	if len(eventLines) != 2 {
+		t.Fatalf("each --bare-gc cycle should still emit an event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
+	}
+
+	if seenCount := compactMarkerValue(t, marker, "seen_count"); seenCount != "2" {
+		t.Fatalf("bookkeeping must advance on every --bare-gc cycle, not stay frozen: seen_count = %q, want 2", seenCount)
+	}
+	if notifyCount := compactMarkerValue(t, marker, "notify_count"); notifyCount != "1" {
+		t.Fatalf("notify_count must advance on the emitted cycle, not stay frozen: notify_count = %q, want 1", notifyCount)
+	}
+	if lastNotifiedTS := compactMarkerValue(t, marker, "last_notified_ts"); lastNotifiedTS == "" {
+		t.Fatal("last_notified_ts must be recorded once bare-gc's alert fires")
 	}
 }
