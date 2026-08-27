@@ -46,6 +46,7 @@ jobs:
             runtime_tmux:
               - 'internal/runtime/tmux/**'
               - 'scripts/runtime-tmux-tests.manifest'
+              - '.github/workflows/fork-verify.yml'
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
