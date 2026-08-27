@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/poolplan"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -304,6 +305,7 @@ func computePoolDesiredStates(
 	// represent already-spent new demand, so they occupy the first new-demand
 	// slots explicitly before anonymous creates are materialized.
 	if len(scaleCheckCounts) > 0 {
+		wsFairShare := workspaceFairShareByTemplate(cfg, limits, usage, scaleCheckCounts, aliasHeldTemplates)
 		for i := range cfg.Agents {
 			agent := &cfg.Agents[i]
 			if agent.Suspended {
@@ -317,7 +319,11 @@ func computePoolDesiredStates(
 			if _, ok := aliasHeldTemplates[template]; ok {
 				continue
 			}
-			newCount := capNewDemandCount(limits, usage, agent, scaleCount)
+			fairDemand := scaleCount
+			if share, capped := wsFairShare[template]; capped && share < fairDemand {
+				fairDemand = share
+			}
+			newCount := capNewDemandCount(limits, usage, agent, fairDemand)
 			recordNewDemandCapTrace(trace, template, agent, limits, usage, scaleCount, newCount)
 			inFlight := inFlightNewRequests[template]
 			inFlightCount := minInt(len(inFlight), newCount)
@@ -341,6 +347,7 @@ func computePoolDesiredStates(
 				workWorkspace := ""
 				workStoreRef := ""
 				workParentSID := ""
+				workBeadPriority := 0
 				if demand := scaleCheckDemand[template]; len(demand.WorkBeadIDs) > j {
 					workBeadID = strings.TrimSpace(demand.WorkBeadIDs[j])
 					if demand.Titles != nil {
@@ -358,9 +365,13 @@ func computePoolDesiredStates(
 					if demand.ParentSIDs != nil {
 						workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 					}
+					if demand.Priorities != nil {
+						workBeadPriority = demand.Priorities[workBeadID]
+					}
 				}
 				req := SessionRequest{
 					Template:       template,
+					BeadPriority:   workBeadPriority,
 					Tier:           "new",
 					WorkBeadID:     workBeadID,
 					WorkBeadTitle:  workBeadTitle,
@@ -643,6 +654,69 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 		}
 	}
 	return usage
+}
+
+// workspaceFairShareByTemplate splits the shared workspace headroom across
+// contending templates' new-tier scale_check demand using the same pure
+// fair-share policy poolplan already uses for session-create tokens
+// (build_desired_state.go:218), with a fixed seed so fairness holds within a
+// single tick without this pure function depending on process-level state.
+//
+// Without this split, the scale-check merge loop's capNewDemandCount calls
+// consume the shared nestedCapUsage struct in cfg.Agents declaration order,
+// so whichever template is declared first exhausts the entire workspace
+// headroom before later templates are ever considered — permanent
+// declaration-order starvation (gcw-tuwx8.4).
+//
+// Returns nil when the workspace has no shared cap, so callers fall back to
+// each template's raw scale_check demand unmodified.
+func workspaceFairShareByTemplate(
+	cfg *config.City,
+	limits nestedCapLimits,
+	usage nestedCapUsage,
+	scaleCheckCounts map[string]int,
+	aliasHeldTemplates map[string]struct{},
+) map[string]int {
+	if limits.workspaceMax < 0 {
+		return nil
+	}
+	headroom := limits.workspaceMax - usage.workspaceCount
+
+	var demands []poolplan.Demand
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended {
+			continue
+		}
+		template := agent.QualifiedName()
+		scaleCount, ok := scaleCheckCounts[template]
+		if !ok || scaleCount <= 0 {
+			continue
+		}
+		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
+		}
+		demands = append(demands, poolplan.Demand{Template: template, FreshCreates: scaleCount})
+	}
+
+	shares := make(map[string]int, len(demands))
+	for _, d := range demands {
+		shares[d.Template] = 0
+	}
+	if headroom <= 0 || len(demands) == 0 {
+		return shares
+	}
+
+	budget := poolplan.NewCreateBudget(headroom)
+	budget.ConfigureFairShare(demands, 0)
+	for _, d := range demands {
+		claimed := 0
+		for claimed < d.FreshCreates && budget.TryClaim(d.Template) {
+			claimed++
+		}
+		shares[d.Template] = claimed
+	}
+	return shares
 }
 
 func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {

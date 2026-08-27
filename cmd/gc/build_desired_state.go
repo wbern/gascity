@@ -182,6 +182,11 @@ type scaleCheckDemand struct {
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
 	ParentSIDs map[string]string
+	// Priorities maps work-bead id → the driving bead's priority, carried onto
+	// the new-tier SessionRequest.BeadPriority so the applyNestedCaps
+	// comparator can differentiate between new-tier requests instead of
+	// treating them all as priority 0 (gcw-tuwx8.4).
+	Priorities map[string]int
 }
 
 var (
@@ -1732,6 +1737,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				}
 				entry.ParentSIDs[b.ID] = parentSID
 			}
+			if entry.Priorities == nil {
+				entry.Priorities = make(map[string]int)
+			}
+			entry.Priorities[b.ID] = beadPriority(b)
 			demand[template] = entry
 		}
 	}
@@ -1761,6 +1770,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.Priorities == nil && len(incoming.Priorities) > 0 {
+		existing.Priorities = make(map[string]int, len(incoming.Priorities))
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
@@ -1782,6 +1794,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
 			}
+		}
+		if incoming.Priorities != nil {
+			existing.Priorities[id] = incoming.Priorities[id]
 		}
 	}
 	existing.Count = len(existing.WorkBeadIDs)

@@ -1968,3 +1968,103 @@ func TestComputePoolDesiredStates_SharedCapWithPerRoleCeiling(t *testing.T) {
 		t.Errorf("total = %d, want %d (ux ceiling frees remainder for polecat within shared cap)", total, wsMax)
 	}
 }
+
+// TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder is
+// the starvation guard proven RED in gcw-tuwx8.3 (verbatim failure captured
+// on that bead's notes) and now GREEN against the fair-share fix in
+// gcw-tuwx8.4. Under an oversubscribed shared workspace cap, new-tier demand
+// must be fair-shared across contending templates on a single tick rather
+// than granted entirely to whichever template is declared first in
+// cfg.Agents.
+func TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder(t *testing.T) {
+	wsMax := 4
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("a", "", nil, 0),
+			poolAgent("b", "", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"a": 4, "b": 4}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+
+	if got["b"] < 1 {
+		t.Fatalf("b received %d sessions across a single tick with identical oversubscribed demand (a=4, b=4, wsMax=4); declaration-order starvation: a consumed the entire shared cap first (full counts: %#v)", got["b"], got)
+	}
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != wsMax {
+		t.Errorf("total = %d, want %d", total, wsMax)
+	}
+}
+
+// TestComputePoolDesiredStates_OversubscribedSplitWithRigMax extends the
+// starvation guard with a real rig-level max in play (PR #124 review: the
+// workspace-only equivalence claim in the composition tests only holds
+// because the inherited workspace value happened to equal the cap under
+// test; this case makes fairness hold against a tighter, distinct rig cap).
+func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
+	wsMax := 6
+	rigMax := 5
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Rigs:      []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: &rigMax}},
+		Agents: []config.Agent{
+			poolAgent("a", "rig", nil, 0),
+			poolAgent("b", "rig", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"rig/a": 4, "rig/b": 4}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+
+	if got["rig/b"] < 1 {
+		t.Fatalf("rig/b received %d sessions with identical oversubscribed demand under a rig cap (full counts: %#v)", got["rig/b"], got)
+	}
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != rigMax {
+		t.Errorf("total = %d, want %d (rig max binds tighter than workspace max)", total, rigMax)
+	}
+}
+
+// TestComputePoolDesiredStates_NewTierCarriesBeadPriority proves scale_check
+// demand threads the driving work bead's priority onto the new-tier session
+// request via scaleCheckDemand.Priorities, so the applyNestedCaps comparator
+// can differentiate between new-tier requests instead of treating every
+// scale_check-driven request as priority 0 (gcw-tuwx8.4).
+func TestComputePoolDesiredStates_NewTierCarriesBeadPriority(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
+	}
+	scaleCheck := map[string]int{"claude": 2}
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       2,
+			WorkBeadIDs: []string{"w-high", "w-low"},
+			Priorities:  map[string]int{"w-high": 9, "w-low": 1},
+		},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, nil, nil, nil, scaleCheck, demand, nil)
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("expected 1 template with 2 requests, got %#v", result)
+	}
+	byWorkBead := make(map[string]int, 2)
+	for _, req := range result[0].Requests {
+		byWorkBead[req.WorkBeadID] = req.BeadPriority
+	}
+	if byWorkBead["w-high"] != 9 {
+		t.Errorf("w-high priority = %d, want 9", byWorkBead["w-high"])
+	}
+	if byWorkBead["w-low"] != 1 {
+		t.Errorf("w-low priority = %d, want 1", byWorkBead["w-low"])
+	}
+}
