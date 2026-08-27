@@ -1958,8 +1958,8 @@ func TestSetGetRemoveEnvironment(t *testing.T) {
 
 	// Get should now fail (variable unset).
 	_, err = tm.GetEnvironment(sessionName, "GC_TEST_VAR")
-	if err == nil {
-		t.Error("GetEnvironment after RemoveEnvironment should return error")
+	if !errors.Is(err, errEnvironmentUnset) {
+		t.Errorf("GetEnvironment after RemoveEnvironment error = %v, want errEnvironmentUnset", err)
 	}
 
 	// Removing a variable that doesn't exist should not error.

@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,9 @@ type fakeExecutor struct {
 	outs  []string
 	errs  []error
 	idx   int
+	// rejectPaneSessionTargets models tmux's session-environment contract:
+	// show/set-environment targets a session, never a pane ID.
+	rejectPaneSessionTargets bool
 }
 
 func (f *fakeExecutor) execute(args []string) (string, error) {
@@ -24,6 +28,13 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 	cp := make([]string, len(args))
 	copy(cp, args)
 	f.calls = append(f.calls, cp)
+	if f.rejectPaneSessionTargets && (slices.Contains(args, "show-environment") || slices.Contains(args, "set-environment")) {
+		for i, arg := range args[:len(args)-1] {
+			if arg == "-t" && strings.HasPrefix(args[i+1], "%") {
+				return "", errors.New("pane ID is not a valid session target")
+			}
+		}
+	}
 	if f.idx < len(f.outs) || f.idx < len(f.errs) {
 		var out string
 		var err error
@@ -36,7 +47,20 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 		f.idx++
 		return out, err
 	}
+	if slices.Contains(args, "show-environment") {
+		return "", errors.New("unknown variable: " + args[len(args)-1])
+	}
 	return f.out, f.err
+}
+
+func TestGetEnvironmentClassifiesTmuxUnknownVariableAsUnset(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{}
+
+	_, err := tm.GetEnvironment("managed", "GC_UNSET")
+	if !errors.Is(err, errEnvironmentUnset) {
+		t.Fatalf("GetEnvironment error = %v, want errEnvironmentUnset", err)
+	}
 }
 
 func (f *fakeExecutor) executeCtx(_ context.Context, args []string) (string, error) {

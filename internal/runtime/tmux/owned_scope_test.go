@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,44 @@ func TestSystemdUserScopesStopTreatsGoneUnitAsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSystemdUserScopesStopAcceptsRetainedInactiveOrFailedUnit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user scopes require Linux")
+	}
+	for _, state := range []string{"inactive", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			oldShow, oldStop := systemdShowProperty, systemdStopUnit
+			t.Cleanup(func() {
+				systemdShowProperty, systemdStopUnit = oldShow, oldStop
+			})
+			showCalls := 0
+			systemdShowProperty = func(_ string, property string) (string, error) {
+				showCalls++
+				switch showCalls {
+				case 1:
+					if property != "InvocationID" {
+						t.Fatalf("first property = %q, want InvocationID", property)
+					}
+					return "original", nil
+				case 2:
+					if property != "ActiveState" {
+						t.Fatalf("post-stop property = %q, want ActiveState", property)
+					}
+					return state, nil
+				default:
+					t.Fatalf("unexpected systemd property read %q", property)
+					return "", nil
+				}
+			}
+			systemdStopUnit = func(string) error { return nil }
+
+			if err := (systemdUserScopes{}).stop(ownedScope{unit: "gascity-pane-0123456789abcdef0123456789abcdef.scope", invocationID: "original"}); err != nil {
+				t.Fatalf("stop retained %s scope: %v", state, err)
+			}
+		})
+	}
+}
+
 func TestSystemdUserScopesStopRetainsCommandFailure(t *testing.T) {
 	oldShow, oldStop := systemdShowProperty, systemdStopUnit
 	t.Cleanup(func() {
@@ -87,6 +126,7 @@ func TestSystemdUserScopesStopRejectsForeignScopeBeforeProbe(t *testing.T) {
 type fakeOwnedScopes struct {
 	captured ownedScope
 	stopped  ownedScope
+	stops    []ownedScope
 	err      error
 }
 
@@ -96,7 +136,12 @@ func (f *fakeOwnedScopes) capture(unit string) (ownedScope, error) {
 	}
 	return f.captured, f.err
 }
-func (f *fakeOwnedScopes) stop(scope ownedScope) error { f.stopped = scope; return f.err }
+
+func (f *fakeOwnedScopes) stop(scope ownedScope) error {
+	f.stopped = scope
+	f.stops = append(f.stops, scope)
+	return f.err
+}
 
 func TestOwnedScopeStopRejectsChangedSessionIncarnation(t *testing.T) {
 	// A replacement session may reuse the tmux name. Its current instance token
