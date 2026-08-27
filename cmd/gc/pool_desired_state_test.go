@@ -1851,3 +1851,155 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
 	}
 }
+
+// TestComputePoolDesiredStates_SharedCapCompositionVaries proves the
+// workspace-wide shared cap composes correctly across demand mixes for
+// agents with no per-agent max (nil = inherit the shared cap). Each case
+// asserts the FULL PoolDesiredCounts map, not just the total, so an agent
+// silently soaking up another agent's share would fail the assertion.
+func TestComputePoolDesiredStates_SharedCapCompositionVaries(t *testing.T) {
+	wsMax := 8
+	newCfg := func() *config.City {
+		return &config.City{
+			Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+			Agents: []config.Agent{
+				poolAgent("ux", "", nil, 0),
+				poolAgent("polecat", "", nil, 0),
+				poolAgent("reviewer", "", nil, 0),
+				poolAgent("witness", "", nil, 0),
+			},
+		}
+	}
+
+	cases := []struct {
+		name       string
+		scaleCheck map[string]int
+		want       map[string]int
+	}{
+		{
+			name:       "ux 6 + polecat 2",
+			scaleCheck: map[string]int{"ux": 6, "polecat": 2},
+			want:       map[string]int{"ux": 6, "polecat": 2},
+		},
+		{
+			name:       "polecat 1 + reviewer 6",
+			scaleCheck: map[string]int{"polecat": 1, "reviewer": 6},
+			want:       map[string]int{"polecat": 1, "reviewer": 6},
+		},
+		{
+			name:       "ux 12 alone capped to workspace max",
+			scaleCheck: map[string]int{"ux": 12},
+			want:       map[string]int{"ux": 8},
+		},
+		{
+			name:       "even split across all four",
+			scaleCheck: map[string]int{"ux": 2, "polecat": 2, "reviewer": 2, "witness": 2},
+			want:       map[string]int{"ux": 2, "polecat": 2, "reviewer": 2, "witness": 2},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ComputePoolDesiredStates(newCfg(), nil, nil, tc.scaleCheck)
+			got := PoolDesiredCounts(result)
+			if len(got) != len(tc.want) {
+				t.Fatalf("counts = %#v, want %#v", got, tc.want)
+			}
+			for template, wantCount := range tc.want {
+				if got[template] != wantCount {
+					t.Errorf("counts[%q] = %d, want %d (full map: %#v)", template, got[template], wantCount, got)
+				}
+			}
+		})
+	}
+}
+
+// TestComputePoolDesiredStates_SharedCapCompositionInheritExplicit proves
+// that an agent whose max_active_sessions is explicitly set to -1 behaves
+// identically to an agent whose max_active_sessions is nil: both inherit the
+// workspace shared cap rather than imposing their own ceiling.
+func TestComputePoolDesiredStates_SharedCapCompositionInheritExplicit(t *testing.T) {
+	wsMax := 8
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("ux", "", intPtr(-1), 0),
+		},
+	}
+	scaleCheck := map[string]int{"ux": 12}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+	if got["ux"] != wsMax {
+		t.Errorf("counts[ux] = %d, want %d (explicit -1 must equal inherit/nil, capped by workspace max)", got["ux"], wsMax)
+	}
+}
+
+// TestComputePoolDesiredStates_SharedCapWithPerRoleCeiling proves a per-agent
+// max_active_sessions ceiling is enforced within the shared workspace cap:
+// the ceilinged agent is capped at its own max, and the remainder of the
+// shared cap is still available to an unceilinged sibling.
+func TestComputePoolDesiredStates_SharedCapWithPerRoleCeiling(t *testing.T) {
+	wsMax := 8
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("ux", "", intPtr(4), 0),
+			poolAgent("polecat", "", intPtr(-1), 0),
+		},
+	}
+	scaleCheck := map[string]int{"ux": 6, "polecat": 6}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+
+	if got["ux"] != 4 {
+		t.Errorf("counts[ux] = %d, want 4 (per-agent ceiling)", got["ux"])
+	}
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != wsMax {
+		t.Errorf("total = %d, want %d (ux ceiling frees remainder for polecat within shared cap)", total, wsMax)
+	}
+}
+
+// TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder is
+// the starvation guard: when two agents both demand more than the shared
+// workspace cap can satisfy, an agent declared later in cfg.Agents must not
+// be starved indefinitely just because an earlier-declared agent's demand
+// alone exhausts the cap on every tick.
+//
+// EXPECTED TO FAIL today (gcw-tuwx8.3): computePoolDesiredStates walks
+// cfg.Agents in declaration order with no rotation, so the first-declared
+// agent (A) consumes the entire shared cap on every tick and the
+// later-declared agent (B) never receives a single session, across any
+// number of ticks. gcw-tuwx8.4 fixes this by seed-rotating cfg.Agents and
+// giving new-tier requests a real BeadPriority so admission isn't purely
+// positional. Do not invert or weaken this assertion to match current
+// behavior — the failure itself is the proof William asked for before any
+// max_active_sessions cap is set on a shared pool.
+func TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder(t *testing.T) {
+	t.Skip("RED until gcw-tuwx8.4 fixes admission fairness (seed-rotate cfg.Agents + real BeadPriority for new-tier requests)")
+
+	wsMax := 4
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("A", "", nil, 0),
+			poolAgent("B", "", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"A": 4, "B": 4}
+
+	bTotal := 0
+	for tick := 0; tick < 2; tick++ {
+		result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+		bTotal += PoolDesiredCounts(result)["B"]
+	}
+
+	if bTotal < 1 {
+		t.Fatalf("B received 0 sessions across 2 ticks with identical oversubscribed demand (A=4, B=4, wsMax=4); declaration-order starvation: A always consumes the entire shared cap first")
+	}
+}
