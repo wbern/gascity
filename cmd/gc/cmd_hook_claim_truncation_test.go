@@ -156,7 +156,7 @@ func TestDoHookReportsWithheldWorkQueryLoudly(t *testing.T) {
 		return "", fmt.Errorf("running work query: %w", beads.ErrOutputTruncated)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr); code != 1 {
+	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr, hookVisibility{}); code != 1 {
 		t.Fatalf("doHook() = %d, want a reported failure", code)
 	}
 	if stdout.Len() != 0 {
