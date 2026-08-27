@@ -144,6 +144,15 @@ func poolTraceFieldInt(t *testing.T, fields map[string]any, key string) int {
 	return got
 }
 
+func poolTraceFieldString(t *testing.T, fields map[string]any, key string) string {
+	t.Helper()
+	got, ok := fields[key].(string)
+	if !ok {
+		t.Fatalf("trace field %s = %#v, want string", key, fields[key])
+	}
+	return got
+}
+
 func poolTraceFieldStrings(t *testing.T, fields map[string]any, key string) []string {
 	t.Helper()
 	got, ok := fields[key].([]string)
@@ -610,7 +619,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, 0, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -633,6 +642,46 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	}
 	if got := poolTraceFieldStrings(t, rec.Fields, "blocking_work_beads"); len(got) != 1 || got[0] != "w-active" {
 		t.Fatalf("blocking_work_beads = %#v, want [w-active]", got)
+	}
+}
+
+// TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling
+// proves recordNewDemandCapTrace identifies which cap actually blocked new
+// demand even when a template's own per-agent ceiling has slack (PR #126
+// review finding 3): feeding it a usage snapshot that already includes this
+// template's own accepted new-tier requests double-counts and blames
+// whichever cap the double-counted subtraction happens to trip first,
+// regardless of which cap actually bound. Here agentMax=4 has slack (2 of 4
+// used) while the real workspace cap of 2 is what stops the remaining 6
+// requests; the buggy call site reported agent_cap with a self-contradictory
+// current(2) < max(4) while claiming 6 were blocked.
+func TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling(t *testing.T) {
+	wsMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents:    []config.Agent{poolAgent("claude", "", intPtr(4), 0)},
+	}
+	trace := newPoolDesiredStateTestTrace("claude")
+
+	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, 0, trace)
+
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("result = %#v, want 2 requests capped by the workspace max", result)
+	}
+	rec := poolTraceDecision(t, trace, TraceSitePoolNewDemandCap)
+	if got := poolTraceFieldString(t, rec.Fields, "active_capacity_kind"); got != string(TraceReasonWorkspaceCap) {
+		t.Fatalf("active_capacity_kind = %q, want %q (workspace is what actually bound; agent_cap has slack)", got, TraceReasonWorkspaceCap)
+	}
+	for key, want := range map[string]int{
+		"scale_check":  8,
+		"accepted_new": 2,
+		"blocked_new":  6,
+		"current":      0,
+		"max":          wsMax,
+	} {
+		if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+			t.Fatalf("%s = %d, want %d (current must be below max without contradicting blocked_new)", key, got, want)
+		}
 	}
 }
 
@@ -790,12 +839,14 @@ func TestComputePoolDesiredStates_NestedCaps(t *testing.T) {
 	if total != 3 {
 		t.Errorf("total = %d, want 3 (rig cap)", total)
 	}
-	// Claude gets 2 (its max), codex gets 1 (rig cap - claude's 2).
-	if perAgent["rig/claude"] != 2 {
-		t.Errorf("claude = %d, want 2", perAgent["rig/claude"])
+	// Identical demand under a shared rig cap is fair-shared, not resolved
+	// by cfg.Agents declaration order, so either template may take the
+	// extra slot within its own 2-session ceiling (gcw-tuwx8.4).
+	if perAgent["rig/claude"] < 1 || perAgent["rig/claude"] > 2 {
+		t.Errorf("claude = %d, want 1 or 2", perAgent["rig/claude"])
 	}
-	if perAgent["rig/codex"] != 1 {
-		t.Errorf("codex = %d, want 1", perAgent["rig/codex"])
+	if perAgent["rig/codex"] < 1 || perAgent["rig/codex"] > 2 {
+		t.Errorf("codex = %d, want 1 or 2", perAgent["rig/codex"])
 	}
 }
 
@@ -1143,7 +1194,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, 0, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1596,7 +1647,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1629,7 +1680,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -1966,5 +2017,217 @@ func TestComputePoolDesiredStates_SharedCapWithPerRoleCeiling(t *testing.T) {
 	}
 	if total != wsMax {
 		t.Errorf("total = %d, want %d (ux ceiling frees remainder for polecat within shared cap)", total, wsMax)
+	}
+}
+
+// TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder is
+// the starvation guard proven RED in gcw-tuwx8.3 (verbatim failure captured
+// on that bead's notes) and now GREEN against the fair-share fix in
+// gcw-tuwx8.4. Under an oversubscribed shared workspace cap, new-tier demand
+// must be fair-shared across contending templates on a single tick rather
+// than granted entirely to whichever template is declared first in
+// cfg.Agents.
+func TestComputePoolDesiredStates_OversubscribedSplitIsNotDeclarationOrder(t *testing.T) {
+	wsMax := 4
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("a", "", nil, 0),
+			poolAgent("b", "", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"a": 4, "b": 4}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+
+	if got["b"] < 1 {
+		t.Fatalf("b received %d sessions across a single tick with identical oversubscribed demand (a=4, b=4, wsMax=4); declaration-order starvation: a consumed the entire shared cap first (full counts: %#v)", got["b"], got)
+	}
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != wsMax {
+		t.Errorf("total = %d, want %d", total, wsMax)
+	}
+}
+
+// TestComputePoolDesiredStates_OversubscribedSplitWithRigMax extends the
+// starvation guard with a real rig-level max in play (PR #124 review: the
+// workspace-only equivalence claim in the composition tests only holds
+// because the inherited workspace value happened to equal the cap under
+// test; this case makes fairness hold against a tighter, distinct rig cap).
+// rigMax is set equal to a single template's raw demand so a
+// declaration-order-only allocator (the pre-fix behavior) saturates the rig
+// on the first-declared template and leaves the second with zero — this
+// case is a genuine fail-to-pass guard against b2030d79 (PR #124 review).
+func TestComputePoolDesiredStates_OversubscribedSplitWithRigMax(t *testing.T) {
+	wsMax := 6
+	rigMax := 4
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Rigs:      []config.Rig{{Name: "rig", Path: "/tmp/rig", MaxActiveSessions: &rigMax}},
+		Agents: []config.Agent{
+			poolAgent("a", "rig", nil, 0),
+			poolAgent("b", "rig", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"rig/a": 4, "rig/b": 4}
+
+	result := ComputePoolDesiredStates(cfg, nil, nil, scaleCheck)
+	got := PoolDesiredCounts(result)
+
+	// Identical demand under an evenly-divisible rig cap must split evenly,
+	// not skew toward whichever template cfg.Agents declares first.
+	if got["rig/a"] != 2 || got["rig/b"] != 2 {
+		t.Fatalf("got %#v, want rig/a=2 rig/b=2 (even split of rig cap %d)", got, rigMax)
+	}
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != rigMax {
+		t.Errorf("total = %d, want %d (rig max binds tighter than workspace max)", total, rigMax)
+	}
+}
+
+// TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention proves
+// one template's in-flight (mid-create) session is not dropped in favor of
+// ANOTHER contending template's anonymous new-tier request when a shared
+// workspace cap binds (PR #126 review finding 2 fix: computePoolDesiredStates
+// now emits every contending template's in-flight requests before opening
+// the interleave to any anonymous ones, since dropping an in-flight request
+// from desired state does not free its slot — sweepUndesiredPoolSessionBeads
+// keeps it regardless). This case demonstrates that property for exactly one
+// in-flight session (claude's) contending against another template (codex)
+// that has none; it does not prove in-flight survives an arbitrarily deep
+// anonymous queue, nor say anything about ordering AMONG MULTIPLE in-flight
+// requests from different templates.
+// Deterministic regardless of poolNewDemandInterleaveCounter's rotation:
+// claude's in-flight request is the only in-flight candidate, so it is
+// always emitted first (ahead of every anonymous candidate, from either
+// template) and is therefore always within the admitted set for any cap >=
+// 1, regardless of which template's anonymous requests the rotation
+// interleaves first afterward.
+func TestComputePoolDesiredStates_InFlightSurvivesSharedCapContention(t *testing.T) {
+	wsMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("claude", "", nil, 0),
+			poolAgent("codex", "", nil, 0),
+		},
+	}
+	sessions := []beads.Bead{pendingPoolSessionBead("sess-inflight")}
+	scaleCheck := map[string]int{"claude": 2, "codex": 2}
+	demand := map[string]scaleCheckDemand{
+		"codex": {
+			Count:       2,
+			WorkBeadIDs: []string{"w-codex-high", "w-codex-low"},
+			Priorities:  map[string]int{"w-codex-high": 9, "w-codex-low": 9},
+		},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, nil, nil, sessionInfosFromBeads(sessions), scaleCheck, demand, nil)
+	got := PoolDesiredCounts(result)
+
+	total := 0
+	for _, count := range got {
+		total += count
+	}
+	if total != wsMax {
+		t.Fatalf("total = %d, want %d", total, wsMax)
+	}
+	for _, ds := range result {
+		if ds.Template != "claude" {
+			continue
+		}
+		found := false
+		for _, req := range ds.Requests {
+			if req.SessionBeadID == "sess-inflight" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("claude's in-flight session sess-inflight was evicted; requests=%#v", ds.Requests)
+		}
+	}
+}
+
+// TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed proves
+// computePoolDesiredStates is a pure function of its explicit seed argument:
+// two calls with the SAME seed on the SAME inputs must agree exactly on the
+// oversubscribed split (PR #126 review cycle 3, finding 1). This is exactly
+// the shape of the production bug — buildDesiredState computes desired
+// state once to materialize sessions
+// (ComputePoolDesiredStatesWithDemandTracedWithSeed) and loadDemandSnapshot
+// computes it again on the same tick's inputs to get the wake-demand count
+// (ComputePoolDesiredStatesTracedWithSeed) — so both call shapes are
+// exercised here with a shared seed. Also proves the test is not vacuous by
+// checking that at least one of two arbitrary distinct seeds produces a
+// DIFFERENT split for this same oversubscribed demand — if every seed
+// produced the same split, agreement would be trivial rather than proving
+// the seed is actually threaded through.
+func TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed(t *testing.T) {
+	wsMax := 3
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &wsMax},
+		Agents: []config.Agent{
+			poolAgent("a", "", nil, 0),
+			poolAgent("b", "", nil, 0),
+		},
+	}
+	scaleCheck := map[string]int{"a": 2, "b": 2}
+
+	splitAtSeed := func(seed uint64) map[string]int {
+		buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, nil))
+		wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, nil))
+		if buildPlan["a"] != wakePlan["a"] || buildPlan["b"] != wakePlan["b"] {
+			t.Fatalf("seed %d: buildDesiredState's create plan %#v disagrees with loadDemandSnapshot's wake plan %#v on the same tick", seed, buildPlan, wakePlan)
+		}
+		return buildPlan
+	}
+
+	splitAtSeed(0)
+	splitAtSeed(1)
+
+	splitA := splitAtSeed(0)
+	splitB := splitAtSeed(1)
+	if splitA["a"] == splitB["a"] && splitA["b"] == splitB["b"] {
+		t.Fatalf("seed 0 and seed 1 produced the identical split %#v; this test needs demand that actually rotates with the seed to be meaningful", splitA)
+	}
+}
+
+// TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow pins that
+// new-tier requests do NOT thread scaleCheckDemand.Priorities onto
+// BeadPriority yet. Real bead priority is ascending-urgent
+// (doltlite_read_store.go:396 ASC), but applyNestedCaps' admission comparator
+// sorts BeadPriority descending, so threading it here would let the least
+// urgent bead win a binding cap and let anonymous new-tier requests (store
+// default priority 2) evict already-spent in-flight requests (priority 0)
+// every tick. gcw-tuwx8.5 owns inverting the comparator; only after that
+// lands should this thread demand.Priorities (gcw-tuwx8.4 PR #126 review).
+func TestComputePoolDesiredStates_NewTierIgnoresDemandPrioritiesForNow(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
+	}
+	scaleCheck := map[string]int{"claude": 2}
+	demand := map[string]scaleCheckDemand{
+		"claude": {
+			Count:       2,
+			WorkBeadIDs: []string{"w-high", "w-low"},
+			Priorities:  map[string]int{"w-high": 9, "w-low": 1},
+		},
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTraced(cfg, nil, nil, nil, scaleCheck, demand, nil)
+	if len(result) != 1 || len(result[0].Requests) != 2 {
+		t.Fatalf("expected 1 template with 2 requests, got %#v", result)
+	}
+	for _, req := range result[0].Requests {
+		if req.BeadPriority != 0 {
+			t.Errorf("request %+v: BeadPriority = %d, want 0 (threading deferred to gcw-tuwx8.5)", req, req.BeadPriority)
+		}
 	}
 }

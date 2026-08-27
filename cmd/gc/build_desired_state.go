@@ -150,6 +150,18 @@ type DesiredStateResult struct {
 	// orphaned.
 	SessionQueryPartial bool
 	BeaconTime          time.Time
+	// PoolNewDemandInterleaveSeed is the rotation seed this call drew for
+	// ComputePoolDesiredStatesWithDemandTracedWithSeed's round-robin
+	// interleave of contending templates' new-tier demand. A caller that
+	// must compute pool desired state again on the SAME tick's inputs (the
+	// wake-demand count computed separately from the create plan; see the
+	// doc comment on ComputePoolDesiredStates) must reuse this seed via
+	// ComputePoolDesiredStatesTracedWithSeed/ComputePoolDesiredStatesWithSeed
+	// rather than drawing a fresh one, or the two calls can disagree about
+	// which sessions exist versus which should be awake on one tick
+	// (gcw-tuwx8.4 PR #126 review cycle 3). Zero when the store-nil branch
+	// never called into pool desired-state computation at all.
+	PoolNewDemandInterleaveSeed uint64
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -182,6 +194,11 @@ type scaleCheckDemand struct {
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
 	ParentSIDs map[string]string
+	// Priorities maps work-bead id → the driving bead's priority, carried onto
+	// the new-tier SessionRequest.BeadPriority so the applyNestedCaps
+	// comparator can differentiate between new-tier requests instead of
+	// treating them all as priority 0 (gcw-tuwx8.4).
+	Priorities map[string]int
 }
 
 var (
@@ -406,6 +423,7 @@ func buildDesiredStateWithSessionBeads(
 		return DesiredStateResult{}
 	}
 
+	var poolNewDemandInterleaveSeed uint64
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 
@@ -858,7 +876,8 @@ func buildDesiredStateWithSessionBeads(
 			bp.poolRespawnBackoffTemplates = poolRespawnBackoffTemplates[0]
 		}
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolNewDemandInterleaveSeed = nextPoolNewDemandInterleaveSeed()
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, poolNewDemandInterleaveSeed, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1087,6 +1106,7 @@ func buildDesiredStateWithSessionBeads(
 		NamedSessionRoutedDemand:           namedRoutedDemand,
 		StoreQueryPartial:                  storePartial,
 		BeaconTime:                         beaconTime,
+		PoolNewDemandInterleaveSeed:        poolNewDemandInterleaveSeed,
 	}
 }
 
@@ -1732,6 +1752,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				}
 				entry.ParentSIDs[b.ID] = parentSID
 			}
+			if entry.Priorities == nil {
+				entry.Priorities = make(map[string]int)
+			}
+			entry.Priorities[b.ID] = beadPriority(b)
 			demand[template] = entry
 		}
 	}
@@ -1761,6 +1785,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.Priorities == nil && len(incoming.Priorities) > 0 {
+		existing.Priorities = make(map[string]int, len(incoming.Priorities))
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
@@ -1781,6 +1808,11 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
+			}
+		}
+		if incoming.Priorities != nil {
+			if p, ok := incoming.Priorities[id]; ok {
+				existing.Priorities[id] = p
 			}
 		}
 	}
