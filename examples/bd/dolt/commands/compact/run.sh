@@ -1396,11 +1396,6 @@ mail_compact_quarantine_alert() {
   return 1
 }
 
-send_compact_quarantine_alert() {
-  emit_compact_quarantine_event "$@"
-  mail_compact_quarantine_alert "$@"
-}
-
 # marker_should_notify DIR DB REASON BACKSTOP_SECS
 #   Fail-open dedup+backstop check: EMIT (return 0) unless DIR/DB's marker
 #   last_notified_reason already matches REASON exactly AND fewer than
@@ -2831,11 +2826,7 @@ bare_gc_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    report_existing_quarantine "$db"
     return 1
   fi
 
