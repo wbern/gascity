@@ -2811,16 +2811,20 @@ type DaemonConfig struct {
 	// just for a different reason. Operators who want the throttle can set
 	// it; nobody gets it by surprise.
 	AutoReapClosedBeadWorktreesMaxLoadPercentValue *int `toml:"auto_reap_closed_bead_worktrees_max_load_percent,omitempty" jsonschema:"default=0"`
-	// PoolNewDemandMaxLoadPercent vetoes NEW pool demand — never resume,
-	// wake, or any other tier — while the host's 1-minute load average
-	// exceeds this percentage of its CPU count. It is a veto, not a count:
-	// a breached ceiling zeroes every template's new-session demand for the
-	// tick rather than deriving a reduced number from load, because on a
-	// host where daemons and other rigs already own most of the baseline
-	// load, "cores minus load" measures spare capacity after everything
-	// else, not this pool's marginal headroom, and can sit at zero
-	// indefinitely on an idle-of-pool-sessions host. Nil (unset) defaults to
-	// DefaultPoolNewDemandMaxLoadPercent. Zero disables the guard.
+	// PoolNewDemandMaxLoadPercent vetoes anonymous NEW pool demand — never
+	// resume, wake, or any session the pool has already created and is
+	// mid-starting — while the host's 1-minute load average exceeds this
+	// percentage of its CPU count, city-wide across every pool template
+	// (this is a DaemonConfig field, not a per-agent one). It is a veto, not
+	// a count: a breached ceiling declines every template's *anonymous*
+	// new-session demand for the tick rather than deriving a reduced number
+	// from load, because on a host where daemons and other rigs already own
+	// most of the baseline load, "cores minus load" measures spare capacity
+	// after everything else, not this pool's marginal headroom, and can sit
+	// at zero indefinitely on an idle-of-pool-sessions host. Already-spent
+	// in-flight demand (a session already created, pending_create_claim or
+	// creating) is not new load and survives the veto. Nil (unset) defaults
+	// to DefaultPoolNewDemandMaxLoadPercent. Zero disables the guard.
 	//
 	// The default is 0 — DISABLED — for the same reason as the worktree
 	// reaper's load guard: an enabled-by-default ceiling would veto new

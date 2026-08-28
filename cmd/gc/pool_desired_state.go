@@ -393,18 +393,31 @@ func computePoolDesiredStates(
 	}
 	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
 
-	// New-demand load veto: zero every template's new-session demand for this
-	// tick while the host's 1-minute load average exceeds the configured
-	// ceiling. This clamps the built-in demand signal in place rather than
-	// recomputing it, and applies only to new demand — resume, wake, and
-	// every other tier above are already computed and unaffected. An
-	// unreadable load proceeds (fail-open), matching the worktree reaper's
-	// load guard: a probe failure must not freeze new-session creation.
+	// New-demand load veto: while the host's 1-minute load average exceeds
+	// the configured ceiling, decline every template's *anonymous* new
+	// demand for this tick. This clamps the built-in demand signal in place
+	// rather than recomputing it, and applies only to demand that would add
+	// load — resume, wake, and already-in-flight new-tier requests (sessions
+	// already created and mid-start, tracked in inFlightNewRequests below)
+	// are unaffected, since re-admitting an already-spent slot does not add
+	// load. An unreadable load proceeds (fail-open), matching the worktree
+	// reaper's load guard: a probe failure must not freeze new-session
+	// creation.
+	newDemandVetoed := false
 	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
 		if load, err := poolNewDemandLoadAverageFn(); err == nil {
 			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
 			if load > ceiling {
-				scaleCheckCounts = make(map[string]int, len(scaleCheckCounts))
+				newDemandVetoed = true
+				if trace != nil {
+					trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
+						"load":              load,
+						"max_load_percent":  pct,
+						"num_cpu":           runtime.NumCPU(),
+						"ceiling":           ceiling,
+						"templates_at_risk": len(scaleCheckCounts),
+					})
+				}
 			}
 		}
 	}
@@ -430,8 +443,16 @@ func computePoolDesiredStates(
 				continue
 			}
 			template := agent.QualifiedName()
-			scaleCount, ok := scaleCheckCounts[template]
-			if !ok || scaleCount <= 0 {
+			scaleCount := scaleCheckCounts[template]
+			templateInFlight := inFlightNewRequests[template]
+			if newDemandVetoed {
+				// Anonymous new demand is declined under load pressure, but
+				// in-flight requests represent sessions already created and
+				// mid-start — already-spent capacity, not new load — so they
+				// remain admissible up to their own count.
+				scaleCount = len(templateInFlight)
+			}
+			if scaleCount <= 0 {
 				continue
 			}
 			if _, ok := aliasHeldTemplates[template]; ok {
@@ -450,7 +471,7 @@ func computePoolDesiredStates(
 				template:   template,
 				scaleCount: scaleCount,
 				ownCap:     capNewDemandCount(limits, resumeUsage, agent, scaleCount),
-				inFlight:   inFlightNewRequests[template],
+				inFlight:   templateInFlight,
 			})
 		}
 
