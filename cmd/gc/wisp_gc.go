@@ -333,15 +333,12 @@ func isWispGCRootBead(b beads.Bead) bool {
 // never be stripped out from under its (possibly still-open) owner, even
 // when that owner never stamped gc.root_bead_id on it.
 //
-// downDeps, when non-nil, supplies every candidate's DOWN edges pre-fetched
-// by wispGCBatchDownDeps in one batched read, and the caller is trusted to
-// have included b.ID among the ids that batch call requested — so a miss
-// within a non-nil map means b genuinely has no down edges, not "unknown,
-// go fetch it." (A batch's absent-entry-means-none contract is documented on
-// beads.DependencyBatchLister; per-anchor DepList instead answers a missing
-// dep list with an empty slice and no error, so the two lookup paths already
-// agree on what "no edges" looks like.) A nil map falls back to fetching b's
-// own down edges directly.
+// downDeps, when non-nil, supplies a candidate's DOWN edges pre-fetched by the
+// caller, keyed by id, trusting that a miss within a non-nil map means b
+// genuinely has no down edges rather than "unknown, go fetch it." Callers that
+// cannot make that coverage guarantee must pass nil; reapOrphanedClosedWisps
+// always does (see the comment on its downDeps declaration for why an earlier
+// batched-prefetch attempt was reverted).
 func hasParentChildDepEdge(store beads.Store, b beads.Bead, downDeps map[string][]beads.Dep) (bool, error) {
 	if b.ParentID != "" {
 		return true, nil
@@ -375,58 +372,6 @@ func hasParentChildDepEdge(store beads.Store, b beads.Bead, downDeps map[string]
 		}
 	}
 	return false, nil
-}
-
-// wispGCBatchDownDeps fetches the DOWN edges for every id in one round trip
-// when the backing store supports it (beads.DependencyBatchLister), falling
-// back to one DepList("down") call per id otherwise. Used exclusively by the
-// ENFORCE path of reapOrphanedClosedWisps: batching the per-row edge lookups
-// there is what keeps enforcement efficient even though its own batch cap
-// already bounds delete attempts per tick (see wispGCReapOrphanBatchCap).
-func wispGCBatchDownDeps(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	if batch, ok := beads.DepListBatchFor(store); ok {
-		deps, err := batch.DepListBatch(ids)
-		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
-			if err != nil {
-				return nil, fmt.Errorf("batch listing down deps for orphan candidates: %w", err)
-			}
-			if deps == nil {
-				deps = make(map[string][]beads.Dep, len(ids))
-			}
-			// A batch result is only trustworthy as "absence means no edges"
-			// when it covers every id that was asked for. Some
-			// DependencyBatchLister implementations (e.g. BdStore.DepListBatch,
-			// which collapses a not-found anchor into an empty map for the
-			// WHOLE batch with no error) can return coverage narrower than the
-			// request without signaling a failure. Reading that gap as "no
-			// down edges" would silently defeat hasParentChildDepEdge's safety
-			// gate on an irreversible delete path, so fall back to a
-			// per-anchor DepList for exactly the ids the batch didn't cover.
-			for _, id := range ids {
-				if _, ok := deps[id]; ok {
-					continue
-				}
-				d, err := store.DepList(id, "down")
-				if err != nil {
-					return nil, fmt.Errorf("listing down dependencies for %q: %w", id, err)
-				}
-				deps[id] = d
-			}
-			return deps, nil
-		}
-	}
-	deps := make(map[string][]beads.Dep, len(ids))
-	for _, id := range ids {
-		d, err := store.DepList(id, "down")
-		if err != nil {
-			return nil, fmt.Errorf("listing down dependencies for %q: %w", id, err)
-		}
-		deps[id] = d
-	}
-	return deps, nil
 }
 
 // closedWispGCEntries lists every CLOSED root across the full wisp GC root
@@ -492,38 +437,6 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	enforce := reapOrphansEnforced()
 
-	// downDeps batches the edge lookup that gates the rootless branch below.
-	// It is only populated when enforcing: hasParentChildDepEdge costs 1
-	// store.Children plus (without this) 2 store.DepList calls per rootless
-	// candidate, and a long-closed backlog can be the entire wisp-tier
-	// population (10k+ rows observed live). Computing it unconditionally would
-	// make dry-run — the default, since GC_WISP_GC_REAP_ORPHANS defaults
-	// unset — cost as much as enforcement on every tick, forever, since
-	// dry-run never shrinks the backlog it just measured. Dry-run instead
-	// reports the rootless population as an UPPER BOUND on what enforcement
-	// would reap (see the decision assignment below) without paying for the
-	// edge proof at all.
-	var downDeps map[string][]beads.Dep
-	if enforce {
-		var rootlessIDs []string
-		for _, c := range candidates {
-			if c.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
-				continue
-			}
-			if c.CreatedAt.IsZero() || !c.CreatedAt.Before(cutoff) {
-				continue
-			}
-			if isWispGCRootBead(c) {
-				continue
-			}
-			rootlessIDs = append(rootlessIDs, c.ID)
-		}
-		downDeps, err = wispGCBatchDownDeps(store, rootlessIDs)
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	// rootCollectible caches the per-root reap decision so many siblings
 	// sharing one dead root cost a single Get.
 	rootCollectible := make(map[string]bool)
@@ -559,11 +472,21 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 				continue
 			}
 			if !enforce {
-				// Dry-run: count as an upper bound without proving the edge —
-				// see the downDeps comment above.
+				// Dry-run: count as an upper bound without proving the edge.
 				decision = true
 			} else {
-				hasEdge, edgeErr := hasParentChildDepEdge(store, c, downDeps)
+				// nil downDeps: read this row's edges directly. A prior batched
+				// prefetch across the whole rootless backlog was reverted — the
+				// batch cost MORE I/O than not batching at all on every
+				// production store, because DependencyBatchLister's "held
+				// anchor with no edges gets an entry" contract is honored only
+				// by MemStore/FileStore. On BdStore/DoltliteReadStore a
+				// rootless plain task with no edges — the exact shape this
+				// sweep targets — comes back uncovered and falls back to a
+				// per-anchor read anyway, while the batch request itself was
+				// sized to the entire backlog rather than the ≤batchCap rows a
+				// tick can actually visit (PR #129 review, round 2).
+				hasEdge, edgeErr := hasParentChildDepEdge(store, c, nil)
 				if edgeErr != nil {
 					collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
 					continue
