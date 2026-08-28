@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -265,6 +266,70 @@ func TestFilterAssignedWorkBeadsForPoolDemandLeavesUnmatchedInstanceSuffixAlone(
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want out-of-range instance suffix left unmatched and dropped", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandDropsDeferredRoutedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	future := time.Now().UTC().Add(720 * time.Hour)
+	work := []beads.Bead{
+		{
+			ID:       "deferred-routed-anchor",
+			Status:   "open",
+			Assignee: "worker-dead",
+			Metadata: map[string]string{
+				"gc.routed_to": "worker",
+			},
+			DeferUntil: &future,
+		},
+		{
+			ID:       "live-routed-work",
+			Status:   "in_progress",
+			Assignee: "worker-dead",
+			Metadata: map[string]string{
+				"gc.routed_to": "worker",
+			},
+		},
+	}
+
+	got, gotRefs := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{"", ""})
+
+	if len(got) != 1 || got[0].ID != "live-routed-work" {
+		t.Fatalf("filtered work = %#v, want only live-routed-work (deferred anchor dropped)", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "" {
+		t.Fatalf("filtered store refs = %#v, want live-routed-work's aligned ref", gotRefs)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	work := []beads.Bead{{
+		ID:       "elapsed-defer-work",
+		Status:   "open",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+		DeferUntil: &past,
+	}}
+
+	got, gotRefs := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "elapsed-defer-work" {
+		t.Fatalf("filtered work = %#v, want elapsed-defer bead preserved as demand", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "" {
+		t.Fatalf("filtered store refs = %#v, want elapsed-defer-work's aligned ref", gotRefs)
 	}
 }
 
