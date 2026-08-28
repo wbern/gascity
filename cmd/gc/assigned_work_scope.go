@@ -155,7 +155,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	filteredStoreRefs := make([]string, 0, len(assignedWorkStoreRefs))
 	now := time.Now().UTC()
 	for i, wb := range assignedWorkBeads {
-		if beads.IsDeferred(wb, now) {
+		if wb.Status == "open" && beads.IsDeferred(wb, now) {
 			continue
 		}
 		template := routedToOrLegacyWorkflowTarget(wb)

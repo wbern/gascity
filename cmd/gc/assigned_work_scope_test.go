@@ -333,6 +333,33 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *test
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsDeferredInProgressRoutedBead(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	work := []beads.Bead{{
+		ID:       "deferred-in-progress-work",
+		Status:   "in_progress",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+		DeferUntil: &future,
+	}}
+
+	got, gotRefs := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "deferred-in-progress-work" {
+		t.Fatalf("filtered work = %#v, want deferred in-progress work preserved as resume demand", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "" {
+		t.Fatalf("filtered store refs = %#v, want deferred in-progress-work's aligned ref", gotRefs)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
