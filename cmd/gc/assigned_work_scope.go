@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -140,7 +141,11 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	now := time.Now().UTC()
 	for i, wb := range assignedWorkBeads {
+		if beads.IsDeferred(wb, now) {
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
