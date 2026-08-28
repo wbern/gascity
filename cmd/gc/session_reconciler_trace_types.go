@@ -88,6 +88,7 @@ const (
 	TraceSitePoolInFlightReuse              TraceSiteCode = "reconciler.pool.inflight_reuse"
 	TraceSitePoolWakeKnownIdentity          TraceSiteCode = "reconciler.pool.wake_known_identity"
 	TraceSitePoolNewDemandCap               TraceSiteCode = "reconciler.pool.new_demand_cap"
+	TraceSitePoolNewDemandLoadVeto          TraceSiteCode = "reconciler.pool.new_demand_load_veto"
 	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
@@ -168,6 +169,7 @@ const (
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
+	TraceReasonHostLoadVeto           TraceReasonCode = "host_load_veto"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 	TraceReasonStartupUninitialized   TraceReasonCode = "startup_uninitialized"
 

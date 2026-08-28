@@ -619,7 +619,7 @@ func TestComputePoolDesiredStates_TraceListsActiveCapacityBlockers(t *testing.T)
 	sessions := []beads.Bead{sessionBead("sess-active", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 1}, nil, 0, poolNewDemandLoadVeto{}, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].Tier != "resume" {
 		t.Fatalf("result = %#v, want only the active resume request under max_active_sessions=1", result)
@@ -663,7 +663,7 @@ func TestComputePoolDesiredStates_TraceBlamesActualBindingCapNotOwnCeiling(t *te
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"claude": 8}, nil, 0, poolNewDemandLoadVeto{}, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("result = %#v, want 2 requests capped by the workspace max", result)
@@ -1232,7 +1232,7 @@ func TestComputePoolDesiredStates_CapsNewDemandBeforeMaterializingRequests(t *te
 	sessions := []beads.Bead{sessionBead("sess-1", "open")}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 10}, nil, 0, poolNewDemandLoadVeto{}, trace)
 
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
@@ -1685,7 +1685,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTrace(t *testing.T) {
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, poolNewDemandLoadVeto{}, trace)
 
 	if len(result) != 1 || len(result[0].Requests) != 5 {
 		t.Fatalf("result = %#v, want five desired requests", result)
@@ -1718,7 +1718,7 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 	trace := newPoolDesiredStateTestTrace("claude")
 
-	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 5}, nil, 0, poolNewDemandLoadVeto{}, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want no desired requests when workspace cap is exhausted", result)
@@ -2219,8 +2219,8 @@ func TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed(t *testing.T) {
 	scaleCheck := map[string]int{"a": 2, "b": 2}
 
 	splitAtSeed := func(seed uint64) map[string]int {
-		buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, nil))
-		wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, nil))
+		buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, poolNewDemandLoadVeto{}, nil))
+		wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, poolNewDemandLoadVeto{}, nil))
 		if buildPlan["a"] != wakePlan["a"] || buildPlan["b"] != wakePlan["b"] {
 			t.Fatalf("seed %d: buildDesiredState's create plan %#v disagrees with loadDemandSnapshot's wake plan %#v on the same tick", seed, buildPlan, wakePlan)
 		}
