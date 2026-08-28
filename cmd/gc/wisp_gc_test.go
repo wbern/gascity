@@ -1163,6 +1163,68 @@ func TestWispGC_HasParentChildDepEdgeUsesBatchedDownDeps(t *testing.T) {
 	}
 }
 
+// partialBatchStore wraps gcTestStore to simulate a Store whose DepListBatch
+// silently degrades to a partial answer without failing the call — mirroring
+// BdStore.DepListBatch's isBdNotFound collapse to an empty map for the WHOLE
+// batch (bdstore.go:2839-2849) when any single anchor in the batch cannot be
+// found. Its own per-anchor DepList stays fully correct, so this isolates the
+// coverage-check fallback in wispGCBatchDownDeps from the underlying
+// per-anchor read path (PR #129 review, merge-blocking finding 1).
+type partialBatchStore struct {
+	*gcTestStore
+	missing map[string]bool
+}
+
+func (s *partialBatchStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	deps, err := s.gcTestStore.DepListBatch(ids)
+	if err != nil {
+		return nil, err
+	}
+	for id := range s.missing {
+		delete(deps, id)
+	}
+	return deps, nil
+}
+
+// TestWispGC_BatchDownDepsFallsBackOnPartialCoverage proves wispGCBatchDownDeps
+// does not trust a batch result that omits a requested id as "no down edges" —
+// it must fall back to a per-anchor DepList for exactly the uncovered ids. This
+// is the fix for PR #129's merge-blocking review finding: BdStore.DepListBatch
+// degrades a not-found anchor into a whole-batch empty map with no error, which
+// previously made every rootless candidate in the tick read as edge-free and
+// eligible for reaping, silently defeating the safety gate on an irreversible
+// delete path.
+func TestWispGC_BatchDownDepsFallsBackOnPartialCoverage(t *testing.T) {
+	now := time.Now()
+	parent := makeGCBead("dep-parent-partial", now.Add(-2*time.Hour), "closed", "task")
+	child := makeGCBeadWithMetadata("dep-child-partial", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	child.Ephemeral = true
+	base := newGCStore([]beads.Bead{parent, child})
+	if err := base.DepAdd("dep-child-partial", "dep-parent-partial", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(dep-child-partial->dep-parent-partial): %v", err)
+	}
+	store := &partialBatchStore{gcTestStore: base, missing: map[string]bool{"dep-child-partial": true}}
+
+	downDeps, err := wispGCBatchDownDeps(store, []string{"dep-child-partial"})
+	if err != nil {
+		t.Fatalf("wispGCBatchDownDeps: %v", err)
+	}
+	if _, ok := downDeps["dep-child-partial"]; !ok {
+		t.Fatalf("downDeps = %v, want an entry for dep-child-partial; a batch coverage gap must be filled by per-anchor fallback, not treated as \"no edges\"", downDeps)
+	}
+	if base.depListCalls != 1 {
+		t.Fatalf("depListCalls = %d, want 1 (fallback DepList for exactly the uncovered id)", base.depListCalls)
+	}
+
+	hasEdge, err := hasParentChildDepEdge(store, child, downDeps)
+	if err != nil {
+		t.Fatalf("hasParentChildDepEdge: %v", err)
+	}
+	if !hasEdge {
+		t.Fatal("hasEdge = false, want true; a real parent-child edge must not be lost to a batch coverage gap")
+	}
+}
+
 func TestWispGC_ReapDeleteErrorSurfacedAndContinues(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	now := time.Now()

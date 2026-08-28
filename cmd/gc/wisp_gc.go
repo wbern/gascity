@@ -396,6 +396,25 @@ func wispGCBatchDownDeps(store beads.Store, ids []string) (map[string][]beads.De
 			if deps == nil {
 				deps = make(map[string][]beads.Dep, len(ids))
 			}
+			// A batch result is only trustworthy as "absence means no edges"
+			// when it covers every id that was asked for. Some
+			// DependencyBatchLister implementations (e.g. BdStore.DepListBatch,
+			// which collapses a not-found anchor into an empty map for the
+			// WHOLE batch with no error) can return coverage narrower than the
+			// request without signaling a failure. Reading that gap as "no
+			// down edges" would silently defeat hasParentChildDepEdge's safety
+			// gate on an irreversible delete path, so fall back to a
+			// per-anchor DepList for exactly the ids the batch didn't cover.
+			for _, id := range ids {
+				if _, ok := deps[id]; ok {
+					continue
+				}
+				d, err := store.DepList(id, "down")
+				if err != nil {
+					return nil, fmt.Errorf("listing down dependencies for %q: %w", id, err)
+				}
+				deps[id] = d
+			}
 			return deps, nil
 		}
 	}
