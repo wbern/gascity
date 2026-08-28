@@ -795,7 +795,11 @@ timeout = "30s"
 		t.Fatal("missing workflow finalizer")
 	}
 
-	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
+	// The root's edge to its own finalizer is "tracks", not "blocks": the
+	// finalizer is what closes the root, so a "blocks" edge would leave the
+	// root permanently unclosable (ga-a6zy9). See ba85a40e2 (#5202).
+	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "tracks")
+	assertLacksDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.design", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.implement.run.1", "blocks")
@@ -970,7 +974,16 @@ needs = ["setup"]
 		if dep.StepID == "graph-demo.work" && dep.DependsOnID == "graph-demo.setup" && dep.Type == "blocks" {
 			foundBlocks = true
 		}
-		if dep.StepID == "graph-demo" && dep.DependsOnID == "graph-demo.workflow-finalize" && dep.Type == "blocks" {
+		if dep.StepID == "graph-demo" && dep.DependsOnID == "graph-demo.workflow-finalize" {
+			// The root's edge to its own finalizer must be "tracks", not
+			// "blocks": the finalizer is what closes the root
+			// (processWorkflowFinalize), so a "blocks" edge here would leave
+			// the root permanently unclosable — the store refuses to close a
+			// blocked issue, and the finalizer is the only bead that could
+			// ever clear the blocker (ga-a6zy9). See ba85a40e2 (#5202).
+			if dep.Type != "tracks" {
+				t.Fatalf("root -> workflow-finalize dep type = %q, want tracks", dep.Type)
+			}
 			foundRootFinalize = true
 		}
 	}
@@ -978,7 +991,7 @@ needs = ["setup"]
 		t.Fatal("missing work -> setup blocks dep")
 	}
 	if !foundRootFinalize {
-		t.Fatal("missing root -> workflow-finalize blocks dep")
+		t.Fatal("missing root -> workflow-finalize dep")
 	}
 }
 
@@ -1084,7 +1097,11 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		if dep.StepID == cleanup.ID && dep.DependsOnID == body.ID && dep.Type == "blocks" {
 			foundCleanupDep = true
 		}
-		if dep.StepID == root.ID && dep.DependsOnID == finalizer.ID && dep.Type == "blocks" {
+		// The root's edge to its own finalizer is "tracks", not "blocks":
+		// the finalizer is what closes the root, so a "blocks" edge would
+		// leave the root permanently unclosable (ga-a6zy9). See ba85a40e2
+		// (#5202).
+		if dep.StepID == root.ID && dep.DependsOnID == finalizer.ID && dep.Type == "tracks" {
 			foundRootFinalize = true
 		}
 		if dep.StepID == finalizer.ID && dep.DependsOnID == body.ID && dep.Type == "blocks" {
@@ -1095,7 +1112,7 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		t.Fatalf("missing cleanup -> body blocks dep")
 	}
 	if !foundRootFinalize {
-		t.Fatalf("missing workflow root -> workflow-finalize blocks dep")
+		t.Fatalf("missing workflow root -> workflow-finalize tracks dep")
 	}
 	if !foundFinalizeBody {
 		t.Fatalf("missing workflow-finalize -> body blocks dep")

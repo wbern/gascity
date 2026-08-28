@@ -83,10 +83,14 @@ jobs:
         run: go test ./cmd/gc/ -run 'TestBuildDesiredState_ScaleFromZero' -count=1 -v
       # Whole packages, not a named list. The named lists above cannot catch a
       # regression in code written after they were authored: none of them ran a
-      # single test from the gcw-qap3.16 fix. These three are the bead/dispatch
-      # core, they are green on develop, and they run in well under a minute.
-      - name: Unit tests — bead store, bd dispatch, control dispatch
-        run: go test ./internal/beads/ ./internal/bddispatch/ ./internal/dispatch/ -count=1
+      # single test from the gcw-qap3.16 fix. These are the bead/dispatch/
+      # compile core, they are green on develop, and they run in well under a
+      # minute. internal/formula and internal/molecule joined this line via
+      # gcw-vmm00.51: those packages previously ran NOTHING in CI, so a
+      # formula-compiler regression test (e.g. gcw-vmm00.50) could pass
+      # locally and never execute here.
+      - name: Unit tests — bead store, bd dispatch, control dispatch, formula compiler, molecule graph
+        run: go test ./internal/beads/ ./internal/bddispatch/ ./internal/dispatch/ ./internal/formula/ ./internal/molecule/ -count=1
 
   # Static analysis belongs on a runner, not on a developer's pre-commit hook.
   # Whole-program linters (staticcheck/unused/unparam) over ~3,400 Go files
