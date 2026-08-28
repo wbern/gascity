@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,11 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+// poolNewDemandLoadAverageFn is the host load probe the new-demand veto
+// reads, indirected so it is stubbable without a process (mirrors
+// reapLoadAverageFn in bead_worktree_reaper.go).
+var poolNewDemandLoadAverageFn = oneMinuteLoadAverage
 
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
@@ -386,6 +392,22 @@ func computePoolDesiredStates(
 		}
 	}
 	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
+
+	// New-demand load veto: zero every template's new-session demand for this
+	// tick while the host's 1-minute load average exceeds the configured
+	// ceiling. This clamps the built-in demand signal in place rather than
+	// recomputing it, and applies only to new demand — resume, wake, and
+	// every other tier above are already computed and unaffected. An
+	// unreadable load proceeds (fail-open), matching the worktree reaper's
+	// load guard: a probe failure must not freeze new-session creation.
+	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
+		if load, err := poolNewDemandLoadAverageFn(); err == nil {
+			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
+			if load > ceiling {
+				scaleCheckCounts = make(map[string]int, len(scaleCheckCounts))
+			}
+		}
+	}
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests

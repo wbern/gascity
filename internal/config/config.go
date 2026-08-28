@@ -2811,6 +2811,23 @@ type DaemonConfig struct {
 	// just for a different reason. Operators who want the throttle can set
 	// it; nobody gets it by surprise.
 	AutoReapClosedBeadWorktreesMaxLoadPercentValue *int `toml:"auto_reap_closed_bead_worktrees_max_load_percent,omitempty" jsonschema:"default=0"`
+	// PoolNewDemandMaxLoadPercent vetoes NEW pool demand — never resume,
+	// wake, or any other tier — while the host's 1-minute load average
+	// exceeds this percentage of its CPU count. It is a veto, not a count:
+	// a breached ceiling zeroes every template's new-session demand for the
+	// tick rather than deriving a reduced number from load, because on a
+	// host where daemons and other rigs already own most of the baseline
+	// load, "cores minus load" measures spare capacity after everything
+	// else, not this pool's marginal headroom, and can sit at zero
+	// indefinitely on an idle-of-pool-sessions host. Nil (unset) defaults to
+	// DefaultPoolNewDemandMaxLoadPercent. Zero disables the guard.
+	//
+	// The default is 0 — DISABLED — for the same reason as the worktree
+	// reaper's load guard: an enabled-by-default ceiling would veto new
+	// demand pass after pass on a host whose baseline load already exceeds
+	// it, silently freezing new-session creation in a way indistinguishable
+	// from "no work". Operators who want the throttle set it explicitly.
+	PoolNewDemandMaxLoadPercentValue *int `toml:"pool_new_demand_max_load_percent,omitempty" jsonschema:"default=0"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2894,6 +2911,10 @@ const DefaultAutoReapClosedBeadWorktreesMaxLoadPercent = 0
 // when none is configured, matching the shell reaper's long-standing 0.15s.
 const DefaultAutoReapClosedBeadWorktreesPaceMillis = 150
 
+// DefaultPoolNewDemandMaxLoadPercent leaves the new-demand load veto off.
+// See the field comment for why an aggressive default would freeze spawns.
+const DefaultPoolNewDemandMaxLoadPercent = 0
+
 // AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
 // closed-bead worktree is eligible for reap classification. Defaults to
 // DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
@@ -2927,6 +2948,18 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMaxLoadPercent() int {
 		return 0
 	}
 	return *d.AutoReapClosedBeadWorktreesMaxLoadPercentValue
+}
+
+// PoolNewDemandMaxLoadPercent reports the load ceiling, as a percentage of CPU
+// count, above which new pool demand is vetoed for the tick. Zero disables it.
+func (d *DaemonConfig) PoolNewDemandMaxLoadPercent() int {
+	if d.PoolNewDemandMaxLoadPercentValue == nil {
+		return DefaultPoolNewDemandMaxLoadPercent
+	}
+	if *d.PoolNewDemandMaxLoadPercentValue < 0 {
+		return 0
+	}
+	return *d.PoolNewDemandMaxLoadPercentValue
 }
 
 // AutoReapClosedBeadWorktreesPace reports how long the reaper pauses after each
