@@ -2258,13 +2258,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		poolWorkBeads, _ := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-		// Reuse result's rotation seed: result already came from this same
-		// tick's buildDesiredState call (see the comment at the paired
-		// wake-count call site in loadDemandSnapshot).
+		// Reuse result's rotation seed and load-veto decision: result already
+		// came from this same tick's buildDesiredState call (see the comment
+		// at the paired wake-count call site in loadDemandSnapshot).
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(
-				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, trace)),
+				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3077,13 +3077,13 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolWorkBeads, _ := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
-	// Reuse wfcResult's rotation seed: this recomputes desired state on the
-	// same tick wfcResult already built it for (see the comment at the
-	// paired wake-count call site in loadDemandSnapshot).
+	// Reuse wfcResult's rotation seed and load-veto decision: this recomputes
+	// desired state on the same tick wfcResult already built it for (see the
+	// comment at the paired wake-count call site in loadDemandSnapshot).
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesWithSeed(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, wfcResult.PoolNewDemandInterleaveSeed)),
+			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, wfcResult.PoolNewDemandInterleaveSeed, wfcResult.PoolNewDemandLoadVeto)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -3296,17 +3296,20 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		poolWorkBeads, _ := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-		// Reuse result's rotation seed rather than drawing a fresh one: this
-		// call recomputes wake demand on the SAME inputs buildDesiredState
-		// just used to compute the create plan, on this same tick. A fresh
-		// seed could rotate the odd-remainder split differently between the
-		// two calls, so a session created for one template would not be
-		// counted as demanded for wake, and another template's wake demand
-		// would have no session behind it (gcw-tuwx8.4 PR #126 review cycle 3).
+		// Reuse result's rotation seed and load-veto decision rather than
+		// drawing fresh ones: this call recomputes wake demand on the SAME
+		// inputs buildDesiredState just used to compute the create plan, on
+		// this same tick. A fresh seed could rotate the odd-remainder split
+		// differently between the two calls, so a session created for one
+		// template would not be counted as demanded for wake, and another
+		// template's wake demand would have no session behind it
+		// (gcw-tuwx8.4 PR #126 review cycle 3). A fresh load probe has the
+		// same failure mode: the two calls could reach opposite veto
+		// verdicts on one tick (PR #131 review cycle 2).
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, trace)),
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)

@@ -162,6 +162,16 @@ type DesiredStateResult struct {
 	// (gcw-tuwx8.4 PR #126 review cycle 3). Zero when the store-nil branch
 	// never called into pool desired-state computation at all.
 	PoolNewDemandInterleaveSeed uint64
+	// PoolNewDemandLoadVeto is the PoolNewDemandMaxLoadPercent guard's
+	// decision for this tick, resolved once (see
+	// resolvePoolNewDemandLoadVeto) alongside PoolNewDemandInterleaveSeed.
+	// The host's 1-minute load average is a per-tick-varying input exactly
+	// like the rotation seed: a caller that recomputes pool desired state
+	// again on the SAME tick's inputs must reuse this decision via
+	// ComputePoolDesiredStatesTracedWithSeed/ComputePoolDesiredStatesWithSeed
+	// rather than probing the host again, or the two calls can reach
+	// opposite verdicts on one tick (PR #131 review cycle 2).
+	PoolNewDemandLoadVeto poolNewDemandLoadVeto
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -424,6 +434,7 @@ func buildDesiredStateWithSessionBeads(
 	}
 
 	var poolNewDemandInterleaveSeed uint64
+	var poolNewDemandLoadVetoDecision poolNewDemandLoadVeto
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 
@@ -877,7 +888,8 @@ func buildDesiredStateWithSessionBeads(
 		}
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolNewDemandInterleaveSeed = nextPoolNewDemandInterleaveSeed()
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, poolNewDemandInterleaveSeed, trace)
+		poolNewDemandLoadVetoDecision = resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, poolNewDemandInterleaveSeed, poolNewDemandLoadVetoDecision, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1107,6 +1119,7 @@ func buildDesiredStateWithSessionBeads(
 		StoreQueryPartial:                  storePartial,
 		BeaconTime:                         beaconTime,
 		PoolNewDemandInterleaveSeed:        poolNewDemandInterleaveSeed,
+		PoolNewDemandLoadVeto:              poolNewDemandLoadVetoDecision,
 	}
 }
 

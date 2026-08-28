@@ -52,8 +52,10 @@ func TestPoolNewDemandLoadGuard_RecordsTraceDecision(t *testing.T) {
 	load := float64(runtime.NumCPU()) * 10
 	stubPoolNewDemandLoad(t, load, nil)
 	trace := newPoolDesiredStateTestTrace("rig/claude")
+	scaleCheck := map[string]int{"rig/claude": 3}
+	loadVeto := resolvePoolNewDemandLoadVeto(cfg, scaleCheck)
 
-	result := computePoolDesiredStates(cfg, nil, nil, nil, map[string]int{"rig/claude": 3}, nil, 0, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, nil, scaleCheck, nil, 0, loadVeto, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want none: new demand should be vetoed under a breached load ceiling", result)
@@ -151,6 +153,53 @@ func TestPoolNewDemandLoadGuard_ResumeTierSurvivesVeto(t *testing.T) {
 	req := result[0].Requests[0]
 	if req.Tier != "resume" || req.SessionBeadID != "sess-live" {
 		t.Fatalf("request = %#v, want the live session's resume request untouched by the veto", req)
+	}
+}
+
+// TestPoolNewDemandLoadGuard_PairedCallsAgreeDespiteChangingLoad proves the
+// load-veto decision is threaded through both same-tick calls rather than
+// re-probed, exactly like TestComputePoolDesiredStates_PairedCallsAgreeOnSameSeed
+// proves for the rotation seed. buildDesiredState computes the create plan
+// via ComputePoolDesiredStatesWithDemandTracedWithSeed, then
+// loadDemandSnapshot recomputes wake demand on the same tick's inputs via
+// ComputePoolDesiredStatesTracedWithSeed — reusing result.PoolNewDemandLoadVeto
+// rather than probing the host again. If either call probed independently,
+// a load reading that crosses the ceiling BETWEEN the two calls (a real risk:
+// they are separated by real work, and each probe is its own subprocess that
+// can independently time out) would let one call admit anonymous demand the
+// other vetoes, so the create plan and the wake count would disagree on one
+// tick (PR #131 review cycle 2, finding 1).
+func TestPoolNewDemandLoadGuard_PairedCallsAgreeDespiteChangingLoad(t *testing.T) {
+	pct := 50
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+	}
+	cfg.Daemon.PoolNewDemandMaxLoadPercentValue = &pct
+	scaleCheck := map[string]int{"claude": 3}
+
+	// Resolve the veto decision ONCE, under load below the ceiling, exactly
+	// as buildDesiredState does before its first call this tick.
+	stubPoolNewDemandLoad(t, 0.01, nil)
+	loadVeto := resolvePoolNewDemandLoadVeto(cfg, scaleCheck)
+	if loadVeto.Vetoed {
+		t.Fatalf("loadVeto = %#v, want not vetoed at the resolution point", loadVeto)
+	}
+
+	// Now the host load crosses the ceiling. A caller that re-probed inside
+	// either call would see this and disagree with the other; a caller that
+	// threads the already-resolved decision (as both calls below do) will
+	// not, because neither call reads poolNewDemandLoadAverageFn again.
+	stubPoolNewDemandLoad(t, float64(runtime.NumCPU())*10, nil)
+
+	seed := nextPoolNewDemandInterleaveSeed()
+	buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, loadVeto, nil))
+	wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, loadVeto, nil))
+
+	if buildPlan["claude"] != wakePlan["claude"] {
+		t.Fatalf("create plan %#v disagrees with wake plan %#v on the same tick's threaded load-veto decision", buildPlan, wakePlan)
+	}
+	if buildPlan["claude"] != 3 {
+		t.Fatalf("claude = %d, want 3: the decision resolved BEFORE the load spike must hold for both calls", buildPlan["claude"])
 	}
 }
 

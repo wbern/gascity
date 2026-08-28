@@ -2812,19 +2812,26 @@ type DaemonConfig struct {
 	// it; nobody gets it by surprise.
 	AutoReapClosedBeadWorktreesMaxLoadPercentValue *int `toml:"auto_reap_closed_bead_worktrees_max_load_percent,omitempty" jsonschema:"default=0"`
 	// PoolNewDemandMaxLoadPercent vetoes anonymous NEW pool demand — never
-	// resume, wake, or any session the pool has already created and is
-	// mid-starting — while the host's 1-minute load average exceeds this
-	// percentage of its CPU count, city-wide across every pool template
-	// (this is a DaemonConfig field, not a per-agent one). It is a veto, not
-	// a count: a breached ceiling declines every template's *anonymous*
-	// new-session demand for the tick rather than deriving a reduced number
-	// from load, because on a host where daemons and other rigs already own
-	// most of the baseline load, "cores minus load" measures spare capacity
-	// after everything else, not this pool's marginal headroom, and can sit
-	// at zero indefinitely on an idle-of-pool-sessions host. Already-spent
+	// resume, or a session the pool has already created and is mid-starting
+	// — while the host's 1-minute load average exceeds this percentage of
+	// its CPU count, city-wide across every pool template (this is a
+	// DaemonConfig field, not a per-agent one). It is a veto, not a count: a
+	// breached ceiling declines every template's *anonymous* new-session
+	// demand for the tick rather than deriving a reduced number from load,
+	// because on a host where daemons and other rigs already own most of the
+	// baseline load, "cores minus load" measures spare capacity after
+	// everything else, not this pool's marginal headroom, and can sit at
+	// zero indefinitely on an idle-of-pool-sessions host. Already-spent
 	// in-flight demand (a session already created, pending_create_claim or
-	// creating) is not new load and survives the veto. Nil (unset) defaults
-	// to DefaultPoolNewDemandMaxLoadPercent. Zero disables the guard.
+	// creating) is not new load and survives the veto.
+	//
+	// Indirect effect on wake: a template whose demand this tick is purely
+	// anonymous has its desired count driven to 0 while vetoed, and a
+	// template's sleeping pool sessions only receive WakeConfig while their
+	// template's desired count is > 0 — so a veto also withholds the wake
+	// override from that template's idle sessions for the tick, even though
+	// no wake-tier *request* is itself vetoed. Nil (unset) defaults to
+	// DefaultPoolNewDemandMaxLoadPercent. Zero disables the guard.
 	//
 	// The default is 0 — DISABLED — for the same reason as the worktree
 	// reaper's load guard: an enabled-by-default ceiling would veto new

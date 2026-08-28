@@ -19,6 +19,40 @@ import (
 // reapLoadAverageFn in bead_worktree_reaper.go).
 var poolNewDemandLoadAverageFn = oneMinuteLoadAverage
 
+// poolNewDemandLoadVeto is the outcome of the PoolNewDemandMaxLoadPercent
+// guard for one tick, resolved once by resolvePoolNewDemandLoadVeto and
+// threaded through computePoolDesiredStates explicitly — never re-probed
+// inside it. The host's 1-minute load average is a per-tick-varying input
+// exactly like the interleave rotation seed: when a tick calls
+// computePoolDesiredStates more than once on the same inputs, both calls
+// must see the identical decision, or they can disagree about which demand
+// exists this tick (the same class of bug the seed threading exists to
+// prevent — gcw-tuwx8.4 PR #126 review cycle 3; this finding on this guard,
+// PR #131 review cycle 2).
+type poolNewDemandLoadVeto struct {
+	Vetoed  bool
+	Load    float64
+	Ceiling float64
+}
+
+// resolvePoolNewDemandLoadVeto probes the host load once and decides whether
+// this tick's anonymous new pool demand is vetoed. Callers that compute pool
+// desired state more than once on one tick's inputs must call this ONCE and
+// thread the result through every call (typically via a field on
+// DesiredStateResult, mirroring PoolNewDemandInterleaveSeed) rather than
+// letting computePoolDesiredStates probe internally.
+func resolvePoolNewDemandLoadVeto(cfg *config.City, scaleCheckCounts map[string]int) poolNewDemandLoadVeto {
+	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
+		if load, err := poolNewDemandLoadAverageFn(); err == nil {
+			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
+			if load > ceiling {
+				return poolNewDemandLoadVeto{Vetoed: true, Load: load, Ceiling: ceiling}
+			}
+		}
+	}
+	return poolNewDemandLoadVeto{}
+}
+
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
 	Template     string // agent template qualified name (e.g., "gascity/claude")
@@ -120,20 +154,21 @@ func ComputePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil)
 }
 
 // ComputePoolDesiredStatesWithSeed is ComputePoolDesiredStates for a caller
-// that must agree with another call on the same tick's rotation (see the
-// package doc above ComputePoolDesiredStates).
+// that must agree with another call on the same tick's rotation and load-veto
+// decision (see the package doc above ComputePoolDesiredStates).
 func ComputePoolDesiredStatesWithSeed(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -143,21 +178,23 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), trace)
 }
 
 // ComputePoolDesiredStatesTracedWithSeed is ComputePoolDesiredStatesTraced
 // for a caller that must agree with another call on the same tick's
-// rotation (see the package doc above ComputePoolDesiredStates).
+// rotation and load-veto decision (see the package doc above
+// ComputePoolDesiredStates).
 func ComputePoolDesiredStatesTracedWithSeed(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -169,15 +206,16 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), trace)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedWithSeed is
 // ComputePoolDesiredStatesWithDemandTraced for a caller that must agree with
-// another call on the same tick's rotation (see the package doc above
-// ComputePoolDesiredStates). This is the variant buildDesiredState uses: it
-// draws the seed itself, passes it here, and records it on DesiredStateResult
-// so the paired wake-count call later in the same tick can reuse it via
+// another call on the same tick's rotation and load-veto decision (see the
+// package doc above ComputePoolDesiredStates). This is the variant
+// buildDesiredState uses: it draws the seed and resolves the load veto
+// itself, passes both here, and records them on DesiredStateResult so the
+// paired wake-count call later in the same tick can reuse them via
 // ComputePoolDesiredStatesTracedWithSeed.
 func ComputePoolDesiredStatesWithDemandTracedWithSeed(
 	cfg *config.City,
@@ -187,9 +225,10 @@ func ComputePoolDesiredStatesWithDemandTracedWithSeed(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, loadVeto, trace)
 }
 
 // nextPoolNewDemandInterleaveSeed draws the next rotation seed for a
@@ -211,6 +250,7 @@ func computePoolDesiredStates(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	newDemandInterleaveSeed uint64,
+	loadVeto poolNewDemandLoadVeto,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
@@ -393,33 +433,36 @@ func computePoolDesiredStates(
 	}
 	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
 
-	// New-demand load veto: while the host's 1-minute load average exceeds
-	// the configured ceiling, decline every template's *anonymous* new
-	// demand for this tick. This clamps the built-in demand signal in place
-	// rather than recomputing it, and applies only to demand that would add
-	// load — resume, wake, and already-in-flight new-tier requests (sessions
-	// already created and mid-start, tracked in inFlightNewRequests below)
-	// are unaffected, since re-admitting an already-spent slot does not add
-	// load. An unreadable load proceeds (fail-open), matching the worktree
-	// reaper's load guard: a probe failure must not freeze new-session
-	// creation.
-	newDemandVetoed := false
-	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
-		if load, err := poolNewDemandLoadAverageFn(); err == nil {
-			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
-			if load > ceiling {
-				newDemandVetoed = true
-				if trace != nil {
-					trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
-						"load":              load,
-						"max_load_percent":  pct,
-						"num_cpu":           runtime.NumCPU(),
-						"ceiling":           ceiling,
-						"templates_at_risk": len(scaleCheckCounts),
-					})
-				}
-			}
-		}
+	// New-demand load veto: while the host's 1-minute load average exceeded
+	// the configured ceiling AT THE TIME THE CALLER RESOLVED loadVeto,
+	// decline every template's *anonymous* new demand for this tick. This
+	// clamps the built-in demand signal in place rather than recomputing it,
+	// and applies only to demand that would add load — the resume tier,
+	// wake-known-identity tier, and already-in-flight new-tier requests
+	// (sessions already created and mid-start, tracked in
+	// inFlightNewRequests below) are none of them vetoed as requests. This
+	// does have an indirect effect on wake for anonymous-only templates via
+	// PoolDesiredCounts going to 0 (see the field doc on
+	// PoolNewDemandMaxLoadPercent). An unreadable load proceeds (fail-open),
+	// matching the worktree reaper's load guard: a probe failure must not
+	// freeze new-session creation.
+	//
+	// The decision itself is resolved ONCE by the caller (see
+	// resolvePoolNewDemandLoadVeto) and passed in, never re-probed here: the
+	// host load is a per-tick-varying input exactly like the interleave
+	// rotation seed, and this function can run twice on one tick's inputs
+	// (build the create plan, then recompute wake demand). Probing internally
+	// let the two calls independently reach opposite verdicts on the same
+	// tick (PR #131 review cycle 2).
+	newDemandVetoed := loadVeto.Vetoed
+	if newDemandVetoed && trace != nil {
+		trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
+			"load":              loadVeto.Load,
+			"max_load_percent":  cfg.Daemon.PoolNewDemandMaxLoadPercent(),
+			"num_cpu":           runtime.NumCPU(),
+			"ceiling":           loadVeto.Ceiling,
+			"templates_at_risk": len(scaleCheckCounts),
+		})
 	}
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
@@ -443,17 +486,23 @@ func computePoolDesiredStates(
 				continue
 			}
 			template := agent.QualifiedName()
-			scaleCount := scaleCheckCounts[template]
+			scaleCount, ok := scaleCheckCounts[template]
+			if !ok || scaleCount <= 0 {
+				// Preserved from the pre-veto behavior: a template absent
+				// from this tick's scale_check demand does not participate
+				// here regardless of veto state, so enabling the guard can
+				// only ever REDUCE admissions for a template, never admit
+				// one that would not have been admitted anyway (PR #131
+				// review cycle 2, advisory finding 3).
+				continue
+			}
 			templateInFlight := inFlightNewRequests[template]
 			if newDemandVetoed {
 				// Anonymous new demand is declined under load pressure, but
 				// in-flight requests represent sessions already created and
 				// mid-start — already-spent capacity, not new load — so they
 				// remain admissible up to their own count.
-				scaleCount = len(templateInFlight)
-			}
-			if scaleCount <= 0 {
-				continue
+				scaleCount = minInt(scaleCount, len(templateInFlight))
 			}
 			if _, ok := aliasHeldTemplates[template]; ok {
 				continue
