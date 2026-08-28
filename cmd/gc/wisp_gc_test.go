@@ -1165,60 +1165,76 @@ func TestWispGC_DryRunBoundsProofToCap(t *testing.T) {
 	}
 }
 
-// TestWispGC_LinkedRowStampSkipsFutureProof is the regression for PR #129's
-// round-5 review, BLOCKING 1: an enforced tick's batch cap counts every
-// rootless row it proves, including ones that fail the proof and are
-// therefore never reaped — so a persistently-linked prefix (rows are always
-// visited oldest-first, per store.List's deterministic order) would otherwise
-// re-consume the entire cap on the SAME rows every tick, forever, and the
-// sweep would never progress past them to a genuinely unproven candidate.
-// Stamping beadmeta.WispGCLinkedMetadataKey on a row the first time it fails
-// the proof lets a later tick skip it for free instead of re-proving it, so a
-// second enforced tick's budget goes to a still-unproven row rather than
-// re-proving the same linked one.
-func TestWispGC_LinkedRowStampSkipsFutureProof(t *testing.T) {
+// TestWispGC_CursorRoundRobinsPastLinkedRow is the regression for PR #129's
+// round-5 finding (BLOCKING 1) and its round-6 fix: an enforced tick's batch
+// cap counts every rootless row it proves, including ones that fail the proof
+// and are therefore never reaped, so with no memory of what a prior tick
+// already examined, a persistently-linked row at a fixed position would
+// re-consume the entire cap on the SAME row every tick forever, starving
+// every row after it. wispGCReapCursor fixes this WITHOUT caching the reap
+// decision itself (round 5's stamp attempt cached the decision and review
+// found it could go permanently stale once a row's edge peers were deleted by
+// another GC path) — it only remembers where to RESUME looking, so a row that
+// fails the proof this tick is re-examined fresh, from scratch, the next time
+// the cursor wraps around to it. Two rootless rows, cap=1: tick 1 proves
+// linkedChild (first in insertion order) and the cursor advances past it;
+// tick 2's budget goes to reapableChild instead of re-proving linkedChild;
+// tick 3 wraps back around and re-proves linkedChild — proving the sweep
+// never permanently skips it, only defers it, unlike a cached stamp would.
+func TestWispGC_CursorRoundRobinsPastLinkedRow(t *testing.T) {
 	withReapOrphansEnforced(t, true)
 	withReapOrphanBatchCap(t, 1)
 	now := time.Now()
-	parent := makeGCBead("stamp-parent", now.Add(-2*time.Hour), "closed", "task")
-	linkedChild := makeGCBeadWithMetadata("stamp-linked-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	parent := makeGCBead("cursor-parent", now.Add(-2*time.Hour), "closed", "task")
+	linkedChild := makeGCBeadWithMetadata("cursor-linked-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
 	linkedChild.Ephemeral = true
-	unprovenChild := makeGCBeadWithMetadata("stamp-unproven-child", now.Add(-1*time.Hour).Add(-time.Minute), "closed", "task", map[string]string{})
-	unprovenChild.Ephemeral = true
-	store := newGCStore([]beads.Bead{parent, linkedChild, unprovenChild})
-	if err := store.DepAdd("stamp-linked-child", "stamp-parent", "parent-child"); err != nil {
-		t.Fatalf("DepAdd(stamp-linked-child->stamp-parent): %v", err)
+	reapableChild := makeGCBeadWithMetadata("cursor-reapable-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	reapableChild.Ephemeral = true
+	// Insertion order fixes rootlessQueue's order for MemStore: linkedChild
+	// then reapableChild.
+	store := newGCStore([]beads.Bead{parent, linkedChild, reapableChild})
+	if err := store.DepAdd("cursor-linked-child", "cursor-parent", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(cursor-linked-child->cursor-parent): %v", err)
 	}
 
-	// Tick 1: cap=1 lets exactly one rootless row be proven. stamp-linked-child
-	// sorts first (older CreatedAt), gets proven linked, and is stamped.
-	if _, err := reapOrphanedClosedWisps(store, now.Add(-30*time.Minute), wispGCReapOrphanBatchCap); err != nil {
+	// Tick 1: cap=1 lets exactly one rootless row be proven: linkedChild
+	// (first in queue order). It fails the proof (has an edge) and is not
+	// reaped, but the cursor still advances past it.
+	reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
+	if err != nil {
 		t.Fatalf("reapOrphanedClosedWisps (tick 1): %v", err)
 	}
-	got, err := store.Get("stamp-linked-child")
-	if err != nil {
-		t.Fatalf("Get(stamp-linked-child): %v", err)
+	if reaped != 0 {
+		t.Fatalf("reaped (tick 1) = %d, want 0; cursor-linked-child must never be reaped", reaped)
 	}
-	if got.Metadata[beadmeta.WispGCLinkedMetadataKey] == "" {
-		t.Fatal("stamp-linked-child not stamped after failing the proof on tick 1")
-	}
-	store.childrenCalls = 0
 
-	// Tick 2: same cap=1. If the stamp were not honored, the sweep would
-	// re-prove stamp-linked-child (deterministically first in list order) and
-	// never reach stamp-unproven-child. With the stamp honored, the budget
-	// goes to stamp-unproven-child instead, proving it reapable.
-	reaped, err := reapOrphanedClosedWisps(store, now.Add(-30*time.Minute), wispGCReapOrphanBatchCap)
+	// Tick 2: same cap=1. The cursor now resumes AFTER cursor-linked-child, so
+	// this tick's budget goes to cursor-reapable-child instead of re-proving
+	// the same linked row.
+	reaped, err = reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
 	if err != nil {
 		t.Fatalf("reapOrphanedClosedWisps (tick 2): %v", err)
 	}
 	if reaped != 1 {
-		t.Fatalf("reaped (tick 2) = %d, want 1; the stamp must free tick 2's budget for stamp-unproven-child", reaped)
+		t.Fatalf("reaped (tick 2) = %d, want 1; the cursor must free tick 2's budget for cursor-reapable-child", reaped)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "cursor-reapable-child")
+
+	// Tick 3: cursor-reapable-child is gone, so the queue is just
+	// cursor-linked-child again. The sweep re-proves it fresh — proving the
+	// row is only ever DEFERRED, never permanently skipped like a cached
+	// stamp would leave it once its edge peer is later deleted.
+	store.childrenCalls = 0
+	reaped, err = reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps (tick 3): %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped (tick 3) = %d, want 0; cursor-linked-child must still never be reaped", reaped)
 	}
 	if store.childrenCalls != 1 {
-		t.Fatalf("childrenCalls (tick 2) = %d, want 1 (only stamp-unproven-child; stamp-linked-child must be skipped for free)", store.childrenCalls)
+		t.Fatalf("childrenCalls (tick 3) = %d, want 1; cursor-linked-child must be re-proven fresh, not skipped via a cached decision", store.childrenCalls)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "stamp-unproven-child")
 }
 
 // TestWispGC_ReapCapsProofReadsOnNonReapableBacklog is the regression for PR
@@ -1920,6 +1936,20 @@ func withReapOrphanBatchCap(t *testing.T, batchCap int) {
 	prev := wispGCReapOrphanBatchCap
 	wispGCReapOrphanBatchCap = batchCap
 	t.Cleanup(func() { wispGCReapOrphanBatchCap = prev })
+	// A shrunk cap makes tests depend on exactly where the rootless proof
+	// pass resumes; reset the shared package-level cursor so no test's
+	// leftover position (from a prior test's bead IDs, which never match
+	// this test's) can affect where this test's window starts.
+	withWispGCReapCursor(t, "")
+}
+
+// withWispGCReapCursor sets the orphan reaper's rootless-proof resume cursor
+// for the duration of a test, restoring the prior value on cleanup.
+func withWispGCReapCursor(t *testing.T, cursor string) {
+	t.Helper()
+	prev := wispGCReapCursor
+	wispGCReapCursor = cursor
+	t.Cleanup(func() { wispGCReapCursor = prev })
 }
 
 // withClosurePurgeBatchCap overrides the per-sweep closed-root closure purge cap

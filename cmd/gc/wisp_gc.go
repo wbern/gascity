@@ -55,11 +55,36 @@ var closeAbandonedEnforced = func() bool {
 	return parseBoolEnv(os.Getenv(closeAbandonedEnv))
 }
 
-// wispGCReapOrphanBatchCap bounds how many orphaned closed wisp descendants a
-// single sweep will reap. The orphaned-closure backlog (~8k rows) drains over
-// roughly cap-sized batches across successive sweeps so no single tick does an
-// unbounded amount of deletion work. Package var so tests can shrink it.
+// wispGCReapOrphanBatchCap bounds, per sweep: DELETE ATTEMPTS (rooted and
+// rootless combined — counting failures, not just successful reaps, so a
+// failing delete backend can't attempt the whole backlog in one tick) and
+// rootless EDGE-PROOF READS (hasParentChildDepEdge calls, in both dry-run and
+// enforce — the expensive part of the rootless path). It does NOT bound the
+// cheap, Get-cached rooted-branch scan or the rootless-eligible count, both of
+// which always cover the full candidate list so dry-run's estimate is never
+// truncated (PR #129 review, round 6). The orphaned-closure backlog (~8k rows)
+// drains over roughly cap-sized proof batches across successive sweeps so no
+// single tick does an unbounded amount of I/O. Package var so tests can
+// shrink it.
 var wispGCReapOrphanBatchCap = 500
+
+// wispGCReapCursor is the in-memory resume position for reapOrphanedClosedWisps's
+// bounded rootless proof pass: the ID of the last rootless candidate examined
+// on a previous tick. It exists purely to round-robin the sweep's per-tick
+// proof budget across the full rootless population instead of the same prefix
+// every tick — nothing about a row's REAP DECISION is cached across ticks,
+// only where to resume looking, so losing this on process restart is safe
+// (the next tick's window simply starts over from the front of the rootless
+// list, which is still correct). Replaces an earlier persisted "proven
+// non-reapable" stamp that review found could go permanently stale: a
+// rootless row's structural link comes from ITS EDGE PEERS (a child row via
+// ParentID/Children, or a dep-edge target), and those peers can be deleted by
+// this same file's other GC paths (the rooted branch below,
+// deleteExpiredBeadClosure) after the stamp was written, with nothing to
+// invalidate it — turning the row permanently unreapable, the exact leak this
+// function exists to fix (PR #129 review, round 6, BLOCKING 1). Package var
+// so tests can reset it.
+var wispGCReapCursor string
 
 // wispGCClosurePurgeBatchCap bounds how many closed-root ownership closures a
 // single sweep will purge. Like wispGCReapOrphanBatchCap it caps DELETE
@@ -381,50 +406,46 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
 // list). Candidates are closed wisp-tier rows older than cutoff, split into
-// two disjoint shapes:
+// two disjoint shapes handled by two passes:
 //
-//   - Rows carrying a gc.root_bead_id pointer: reaped once the pointed-to root
-//     is provably collectible (see the root-Get safety note below).
-//   - Rootless rows (no gc.root_bead_id at all): upstream 599afe65b's fix.
-//     wispGCRootSelectors never matches a plain task, so if it is not itself
-//     root-shaped (isWispGCRootBead) and carries no structural parent-child
-//     edge (hasParentChildDepEdge), NOTHING else in the sweep will ever
-//     enumerate it — neither as a root (closedWispGCEntries) nor as an
-//     owned descendant (this function's own root-pointer branch). Such a row
-//     is reaped directly.
+//   - Rows carrying a gc.root_bead_id pointer (the ROOTED pass): reaped once
+//     the pointed-to root is provably collectible (see the root-Get safety
+//     note below). Get is cached per unique root, so this pass scans every
+//     rooted candidate unconditionally in both modes — cheap regardless of
+//     backlog size, and truncating it would understate dry-run's estimate
+//     (PR #129 review, round 6, BLOCKING 2).
+//   - Rootless rows (no gc.root_bead_id at all, the ROOTLESS pass): upstream
+//     599afe65b's fix. wispGCRootSelectors never matches a plain task, so if
+//     it is not itself root-shaped (isWispGCRootBead) and carries no
+//     structural parent-child edge (hasParentChildDepEdge), NOTHING else in
+//     the sweep will ever enumerate it — neither as a root
+//     (closedWispGCEntries) nor as an owned descendant (the rooted pass
+//     above). Such a row is reaped directly. Proving the edge costs 1
+//     store.Children plus up to 2 store.DepList calls, so this pass is
+//     bounded to batchCap rows per tick, resuming from wispGCReapCursor (see
+//     its doc comment) so the budget round-robins across the full rootless
+//     population instead of the same prefix forever.
 //
 // Safety: a rooted descendant is reaped only when its root is provably
 // collectible — the root Get returns ErrNotFound (root gone) or the root is
 // terminal (closed/tombstone). A live/open root, or any other (unreadable)
 // Get error, causes the descendant to be SKIPPED so an in-flight workflow is
-// never stripped of its closed steps. The per-root Get decision is cached so
-// many siblings sharing one dead root cost a single Get. When enforcing, a
-// rootless row is reaped only when hasParentChildDepEdge proves it carries no
-// structural link into any molecule/workflow, so a step still attached to an
-// in-flight owner (even one whose root ownership metadata was never stamped)
-// is never stripped out.
+// never stripped of its closed steps. A rootless row is reaped only when
+// hasParentChildDepEdge proves it carries no structural link into any
+// molecule/workflow, so a step still attached to an in-flight owner (even one
+// whose root ownership metadata was never stamped) is never stripped out.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
-// unset) the function mutates nothing but still PROVES up to batchCap rootless
-// rows (same edge check enforcing does), so the logged estimate is a real
-// measurement — "N proven reapable of P sampled" — rather than an unproven
-// upper bound, and the safety gate is exercised before it is ever load-bearing
-// (PR #129 review, round 5). Bounding the proof to batchCap keeps the cost
-// finite even when the backlog is the sweep's entire wisp-tier population.
+// unset) the function mutates nothing but still runs both passes — the rooted
+// pass in full, and the rootless pass bounded to batchCap — so the logged
+// estimate is a real measurement rather than an unproven upper bound, and the
+// rootless safety gate is exercised before it is ever load-bearing (PR #129
+// review, round 5).
 //
-// Both dry-run and enforce skip the proof for free on a row already stamped
-// beadmeta.WispGCLinkedMetadataKey by an earlier ENFORCED tick: that stamp is
-// a persisted negative cache proving the row is not reapable, so re-running
-// the same proof on it forever would let a persistently-linked prefix (rows
-// visited oldest-first, per store.List's deterministic order) monopolize
-// every tick's budget and starve the sweep of progress on any row after it —
-// permanently, since the same prefix reappears every tick (round 5, BLOCKING
-// 1). Only an enforced tick writes the stamp; dry-run only reads it, since
-// dry-run must never mutate the store.
-//
-// Per-bead delete and stamp errors are joined and never abort the sweep. The
-// batch cap bounds proof reads and delete attempts together per tick, in both
-// modes, so a backlog of any size costs a bounded amount of I/O per tick.
+// Per-bead delete errors are joined and never abort the sweep. DELETE
+// ATTEMPTS (rooted and rootless combined — counting failures, not just
+// successes) and rootless PROOF READS both respect batchCap; see its doc
+// comment for exactly what is and is not bounded.
 func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")
@@ -440,93 +461,107 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	enforce := reapOrphansEnforced()
 
-	// rootCollectible caches the per-root reap decision so many siblings
-	// sharing one dead root cost a single Get.
-	rootCollectible := make(map[string]bool)
-	var collectErr error
-
-	reaped := 0
-	attempted := 0
-	proved := 0
-	skipped := 0
-	var deleteErr error
+	// Partition once: rooted candidates go to the cheap Get-based pass below;
+	// rootlessQueue holds every non-root-shaped rootless candidate past
+	// cutoff, in list order, for the bounded, cursor-resuming proof pass.
+	var rooted []beads.Bead
+	var rootlessQueue []beads.Bead
 	for _, c := range candidates {
-		// The batch cap bounds per-tick WORK — proof reads (proved) and delete
-		// attempts (attempted) — in BOTH dry-run and enforce: dry-run now
-		// proves rootless rows too (bounded, see the doc comment above), so an
-		// unbounded backlog can no longer cost unbounded I/O in either mode.
-		if batchCap > 0 && attempted+proved >= batchCap {
-			break
-		}
-
-		// Reuse the closure purge's age semantics: skip zero/recent rows.
 		if c.CreatedAt.IsZero() || !c.CreatedAt.Before(cutoff) {
 			continue
 		}
-
-		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
-
-		var decision bool
-		if rootID == "" {
-			// Root-shaped rows (matching wispGCRootSelectors) belong to the
-			// closed-root purge (closedWispGCEntries/purgeExpiredBeadClosures);
-			// skip here so the two paths never race the same row.
-			if isWispGCRootBead(c) {
-				continue
-			}
-			if c.Metadata[beadmeta.WispGCLinkedMetadataKey] != "" {
-				// A prior enforced tick already proved this row structurally
-				// linked and stamped it; skip the proof for free (see the doc
-				// comment above).
-				skipped++
-				continue
-			}
-			proved++
-			hasEdge, edgeErr := hasParentChildDepEdge(store, c)
-			if edgeErr != nil {
-				collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
-				continue
-			}
-			if hasEdge && enforce {
-				// Stamp only when enforcing — dry-run must never mutate the
-				// store — so a later enforced tick can skip this row for free.
-				if updErr := store.Update(c.ID, beads.UpdateOpts{
-					Metadata: map[string]string{beadmeta.WispGCLinkedMetadataKey: "true"},
-				}); updErr != nil {
-					collectErr = errors.Join(collectErr, fmt.Errorf("stamping structurally-linked orphan %q: %w", c.ID, updErr))
-				}
-			}
-			decision = !hasEdge
-		} else {
-			cached, ok := rootCollectible[rootID]
-			if !ok {
-				root, getErr := store.Get(rootID)
-				switch {
-				case errors.Is(getErr, beads.ErrNotFound):
-					cached = true // root gone
-				case getErr == nil && convoycore.IsTerminalStatus(root.Status):
-					cached = true // root terminal
-				case getErr == nil:
-					cached = false // root live/open — never reap its descendants
-				default:
-					// Any other Get error: cannot prove safe — skip without caching
-					// as collectible. Surface so the sweep records the failure.
-					cached = false
-					collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
-				}
-				rootCollectible[rootID] = cached
-			}
-			decision = cached
-		}
-		if !decision {
+		if c.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+			rooted = append(rooted, c)
 			continue
 		}
+		// Root-shaped rows (matching wispGCRootSelectors) belong to the
+		// closed-root purge (closedWispGCEntries/purgeExpiredBeadClosures);
+		// excluded here so the two paths never race the same row.
+		if isWispGCRootBead(c) {
+			continue
+		}
+		rootlessQueue = append(rootlessQueue, c)
+	}
+	rootlessEligible := len(rootlessQueue)
 
+	rootCollectible := make(map[string]bool)
+	var collectErr error
+	var deleteErr error
+	reaped := 0
+	attempted := 0
+
+	// Rooted pass: unconditional full scan in both modes (see the doc
+	// comment). Actual DELETE attempts still respect batchCap so a failing
+	// delete backend can't attempt the whole rooted backlog in one tick.
+	for _, c := range rooted {
+		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
+		cached, ok := rootCollectible[rootID]
+		if !ok {
+			root, getErr := store.Get(rootID)
+			switch {
+			case errors.Is(getErr, beads.ErrNotFound):
+				cached = true // root gone
+			case getErr == nil && convoycore.IsTerminalStatus(root.Status):
+				cached = true // root terminal
+			case getErr == nil:
+				cached = false // root live/open — never reap its descendants
+			default:
+				// Any other Get error: cannot prove safe — skip without caching
+				// as collectible. Surface so the sweep records the failure.
+				cached = false
+				collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+			}
+			rootCollectible[rootID] = cached
+		}
+		if !cached {
+			continue
+		}
 		if !enforce {
 			reaped++
 			continue
 		}
+		if batchCap > 0 && attempted >= batchCap {
+			continue // cap reached this tick; leave for a later one
+		}
+		attempted++
+		if err := deleteWorkflowBead(store, c.ID); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
+			continue
+		}
+		reaped++
+	}
 
+	// Rootless pass: bounded proof, resuming from wispGCReapCursor.
+	proved := 0
+	n := len(rootlessQueue)
+	startIdx := 0
+	if n > 0 && wispGCReapCursor != "" {
+		for i, c := range rootlessQueue {
+			if c.ID == wispGCReapCursor {
+				startIdx = (i + 1) % n
+				break
+			}
+		}
+	}
+	for i := 0; i < n; i++ {
+		if batchCap > 0 && attempted+proved >= batchCap {
+			break
+		}
+		c := rootlessQueue[(startIdx+i)%n]
+		proved++
+		wispGCReapCursor = c.ID
+		hasEdge, edgeErr := hasParentChildDepEdge(store, c)
+		if edgeErr != nil {
+			collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
+			continue
+		}
+		if hasEdge {
+			continue
+		}
+		if !enforce {
+			reaped++
+			continue
+		}
 		attempted++
 		if err := deleteWorkflowBead(store, c.ID); err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
@@ -540,11 +575,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	// tick (PR #129 review, round 5, BLOCKING 2).
 	switch {
 	case enforce:
-		log.Printf("wisp gc: reaped %d orphaned closed wisp(s) (%d rootless row(s) proven, %d already-linked skipped for free, %d delete attempt(s), cap %d)", reaped, proved, skipped, attempted, batchCap)
+		log.Printf("wisp gc: reaped %d orphaned closed wisp(s) (%d rootless row(s) proven of %d eligible, %d delete attempt(s), cap %d)", reaped, proved, rootlessEligible, attempted, batchCap)
 	case batchCap > 0:
-		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven, %d already-linked skipped for free; set %s=1 to enforce; cap %d per tick)", reaped, proved, skipped, reapOrphansEnv, batchCap)
+		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven of %d eligible; set %s=1 to enforce; cap %d per tick)", reaped, proved, rootlessEligible, reapOrphansEnv, batchCap)
 	default:
-		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven, %d already-linked skipped for free; set %s=1 to enforce)", reaped, proved, skipped, reapOrphansEnv)
+		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven of %d eligible; set %s=1 to enforce)", reaped, proved, rootlessEligible, reapOrphansEnv)
 	}
 
 	if !enforce {
