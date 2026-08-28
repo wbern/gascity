@@ -331,15 +331,11 @@ func isWispGCRootBead(b beads.Bead) bool {
 // the safety gate before reaping a rootless closed wisp-tier row — a row
 // still linked into a molecule/workflow structure by any of these edges must
 // never be stripped out from under its (possibly still-open) owner, even
-// when that owner never stamped gc.root_bead_id on it.
-//
-// downDeps, when non-nil, supplies a candidate's DOWN edges pre-fetched by the
-// caller, keyed by id, trusting that a miss within a non-nil map means b
-// genuinely has no down edges rather than "unknown, go fetch it." Callers that
-// cannot make that coverage guarantee must pass nil; reapOrphanedClosedWisps
-// always does (see the comment on its downDeps declaration for why an earlier
-// batched-prefetch attempt was reverted).
-func hasParentChildDepEdge(store beads.Store, b beads.Bead, downDeps map[string][]beads.Dep) (bool, error) {
+// when that owner never stamped gc.root_bead_id on it. Always reads directly
+// from store (no pre-fetched/batched edge map): an earlier batched-prefetch
+// attempt was reverted after two review rounds found it costlier than direct
+// reads on every production store (PR #129 review, rounds 2-3).
+func hasParentChildDepEdge(store beads.Store, b beads.Bead) (bool, error) {
 	if b.ParentID != "" {
 		return true, nil
 	}
@@ -350,12 +346,9 @@ func hasParentChildDepEdge(store beads.Store, b beads.Bead, downDeps map[string]
 	if len(children) > 0 {
 		return true, nil
 	}
-	down := downDeps[b.ID]
-	if downDeps == nil {
-		down, err = store.DepList(b.ID, "down")
-		if err != nil {
-			return false, fmt.Errorf("listing down dependencies for %q: %w", b.ID, err)
-		}
+	down, err := store.DepList(b.ID, "down")
+	if err != nil {
+		return false, fmt.Errorf("listing down dependencies for %q: %w", b.ID, err)
 	}
 	for _, dep := range down {
 		if dep.Type == "parent-child" {
@@ -444,15 +437,22 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	reaped := 0
 	attempted := 0
+	proved := 0
 	var deleteErr error
 	for _, c := range candidates {
-		// The batch cap bounds DELETION ATTEMPTS per sweep — counting failed
-		// deletes, not just successful reaps — so a failing delete backend can't
-		// attempt the whole backlog in one tick. In dry-run attempted stays 0 and
-		// reaped keeps counting past the cap so the logged estimate reflects the
-		// true eligible backlog an operator needs before enabling enforcement, not
-		// just the cap-sized prefix the enforced sweep would reap this tick.
-		if enforce && batchCap > 0 && attempted >= batchCap {
+		// The batch cap bounds per-tick WORK, not just deletions: attempted
+		// counts DELETION ATTEMPTS (failed deletes included, so a failing
+		// delete backend can't attempt the whole backlog in one tick) and
+		// proved counts EDGE-PROOF READS (hasParentChildDepEdge calls below),
+		// so a rootless row that carries a structural edge — and therefore is
+		// never reaped — still counts against the cap instead of letting the
+		// sweep pay its proof cost for the entire backlog every tick with zero
+		// progress (PR #129 review, round 4). In dry-run both counters stay 0
+		// and reaped keeps counting past the cap so the logged estimate
+		// reflects the true eligible backlog an operator needs before enabling
+		// enforcement, not just the cap-sized prefix the enforced sweep would
+		// reap this tick.
+		if enforce && batchCap > 0 && attempted+proved >= batchCap {
 			break
 		}
 
@@ -486,7 +486,8 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 				// per-anchor read anyway, while the batch request itself was
 				// sized to the entire backlog rather than the ≤batchCap rows a
 				// tick can actually visit (PR #129 review, round 2).
-				hasEdge, edgeErr := hasParentChildDepEdge(store, c, nil)
+				proved++
+				hasEdge, edgeErr := hasParentChildDepEdge(store, c)
 				if edgeErr != nil {
 					collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
 					continue

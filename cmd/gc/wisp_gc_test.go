@@ -1098,6 +1098,11 @@ func TestWispGC_ReapSkipsRootlessTaskWithParentChildDepEdge(t *testing.T) {
 // every tick, forever, on a backlog dry-run never shrinks is what made the
 // original port a regression rather than a fix. Proves zero Children/DepList
 // calls with several rootless candidates present, not just a passing count.
+// Calls reapOrphanedClosedWisps directly (rather than the full wg.runGC) so
+// the assertion is scoped to the orphan reaper's own I/O and does not start
+// failing — pointing at the wrong code — the moment an unrelated GC arm
+// legitimately calls Children/DepList on this fixture (PR #129 review,
+// round 4 advisory).
 func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
 	withReapOrphansEnforced(t, false)
 	now := time.Now()
@@ -1109,12 +1114,17 @@ func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
 	rootless3.Ephemeral = true
 	store := newGCStore([]beads.Bead{rootless1, rootless2, rootless3})
 
-	wg := newWispGC(5*time.Minute, time.Hour, 0)
+	var reaped int
 	logOutput := captureWispGCLog(t, func() {
-		if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
-			t.Fatalf("runGC: %v", err)
+		var err error
+		reaped, err = reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
+		if err != nil {
+			t.Fatalf("reapOrphanedClosedWisps: %v", err)
 		}
 	})
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0; dry-run must never mutate", reaped)
+	}
 	if store.childrenCalls != 0 {
 		t.Fatalf("childrenCalls = %d, want 0; dry-run must not call store.Children for the edge proof", store.childrenCalls)
 	}
@@ -1123,6 +1133,44 @@ func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "up to 3 orphaned closed wisp(s) would be reaped (upper bound") {
 		t.Fatalf("log = %q, want an upper-bound dry-run notice for all 3 rootless candidates", logOutput)
+	}
+}
+
+// TestWispGC_ReapCapsProofReadsOnNonReapableBacklog is the regression for PR
+// #129's round-4 finding: the batch cap counted only delete ATTEMPTS, so a
+// rootless row that fails the parent-child edge proof (and is therefore never
+// reaped) never advanced the cap counter — an enforced sweep would pay the
+// edge-proof I/O for its ENTIRE rootless backlog every tick, forever, once the
+// reapable rows drained, since batchCap never bounded that read work. Uses
+// rows that all carry a real parent-child edge (never reapable) so attempted
+// stays 0 and only the proof counter can be responsible for stopping the
+// sweep short of the full candidate count.
+func TestWispGC_ReapCapsProofReadsOnNonReapableBacklog(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 2)
+	now := time.Now()
+	beadsIn := []beads.Bead{makeGCBead("edge-parent", now.Add(-2*time.Hour), "closed", "task")}
+	for i := 0; i < 5; i++ {
+		child := makeGCBeadWithMetadata(fmt.Sprintf("edge-child-%d", i), now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+		child.Ephemeral = true
+		beadsIn = append(beadsIn, child)
+	}
+	store := newGCStore(beadsIn)
+	for i := 0; i < 5; i++ {
+		if err := store.DepAdd(fmt.Sprintf("edge-child-%d", i), "edge-parent", "parent-child"); err != nil {
+			t.Fatalf("DepAdd(edge-child-%d->edge-parent): %v", i, err)
+		}
+	}
+
+	reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), wispGCReapOrphanBatchCap)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0; every candidate carries a parent-child edge and must never be reaped", reaped)
+	}
+	if store.childrenCalls != 2 {
+		t.Fatalf("childrenCalls = %d, want 2 (bounded by batchCap=2, not the 5-row candidate count)", store.childrenCalls)
 	}
 }
 
