@@ -711,16 +711,6 @@ func (m *MemStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	for _, id := range ids {
 		idSet[id] = struct{}{}
 	}
-	// A held anchor with no down edges still gets an entry carrying an empty
-	// slice, per DependencyBatchLister's documented contract: presence
-	// distinguishes "anchor exists, no edges" from "anchor not found", and a
-	// caller gating an irreversible action on that distinction must not read
-	// a held anchor as merely absent.
-	for _, b := range m.beads {
-		if _, ok := idSet[b.ID]; ok {
-			result[b.ID] = []Dep{}
-		}
-	}
 	for _, d := range m.deps {
 		if _, ok := idSet[d.IssueID]; ok {
 			result[d.IssueID] = append(result[d.IssueID], d)

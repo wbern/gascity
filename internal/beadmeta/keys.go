@@ -198,12 +198,25 @@ const (
 	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
-	WorkBranchMetadataKey          = "gc.work_branch"
-	WorkCommitMetadataKey          = "gc.work_commit"
-	WorkDirMetadataKey             = "gc.work_dir"
-	WorkOutcomeMetadataKey         = "gc.work_outcome"
-	WorkVerificationMetadataKey    = "gc.work_verification"
-	WorkflowIDMetadataKey          = "gc.workflow_id"
+
+	// WispGCLinkedMetadataKey marks a rootless closed wisp-tier row that the
+	// orphan reaper (cmd/gc/wisp_gc.go) has proven carries a structural
+	// parent-child link and must never be reaped. Stamped only when enforcing
+	// (never under dry-run, which must not mutate the store), so a later
+	// enforced tick can skip the proof for free instead of re-proving the same
+	// linked row on every tick forever — the persisted negative-cache that
+	// bounds the sweep's per-tick cost to genuinely unproven candidates and
+	// guarantees the backlog eventually drains (PR #129 review, round 5).
+	// Closed rows are terminal, so a stamped row's structural edges are not
+	// expected to change afterward.
+	WispGCLinkedMetadataKey = "gc.wisp_gc_linked"
+
+	WorkBranchMetadataKey       = "gc.work_branch"
+	WorkCommitMetadataKey       = "gc.work_commit"
+	WorkDirMetadataKey          = "gc.work_dir"
+	WorkOutcomeMetadataKey      = "gc.work_outcome"
+	WorkVerificationMetadataKey = "gc.work_verification"
+	WorkflowIDMetadataKey       = "gc.workflow_id"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -437,6 +450,7 @@ var KnownMetadataKeys = []string{
 	TriggerBeadIDMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
+	WispGCLinkedMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

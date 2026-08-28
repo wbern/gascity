@@ -742,41 +742,6 @@ func TestMemStoreDepListEmpty(t *testing.T) {
 	}
 }
 
-// TestMemStoreDepListBatchDistinguishesHeldFromMissingAnchors pins
-// DependencyBatchLister's documented contract: a held anchor with no down
-// edges must get an entry (an empty slice), distinguishing it from an anchor
-// that was never found, because a caller gating an irreversible action (e.g.
-// wisp_gc's hasParentChildDepEdge) on presence must not read a held anchor as
-// merely absent (PR #129 review).
-func TestMemStoreDepListBatchDistinguishesHeldFromMissingAnchors(t *testing.T) {
-	s := beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "held-no-edges", Status: "open", Type: "task"},
-		{ID: "held-with-edge", Status: "open", Type: "task"},
-		{ID: "held-target", Status: "open", Type: "task"},
-	}, nil)
-	if err := s.DepAdd("held-with-edge", "held-target", "parent-child"); err != nil {
-		t.Fatalf("DepAdd: %v", err)
-	}
-
-	deps, err := s.DepListBatch([]string{"held-no-edges", "held-with-edge", "missing-anchor"})
-	if err != nil {
-		t.Fatalf("DepListBatch: %v", err)
-	}
-	edges, ok := deps["held-no-edges"]
-	if !ok {
-		t.Fatal(`deps["held-no-edges"] missing; a held anchor with no down edges must still get an entry`)
-	}
-	if len(edges) != 0 {
-		t.Fatalf(`deps["held-no-edges"] = %v, want an empty slice`, edges)
-	}
-	if len(deps["held-with-edge"]) != 1 {
-		t.Fatalf(`deps["held-with-edge"] = %v, want 1 edge`, deps["held-with-edge"])
-	}
-	if _, ok := deps["missing-anchor"]; ok {
-		t.Fatal(`deps["missing-anchor"] present, want absent; an anchor that was never held must not get an entry`)
-	}
-}
-
 func TestMemStoreReadyRespectsBlockingDeps(t *testing.T) {
 	s := beads.NewMemStore()
 

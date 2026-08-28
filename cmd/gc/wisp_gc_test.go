@@ -915,8 +915,8 @@ func TestWispGC_DryRunDefaultReapsNothing(t *testing.T) {
 	if _, err := store.Get("orphan-dry"); err != nil {
 		t.Fatalf("orphan-dry must survive dry-run: %v", err)
 	}
-	if !strings.Contains(logOutput, "would be reaped") {
-		t.Fatalf("log = %q, want dry-run notice containing %q", logOutput, "would be reaped")
+	if !strings.Contains(logOutput, "dry-run found 1 orphan(s) reapable") {
+		t.Fatalf("log = %q, want dry-run notice containing %q", logOutput, "dry-run found 1 orphan(s) reapable")
 	}
 }
 
@@ -1090,20 +1090,20 @@ func TestWispGC_ReapSkipsRootlessTaskWithParentChildDepEdge(t *testing.T) {
 	}
 }
 
-// TestWispGC_DryRunSkipsParentChildEdgeIO is the regression for PR #129's
-// review: hasParentChildDepEdge (1 Children plus up to 2 DepList calls per
-// rootless candidate) must never run under dry-run, because dry-run is the
-// production default (GC_WISP_GC_REAP_ORPHANS unset) and a long-closed
-// backlog can be the sweep's entire wisp-tier population — paying that cost
-// every tick, forever, on a backlog dry-run never shrinks is what made the
-// original port a regression rather than a fix. Proves zero Children/DepList
-// calls with several rootless candidates present, not just a passing count.
-// Calls reapOrphanedClosedWisps directly (rather than the full wg.runGC) so
-// the assertion is scoped to the orphan reaper's own I/O and does not start
-// failing — pointing at the wrong code — the moment an unrelated GC arm
-// legitimately calls Children/DepList on this fixture (PR #129 review,
-// round 4 advisory).
-func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
+// TestWispGC_DryRunProvesBoundedRootlessSample is the regression for PR
+// #129's round-5 review: dry-run — the production default, since
+// GC_WISP_GC_REAP_ORPHANS is unset until an operator opts in — must PROVE a
+// bounded sample of rootless candidates (the same edge check enforcing does)
+// rather than reporting an unproven upper bound. An unproven preview cannot
+// tell an operator what enforcement will actually do, and the safety gate
+// (hasParentChildDepEdge) would otherwise get its first real exercise on
+// production data in the very sweep that starts deleting. Uses 3 rootless
+// candidates, none carrying a structural edge, well under the default cap, so
+// every one gets proven: reaped must equal the true count (3), not merely the
+// candidate count, and childrenCalls must equal exactly 3 (one proof per row),
+// not 0. Calls reapOrphanedClosedWisps directly so the assertion is scoped to
+// the orphan reaper's own I/O.
+func TestWispGC_DryRunProvesBoundedRootlessSample(t *testing.T) {
 	withReapOrphansEnforced(t, false)
 	now := time.Now()
 	rootless1 := makeGCBeadWithMetadata("rootless-1", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
@@ -1123,17 +1123,102 @@ func TestWispGC_DryRunSkipsParentChildEdgeIO(t *testing.T) {
 		}
 	})
 	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0; dry-run must never return a mutation count even when it proves rows reapable", reaped)
+	}
+	if store.childrenCalls != 3 {
+		t.Fatalf("childrenCalls = %d, want 3; dry-run must prove every sampled rootless candidate's edges", store.childrenCalls)
+	}
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("deleted = %v, want none; dry-run must never mutate the store", store.deletedIDs)
+	}
+	if !strings.Contains(logOutput, "dry-run found 3 orphan(s) reapable (3 rootless row(s) proven") {
+		t.Fatalf("log = %q, want a proven-count dry-run notice for all 3 rootless candidates", logOutput)
+	}
+}
+
+// TestWispGC_DryRunBoundsProofToCap proves dry-run's edge proof — now that it
+// runs unconditionally rather than being skipped — is bounded by batchCap
+// rather than costing I/O proportional to the full backlog: the exact
+// "unbounded per-tick edge I/O over a backlog dry-run never shrinks" defect
+// dry-run was originally exempted from (PR #129 review, round 2) must not
+// reappear now that round 5 requires dry-run to prove a sample.
+func TestWispGC_DryRunBoundsProofToCap(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	now := time.Now()
+	var beadsIn []beads.Bead
+	for i := 0; i < 5; i++ {
+		b := makeGCBeadWithMetadata(fmt.Sprintf("dry-rootless-%d", i), now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+		b.Ephemeral = true
+		beadsIn = append(beadsIn, b)
+	}
+	store := newGCStore(beadsIn)
+
+	reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), 2)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
 		t.Fatalf("reaped = %d, want 0; dry-run must never mutate", reaped)
 	}
-	if store.childrenCalls != 0 {
-		t.Fatalf("childrenCalls = %d, want 0; dry-run must not call store.Children for the edge proof", store.childrenCalls)
+	if store.childrenCalls != 2 {
+		t.Fatalf("childrenCalls = %d, want 2 (bounded by batchCap=2, not the 5-row candidate count)", store.childrenCalls)
 	}
-	if store.depListCalls != 0 {
-		t.Fatalf("depListCalls = %d, want 0; dry-run must not call store.DepList for the edge proof", store.depListCalls)
+}
+
+// TestWispGC_LinkedRowStampSkipsFutureProof is the regression for PR #129's
+// round-5 review, BLOCKING 1: an enforced tick's batch cap counts every
+// rootless row it proves, including ones that fail the proof and are
+// therefore never reaped — so a persistently-linked prefix (rows are always
+// visited oldest-first, per store.List's deterministic order) would otherwise
+// re-consume the entire cap on the SAME rows every tick, forever, and the
+// sweep would never progress past them to a genuinely unproven candidate.
+// Stamping beadmeta.WispGCLinkedMetadataKey on a row the first time it fails
+// the proof lets a later tick skip it for free instead of re-proving it, so a
+// second enforced tick's budget goes to a still-unproven row rather than
+// re-proving the same linked one.
+func TestWispGC_LinkedRowStampSkipsFutureProof(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanBatchCap(t, 1)
+	now := time.Now()
+	parent := makeGCBead("stamp-parent", now.Add(-2*time.Hour), "closed", "task")
+	linkedChild := makeGCBeadWithMetadata("stamp-linked-child", now.Add(-2*time.Hour), "closed", "task", map[string]string{})
+	linkedChild.Ephemeral = true
+	unprovenChild := makeGCBeadWithMetadata("stamp-unproven-child", now.Add(-1*time.Hour).Add(-time.Minute), "closed", "task", map[string]string{})
+	unprovenChild.Ephemeral = true
+	store := newGCStore([]beads.Bead{parent, linkedChild, unprovenChild})
+	if err := store.DepAdd("stamp-linked-child", "stamp-parent", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(stamp-linked-child->stamp-parent): %v", err)
 	}
-	if !strings.Contains(logOutput, "up to 3 orphaned closed wisp(s) would be reaped (upper bound") {
-		t.Fatalf("log = %q, want an upper-bound dry-run notice for all 3 rootless candidates", logOutput)
+
+	// Tick 1: cap=1 lets exactly one rootless row be proven. stamp-linked-child
+	// sorts first (older CreatedAt), gets proven linked, and is stamped.
+	if _, err := reapOrphanedClosedWisps(store, now.Add(-30*time.Minute), wispGCReapOrphanBatchCap); err != nil {
+		t.Fatalf("reapOrphanedClosedWisps (tick 1): %v", err)
 	}
+	got, err := store.Get("stamp-linked-child")
+	if err != nil {
+		t.Fatalf("Get(stamp-linked-child): %v", err)
+	}
+	if got.Metadata[beadmeta.WispGCLinkedMetadataKey] == "" {
+		t.Fatal("stamp-linked-child not stamped after failing the proof on tick 1")
+	}
+	store.childrenCalls = 0
+
+	// Tick 2: same cap=1. If the stamp were not honored, the sweep would
+	// re-prove stamp-linked-child (deterministically first in list order) and
+	// never reach stamp-unproven-child. With the stamp honored, the budget
+	// goes to stamp-unproven-child instead, proving it reapable.
+	reaped, err := reapOrphanedClosedWisps(store, now.Add(-30*time.Minute), wispGCReapOrphanBatchCap)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps (tick 2): %v", err)
+	}
+	if reaped != 1 {
+		t.Fatalf("reaped (tick 2) = %d, want 1; the stamp must free tick 2's budget for stamp-unproven-child", reaped)
+	}
+	if store.childrenCalls != 1 {
+		t.Fatalf("childrenCalls (tick 2) = %d, want 1 (only stamp-unproven-child; stamp-linked-child must be skipped for free)", store.childrenCalls)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "stamp-unproven-child")
 }
 
 // TestWispGC_ReapCapsProofReadsOnNonReapableBacklog is the regression for PR

@@ -405,16 +405,26 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // is never stripped out.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
-// unset) the function mutates nothing and logs a dry-run notice. The rootless
-// count in that notice is an UPPER BOUND, not a proof: dry-run deliberately
-// skips hasParentChildDepEdge (1 Children plus up to 2 DepList calls per
-// rootless row) because a long-closed backlog can be the sweep's entire
-// wisp-tier population, and a dry-run that never mutates the store also never
-// shrinks the backlog it just paid to measure — so proving each row exactly
-// would repeat that cost, unbounded, on every tick forever. An upper bound is
-// free and sufficient given dry-run deletes nothing. Per-bead delete errors
-// are joined and never abort the sweep. The batch cap bounds reaps per sweep
-// so the backlog drains over multiple ticks.
+// unset) the function mutates nothing but still PROVES up to batchCap rootless
+// rows (same edge check enforcing does), so the logged estimate is a real
+// measurement — "N proven reapable of P sampled" — rather than an unproven
+// upper bound, and the safety gate is exercised before it is ever load-bearing
+// (PR #129 review, round 5). Bounding the proof to batchCap keeps the cost
+// finite even when the backlog is the sweep's entire wisp-tier population.
+//
+// Both dry-run and enforce skip the proof for free on a row already stamped
+// beadmeta.WispGCLinkedMetadataKey by an earlier ENFORCED tick: that stamp is
+// a persisted negative cache proving the row is not reapable, so re-running
+// the same proof on it forever would let a persistently-linked prefix (rows
+// visited oldest-first, per store.List's deterministic order) monopolize
+// every tick's budget and starve the sweep of progress on any row after it —
+// permanently, since the same prefix reappears every tick (round 5, BLOCKING
+// 1). Only an enforced tick writes the stamp; dry-run only reads it, since
+// dry-run must never mutate the store.
+//
+// Per-bead delete and stamp errors are joined and never abort the sweep. The
+// batch cap bounds proof reads and delete attempts together per tick, in both
+// modes, so a backlog of any size costs a bounded amount of I/O per tick.
 func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")
@@ -438,21 +448,14 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	reaped := 0
 	attempted := 0
 	proved := 0
+	skipped := 0
 	var deleteErr error
 	for _, c := range candidates {
-		// The batch cap bounds per-tick WORK, not just deletions: attempted
-		// counts DELETION ATTEMPTS (failed deletes included, so a failing
-		// delete backend can't attempt the whole backlog in one tick) and
-		// proved counts EDGE-PROOF READS (hasParentChildDepEdge calls below),
-		// so a rootless row that carries a structural edge — and therefore is
-		// never reaped — still counts against the cap instead of letting the
-		// sweep pay its proof cost for the entire backlog every tick with zero
-		// progress (PR #129 review, round 4). In dry-run both counters stay 0
-		// and reaped keeps counting past the cap so the logged estimate
-		// reflects the true eligible backlog an operator needs before enabling
-		// enforcement, not just the cap-sized prefix the enforced sweep would
-		// reap this tick.
-		if enforce && batchCap > 0 && attempted+proved >= batchCap {
+		// The batch cap bounds per-tick WORK — proof reads (proved) and delete
+		// attempts (attempted) — in BOTH dry-run and enforce: dry-run now
+		// proves rootless rows too (bounded, see the doc comment above), so an
+		// unbounded backlog can no longer cost unbounded I/O in either mode.
+		if batchCap > 0 && attempted+proved >= batchCap {
 			break
 		}
 
@@ -471,29 +474,29 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			if isWispGCRootBead(c) {
 				continue
 			}
-			if !enforce {
-				// Dry-run: count as an upper bound without proving the edge.
-				decision = true
-			} else {
-				// nil downDeps: read this row's edges directly. A prior batched
-				// prefetch across the whole rootless backlog was reverted — the
-				// batch cost MORE I/O than not batching at all on every
-				// production store, because DependencyBatchLister's "held
-				// anchor with no edges gets an entry" contract is honored only
-				// by MemStore/FileStore. On BdStore/DoltliteReadStore a
-				// rootless plain task with no edges — the exact shape this
-				// sweep targets — comes back uncovered and falls back to a
-				// per-anchor read anyway, while the batch request itself was
-				// sized to the entire backlog rather than the ≤batchCap rows a
-				// tick can actually visit (PR #129 review, round 2).
-				proved++
-				hasEdge, edgeErr := hasParentChildDepEdge(store, c)
-				if edgeErr != nil {
-					collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
-					continue
-				}
-				decision = !hasEdge
+			if c.Metadata[beadmeta.WispGCLinkedMetadataKey] != "" {
+				// A prior enforced tick already proved this row structurally
+				// linked and stamped it; skip the proof for free (see the doc
+				// comment above).
+				skipped++
+				continue
 			}
+			proved++
+			hasEdge, edgeErr := hasParentChildDepEdge(store, c)
+			if edgeErr != nil {
+				collectErr = errors.Join(collectErr, fmt.Errorf("checking parent-child edges for orphan %q: %w", c.ID, edgeErr))
+				continue
+			}
+			if hasEdge && enforce {
+				// Stamp only when enforcing — dry-run must never mutate the
+				// store — so a later enforced tick can skip this row for free.
+				if updErr := store.Update(c.ID, beads.UpdateOpts{
+					Metadata: map[string]string{beadmeta.WispGCLinkedMetadataKey: "true"},
+				}); updErr != nil {
+					collectErr = errors.Join(collectErr, fmt.Errorf("stamping structurally-linked orphan %q: %w", c.ID, updErr))
+				}
+			}
+			decision = !hasEdge
 		} else {
 			cached, ok := rootCollectible[rootID]
 			if !ok {
@@ -532,19 +535,20 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		reaped++
 	}
 
-	if reaped > 0 {
-		switch {
-		case enforce:
-			log.Printf("wisp gc: reaped %d orphaned closed wisp(s)", reaped)
-		case batchCap > 0:
-			log.Printf("wisp gc: up to %d orphaned closed wisp(s) would be reaped (upper bound; dry-run skips the parent-child edge proof — set %s=1 to enforce; enforced sweeps reap up to %d per tick)", reaped, reapOrphansEnv, batchCap)
-		default:
-			log.Printf("wisp gc: up to %d orphaned closed wisp(s) would be reaped (upper bound; dry-run skips the parent-child edge proof — set %s=1 to enforce)", reaped, reapOrphansEnv)
-		}
+	// Logged unconditionally, including reaped == 0: a stalled or empty sweep
+	// must be distinguishable from one that simply had nothing to prove this
+	// tick (PR #129 review, round 5, BLOCKING 2).
+	switch {
+	case enforce:
+		log.Printf("wisp gc: reaped %d orphaned closed wisp(s) (%d rootless row(s) proven, %d already-linked skipped for free, %d delete attempt(s), cap %d)", reaped, proved, skipped, attempted, batchCap)
+	case batchCap > 0:
+		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven, %d already-linked skipped for free; set %s=1 to enforce; cap %d per tick)", reaped, proved, skipped, reapOrphansEnv, batchCap)
+	default:
+		log.Printf("wisp gc: dry-run found %d orphan(s) reapable (%d rootless row(s) proven, %d already-linked skipped for free; set %s=1 to enforce)", reaped, proved, skipped, reapOrphansEnv)
 	}
 
 	if !enforce {
-		// Dry-run never mutates: report would-be count via log only, return 0
+		// Dry-run never mutates: report the proven count via log only, return 0
 		// purged so callers don't over-count deletions that did not happen.
 		return 0, errors.Join(collectErr, deleteErr)
 	}
