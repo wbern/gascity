@@ -1009,7 +1009,7 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_DIFF_STAT"*)
-    if [ "$mode" = "idempotent_post_flatten_audit_write" ]; then
+    if [ "$mode" = "idempotent_post_flatten_audit_write" ] || [ "$mode" = "same_row_count_writer_race" ]; then
       print_cell 0
       exit 0
     fi
