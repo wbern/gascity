@@ -741,7 +741,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_row_count_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_row_count_writer_race" ] || [ "$mode" = "idempotent_post_flatten_audit_write" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -839,7 +839,7 @@ case "$query" in
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_writer_race" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_writer_race" ] || [ "$mode" = "idempotent_post_flatten_audit_write" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -1009,6 +1009,10 @@ case "$query" in
     exit 0
     ;;
   *"DOLT_DIFF_STAT"*)
+    if [ "$mode" = "idempotent_post_flatten_audit_write" ]; then
+      print_cell 0
+      exit 0
+    fi
     if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
       print_diff_stat beads 0 0 1 10 10
       exit 0
@@ -1068,7 +1072,7 @@ case "$query" in
       exit 44
     fi
     set_head compactcommit
-    if [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_writer_race" ]; then
+    if [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_writer_race" ] || [ "$mode" = "idempotent_post_flatten_audit_write" ]; then
       set_hash hash-after-writer
     fi
     if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "writer_race_db_hash_during_verify" ]; then
@@ -3014,7 +3018,9 @@ func TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure(t *testing.T) {
 	}
 }
 
-func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
+// A same-count value change in the flatten itself has no concurrent post-
+// flatten commit to explain it, so it must remain a fail-closed quarantine.
+func TestCompactScriptQuarantinesSameRowCountSemanticValueDriftBeforeFullGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "same_row_count_writer", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
@@ -3048,6 +3054,24 @@ func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
 		"decision=preserve_marker_manual_review_required",
 		"clear_decision=clear_only_after_clean_worktree_reachable_server_healthy_bead_queries_and_diff_hash_evidence_proves_no_loss",
 	)
+}
+
+// A post-flatten patrol write may advance only updated_at and append an audit
+// event. The compaction itself is intact when the preflight and flatten heads
+// have no semantic diff, so this must defer rather than quarantine.
+func TestCompactScriptDefersIdempotentPostFlattenAuditWriteAfterProvingFlattenPreservedSnapshot(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "idempotent_post_flatten_audit_write", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("idempotent post-flatten audit write must defer, not quarantine: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "preflight-to-flatten diff is empty") {
+		t.Fatalf("output must prove that flatten preserved the preflight snapshot:\n%s", out)
+	}
+	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("idempotent post-flatten audit write must not quarantine; stat=%v", statErr)
+	}
 }
 
 func TestCompactScriptFailsOnEmptyPreflightValueHash(t *testing.T) {
