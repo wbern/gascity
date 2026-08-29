@@ -1276,6 +1276,23 @@ EOF
   return 0
 }
 
+# flatten_preserved_preflight_snapshot proves that the flatten commit made no
+# semantic table change relative to the stable preflight head. It deliberately
+# compares committed roots, so a later writer's updated_at/audit commit cannot
+# masquerade as compaction damage.
+flatten_preserved_preflight_snapshot() {
+  db="$1"
+  from="$2"
+  to="$3"
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  diff_count=$(query_single_cell "$db" "preflight-to-flatten diff probe failed" \
+    "SELECT COUNT(*) FROM DOLT_DIFF_STAT('$from', '$to')") || return 1
+  case "$diff_count" in
+    0) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 oldgen_has_files() {
   db="$1"
   oldgen_dir="$DOLT_DATA_DIR/$db/.dolt/noms/oldgen"
@@ -2626,8 +2643,9 @@ flatten_database() {
        [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
-       [ "${verify_counts_saw_probe_failure:-0}" != "1" ]; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       flatten_preserved_preflight_snapshot "$db" "$head" "$flatten_head"; then
+      printf 'compact: db=%s preflight-to-flatten diff is empty; writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
