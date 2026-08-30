@@ -876,6 +876,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			// Validation forbids combining drain with retry/ralph, so this
 			// never overwrites the nested-control kinds above.
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
+			if childMeta[beadmeta.KindMetadataKey] == "" {
+				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
+			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,

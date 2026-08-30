@@ -2437,10 +2437,16 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	if applyStep.Metadata["gc.attempt"] != "3" {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
+	if applyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
+	}
 
 	verifyStep := recipe.StepByID("mol-test.converge.iteration.3.verify")
 	if verifyStep == nil {
 		t.Fatal("missing verify step")
+	}
+	if verifyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("verify gc.kind = %q, want task", verifyStep.Metadata["gc.kind"])
 	}
 	applyScopeCheck := recipe.StepByID("mol-test.converge.iteration.3.apply-scope-check")
 	if applyScopeCheck == nil {
