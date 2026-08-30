@@ -124,6 +124,65 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRun}},
 			want: false,
 		},
+		{
+			name: "typed isolated UX review is not gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{
+				"review_context":      "ux-review",
+				"review_dispatch_key": "ux-review:1528:e247cbcac2036b806e1d95754742332a6133cd2a",
+				"tracker_bead":        "crm-tracker",
+				"molecule_id":         "crm-molecule",
+				"pr_number":           "1528",
+				"head":                "e247cbcac2036b806e1d95754742332a6133cd2a",
+			}},
+			want: false,
+		},
+		{
+			name: "typed isolated code review is not gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{
+				"review_context":      "code-review",
+				"review_dispatch_key": "code-review:1545:955d803fae253657d6291df6b4a9621f762f043b",
+				"tracker_bead":        "crm-tracker",
+				"molecule_id":         "crm-molecule",
+				"pr_number":           "1545",
+				"head":                "955d803fae253657d6291df6b4a9621f762f043b",
+			}},
+			want: false,
+		},
+		{
+			name: "invalid review PR identity remains gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{
+				"review_context":      "ux-review",
+				"review_dispatch_key": "ux-review:not-a-pr:e247cbcac2036b806e1d95754742332a6133cd2a",
+				"tracker_bead":        "crm-tracker",
+				"molecule_id":         "crm-molecule",
+				"pr_number":           "not-a-pr",
+				"head":                "e247cbcac2036b806e1d95754742332a6133cd2a",
+			}},
+			want: true,
+		},
+		{
+			name: "incomplete review identity remains gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{
+				"review_context":      "ux-review",
+				"review_dispatch_key": "ux-review:1528:e247cbcac2036b806e1d95754742332a6133cd2a",
+				"tracker_bead":        "crm-tracker",
+				"pr_number":           "1528",
+				"head":                "e247cbcac2036b806e1d95754742332a6133cd2a",
+			}},
+			want: true,
+		},
+		{
+			name: "mismatched review dispatch key remains gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{
+				"review_context":      "ux-review",
+				"review_dispatch_key": "ux-review:1528:different-head",
+				"tracker_bead":        "crm-tracker",
+				"molecule_id":         "crm-molecule",
+				"pr_number":           "1528",
+				"head":                "e247cbcac2036b806e1d95754742332a6133cd2a",
+			}},
+			want: true,
+		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
 	}
@@ -195,6 +254,14 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "review-skipped", Type: "task", Status: "in_progress", Metadata: map[string]string{
+			"review_context":      "ux-review",
+			"review_dispatch_key": "ux-review:1528:e247cbcac2036b806e1d95754742332a6133cd2a",
+			"tracker_bead":        "crm-tracker",
+			"molecule_id":         "crm-molecule",
+			"pr_number":           "1528",
+			"head":                "e247cbcac2036b806e1d95754742332a6133cd2a",
+		}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -207,6 +274,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}{
 		{"non-close subcommand is ignored", []string{"show", "wr-shipped-nocommit"}, true, false, ""},
 		{"control bead is exempt", []string{"close", "wr-control"}, true, false, ""},
+		{"typed isolated review closes without a work outcome when enforced", []string{"close", "review-skipped"}, true, false, ""},
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
