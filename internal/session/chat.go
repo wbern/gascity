@@ -122,6 +122,52 @@ func stripInsertedResumeSubcommandArg(cmd, resumeFlag string) string {
 	return strings.TrimSpace(binary + " " + afterKey)
 }
 
+// stripSessionIDFlagArg removes a generated fresh-start session ID regardless
+// of its value. It is the fallback when the command's ID has diverged from the
+// session key persisted on the bead.
+func stripSessionIDFlagArg(cmd, sessionIDFlag string) string {
+	if sessionIDFlag == "" {
+		return cmd
+	}
+	for searchFrom := 0; ; {
+		idx := strings.Index(cmd[searchFrom:], sessionIDFlag)
+		if idx < 0 {
+			return cmd
+		}
+		flagStart := searchFrom + idx
+		afterFlag := flagStart + len(sessionIDFlag)
+		if flagStart > 0 && cmd[flagStart-1] != ' ' {
+			searchFrom = afterFlag
+			continue
+		}
+		spanEnd := afterFlag
+		switch {
+		case afterFlag < len(cmd) && cmd[afterFlag] == '=':
+			spanEnd++
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
+			}
+		case afterFlag == len(cmd) || cmd[afterFlag] == ' ':
+			for spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+				spanEnd++
+			}
+			for spanEnd < len(cmd) && cmd[spanEnd] != ' ' {
+				spanEnd++
+			}
+		default:
+			searchFrom = afterFlag
+			continue
+		}
+		spanStart := flagStart
+		if spanStart > 0 && cmd[spanStart-1] == ' ' {
+			spanStart--
+		} else if spanEnd < len(cmd) && cmd[spanEnd] == ' ' {
+			spanEnd++
+		}
+		return strings.TrimSpace(cmd[:spanStart] + cmd[spanEnd:])
+	}
+}
+
 func freshStartCommandFromMetadata(metadata map[string]string, fallback string) string {
 	if metadata == nil {
 		return fallback
@@ -178,6 +224,11 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	}
 	resumeFlag := b.Metadata["resume_flag"]
 	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
+	// A fresh start carries session_id_flag rather than resume_flag. Remove the
+	// generated ID by flag so this recovery does not replay a rejected
+	// first-start command, even if its ID differs from the persisted key.
+	sessionIDFlag := b.Metadata["session_id_flag"]
+	freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()

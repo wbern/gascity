@@ -5071,6 +5071,68 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 	}
 }
 
+// A first-start command can carry a generated session ID even when it has no
+// resume flag. On startup death, the fresh retry must remove that stale ID.
+func TestEnsureRunning_RetriesWithoutStaleSessionIDFlag(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "worker", Command: "provider --option value", WorkDir: "/tmp", Provider: "custom",
+		Resume: ProviderResume{SessionIDFlag: "--session-id"}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get created session: %v", err)
+	}
+	if b.Metadata["session_id_flag"] != "--session-id" {
+		t.Fatalf("session_id_flag = %q, want --session-id", b.Metadata["session_id_flag"])
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+	if err := mgr.Send(context.Background(), info.ID, "hello", "provider --session-id stale-key --option value", runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Send should recover from a stale generated session ID: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand != "provider --option value" {
+		t.Fatalf("fresh retry command = %q, want generated session ID removed", retryCommand)
+	}
+}
+
+func TestCreateBeadOnly_PersistsSessionIDFlag(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "worker", Command: "provider", WorkDir: "/tmp", Provider: "custom", BeadOnly: true,
+		Resume: ProviderResume{SessionIDFlag: "--session-id"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get created session: %v", err)
+	}
+	if got := b.Metadata["session_id_flag"]; got != "--session-id" {
+		t.Fatalf("session_id_flag = %q, want --session-id", got)
+	}
+}
+
 // A resume-capable session whose embedded resume key has diverged from the
 // bead's current session_key (e.g. a concurrent fresh start minted a new key,
 // or a stale store read returned a different one) must still recover with a

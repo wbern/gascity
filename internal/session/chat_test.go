@@ -180,6 +180,41 @@ func TestStripResumeFlagArg(t *testing.T) {
 	}
 }
 
+func TestStripSessionIDFlagArg(t *testing.T) {
+	tests := []struct {
+		name          string
+		cmd           string
+		sessionIDFlag string
+		want          string
+	}{
+		{
+			name:          "removes diverged trailing session id",
+			cmd:           "provider --option value --session-id stale-key",
+			sessionIDFlag: "--session-id",
+			want:          "provider --option value",
+		},
+		{
+			name:          "removes equals form",
+			cmd:           "provider --session-id=stale-key --option value",
+			sessionIDFlag: "--session-id",
+			want:          "provider --option value",
+		},
+		{
+			name:          "leaves a fresh command unchanged",
+			cmd:           "provider --option value",
+			sessionIDFlag: "--session-id",
+			want:          "provider --option value",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripSessionIDFlagArg(tt.cmd, tt.sessionIDFlag); got != tt.want {
+				t.Errorf("stripSessionIDFlagArg(%q, %q) = %q, want %q", tt.cmd, tt.sessionIDFlag, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
