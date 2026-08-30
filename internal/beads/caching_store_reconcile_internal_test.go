@@ -875,3 +875,54 @@ func TestUnchangedStatusEventDoesNotReopenTheReconcileLoop(t *testing.T) {
 		t.Fatalf("a real status change left %s's ready projection stale", dependent.ID)
 	}
 }
+
+func TestCacheReconcileSnapshotDoesNotReopenDependencyFreeLoop(t *testing.T) {
+	backing := NewMemStore()
+	unblocked := false
+	subject, err := backing.Create(Bead{Title: "backlog issue", IsBlocked: &unblocked})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var pending []struct {
+		eventType string
+		payload   json.RawMessage
+	}
+	var emitted []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
+		emitted = append(emitted, eventType+":"+beadID)
+		pending = append(pending, struct {
+			eventType string
+			payload   json.RawMessage
+		}{eventType: eventType, payload: payload})
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	pass := func() {
+		cache.runReconciliation()
+		events := pending
+		pending = nil
+		for _, event := range events {
+			cache.ApplyEventSnapshot(event.eventType, event.payload)
+		}
+	}
+
+	pass()
+	emitted = nil
+	title := "backlog issue (edited)"
+	if err := backing.Update(subject.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	pass()
+	if len(emitted) == 0 {
+		t.Fatal("reconcile did not emit the seeded change")
+	}
+	emitted = nil
+	for range 5 {
+		pass()
+	}
+	if len(emitted) != 0 {
+		t.Fatalf("reconcile kept emitting for an unchanged dependency-free bead: %v", emitted)
+	}
+}

@@ -50,6 +50,8 @@ import (
 // api.ConfigWriteSerializer.
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
+const cacheReconcileActor = "cache-reconcile"
+
 type controllerState struct {
 	mu  sync.RWMutex
 	cfg *config.City
@@ -244,7 +246,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if recorder != nil {
 			recorder.Record(events.Event{
 				Type:             eventType,
-				Actor:            "cache-reconcile",
+				Actor:            cacheReconcileActor,
 				Subject:          beadID,
 				RunID:            runID,
 				SessionID:        sessionID,
@@ -574,12 +576,17 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.mu.RUnlock()
 
+	snapshot := evt.Actor == cacheReconcileActor
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
-			cached.ApplyEvent(evt.Type, evt.Payload)
+			if snapshot {
+				cached.ApplyEventSnapshot(evt.Type, evt.Payload)
+			} else {
+				cached.ApplyEvent(evt.Type, evt.Payload)
+			}
 		}
 	}
-	if evt.Actor != "cache-reconcile" {
+	if !snapshot {
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {

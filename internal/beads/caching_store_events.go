@@ -18,6 +18,17 @@ import (
 // with the full bead JSON payload. This keeps the cache fresh without
 // waiting for reconciliation.
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, false)
+}
+
+// ApplyEventSnapshot applies an event containing a complete bead snapshot.
+// Unlike hook patches, a snapshot has authoritative dependency coverage even
+// when empty dependency fields are omitted from its JSON representation.
+func (c *CachingStore) ApplyEventSnapshot(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, true)
+}
+
+func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, depsAuthoritative bool) {
 	if len(payload) == 0 {
 		return
 	}
@@ -226,7 +237,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
-			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -247,7 +258,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			})
 			mutated = true
 		}
-		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking); depsMutated && !mutated {
+		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative); depsMutated && !mutated {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
@@ -268,7 +279,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
