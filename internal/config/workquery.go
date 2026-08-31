@@ -212,14 +212,15 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 
 func namedGraphV2RoutedReadyTierCommand(includeEphemeralReady bool) string {
 	canonical := bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
-	legacy := routedReadyTierCommand(includeEphemeralReady)
-	legacyRoots := `[.[] | select((` + jqMeta(beadmeta.RootBeadIDMetadataKey) + ` != "") and (` + jqMeta(beadmeta.StepRefMetadataKey) + ` != "")) | ` + jqMeta(beadmeta.RootBeadIDMetadataKey) + `] | unique[]`
+	legacy := bdReadyPoolDemandShell("--sort oldest --limit=0", includeEphemeralReady) + ` 2>/dev/null`
+	legacyCandidates := `.[] | select((` + jqMeta(beadmeta.RootBeadIDMetadataKey) + ` != "") and (` + jqMeta(beadmeta.StepRefMetadataKey) + ` != ""))`
+	candidateRoot := jqMeta(beadmeta.RootBeadIDMetadataKey)
 	rootContract := `.[0].metadata["` + beadmeta.FormulaContractMetadataKey + `"] // ""`
-	rootCandidate := `[.[] | select(` + jqMeta(beadmeta.RootBeadIDMetadataKey) + ` == $root)] | .[:1]`
 	return `{ r=$(` + canonical + `); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" || { ` +
-		`r=$(` + legacy + `); printf "%s" "$r" | jq -r ` + shellquote.Quote(legacyRoots) + ` 2>/dev/null | while IFS= read -r root; do ` +
+		`r=$(` + legacy + `); printf "%s" "$r" | jq -c ` + shellquote.Quote(legacyCandidates) + ` 2>/dev/null | while IFS= read -r candidate; do ` +
+		`root=$(printf "%s" "$candidate" | jq -r ` + shellquote.Quote(candidateRoot) + ` 2>/dev/null); [ -n "$root" ] || continue; ` +
 		`[ "$(bd show --json "$root" 2>/dev/null | jq -r ` + shellquote.Quote(rootContract) + ` 2>/dev/null)" = "` + beadmeta.FormulaContractGraphV2 + `" ] || continue; ` +
-		`printf "%s" "$r" | jq --arg root "$root" ` + shellquote.Quote(rootCandidate) + ` 2>/dev/null; break; ` +
+		`printf '[%s]' "$candidate"; break; ` +
 		`done; }; }`
 }
 

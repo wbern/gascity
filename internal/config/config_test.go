@@ -2608,6 +2608,36 @@ esac
 	}
 }
 
+func TestEffectiveWorkQueryNamedSessionClaimsLegacyGraphV2StepPastGenericBacklog(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"show --json graph-root"*) printf '[{"id":"graph-root","metadata":{"gc.formula_contract":"graph.v2"}}]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '['
+    i=1
+    while [ "$i" -le 20 ]; do
+      [ "$i" -gt 1 ] && printf ','
+      printf '{"id":"generic-%s","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"generic-root-%s","gc.step_ref":"ordinary.work"}}' "$i" "$i"
+      i=$((i + 1))
+    done
+    case "$*" in
+      *"--limit=0"*) printf ',{"id":"legacy-graph-initial-step","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}' ;;
+    esac
+    printf ']'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "legacy-graph-initial-step") {
+		t.Fatalf("EffectiveWorkQuery() did not search past generic routed backlog: %q", out)
+	}
+}
+
 func TestEffectiveWorkQueryNamedSessionSkipsLegacyNonGraphRoutedWork(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
