@@ -1335,6 +1335,53 @@ func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *te
 	}
 }
 
+// TestDefaultScaleCheckCountsIgnoresRunTargetOnlyNonWorkflowWork fences the
+// direct default-demand compatibility path. Route recovery may later restore a
+// carried plain-work route, but a raw gc.run_target must not itself make
+// ordinary or control-shaped work new pool demand.
+func TestDefaultScaleCheckCountsIgnoresRunTargetOnlyNonWorkflowWork(t *testing.T) {
+	const template = "gascity/reviewer"
+	for _, tc := range []struct {
+		name string
+		kind string
+	}{
+		{name: "plain task"},
+		{name: "retry control", kind: "retry"},
+		{name: "spec sidecar", kind: "spec"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			if _, err := backing.Create(beads.Bead{
+				Title:  tc.name,
+				Type:   "task",
+				Status: "open",
+				Metadata: map[string]string{
+					"gc.kind":       tc.kind,
+					"gc.run_target": template,
+				},
+			}); err != nil {
+				t.Fatalf("create %s: %v", tc.name, err)
+			}
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if err := cache.PrimeActive(); err != nil {
+				t.Fatalf("PrimeActive: %v", err)
+			}
+
+			counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+				template: template,
+				storeKey: "rig:gascity",
+				store:    cache,
+			}})
+			if len(errs) != 0 {
+				t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+			}
+			if got := counts[template]; got != 0 {
+				t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", template, got)
+			}
+		})
+	}
+}
+
 func TestDefaultScaleCheckCountsIgnoresRunTargetOnNonWorkflowDivergentWork(t *testing.T) {
 	const (
 		entryTarget = "gascity/controller"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -110,6 +111,90 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NoDemandNoWake(t *testing.
 	}
 	if len(result.State) != 0 {
 		t.Errorf("desired sessions = %d, want 0", len(result.State))
+	}
+}
+
+// TestBuildDesiredState_ScaleFromZero_NoScaleCheck_UnroutedBacklogDoesNotWake
+// proves that ordinary ready backlog is not pool demand. A bead must be
+// explicitly routed before it may create a min=0 pool session; being open and
+// unassigned alone is deliberately insufficient.
+func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_UnroutedBacklogDoesNotWake(t *testing.T) {
+	cfg, cityStore, rigStores, qualified := newNoScaleCheckRigPoolCity(t)
+	if _, err := cityStore.Create(beads.Bead{
+		ID:     "ordinary-backlog",
+		Title:  "Ordinary backlog",
+		Status: "open",
+		Type:   "task",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
+	)
+
+	if got := result.ScaleCheckCounts[qualified]; got != 0 {
+		t.Errorf("unrouted backlog demand = %d, want 0", got)
+	}
+	if len(result.State) != 0 {
+		t.Errorf("desired sessions = %d, want 0", len(result.State))
+	}
+}
+
+// TestBuildDesiredState_ScaleFromZero_NoScaleCheck_RoutedDemandRecoversAfterLoad
+// proves that a temporary host-load veto does not consume or lose routed work.
+// On the next reconciliation, the unchanged routed bead must create capacity
+// once headroom returns; no second sling or event is required.
+func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_RoutedDemandRecoversAfterLoad(t *testing.T) {
+	cfg, cityStore, rigStores, qualified := newNoScaleCheckRigPoolCity(t)
+	pct := 50
+	cfg.Daemon.PoolNewDemandMaxLoadPercentValue = &pct
+	if _, err := cityStore.Create(beads.Bead{
+		ID:       "routed-demand",
+		Title:    "Routed demand",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": qualified},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	loads := []float64{float64(runtime.NumCPU()) * 10, 0}
+	previous := poolNewDemandLoadAverageFn
+	poolNewDemandLoadAverageFn = func() (float64, error) {
+		if len(loads) == 0 {
+			t.Fatal("unexpected extra load probe")
+		}
+		load := loads[0]
+		loads = loads[1:]
+		return load, nil
+	}
+	t.Cleanup(func() { poolNewDemandLoadAverageFn = previous })
+
+	first := buildDesiredStateWithSessionBeads(
+		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
+	)
+	if got := first.ScaleCheckCounts[qualified]; got != 1 {
+		t.Fatalf("first demand = %d, want 1 before the load veto is applied", got)
+	}
+	if len(first.State) != 0 {
+		t.Fatalf("first desired sessions = %d, want 0 under load veto", len(first.State))
+	}
+
+	second := buildDesiredStateWithSessionBeads(
+		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, &sessionBeadSnapshot{}, nil, os.Stderr,
+	)
+	if got := second.ScaleCheckCounts[qualified]; got != 1 {
+		t.Fatalf("second demand = %d, want unchanged routed demand", got)
+	}
+	if len(second.State) != 1 {
+		t.Fatalf("second desired sessions = %d, want 1 after load recovery", len(second.State))
+	}
+	if len(loads) != 0 {
+		t.Fatalf("load probes remaining = %d, want 0", len(loads))
 	}
 }
 
