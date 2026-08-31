@@ -349,6 +349,7 @@ name = "worker"
 printf '%%s\n' "$*" >> %q
 case "$*" in
   *"ready"*"gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"show --json graph-root"*) printf '[{"id":"graph-root","metadata":{"gc.formula_contract":"graph.v2"}}]' ;;
   *"ready"*"gc.routed_to=worker"*) printf '[{"id":"graph-initial-step","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;
   *"update graph-initial-step --claim --json"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;
   *"show --json graph-initial-step"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;

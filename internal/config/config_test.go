@@ -2596,6 +2596,7 @@ func TestEffectiveWorkQueryNamedSessionClaimsLegacyGraphV2RoutedStep(t *testing.
 set -eu
 case "$*" in
   *"--metadata-field gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"show --json graph-root"*) printf '[{"id":"graph-root","metadata":{"gc.formula_contract":"graph.v2"}}]' ;;
   *"--metadata-field gc.routed_to=hello-world/worker"*)
     printf '[{"id":"legacy-graph-initial-step","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]'
     ;;
@@ -2616,7 +2617,7 @@ set -eu
 case "$*" in
   *"--metadata-field gc.formula_contract=graph.v2"*) printf '[]' ;;
   *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"generic-routed-work","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"legacy-root"}}]'
+    printf '[{"id":"generic-routed-work","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"legacy-root","gc.step_ref":"ordinary-molecule.work"}}]'
     ;;
   *) printf '[]' ;;
 esac
