@@ -68,6 +68,10 @@ func bdReadyPoolDemandShell(limitFlag string, includeEphemeralReady bool) string
 	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
 }
 
+func bdReadyNamedGraphV2PoolDemandShell(limitFlag string, includeEphemeralReady bool) string {
+	return `bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target" --metadata-field "` + beadmeta.FormulaContractMetadataKey + `=` + beadmeta.FormulaContractGraphV2 + `" --unassigned --exclude-type=epic` + excludeHoldLabelsShellArgs() + ` --json ` + limitFlag
+}
+
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
 // graph.v2 workflow roots created before gc.routed_to root stamping shipped.
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
@@ -179,8 +183,13 @@ func poolDemandFirstRowFunctionScript(includeEphemeralReady bool) string {
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(includeEphemeralReady) + `); ` +
+		`case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") r=$(` + routedReadyTierCommand(includeEphemeralReady) + `);; ` +
+		`named) r=$(` + namedGraphV2RoutedReadyTierCommand(includeEphemeralReady) + `);; ` +
+		`*) return 1;; ` +
+		`esac; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`[ "$GC_SESSION_ORIGIN" = "named" ] && return 1; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", includeEphemeralReady) + ` 2>/dev/null); ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -199,6 +208,10 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 	// behind it to fall through to instead of idle-exiting; the hook layer
 	// (filterUnreadyHookCandidates) strips the blocked head from the result.
 	return bdReadyPoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+}
+
+func namedGraphV2RoutedReadyTierCommand(includeEphemeralReady bool) string {
+	return bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -365,10 +378,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 }
 
 func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; `
+	return ""
 }
 
 func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {

@@ -2564,6 +2564,30 @@ esac
 	}
 }
 
+func TestEffectiveWorkQueryNamedSessionClaimsOnlyGraphV2RoutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*"--metadata-field gc.formula_contract=graph.v2"*)
+    printf '[{"id":"graph-initial-step","metadata":{"gc.routed_to":"hello-world/worker","gc.formula_contract":"graph.v2"}}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"generic-pool-work","metadata":{"gc.routed_to":"hello-world/worker"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "graph-initial-step") {
+		t.Fatalf("EffectiveWorkQuery() did not return graph.v2 routed work to named session: %q", out)
+	}
+	if strings.Contains(out, "generic-pool-work") {
+		t.Fatalf("EffectiveWorkQuery() returned unrelated generic routed work to named session: %q", out)
+	}
+}
+
 func TestEffectiveWorkQueryClaimsRunTargetOnlyRootDuringMigration(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; migration fallback filters routed_to with jq")
