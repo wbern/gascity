@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -65,7 +67,24 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
 		return false
 	}
+	if isIsolatedReviewWork(bead.Metadata) {
+		return false
+	}
 	return true
+}
+
+func isIsolatedReviewWork(metadata map[string]string) bool {
+	context := strings.TrimSpace(metadata["review_context"])
+	tracker := strings.TrimSpace(metadata["tracker_bead"])
+	molecule := strings.TrimSpace(metadata["molecule_id"])
+	pr := strings.TrimSpace(metadata["pr_number"])
+	head := strings.TrimSpace(metadata["head"])
+	key := strings.TrimSpace(metadata["review_dispatch_key"])
+	prNumber, prErr := strconv.Atoi(pr)
+	headBytes, headErr := hex.DecodeString(head)
+	return context != "" && tracker != "" && molecule != "" && prErr == nil && prNumber > 0 &&
+		headErr == nil && len(headBytes) == 20 &&
+		key == fmt.Sprintf("%s:%s:%s", context, pr, head)
 }
 
 // validateWorkRecordOnClose checks bead against the typed work-record contract
