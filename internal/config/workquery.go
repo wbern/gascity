@@ -328,7 +328,7 @@ func inProgressBlockedByEnrichmentScript() string {
 func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --json --limit=1 2>/dev/null); ` +
+		`r=$(bd ready` + bdReadyIncludeEphemeralArg(includeEphemeralReady) + ` --assignee="$id" --exclude-type=message --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		ephemeralAssignedReadyProbeScript("id", includeEphemeralReady) +
 		`done; `
@@ -380,7 +380,10 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 	if includeEphemeralReady {
 		return ""
 	}
-	filter := ephemeralReadyCandidatesFilterJQ(`select((.assignee // "") == $id)`, false)
+	filter := ephemeralReadyCandidatesFilterJQ(
+		`select((.assignee // "") == $id) | select(((.issue_type // .type // "") != "message"))`,
+		false,
+	)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null | ` +
 		ephemeralReadinessFilterShell(1, true) + `); ` +
