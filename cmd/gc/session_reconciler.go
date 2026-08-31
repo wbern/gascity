@@ -3854,6 +3854,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !shouldWake && target.alive {
 			// No reason to be awake — begin drain.
 			intent := info.SleepIntent
+			// An explicit session suspend has already persisted a durable user hold
+			// before this tick. Unlike a controller-initiated drain, it is an
+			// operator request to free the runtime now; manual sessions have no
+			// drain-ack protocol and would otherwise keep their tmux server alive
+			// until the five-minute drain timeout. Fence the stop by the observed
+			// instance token so a concurrent wake cannot stop its replacement.
+			if intent == "user-hold" {
+				if err := verifiedStop(info, store, sp, cfg); err != nil && !runtime.IsSessionGone(err) {
+					if !errors.Is(err, errTokenMismatch) {
+						fmt.Fprintf(stderr, "session reconciler: stopping suspended %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+					}
+				}
+				cancelSessionDrainInfo(info, sp, dt)
+				continue
+			}
 			// Keep-alive hold: a live session held only by `held_until` in the
 			// future with no sleep_intent is running `gc runtime heartbeat` to
 			// suppress its idle-timeout / max-session-age timers during a long,
