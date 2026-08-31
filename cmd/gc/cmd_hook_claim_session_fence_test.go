@@ -326,6 +326,62 @@ esac
 	}
 }
 
+func TestHookCommandClaimNamedSessionClaimsGraphV2RoutedStep(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"ready"*"gc.routed_to=worker"*"gc.formula_contract=graph.v2"*) printf '[{"id":"graph-initial-step","status":"open","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
+  *"update graph-initial-step --claim --json"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
+  *"show --json graph-initial-step"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, bdLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "named-session")
+	t.Setenv("GC_SESSION_NAME", "named-worker")
+	t.Setenv("GC_SESSION_ORIGIN", "named")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "hook", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc hook --claim = %d, want 0; stdout=%q stderr=%s bd log=%s", code, stdout.String(), stderr.String(), readFileString(t, bdLog))
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.BeadID != "graph-initial-step" || result.Reason != "claimed" {
+		t.Fatalf("result = %+v, want named claim of graph-initial-step", result)
+	}
+	if !strings.Contains(readFileString(t, bdLog), "update graph-initial-step --claim --json") {
+		t.Fatalf("named session did not claim graph step; bd log=%s", readFileString(t, bdLog))
+	}
+}
+
 // TestHookCommandClaimSkipTriggerIgnoresTokenlessEnvironmentTrigger preserves
 // the same query-only behavior for legacy runtimes, which obtain trigger data
 // directly from GC_TRIGGER_WORK_* rather than a session projection.

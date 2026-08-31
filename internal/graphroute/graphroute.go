@@ -556,6 +556,7 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		} else {
 			step.Metadata = maps.Clone(step.Metadata)
 		}
+		step.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
 		if rootStoreRef != "" {
 			step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}

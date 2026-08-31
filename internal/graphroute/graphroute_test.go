@@ -278,6 +278,9 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 	if work.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("work gc.routed_to = %q, want mayor", work.Metadata["gc.routed_to"])
 	}
+	if work.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
+		t.Errorf("work %s = %q, want %q", beadmeta.FormulaContractMetadataKey, work.Metadata[beadmeta.FormulaContractMetadataKey], beadmeta.FormulaContractGraphV2)
+	}
 }
 
 func TestDecorateGraphWorkflowRecipe_ControlRouteUsesOwningStoreScope(t *testing.T) {
