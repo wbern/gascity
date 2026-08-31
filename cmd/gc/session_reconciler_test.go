@@ -9481,12 +9481,15 @@ func TestReconcileSessionBeads_IdleTimeoutRespectsUserHold(t *testing.T) {
 	}
 }
 
-func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testing.T) {
+func TestReconcileSessionBeads_SuspendedUserHoldStopsRuntimeImmediately(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
 	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
 	env.setSessionMetadata(&session, map[string]string{
 		"held_until":   heldUntil,
@@ -9506,15 +9509,11 @@ func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testin
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
-	ds := env.dt.get(session.ID)
-	if ds == nil {
-		t.Fatal("expected suspended user-hold session to start draining")
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("explicit suspend must not wait for drain acknowledgement, got drain reason=%q", ds.reason)
 	}
-	if ds.reason != "user-hold" {
-		t.Fatalf("drain reason = %q, want user-hold", ds.reason)
-	}
-	if !env.sp.IsRunning("worker") {
-		t.Fatal("held worker must drain before the runtime is stopped")
+	if env.sp.IsRunning("worker") {
+		t.Fatal("explicit suspended user-hold must stop the runtime in the same reconciliation tick")
 	}
 	b, err := env.store.Get(session.ID)
 	if err != nil {
@@ -9525,6 +9524,43 @@ func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testin
 	}
 }
 
+func TestReconcileSessionBeads_SuspendedUserHoldDoesNotStopWokenReplacement(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"held_until":     heldUntil,
+		"sleep_intent":   "user-hold",
+		"state":          "suspended",
+		"instance_token": "before-wake",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "after-wake"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("a concurrent wake replacement must not be stopped by a stale suspend")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("stale suspend must not enqueue a drain, got reason=%q", ds.reason)
+	}
+}
+
 // TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout guards the
 // session_reconciler.go wake/drain block against the `gc runtime heartbeat`
 // regression (PR #3994). Heartbeat sets held_until only — no sleep_intent and
@@ -9532,9 +9568,9 @@ func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testin
 // operation. Before the fix, ComputeAwakeSet's hold suppression drove the live
 // session into a "no-wake-reason" drain that force-stopped it after
 // defaultDrainTimeout: the exact opposite of the heartbeat's purpose. The
-// session must survive past the drain deadline, and a suspend (which sets
-// sleep_intent) must still drain — see
-// TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain.
+// session must survive past the drain deadline, while an explicit suspend
+// (which sets sleep_intent) stops immediately — see
+// TestReconcileSessionBeads_SuspendedUserHoldStopsRuntimeImmediately.
 func TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
