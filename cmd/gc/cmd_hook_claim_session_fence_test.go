@@ -326,7 +326,7 @@ esac
 	}
 }
 
-func TestHookCommandClaimNamedSessionClaimsGraphV2RoutedStep(t *testing.T) {
+func TestHookCommandClaimNamedSessionClaimsLegacyGraphV2RoutedStep(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -348,9 +348,10 @@ name = "worker"
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
 case "$*" in
-  *"ready"*"gc.routed_to=worker"*"gc.formula_contract=graph.v2"*) printf '[{"id":"graph-initial-step","status":"open","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
-  *"update graph-initial-step --claim --json"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
-  *"show --json graph-initial-step"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2"}}]' ;;
+  *"ready"*"gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"ready"*"gc.routed_to=worker"*) printf '[{"id":"graph-initial-step","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;
+  *"update graph-initial-step --claim --json"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;
+  *"show --json graph-initial-step"*) printf '[{"id":"graph-initial-step","status":"in_progress","assignee":"named-worker","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]' ;;
   *) printf '[]' ;;
 esac
 `, bdLog)
@@ -366,7 +367,7 @@ esac
 	t.Setenv("GC_SESSION_ORIGIN", "named")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityDir, "hook", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
+	code := run([]string{"--city", cityDir, "hook", "--query-target", "worker", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc hook --claim = %d, want 0; stdout=%q stderr=%s bd log=%s", code, stdout.String(), stderr.String(), readFileString(t, bdLog))
 	}

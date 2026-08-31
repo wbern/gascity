@@ -211,7 +211,11 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 }
 
 func namedGraphV2RoutedReadyTierCommand(includeEphemeralReady bool) string {
-	return bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	canonical := bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	legacy := routedReadyTierCommand(includeEphemeralReady)
+	filter := `[.[] | select((` + jqMeta(beadmeta.RootBeadIDMetadataKey) + ` != "") and (` + jqMeta(beadmeta.StepRefMetadataKey) + ` != ""))] | .[:1]`
+	return `{ r=$(` + canonical + `); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" || { ` +
+		`r=$(` + legacy + `); printf "%s" "$r" | jq ` + shellquote.Quote(filter) + ` 2>/dev/null; }; }`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts

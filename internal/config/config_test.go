@@ -2588,6 +2588,44 @@ esac
 	}
 }
 
+func TestEffectiveWorkQueryNamedSessionClaimsLegacyGraphV2RoutedStep(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"legacy-graph-initial-step","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"graph-root","gc.step_ref":"workflow.load-context"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "legacy-graph-initial-step") {
+		t.Fatalf("EffectiveWorkQuery() did not return legacy graph.v2 routed work to named session: %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryNamedSessionSkipsLegacyNonGraphRoutedWork(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.formula_contract=graph.v2"*) printf '[]' ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"generic-routed-work","metadata":{"gc.routed_to":"hello-world/worker","gc.root_bead_id":"legacy-root"}}]'
+    ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.Contains(out, "generic-routed-work") {
+		t.Fatalf("EffectiveWorkQuery() returned unrelated legacy routed work to named session: %q", out)
+	}
+}
+
 func TestEffectiveWorkQueryClaimsRunTargetOnlyRootDuringMigration(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; migration fallback filters routed_to with jq")
