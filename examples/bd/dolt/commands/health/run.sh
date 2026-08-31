@@ -443,12 +443,13 @@ if [ -d "$quarantine_dir" ]; then
   for marker in "$quarantine_dir"/*; do
     [ -f "$marker" ] || continue
     q_db=$(basename "$marker")
-    # compact/run.sh writes transient files into this same directory:
+    # compact/run.sh writes non-marker files into this same directory:
     # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
     # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
-    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
-    # and a spurious exit 2.
-    case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
+    # EVERY flatten). Clearing a quarantine also renames its marker in place to
+    # `<db>.cleared-<timestamp>` as durable audit evidence. None is an active
+    # marker; reading one yields a phantom entry and a spurious exit 2.
+    case "$q_db" in *.tmp.*|*.probe.*|*.cleared-*) continue ;; esac
     # Anchor each key to column 1 with index()==1 — the same reader idiom
     # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
     # key (8 and 12 = key length + 1).
