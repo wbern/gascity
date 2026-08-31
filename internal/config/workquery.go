@@ -211,7 +211,17 @@ func routedReadyTierCommand(includeEphemeralReady bool) string {
 }
 
 func namedGraphV2RoutedReadyTierCommand(includeEphemeralReady bool) string {
-	return bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	canonical := bdReadyNamedGraphV2PoolDemandShell("--sort oldest --limit=20", includeEphemeralReady) + ` 2>/dev/null`
+	legacy := bdReadyPoolDemandShell("--sort oldest --limit=0", includeEphemeralReady) + ` 2>/dev/null`
+	legacyCandidates := `.[] | select((` + jqMeta(beadmeta.RootBeadIDMetadataKey) + ` != "") and (` + jqMeta(beadmeta.StepRefMetadataKey) + ` != ""))`
+	candidateRoot := jqMeta(beadmeta.RootBeadIDMetadataKey)
+	rootContract := `.[0].metadata["` + beadmeta.FormulaContractMetadataKey + `"] // ""`
+	return `{ r=$(` + canonical + `); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" || { ` +
+		`r=$(` + legacy + `); printf "%s" "$r" | jq -c ` + shellquote.Quote(legacyCandidates) + ` 2>/dev/null | while IFS= read -r candidate; do ` +
+		`root=$(printf "%s" "$candidate" | jq -r ` + shellquote.Quote(candidateRoot) + ` 2>/dev/null); [ -n "$root" ] || continue; ` +
+		`[ "$(bd show --json "$root" 2>/dev/null | jq -r ` + shellquote.Quote(rootContract) + ` 2>/dev/null)" = "` + beadmeta.FormulaContractGraphV2 + `" ] || continue; ` +
+		`printf '[%s]' "$candidate"; break; ` +
+		`done; }; }`
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
