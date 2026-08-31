@@ -112,6 +112,13 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_NoDemandNoWake(t *testing.
 	if len(result.State) != 0 {
 		t.Errorf("desired sessions = %d, want 0", len(result.State))
 	}
+	sessions, err := cityStore.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("session beads = %d, want 0", len(sessions))
+	}
 }
 
 // TestBuildDesiredState_ScaleFromZero_NoScaleCheck_UnroutedBacklogDoesNotWake
