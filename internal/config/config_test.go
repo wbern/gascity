@@ -2835,6 +2835,27 @@ func TestEffectiveWorkQuerySkipsAssignedMessageBeadsBeforeRoutedDemand(t *testin
 	}
 }
 
+func TestEffectiveWorkQuerySkipsEphemeralAssignedMessageBeforeRoutedDemand(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; default work query exercises an ephemeral fallback")
+	}
+	agent := Agent{Name: "worker"}
+	out := runShellWithFakeBd(t, agent.EffectiveWorkQuery(), map[string]string{
+		"GC_SESSION_ORIGIN": "named",
+		"GC_SESSION_NAME":   "worker-session",
+	}, `#!/bin/sh
+case "$*" in
+  *"ready --assignee=worker-session --exclude-type=message"*) printf '[]' ;;
+  *"query --json ephemeral=true AND status=open"*) printf '[{"id":"mail-wisp","status":"open","issue_type":"message","assignee":"worker-session"}]' ;;
+  *"ready"*"gc.routed_to=worker"*"gc.formula_contract=graph.v2"*) printf '[{"id":"graph-step","status":"open","issue_type":"task","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2","gc.root_bead_id":"root","gc.step_ref":"workflow.step"}}]' ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != `[{"id":"graph-step","status":"open","issue_type":"task","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2","gc.root_bead_id":"root","gc.step_ref":"workflow.step"}}]` {
+		t.Fatalf("EffectiveWorkQuery() output = %q, want routed graph step after skipping ephemeral message", out)
+	}
+}
+
 // TestPoolDemandPredicateSharedWithWorkQuery is the structural regression
 // test for the protocol-mismatch class addressed by PR #1516. The
 // reconciler's pool-demand path (EffectivePoolDemandQuery) and the

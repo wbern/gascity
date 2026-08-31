@@ -380,7 +380,10 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 	if includeEphemeralReady {
 		return ""
 	}
-	filter := ephemeralReadyCandidatesFilterJQ(`select((.assignee // "") == $id)`, false)
+	filter := ephemeralReadyCandidatesFilterJQ(
+		`select((.assignee // "") == $id) | select(((.issue_type // .type // "") != "message"))`,
+		false,
+	)
 	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null | ` +
 		ephemeralReadinessFilterShell(1, true) + `); ` +
