@@ -3983,15 +3983,28 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 // agentKey identifies an agent by its rig directory and name.
 type agentKey struct{ dir, name string }
 
+// implicitAgentOccupancy returns the agent identities that are already claimed
+// by explicit configuration. A city-level scope=rig template reserves its name
+// in every configured rig because FindAgent synthesizes that template for each
+// qualified rig identity.
+func implicitAgentOccupancy(cfg *City) map[agentKey]bool {
+	existing := make(map[agentKey]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		existing[agentKey{a.Dir, a.Name}] = true
+		if a.Dir == "" && a.Scope == "rig" {
+			for _, rig := range cfg.Rigs {
+				existing[agentKey{rig.Name, a.Name}] = true
+			}
+		}
+	}
+	return existing
+}
+
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
 // sling targets without requiring manual agent declarations.
 func InjectImplicitAgents(cfg *City) {
-	// Build set of existing agent keys (dir, name).
-	existing := make(map[agentKey]bool, len(cfg.Agents))
-	for _, a := range cfg.Agents {
-		existing[agentKey{a.Dir, a.Name}] = true
-	}
+	existing := implicitAgentOccupancy(cfg)
 
 	configured := configuredProviders(cfg)
 	if len(configured) == 0 {
@@ -4060,10 +4073,7 @@ func implicitAgentIdentities(cfg *City) map[agentKey]bool {
 	}
 	providers := configuredProviderOrder(configured)
 
-	existing := make(map[agentKey]bool, len(cfg.Agents))
-	for _, a := range cfg.Agents {
-		existing[agentKey{a.Dir, a.Name}] = true
-	}
+	existing := implicitAgentOccupancy(cfg)
 
 	result := make(map[agentKey]bool)
 	for _, name := range providers {
