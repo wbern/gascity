@@ -7125,6 +7125,68 @@ func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 	}
 }
 
+func TestInjectImplicitAgents_CityRigScopedTemplateReservesEachRig(t *testing.T) {
+	formula := "mol-configured-work"
+	cfg := &City{
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Providers: map[string]ProviderSpec{
+			"configured": {},
+			"other":      {},
+		},
+		Rigs: []Rig{
+			{Name: "alpha", Path: "/tmp/alpha"},
+			{Name: "beta", Path: "/tmp/beta"},
+		},
+		Agents: []Agent{{
+			Name:                "configured",
+			Scope:               "rig",
+			Provider:            "configured",
+			WorkDir:             "worktrees/{{.Rig}}",
+			MinActiveSessions:   ptrInt(0),
+			MaxActiveSessions:   ptrInt(3),
+			DefaultSlingFormula: &formula,
+		}},
+	}
+
+	identities := implicitAgentIdentities(cfg)
+	InjectImplicitAgents(cfg)
+
+	for _, rig := range []string{"alpha", "beta"} {
+		if got := FindAgent(cfg, rig+"/configured"); got == nil {
+			t.Fatalf("FindAgent(%q) = nil", rig+"/configured")
+		} else {
+			if got.Implicit {
+				t.Errorf("FindAgent(%q).Implicit = true, want false", rig+"/configured")
+			}
+			if got.Dir != rig {
+				t.Errorf("FindAgent(%q).Dir = %q, want %q", rig+"/configured", got.Dir, rig)
+			}
+			if got.Provider != "configured" || got.WorkDir != "worktrees/{{.Rig}}" || got.MinActiveSessions == nil || *got.MinActiveSessions != 0 || got.MaxActiveSessions == nil || *got.MaxActiveSessions != 3 || got.EffectiveDefaultSlingFormula() != formula {
+				t.Errorf("FindAgent(%q) = %+v, want synthesized rig template fields preserved", rig+"/configured", *got)
+			}
+		}
+	}
+
+	for _, agent := range cfg.Agents {
+		if agent.Implicit && agent.Name == "configured" && agent.Dir != "" {
+			t.Errorf("unexpected implicit agent %q", agent.QualifiedName())
+		}
+	}
+	for _, key := range []struct {
+		key  agentKey
+		want bool
+	}{
+		{agentKey{"alpha", "configured"}, false},
+		{agentKey{"beta", "configured"}, false},
+		{agentKey{"alpha", "other"}, true},
+		{agentKey{"beta", "other"}, true},
+	} {
+		if got := identities[key.key]; got != key.want {
+			t.Errorf("implicitAgentIdentities()[%+v] = %v, want %v", key.key, got, key.want)
+		}
+	}
+}
+
 func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	// With rigs defined, implicit agents are injected for each rig too.
 	cfg := &City{
