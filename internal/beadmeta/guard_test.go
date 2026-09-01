@@ -40,6 +40,12 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
+	// JSON envelope "kind" discriminators. These name a wire envelope, not a
+	// bead-metadata key: they are written into and matched against the kind
+	// field of a JSON document, never into bead.Metadata.
+	"gc.bead_summary":    "bounded discovery envelope kind; declared once as bddispatch.BeadSummaryKind and referenced by its cmd/gc reader",
+	"gc.output_firewall": "managed output-firewall manifest kind. internal/outputfirewall (the writer) imports no gascity package by design, so internal/beads mirrors the literal to detect truncation; TestShowSummariesReportTruncationInsteadOfEmptiness pins writer and reader together end-to-end",
+
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
 	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",

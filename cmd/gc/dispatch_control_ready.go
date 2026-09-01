@@ -401,7 +401,7 @@ func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return nil, err
 	}
-	if envelope.SchemaVersion != "1" || envelope.Kind != "gc.bead_summary" || envelope.Verb != "ready" {
+	if envelope.SchemaVersion != "1" || envelope.Kind != bddispatch.BeadSummaryKind || envelope.Verb != "ready" {
 		return nil, fmt.Errorf("unrecognized summary envelope (schema_version=%q kind=%q verb=%q)", envelope.SchemaVersion, envelope.Kind, envelope.Verb)
 	}
 	result := make([]beads.Bead, 0, len(envelope.Beads))

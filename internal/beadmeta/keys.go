@@ -47,6 +47,7 @@ const (
 	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	AttemptLogMetadataKey                = "gc.attempt_log"
 	AttemptMetadataKey                   = "gc.attempt"
+	BaseSHAMetadataKey                   = "gc.base_sha"
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
 	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
@@ -193,6 +194,7 @@ const (
 	StepTimeoutMetadataKey         = "gc.step_timeout"
 	SyntheticKindMetadataKey       = "gc.synthetic_kind"
 	SyntheticMetadataKey           = "gc.synthetic"
+	TaskWorktreeMetadataKey        = "gc.task_worktree"
 	TemplateMetadataKey            = "gc.template"
 	TerminalMetadataKey            = "gc.terminal"
 	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
@@ -204,6 +206,7 @@ const (
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
+	WorkspaceOwnerMetadataKey      = "gc.workspace_owner"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -300,6 +303,7 @@ var KnownMetadataKeys = []string{
 	ActiveWorkBeadMetadataKey,
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
+	BaseSHAMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BrainParentSIDMetadataKey,
@@ -432,6 +436,7 @@ var KnownMetadataKeys = []string{
 	StepTimeoutMetadataKey,
 	SyntheticKindMetadataKey,
 	SyntheticMetadataKey,
+	TaskWorktreeMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
@@ -443,6 +448,7 @@ var KnownMetadataKeys = []string{
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
 	WorkflowIDMetadataKey,
+	WorkspaceOwnerMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that
