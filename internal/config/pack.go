@@ -548,12 +548,17 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	// agents/<name>/, or an earlier hoist) wins; the hoisted copy is skipped.
 	cfg.Agents = mergeHoistedCityAgents(cfg.Agents, hoistedAgents)
 	cfg.NamedSessions = mergeHoistedCityNamedSessions(cfg.NamedSessions, hoistedNamedSessions)
-	if opts.deferRigPatches && opts.deferredRigPatches != nil {
-		for i := range *opts.deferredRigPatches {
-			(*opts.deferredRigPatches)[i].expectedAgentCount = len(cfg.Agents)
-		}
-	}
 	return nil
+}
+
+// snapshotDeferredRigPatchAgentCount records the merged agent count that
+// applyDeferredRigPatches checks against. It must run after ApplyPatches so
+// that qualified scope-rig patches (which append derived agent instances)
+// are accounted for, not just the pack-expansion count.
+func snapshotDeferredRigPatchAgentCount(cfg *City, deferred []deferredRigPatches) {
+	for i := range deferred {
+		deferred[i].expectedAgentCount = len(cfg.Agents)
+	}
 }
 
 // ExpandCityPacks loads all city-level packs from workspace.includes (V1)

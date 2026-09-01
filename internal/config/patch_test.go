@@ -36,6 +36,63 @@ func TestApplyPatches_AgentSuspend(t *testing.T) {
 	}
 }
 
+func TestApplyPatches_QualifiedPatchMaterializesScopeRigTemplateInstance(t *testing.T) {
+	formula := "mol-template-work"
+	maxSessions := 3
+	patchedMaxSessions := 1
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gas-city-infra"},
+			{Name: "gas-city-wbern"},
+			{Name: "gascity-packs"},
+		},
+		Agents: []Agent{{
+			Name:                "codex-polecat",
+			Scope:               "rig",
+			Provider:            "codex",
+			MaxActiveSessions:   &maxSessions,
+			DefaultSlingFormula: &formula,
+		}},
+	}
+
+	if err := ApplyPatches(cfg, Patches{Agents: []AgentPatch{{
+		Dir:       "gas-city-infra",
+		Name:      "codex-polecat",
+		Suspended: ptrBool(true),
+		Pool:      &PoolOverride{Max: &patchedMaxSessions},
+	}}}); err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+
+	infra := FindAgent(cfg, "gas-city-infra/codex-polecat")
+	if infra == nil {
+		t.Fatal("FindAgent(gas-city-infra/codex-polecat) = nil")
+	}
+	if !infra.Suspended || infra.MaxActiveSessions == nil || *infra.MaxActiveSessions != patchedMaxSessions {
+		t.Errorf("infra agent = %+v, want suspended max=%d", *infra, patchedMaxSessions)
+	}
+	for _, rig := range []string{"gas-city-wbern", "gascity-packs"} {
+		agent := FindAgent(cfg, rig+"/codex-polecat")
+		if agent == nil {
+			t.Fatalf("FindAgent(%q) = nil", rig+"/codex-polecat")
+		}
+		if agent.Suspended || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != maxSessions || agent.EffectiveDefaultSlingFormula() != formula {
+			t.Errorf("agent for %s = %+v, want unchanged template behavior", rig, *agent)
+		}
+	}
+
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("resolved agent records = %d, want template plus one derived instance", len(cfg.Agents))
+	}
+	seen := make(map[string]bool, len(cfg.Agents))
+	for _, agent := range cfg.Agents {
+		if seen[agent.QualifiedName()] {
+			t.Errorf("duplicate resolved agent record %q", agent.QualifiedName())
+		}
+		seen[agent.QualifiedName()] = true
+	}
+}
+
 func TestApplyPatchesAgentSkillFiltersReplaceAndClear(t *testing.T) {
 	include := []string{"review"}
 	exclude := []string{"unused"}

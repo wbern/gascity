@@ -493,6 +493,100 @@ scope = "rig"
 	}
 }
 
+// TestLoadWithIncludes_QualifiedScopeRigPatchDoesNotTripDeferredRigPatchGuard
+// composes a city where a rig has [[rigs.patches]] (forcing rig-patch
+// deferral in expandPacks) alongside a city-level [[patches.agent]] that
+// qualifies a scope="rig" template for a different rig. The qualified patch
+// materializes a new derived agent record, which changes len(cfg.Agents)
+// after expandPacks snapshots its rig-patch expectations. Without
+// snapshotting expectedAgentCount after ApplyPatches runs, this trips the
+// deferred-rig-patch integrity guard in applyDeferredRigPatches.
+func TestLoadWithIncludes_QualifiedScopeRigPatchDoesNotTripDeferredRigPatchGuard(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "refinery"
+suspended = true
+
+[[rigs]]
+name = "infra"
+path = "/tmp/infra"
+
+[providers.codex]
+base = "builtin:codex"
+
+[[agent]]
+name = "codex-polecat"
+scope = "rig"
+provider = "codex"
+
+[[patches.agent]]
+dir = "infra"
+name = "codex-polecat"
+suspended = true
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var refinery, infraPolecat, projPolecat *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].QualifiedName() {
+		case "proj/gs.refinery":
+			refinery = &cfg.Agents[i]
+		case "infra/codex-polecat":
+			infraPolecat = &cfg.Agents[i]
+		case "proj/codex-polecat":
+			projPolecat = &cfg.Agents[i]
+		}
+	}
+	if refinery == nil {
+		t.Fatal("agent proj/gs.refinery not found in merged config")
+	}
+	if !refinery.Suspended {
+		t.Errorf("refinery.Suspended = false, want true (rig patch should apply)")
+	}
+	if infraPolecat == nil {
+		t.Fatal("agent infra/codex-polecat not found in merged config")
+	}
+	if !infraPolecat.Suspended {
+		t.Errorf("infraPolecat.Suspended = false, want true (qualified patch should apply)")
+	}
+	if projPolecat != nil && projPolecat.Suspended {
+		t.Errorf("proj/codex-polecat should not be materialized as suspended by the infra-qualified patch")
+	}
+
+	seen := make(map[string]bool, len(cfg.Agents))
+	for _, agent := range cfg.Agents {
+		qn := agent.QualifiedName()
+		if seen[qn] {
+			t.Errorf("duplicate resolved agent record %q", qn)
+		}
+		seen[qn] = true
+	}
+}
+
 func TestApplyDeferredRigPatchesRejectsShiftedAgentRange(t *testing.T) {
 	suspended := true
 	cfg := &City{

@@ -600,6 +600,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		root.Patches = Patches{} // clear after application
 	}
+	// Snapshot the merged agent count here, after ApplyPatches, so a
+	// qualified scope-rig patch that appends a derived agent instance
+	// (applyAgentPatch in patch.go) doesn't trip the deferred-rig-patch
+	// integrity guard below.
+	snapshotDeferredRigPatchAgentCount(root, deferredRigPatches)
 	if err := applyDeferredRigPatches(root, deferredRigPatches); err != nil {
 		return nil, nil, fmt.Errorf("applying rig patches: %w", err)
 	}
