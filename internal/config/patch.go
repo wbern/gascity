@@ -437,6 +437,19 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			return nil
 		}
 	}
+	if patch.Dir != "" && hasRigNamed(cfg, patch.Dir) {
+		for i := range cfg.Agents {
+			template := &cfg.Agents[i]
+			if template.Dir != "" || template.Scope != "rig" || !AgentMatchesIdentity(template, patch.Name) {
+				continue
+			}
+			derived := template.Clone()
+			derived.Dir = patch.Dir
+			applyAgentPatchFields(&derived, patch)
+			cfg.Agents = append(cfg.Agents, derived)
+			return nil
+		}
+	}
 	return fmt.Errorf("agent %q not found in merged config", target)
 }
 
