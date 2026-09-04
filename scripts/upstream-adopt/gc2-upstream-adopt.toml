@@ -1,0 +1,47 @@
+# Incremental upstream adoption for the wbern/gascity fork.
+#
+# Takes ONE verified-clean upstream commit per tick and opens a PR for it. The
+# point is to keep closing the 493-commit gap to upstream/main in reviewable
+# steps, and to shrink the eventual big merge (207 conflicting files) while
+# collecting stability fixes on the way.
+#
+# DISABLED BY DEFAULT, deliberately. The pattern this city already uses for a new
+# order (see gc2-fork-pr-review.toml's header) is: deploy disabled, exercise once
+# by hand, verify the result, and only then enable the live copy. gci-mq8qz shows
+# the cost of skipping that last step — it closed with the enable never done and
+# the lane sat dark for two weeks.
+#
+# Already validated, 2026-09-04, before this file existed:
+#   adopt-next.sh --check    refuses correctly while sessions are active
+#                            ("8 session(s) active within 20m")
+#   adopt-next.sh --dry-run  cherry-picked upstream #5276 onto develop and passed
+#                            preflight in 126s, pushing nothing
+#
+# Still to prove before enabling: one real (non-dry) tick, confirming the PR it
+# opens is well-formed and that WIP=1 then holds the next tick off.
+#
+# Trigger is condition, not cooldown: --check is side-effect free and encodes
+# every gate (worklist non-empty, no adoption PR already open, city idle for
+# ADOPT_IDLE_MIN). All gates fail CLOSED — an unreadable probe refuses.
+#
+# timeout is generous on purpose. A pick that touches a core package forces a
+# cold rebuild of everything above it (cmd/gc included) in the scratch worktree;
+# #5276 measured 126s, and a larger pick can exceed that. The order only ever
+# runs on an idle city, so a slow tick costs nothing.
+
+[order]
+enabled = false
+description = "Adopt one verified-clean upstream commit as a PR, when the city is idle"
+exec = "/Users/willi/Repos/KenDev-AB/gas-city-wbern/scripts/upstream-adopt/adopt-next.sh"
+check = "/Users/willi/Repos/KenDev-AB/gas-city-wbern/scripts/upstream-adopt/adopt-next.sh --check"
+trigger = "condition"
+interval = "30m"
+check_timeout = "90s"
+timeout = "20m"
+
+[order.env]
+ADOPT_REPO = "/Users/willi/Repos/KenDev-AB/gas-city-wbern"
+ADOPT_BASE = "develop"
+# Minutes a session must be quiet before adoption is allowed to run. 20m keeps it
+# clear of live development; lower it only if the queue is draining too slowly.
+ADOPT_IDLE_MIN = "20"

@@ -185,12 +185,21 @@ if ! git -C "$scratch" cherry-pick -x "$NEXT_SHA" >"$scratch/.cp.log" 2>&1; then
   refuse "cherry-pick conflict on $NEXT_SHA (worklist said clean; base has moved)"
 fi
 
-# Preflight, not a gate. This proves the pick is not obviously broken before it
-# costs a reviewer anything; the PR's own CI (verify + lint) remains the real
-# gate and runs the full suite. Scoping to the touched packages is deliberate:
-# a repo-wide `go build ./... && go vet ./...` measured over 10 minutes per tick
-# here — far too heavy for an unattended job, and it duplicates what CI does
-# properly a moment later.
+# Preflight, not a gate. It answers one question: did this cherry-pick produce
+# something that still compiles? That is the realistic failure mode for a commit
+# already trialled clean, and build+vet over the touched packages answers it in
+# seconds.
+#
+# It deliberately runs neither tests nor vet. Behavioural and lint regressions are
+# caught by this PR's own CI, which runs the full suite and gates the merge, so
+# repeating them here buys nothing the gate does not already require.
+#
+# Budget this generously. In a warm tree these packages build and vet in ~1s, but
+# the scratch worktree is cold and a pick that touches a core package (#5276
+# changes internal/beads) forces a full rebuild of everything above it, cmd/gc
+# included. That is minutes, and it is inherent rather than something scoping can
+# avoid. Measured: repo-wide build+vet >10m; touched-package build+vet+test >9m;
+# build alone is the cheapest honest answer to "does it still compile".
 pkgs=$(git -C "$scratch" show --stat --format='' --name-only "$NEXT_SHA" |
   grep -E '\.go$' | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' | tr '\n' ' ')
 
@@ -202,16 +211,6 @@ else
   (cd "$scratch" && go build $pkgs >"$scratch/.pre.log" 2>&1) || {
     tail -20 "$scratch/.pre.log" >&2
     refuse "go build failed after $NEXT_SHA"
-  }
-  # shellcheck disable=SC2086
-  (cd "$scratch" && go vet $pkgs >"$scratch/.pre.log" 2>&1) || {
-    tail -20 "$scratch/.pre.log" >&2
-    refuse "go vet failed after $NEXT_SHA"
-  }
-  # shellcheck disable=SC2086
-  (cd "$scratch" && go test $pkgs -count=1 >"$scratch/.test.log" 2>&1) || {
-    tail -30 "$scratch/.test.log" >&2
-    refuse "tests failed after $NEXT_SHA"
   }
 fi
 
