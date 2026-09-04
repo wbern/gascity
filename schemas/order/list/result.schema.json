@@ -29,12 +29,40 @@
     "summary": {
       "type": "object",
       "required": [
-        "count"
+        "count",
+        "enabled",
+        "disabled",
+        "total",
+        "filter"
       ],
       "properties": {
         "count": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Orders emitted in this payload, after the filter named by `filter`."
+        },
+        "enabled": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Enabled orders in the scanned set, independent of the filter."
+        },
+        "disabled": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Disabled orders in the scanned set. Non-zero with filter=\"enabled\" means rows were withheld; pass --all to include them."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Orders in the scanned set before filtering (enabled + disabled)."
+        },
+        "filter": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "all"
+          ],
+          "description": "The view that produced `orders`. \"enabled\" withholds disabled orders; \"all\" includes them. Read this before treating the payload as a complete inventory."
         }
       },
       "additionalProperties": true

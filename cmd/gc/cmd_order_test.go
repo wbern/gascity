@@ -50,7 +50,7 @@ func (s *partialListStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
 
 func TestOrderListEmpty(t *testing.T) {
 	var stdout bytes.Buffer
-	code := doOrderList(nil, &stdout)
+	code := doOrderList(nil, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
@@ -67,7 +67,7 @@ func TestOrderList(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderList(aa, &stdout)
+	code := doOrderList(aa, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
@@ -86,7 +86,7 @@ func TestOrderListJSON(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderListJSON("/city", &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, aa, &stdout)
+	code := doOrderListJSON("/city", &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, aa, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderListJSON = %d, want 0", code)
 	}
@@ -130,7 +130,7 @@ func TestOrderListExecType(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderList(aa, &stdout)
+	code := doOrderList(aa, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
@@ -3513,7 +3513,7 @@ func TestOrderListWithRig(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderList(aa, &stdout)
+	code := doOrderList(aa, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
@@ -3534,7 +3534,7 @@ func TestOrderListCityOnly(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderList(aa, &stdout)
+	code := doOrderList(aa, false, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
