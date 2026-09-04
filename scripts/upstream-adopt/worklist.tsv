@@ -1,0 +1,138 @@
+# Upstream adoption worklist — gascity fork
+#
+# Ordered queue consumed one entry per tick by scripts/upstream-adopt/adopt-next.sh.
+# Columns: TIER<TAB>SHA<TAB>SUBJECT
+#
+# Every SHA here was TRIALLED with `git cherry-pick -n` against origin/develop and
+# applied without conflict. That is measured, not inferred: a static "touches no
+# diverged file" heuristic predicted 178 clean and only 110 actually were (~62%
+# precise), so entries are trial-verified rather than classified.
+#
+# Tier order is risk-ascending, which is also the execution order:
+#   T0-zero-runtime-risk  test/ci/chore/docs only. Cannot change runtime behaviour.
+#                         Warms the later merge by retiring test-file divergence.
+#   T1-low-blast-radius   fixes in observability/diagnostic/leaf areas.
+#   T2-core-runtime       fixes in beads/order/session/reconciler/routing. Highest
+#                         stability value, so highest scrutiny.
+#   DEFER-feature         feat/perf. NOT adopted here. Feature-shaped changes belong
+#                         in the deliberate merge, not in an unattended trickle.
+#
+# PINNED-FIRST is the single exception to tier order: upstream #5276 is on the
+# critical path of gcw-qap3 (it fixes PrimeActive swallowing partial reads — the
+# exact function our preserved summary-envelope test names). Taking it first stops
+# further fork-local gcw-qap3 work being written against code upstream replaced.
+# It touches one diverged file, docs/reference/cli.md, which is GENERATED — resolve
+# by regenerating, never by hand-merging.
+PINNED-FIRST	0e7adb38d	fix(beads): preserve blocked work across partial cache reads (#5276)
+T0-zero-runtime-risk	59fb0839a	chore(github): remove csells from CODEOWNERS (#5683)
+T0-zero-runtime-risk	407114321	chore(github): stop automatic csells review requests (#5989)
+T0-zero-runtime-risk	9999fc65b	chore(license): attribute copyright to Gas City Contributors
+T0-zero-runtime-risk	28f4436fb	chore: record release gate FAIL for ga-v138pa
+T0-zero-runtime-risk	f3d1d70e8	chore: release gate PASS for sling formula-attach routing fix
+T0-zero-runtime-risk	a57af6e92	ci: scan the Go module graph for known vulnerabilities (#5063)
+T0-zero-runtime-risk	e87c5ac07	ci: skip image rebuild dispatch in forks (#5570)
+T0-zero-runtime-risk	31dafd521	docs(dispatch): work-formula selection guide + v2 --on semantics; fix digest-generate misl
+T0-zero-runtime-risk	d9fc6ddba	docs(pack-spec): document [runtimes.<name>] pack manifest tables (#5619)
+T0-zero-runtime-risk	7d7004cf0	docs(session): clarify primed_at as delivery-attempted, not consumed (#5236) (#5261)
+T0-zero-runtime-risk	f056a4f97	docs: define the Gas City identity separator contract (#5680)
+T0-zero-runtime-risk	f59a20cf2	docs: record source install plan (#4838)
+T0-zero-runtime-risk	bd494bfb2	docs: update bd priority output examples (#5303)
+T0-zero-runtime-risk	96caeab17	test(api): pin both rig-path containment passes (ga-qe7qm) (#5405)
+T0-zero-runtime-risk	7cbde04ea	test(beads): pin that reconcile emits bead.updated for an external claim (ga-bplkj.3) (#51
+T0-zero-runtime-risk	541d33b76	test(bench): measure the readiness pass a city with locked imports pays (#4916)
+T0-zero-runtime-risk	c9f32fbbf	test(cmd/gc): isolate stderr assertions from tmux leak-guard diagnostics (#5932)
+T0-zero-runtime-risk	d4e1a70e2	test(cmd/gc): let the dolt leak guard see servers rooted in the checkout (#5057)
+T0-zero-runtime-risk	847e8f2f6	test(cmd/gc): tear down managed dolt after init-from without hosted endpoint (#5096)
+T0-zero-runtime-risk	593e8e134	test(credentialprovider): use package hang budgets (#5490)
+T0-zero-runtime-risk	1540fc3a1	test(dashboardbff): clarify hang-detector deadlines behind a 1x hangBudget (ga-oet3z5) (#5
+T0-zero-runtime-risk	9c6ccc853	test(doctor): sync managed-config fixture default to 120000 (refs ga-lfcx72)
+T0-zero-runtime-risk	638ec38bc	test(eventfeed): derive hang-detector waits from a package budget (#5632)
+T0-zero-runtime-risk	c80603219	test(eventstest): use a hang budget for rotation waits (#5651)
+T0-zero-runtime-risk	3c0ee8a1c	test(integration): replace hardcoded Dolt startup waits (#5452)
+T0-zero-runtime-risk	c374d5247	test(order-exec): stop the reserved-key guard failing on an ambient gh token (#5326)
+T0-zero-runtime-risk	bc7342d62	test(productmetrics): stabilize DisableAndPurge races under -p=N load (#4653) (#4793)
+T0-zero-runtime-risk	5596c19d7	test(rigidem): pin the rig-create idem record to the work class (#5604)
+T0-zero-runtime-risk	05ef5924a	test(runproj): gate run projection end-to-end from bead.* events (#5399)
+T0-zero-runtime-risk	d5e37c7a4	test(session): derive hang-detector waits from package budgets (#5467)
+T0-zero-runtime-risk	b1153eb25	test(sling): cold-pool regression guard — --on must route the source bead and keep it scal
+T0-zero-runtime-risk	e736d74d0	test: close two local-only test gaps (docsync scratch roots, label-order cache path) (#550
+T1-low-blast-radius	25117dd62	Add GraphOnlyReadyStore support to beads store wrappers (#3853)
+T1-low-blast-radius	29b3687cf	Fix pre-claim entry-step reminders for attached formulas (#5297)
+T1-low-blast-radius	326bbf889	Keep clean-install test output free of stderr diagnostics (#5374)
+T1-low-blast-radius	615f5b794	Make canonical pause message allocation overflow-safe (#5866)
+T1-low-blast-radius	5dc58970c	Respect hold:mayor in control-ready pool routing (#4787)
+T1-low-blast-radius	b5ffb6081	Stabilize the Python fallback SIGTERM regression test (#5454)
+T1-low-blast-radius	f262cfe8c	Use production-default timeout in stop-fallback tests (#5403)
+T1-low-blast-radius	0dbf23045	Wait for Dolt leak processes to exit before test cleanup (#5402)
+T1-low-blast-radius	441e413a5	fix(api): read the /status session snapshot from the sessions class, not the work ledger (
+T1-low-blast-radius	b1ef469a2	fix(api): resolve a workflow's scope from its root ref before the store leg (#5929)
+T1-low-blast-radius	dec245e18	fix(api): resolve class-prefix bead ids before any rig-route fallback (#5128)
+T1-low-blast-radius	7724983de	fix(bdflags): stop reporting valid gc bd invocations as unknown flags (#5220)
+T1-low-blast-radius	fb097897f	fix(ci): a failed integration-test discovery is not an empty shard (#5686)
+T1-low-blast-radius	ff7bc5f9a	fix(ci): mac-regression's path filter was inert, gate the smoke tier properly (#5155) (#56
+T1-low-blast-radius	fb9a6b154	fix(ci): make native dependency size guard deterministic (#5750)
+T1-low-blast-radius	655713ff4	fix(ci): resolve the macOS Go toolchain from go.mod instead of a literal pin (ga-1qp5qo) (
+T1-low-blast-radius	3f2947759	fix(ci): scan every image before failing Container Scan (#5909)
+T1-low-blast-radius	72b895179	fix(cmd/gc): lint no longer flags the max=1 named-session singleton flavor as a pool confl
+T1-low-blast-radius	7cd38a2ee	fix(cmd/gc): probe the work bead's owner store for orphan-release liveness (#5242)
+T1-low-blast-radius	4c64f3219	fix(convergence): preserve GC_HOME for gate subprocesses (#4992)
+T1-low-blast-radius	701155727	fix(dashboard): count agents with active graph.v2 work as running (#5400)
+T1-low-blast-radius	16954f84e	fix(dashboardbff): pin canonical a//b/ diff prefixes against ambient … (#5145)
+T1-low-blast-radius	65a9085bd	fix(dolt): name failed databases in sync summary (#5621)
+T1-low-blast-radius	8d73ce353	fix(dolt-cleanup): drop rss= from the reap-stage ps scan (#5201) (#5253)
+T1-low-blast-radius	5c6154ede	fix(events): normalize caller-supplied Ts to the recorder's zone (#5300) (#5301)
+T1-low-blast-radius	b6a0de5b1	fix(events): set a colliding rotation source aside instead of stranding it in every scan (
+T1-low-blast-radius	5ad01634f	fix(execgrace): run TestMonitorOutputResetsIdle on a virtual clock (#5751)
+T1-low-blast-radius	0745bf3c0	fix(formula): preserve resolved description_file stub paths through expansion (#4867)
+T1-low-blast-radius	06f8b61e4	fix(formulas): search the ledger before filing pre-existing-failure beads (#4811)
+T1-low-blast-radius	e74cd9263	fix(gc): print short usage pointer instead of full command help on flag/arg errors (#5359)
+T1-low-blast-radius	e2a59bf0c	fix(gc): route gc start's warm-up mail through the storage-class funnel (#5319)
+T1-low-blast-radius	a99fc67b6	fix(internal/api): serve stale /v0/status and refresh in the background on cache-miss (#50
+T1-low-blast-radius	f6741d948	fix(k8s): controller + beads-runner uid 1000->1001 (match baked gcagent) (#3693)
+T1-low-blast-radius	3166fe695	fix(maintenance): run disk pre-flight before snapshot in the store-maintenance cycle (#479
+T1-low-blast-radius	a0ef020a7	fix(metrics): try the free uploader lock before opening the contention window (#4993)
+T1-low-blast-radius	9a1801719	fix(nudge): prune dead letters after backing beads are reaped (#5328)
+T1-low-blast-radius	6e4270047	fix(nudge): record dispatch skips for busy-session legacy nudge poll (#5317) (#5363)
+T1-low-blast-radius	c7a92b25e	fix(opencode): close child stdin so gc calls can finish (#5563)
+T1-low-blast-radius	9c28476f4	fix(pidutil): parse proc state after comm (#4998)
+T1-low-blast-radius	9867bf1d0	fix(pidutil): preserve Darwin argv boundaries
+T1-low-blast-radius	87d94763a	fix(pool): resolve modern pool session names in orphan-release liveness check (#4817)
+T1-low-blast-radius	a6b72d832	fix(proctable): never classify a tmux server as an agent root (#5392)
+T1-low-blast-radius	732290844	fix(productmetrics): bind cleanup authority to the installed record, not a path re-open (#
+T1-low-blast-radius	6af2ea6c6	fix(push-gate): an occupied descriptor must not consume a free slot (ga-rjj9lm)
+T1-low-blast-radius	906368df4	fix(release): create dispatch-path RC tags with a dedicated release-tagger app token (#531
+T1-low-blast-radius	2d7089a62	fix(rig): fail loudly when --include resolves to no pack (#4799)
+T1-low-blast-radius	e184d7c2a	fix(scripts): make check-routed-test-rows.sh portable to bash 3.2 (#5001)
+T1-low-blast-radius	44fa317b2	fix(test-harness): stop leaking managed dolt servers on uncleanly-killed runs (#5480)
+T1-low-blast-radius	a699601f0	fix(testenv): scrub ambient metrics opt-outs so bare `go test` is trustworthy (#4809)
+T1-low-blast-radius	fb4c42530	fix(worker): retry transcript metadata sidecar (#5058)
+T1-low-blast-radius	48339482c	fix: drop stale gc x/net waivers
+T1-low-blast-radius	623cbc4eb	fix: preserve fresh managed-Dolt bootstrap with bd 1.2 (#5294)
+T1-low-blast-radius	99a3606cb	fix: update MCP mail image security floors
+T1-low-blast-radius	52d1f8660	fix: upgrade Beads schema catalog
+T2-core-runtime	df507a4da	fix(beads): commit the runtime config write to Dolt (#5287)
+T2-core-runtime	832ffb8d7	fix(beads): edit city.toml endpoint keys in place, preserving comments (#4371)
+T2-core-runtime	19e0862cf	fix(beads): stop version_compat failing a comparison it cannot make (ga-40qh1) (#5184)
+T2-core-runtime	6c1420589	fix(config): detect mtime-preserving pack edits (#5367)
+T2-core-runtime	151168c76	fix(dispatch): preserve retry task descriptions (#4984)
+T2-core-runtime	c91381b22	fix(graphroute): make the pool continuation group a formula opt-in (#5622)
+T2-core-runtime	5bbbb643f	fix(molecule): extend residual-var guard to routing metadata (#5060) (#5074)
+T2-core-runtime	de7d479c4	fix(order): bound gc order check's order.fired event read (#5794)
+T2-core-runtime	7cf9c8b3f	fix(order): validate runtime vars against the vars the caller supplied (#5322)
+T2-core-runtime	c3c006c1d	fix(orders): drop open-work gate for gate-less cooldown probes (NoWorkGate opt-out) (#3961
+T2-core-runtime	a090588c0	fix(reconciler): free max-age pool slots after runtime exit (#5523)
+T2-core-runtime	c1ed8f99c	fix(reconciler): gate WakeWork's assigned-work cause on the same blocked-state signal the 
+T2-core-runtime	52b5f4045	fix(routing): never collapse a route that names a configured agent (#5733)
+T2-core-runtime	72815d4e5	fix(runtime): bound the startup-dialog sequence so it cannot outlive the start budget (#51
+T2-core-runtime	acac7da3a	fix(session): age-gate `gc session wake` on stuck creates, plus an unobserved-runtime back
+T2-core-runtime	d3e0536b8	fix(session): keep claimed idle seats awake (#5174)
+T2-core-runtime	08461bb39	fix(session): recognize unique alias owner as canonical (#5487)
+T2-core-runtime	5a252c606	fix(session): stop the retired-session sweeps clobbering a re-claimed assignee (#5136)
+T2-core-runtime	d64bab888	fix(session): widen STATE cache-age banner to the wake-lag window (#3756)
+T2-core-runtime	d8d07eedd	fix(sessionlog): seed codex tail model from the nearest preceding turn_context (#5347)
+
+# --- deferred, recorded so the omission is explicit rather than silent ---
+# DEFERRED	cb456b85e	feat(api): add pi readiness probe recognizing ~/.pi/agent/auth.json (#5168)
+# DEFERRED	222777106	feat(ci): add CI verdict watchdog for cancelled-while-queued runs (ga-r0fbe5) (#4872)
+# DEFERRED	4441c9e40	feat: green — macOS: two mechanical test fixes revealed by restoring the mac unit package 
+# DEFERRED	c3b12fb91	perf(events): seek past the cursor instead of rescanning the active log (#5589)
