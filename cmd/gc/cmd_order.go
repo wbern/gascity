@@ -63,22 +63,29 @@ tick and dispatches work when a trigger opens.`,
 
 func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var showAll bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List available orders",
-		Long: `List all available orders with their trigger type, schedule, and target.
+		Short: "List enabled orders",
+		Long: `List enabled orders with their trigger type, schedule, and target.
 
 Scans orders/ directories for flat .toml files defining trigger conditions,
-scheduling parameters, and target pools.`,
+scheduling parameters, and target pools.
+
+Disabled orders are omitted by default; the trailing summary always reports how
+many were omitted, and --all includes them with an ENABLED column. Under --json
+the summary carries enabled, disabled, total and filter, so a reader can tell a
+filtered view from a complete one.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderListWithOptions(stdout, stderr, jsonOutput) != 0 {
+			if cmdOrderListWithOptions(stdout, stderr, jsonOutput, showAll) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	cmd.Flags().BoolVar(&showAll, "all", false, "include disabled orders")
 	return cmd
 }
 
@@ -252,17 +259,10 @@ order-scoped to avoid scanning unrelated beads.`,
 	return cmd
 }
 
-// loadOrders is the common preamble for active order commands: resolve city,
-// load config, scan formula layers, apply overrides, and filter disabled orders.
-func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	return loadActiveOrders(stderr, cmdName)
-}
-
-func loadActiveOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	_, _, aa, code := loadActiveOrdersWithCity(stderr, cmdName)
-	return aa, code
-}
-
+// loadOrdersWithCity is the common preamble for active order commands: resolve
+// city, load config, scan formula layers, apply overrides, and filter disabled
+// orders. Surfaces that must report what the filter withheld should call
+// loadAllOrdersWithCity and partition the result themselves.
 func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	return loadActiveOrdersWithCity(stderr, cmdName)
 }
@@ -333,32 +333,77 @@ func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	return orderdiscovery.CityOrderRoots(cityPath, cfg)
 }
 
-func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
+func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput, showAll bool) int {
 	if jsonOutput {
-		cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
+		cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order list")
 		if code != 0 {
 			return code
 		}
-		return doOrderListJSON(cityPath, cfg, aa, stdout)
+		return doOrderListJSON(cityPath, cfg, aa, showAll, stdout)
 	}
-	aa, code := loadOrders(stderr, "gc order list")
+	_, _, aa, code := loadAllOrdersWithCity(stderr, "gc order list")
 	if code != 0 {
 		return code
 	}
-	return doOrderList(aa, stdout)
+	return doOrderList(aa, showAll, stdout)
 }
 
-// doOrderList prints a table of orders. Accepts pre-scanned orders for testability.
-func doOrderList(aa []orders.Order, stdout io.Writer) int {
+// partitionOrdersByEnabled splits a scanned order set into its enabled and
+// disabled halves, preserving scan order within each.
+func partitionOrdersByEnabled(all []orders.Order) (enabled, disabled []orders.Order) {
+	for _, a := range all {
+		if a.IsEnabled() {
+			enabled = append(enabled, a)
+		} else {
+			disabled = append(disabled, a)
+		}
+	}
+	return enabled, disabled
+}
+
+// orderFilterFooter renders the one-line disclosure that every listing carries.
+// A list surface that silently drops rows makes a disabled order
+// indistinguishable from an absent one, so the counts are stated
+// unconditionally and the flag that reaches the hidden rows is named whenever
+// there are any.
+func orderFilterFooter(enabled, disabled int, showAll bool) string {
+	footer := fmt.Sprintf("%d enabled, %d disabled", enabled, disabled)
+	if disabled > 0 && !showAll {
+		footer += " (--all to include disabled)"
+	}
+	return footer
+}
+
+// doOrderList prints a table of orders. It accepts the FULL scanned set and
+// applies the enabled filter itself, so it can report what it filtered rather
+// than receiving a pre-filtered set whose provenance it cannot see.
+func doOrderList(all []orders.Order, showAll bool, stdout io.Writer) int {
+	enabledOrders, disabledOrders := partitionOrdersByEnabled(all)
+
+	aa := enabledOrders
+	if showAll {
+		aa = all
+	}
+
 	if len(aa) == 0 {
+		if len(disabledOrders) > 0 {
+			// Never report absence for rows that were merely filtered.
+			fmt.Fprintf(stdout, "No enabled orders found. %s\n", orderFilterFooter(len(enabledOrders), len(disabledOrders), showAll)) //nolint:errcheck // best-effort stdout
+			return 0
+		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
 	hasRig := anyOrderHasRig(aa)
-	if hasRig {
+	switch {
+	case showAll && hasRig:
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %-8s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "ENABLED", "TARGET") //nolint:errcheck
+	case showAll:
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-8s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "ENABLED", "TARGET") //nolint:errcheck
+	case hasRig:
 		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
-	} else {
+	default:
 		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
 	}
 	for _, a := range aa {
@@ -384,12 +429,22 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 		if rig == "" {
 			rig = "-"
 		}
-		if hasRig {
+		enabledCell := "yes"
+		if !a.IsEnabled() {
+			enabledCell = "no"
+		}
+		switch {
+		case showAll && hasRig:
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %-8s %s\n", a.Name, typ, a.Trigger, timing, rig, enabledCell, pool) //nolint:errcheck
+		case showAll:
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-8s %s\n", a.Name, typ, a.Trigger, timing, enabledCell, pool) //nolint:errcheck
+		case hasRig:
 			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Trigger, timing, rig, pool) //nolint:errcheck
-		} else {
+		default:
 			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Trigger, timing, pool) //nolint:errcheck
 		}
 	}
+	fmt.Fprintf(stdout, "\n%s\n", orderFilterFooter(len(enabledOrders), len(disabledOrders), showAll)) //nolint:errcheck
 	return 0
 }
 
@@ -402,8 +457,18 @@ type orderListJSON struct {
 	Warnings      []jsonContractWarning `json:"warnings,omitempty"`
 }
 
+// orderListSummaryJSON lets a machine reader tell "these are all the orders"
+// from "these are the orders that survived a filter" without knowing which
+// flags produced the payload. Count is the number of rows emitted; Enabled,
+// Disabled and Total describe the scanned set behind them, and Filter names
+// the view. Without these, a pre-filtered listing reports every row as
+// enabled=true and reads as a complete inventory.
 type orderListSummaryJSON struct {
-	Count int `json:"count"`
+	Count    int    `json:"count"`
+	Enabled  int    `json:"enabled"`
+	Disabled int    `json:"disabled"`
+	Total    int    `json:"total"`
+	Filter   string `json:"filter"`
 }
 
 type orderShowJSON struct {
@@ -436,7 +501,19 @@ type orderJSON struct {
 	Env          map[string]string `json:"env,omitempty"`
 }
 
-func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
+// doOrderListJSON emits the machine-readable listing. Like doOrderList it takes
+// the FULL scanned set and filters here, so the payload can describe the filter
+// it applied instead of presenting a filtered view as a complete one.
+func doOrderListJSON(cityPath string, cfg *config.City, all []orders.Order, showAll bool, stdout io.Writer) int {
+	enabledOrders, disabledOrders := partitionOrdersByEnabled(all)
+
+	aa := enabledOrders
+	filter := "enabled"
+	if showAll {
+		aa = all
+		filter = "all"
+	}
+
 	rows := make([]orderJSON, 0, len(aa))
 	for _, a := range aa {
 		rows = append(rows, orderToJSON(a))
@@ -446,7 +523,13 @@ func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdou
 		CityPath:      cityPath,
 		CityName:      effectiveJSONCityName(cfg, cityPath),
 		Orders:        rows,
-		Summary:       orderListSummaryJSON{Count: len(rows)},
+		Summary: orderListSummaryJSON{
+			Count:    len(rows),
+			Enabled:  len(enabledOrders),
+			Disabled: len(disabledOrders),
+			Total:    len(all),
+			Filter:   filter,
+		},
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		return 1
