@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -18,6 +19,11 @@ const (
 	// MaxBeadSummaryRows bounds the number of discovery records independently
 	// from their serialized size.
 	MaxBeadSummaryRows = 100
+	// BeadSummaryKind is the Kind discriminator of BeadSummaryEnvelope. It names
+	// a wire envelope, not a bead-metadata key. Readers must match against this
+	// constant rather than respell the literal, so writer and reader cannot
+	// drift apart into a silently unrecognized envelope.
+	BeadSummaryKind = "gc.bead_summary"
 )
 
 // BeadSummaryEnvelope is the bounded discovery projection for list and ready.
@@ -64,17 +70,17 @@ type BeadShowSummary struct {
 }
 
 var summaryRoutingMetadataKeys = []string{
-	"gc.routed_to",
-	"gc.root_bead_id",
-	"gc.session_id",
-	"gc.session_name",
-	"gc.step_id",
+	beadmeta.RoutedToMetadataKey,
+	beadmeta.RootBeadIDMetadataKey,
+	beadmeta.SessionIDMetadataKey,
+	beadmeta.SessionNameMetadataKey,
+	beadmeta.StepIDMetadataKey,
 	"target",
 	"branch",
-	"gc.base_sha",
-	"gc.task_worktree",
+	beadmeta.BaseSHAMetadataKey,
+	beadmeta.TaskWorktreeMetadataKey,
 	"work_dir",
-	"gc.workspace_owner",
+	beadmeta.WorkspaceOwnerMetadataKey,
 }
 
 var summaryDetailsOmitted = []string{
@@ -95,7 +101,7 @@ func NewBeadSummaryEnvelope(verb string, input []beads.Bead, budget int) BeadSum
 	}
 	envelope := BeadSummaryEnvelope{
 		SchemaVersion: "1",
-		Kind:          "gc.bead_summary",
+		Kind:          BeadSummaryKind,
 		Verb:          verb,
 		BudgetBytes:   budget,
 		Total:         len(input),
