@@ -2665,7 +2665,7 @@ gc order
 |------------|-------------|
 | [gc order check](#gc-order-check) | Check which orders are due to run |
 | [gc order history](#gc-order-history) | Show order execution history |
-| [gc order list](#gc-order-list) | List available orders |
+| [gc order list](#gc-order-list) | List enabled orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
 | [gc order sweep-nudge-mail](#gc-order-sweep-nudge-mail) | Close stale delivered nudge beads and read mail beads |
@@ -2704,10 +2704,15 @@ gc order history [name] [flags]
 
 ## gc order list
 
-List all available orders with their trigger type, schedule, and target.
+List enabled orders with their trigger type, schedule, and target.
 
 Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.
+
+Disabled orders are omitted by default; the trailing summary always reports how
+many were omitted, and --all includes them with an ENABLED column. Under --json
+the summary carries enabled, disabled, total and filter, so a reader can tell a
+filtered view from a complete one.
 
 ```
 gc order list [flags]
@@ -2715,6 +2720,7 @@ gc order list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--all` | bool |  | include disabled orders |
 | `--json` | bool |  | emit JSON |
 
 ## gc order run
