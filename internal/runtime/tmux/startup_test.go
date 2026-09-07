@@ -62,6 +62,7 @@ type fakeStartOps struct {
 	hasSessionResult           bool
 	hasSessionErr              error
 	setRemainOnExitErr         error
+	enableMouseErr             error
 	disableMouseAndActivityErr error
 	runSetupCommandErr         error
 	sendKeysErr                error
@@ -179,6 +180,11 @@ func (f *fakeStartOps) sendKeys(name, text string) error {
 func (f *fakeStartOps) setRemainOnExit(name string) error {
 	f.calls = append(f.calls, startCall{method: "setRemainOnExit", name: name})
 	return f.setRemainOnExitErr
+}
+
+func (f *fakeStartOps) enableMouse(name string) error {
+	f.calls = append(f.calls, startCall{method: "enableMouse", name: name})
+	return f.enableMouseErr
 }
 
 func (f *fakeStartOps) disableMouseAndActivity(name string) error {
@@ -315,7 +321,7 @@ func TestDoStartSession_MouseOffDefaultDisables(t *testing.T) {
 	}
 }
 
-func TestDoStartSession_MouseOnSkipsDisable(t *testing.T) {
+func TestDoStartSession_MouseOnExplicitlyEnables(t *testing.T) {
 	ops := &fakeStartOps{}
 
 	err := doStartSession(context.Background(), ops, "test-sess", runtime.Config{
@@ -330,6 +336,11 @@ func TestDoStartSession_MouseOnSkipsDisable(t *testing.T) {
 	methods := ops.callMethods()
 	if containsMethod(methods, "disableMouseAndActivity") {
 		t.Fatalf("disableMouseAndActivity called with MouseOn=true; calls = %v", methods)
+	}
+	remainIdx := methodIndex(methods, "setRemainOnExit")
+	enableIdx := methodIndex(methods, "enableMouse")
+	if remainIdx == -1 || enableIdx == -1 || enableIdx != remainIdx+1 {
+		t.Fatalf("enableMouse should immediately follow setRemainOnExit; calls = %v", methods)
 	}
 }
 
