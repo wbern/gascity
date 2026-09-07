@@ -812,6 +812,7 @@ type startOps interface {
 	recordStartCrash(name, paneContent string) string
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
+	enableMouse(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
@@ -970,6 +971,14 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
 	return o.tm.SetRemainOnExit(name, true)
+}
+
+// enableMouse explicitly enables tmux mouse mode for sessions that a human
+// can attach to. A fresh tmux server defaults this option to off, so merely
+// avoiding disableMouseAndActivity is not enough to make MouseOn effective.
+func (o *tmuxStartOps) enableMouse(name string) error {
+	o.tm.run("set-option", "-t", name, "mouse", "on") //nolint:errcheck
+	return nil
 }
 
 func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
@@ -1210,9 +1219,12 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	// Enable remain-on-exit for crash forensics. Best-effort.
 	_ = ops.setRemainOnExit(name)
-	// Headless sessions disable mouse tracking and monitor-activity to avoid
-	// terminal escape sequences leaking into agent stdin during controller polls.
-	if !cfg.MouseOn {
+	// MouseOn must be explicit: fresh tmux servers default mouse mode to off.
+	// Headless sessions also disable monitor-activity to avoid terminal escape
+	// sequences leaking into agent stdin during controller polls.
+	if cfg.MouseOn {
+		_ = ops.enableMouse(name)
+	} else {
 		_ = ops.disableMouseAndActivity(name)
 	}
 	if err := ctx.Err(); err != nil {
