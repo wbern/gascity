@@ -834,6 +834,8 @@ func reachableServerEnv(t *testing.T, root, cityPath string) []string {
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
 	fakeBin := t.TempDir()
+	// Rig/cleanup discovery is unrelated to the server and backup fixtures.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
@@ -843,7 +845,17 @@ if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" 
 fi
 exit 1
 `)
-	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+case "$*" in
+  *'SHOW DATABASES;'*)
+    printf 'Database\n'
+    for d in "$GC_CITY_PATH"/.beads/dolt/*/; do
+      [ -d "$d/.dolt" ] && basename "$d"
+    done
+    ;;
+esac
+exit 0
+`)
 
 	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -2241,6 +2253,9 @@ func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
 func backupCityWithArtifacts(t *testing.T, cityPath string, dbs ...string) {
 	t.Helper()
 	for _, db := range dbs {
+		if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt", db, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		root := filepath.Join(cityPath, ".dolt-backup")
 		dir := filepath.Join(root, db)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -2345,6 +2360,7 @@ func TestHealthScriptDistinguishesBackupStates(t *testing.T) {
 	t.Run("honors GC_BACKUP_ARTIFACT_DIR like the writer does", func(t *testing.T) {
 		cityPath := t.TempDir()
 		relocated := t.TempDir()
+		backupCityWithArtifacts(t, cityPath, "hq")
 		if err := os.MkdirAll(filepath.Join(relocated, "hq"), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -2378,6 +2394,108 @@ func assertBackupState(t *testing.T, out []byte, wantState string, wantStale boo
 	}
 	if report.Backups.Stale != wantStale {
 		t.Errorf("dolt_stale = %v, want %v", report.Backups.Stale, wantStale)
+	}
+}
+
+// Active inventory must own coverage: retired archives cannot age it, and
+// an unobserved or missing active backup cannot disappear from the report.
+func TestHealthScriptActiveBackupCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, missing string
+		stale                bool
+	}{
+		{"retired archive", "ok", "", false},
+		{"system schemas", "ok", "", false},
+		{"missing active", "absent", "crm", true},
+		{"empty active manifest", "absent", "crm", true},
+		{"future active manifest", "absent", "crm", true},
+		{"unrelated fresh file", "stale", "", true},
+		{"inventory failed", "unknown", "", true},
+		{"inventory malformed", "unknown", "", true},
+		{"inventory unsafe name", "unknown", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			root := repoRoot(t)
+			backupCityWithArtifacts(t, city, "hq", "crm", "adr")
+			if err := os.Remove(filepath.Join(city, ".beads", "dolt", "adr", ".dolt")); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-20 * 24 * time.Hour)
+			archive := filepath.Join(city, ".dolt-backup", "adr", "manifest")
+			if tc.name == "retired archive" {
+				if err := os.Chtimes(archive, old, old); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(filepath.Dir(archive), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest := filepath.Join(city, ".dolt-backup", "crm", "manifest")
+			env := reachableServerEnv(t, root, city)
+			switch tc.name {
+			case "missing active":
+				if err := os.Remove(manifest); err != nil {
+					t.Fatal(err)
+				}
+			case "empty active manifest":
+				if err := os.Truncate(manifest, 0); err != nil {
+					t.Fatal(err)
+				}
+			case "future active manifest":
+				future := time.Now().Add(time.Hour)
+				if err := os.Chtimes(manifest, future, future); err != nil {
+					t.Fatal(err)
+				}
+			case "unrelated fresh file":
+				if err := os.Chtimes(manifest, old, old); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "scratch"), []byte("fresh"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "inventory failed", "inventory malformed", "inventory unsafe name", "system schemas":
+				for _, entry := range env {
+					if strings.HasPrefix(entry, "PATH=") {
+						bin := strings.SplitN(strings.TrimPrefix(entry, "PATH="), string(os.PathListSeparator), 2)[0]
+						result := "printf 'Database\\nhq\\n'; exit 9"
+						if tc.name == "inventory malformed" {
+							result = "printf 'query error\\n'; exit 0"
+						}
+						if tc.name == "inventory unsafe name" {
+							result = "printf 'Database\\nhq\\nbad,name\\n'; exit 0"
+						}
+						if tc.name == "system schemas" {
+							result = "printf 'Database\\nhq\\ncrm\\ndolt\\nmysql\\ninformation_schema\\ndolt_cluster\\nperformance_schema\\nsys\\n__gc_probe\\n'; exit 0"
+						}
+						writeExecutable(t, filepath.Join(bin, "dolt"), "#!/bin/sh\ncase \"$*\" in *'SHOW DATABASES;'*) "+result+";; esac\nexit 0\n")
+					}
+				}
+			}
+			out, err := newHealthScriptCmd(root, env, "--json").Output()
+			if err != nil {
+				t.Fatalf("health: %v\n%s", err, out)
+			}
+			assertBackupState(t, out, tc.state, tc.stale)
+			var report struct {
+				Backups struct {
+					Missing []string `json:"missing_databases"`
+					Retired []string `json:"retired_databases"`
+				} `json:"backups"`
+			}
+			if err := json.Unmarshal(out, &report); err != nil {
+				t.Fatal(err)
+			}
+			if tc.missing != "" && strings.Join(report.Backups.Missing, ",") != tc.missing {
+				t.Errorf("missing database absent from report: %s", out)
+			}
+			if tc.name == "retired archive" && strings.Join(report.Backups.Retired, ",") != "adr" {
+				t.Errorf("retired archive advisory absent: %s", out)
+			}
+			if _, err := os.Stat(archive); err != nil {
+				t.Fatalf("archive changed: %v", err)
+			}
+		})
 	}
 }
 

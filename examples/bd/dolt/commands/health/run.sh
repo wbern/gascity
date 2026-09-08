@@ -300,30 +300,51 @@ backup_stale=false
 backup_age_sec=0
 backup_state="not_configured"
 backup_root="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
-if [ -d "$backup_root" ]; then
-  # Report the OLDEST per-database artifact, not the newest. One database that
-  # quietly stopped syncing is precisely the failure this line exists to
-  # surface, and reporting the newest would mask it behind its healthy peers.
+backup_missing=""
+backup_retired=""
+backup_inventory_error=""
+
+# Require a complete successful catalog before evaluating coverage. Check the
+# producer before parsing: a failed SHOW with partial stdout is not an inventory.
+backup_database_names() {
+  [ "$server_reachable" = true ] || return 1
+  _catalog=$(run_bounded 5 dolt --host "$host" --port "$GC_DOLT_PORT" \
+    --user "$GC_DOLT_USER" --no-tls sql --result-format csv \
+    -q "SHOW DATABASES;" 2>/dev/null) || return 1
+  printf '%s\n' "$_catalog" | (
+    IFS= read -r _header
+    [ "$(printf '%s' "$_header" | tr -d '\r')" = "Database" ] || exit 1
+    while IFS= read -r _name; do
+      _name=$(printf '%s' "$_name" | tr -d '\r' | sed 's/^"//;s/"$//')
+      db_name_is_safe "$_name" || exit 1
+      case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
+      esac
+      printf '%s\n' "$_name"
+    done
+  )
+}
+
+# External endpoints without a local destination own their backup policy.
+if [ "$is_external" != true ] || [ -e "$backup_root" ]; then
+  if ! backup_databases=$(backup_database_names); then
+    backup_state="unknown"
+    backup_stale=true
+    backup_inventory_error="active database inventory unavailable or invalid"
+  else
   oldest_mtime=""
-  for db_dir in "$backup_root"/*/; do
-    [ -d "$db_dir" ] || continue
-    # An empty directory is a registered destination that never synced; it must
-    # not be read as a fresh backup just because mkdir -p touched it.
-    # -A so a directory holding only dot-entries is not misread as empty.
-    newest_entry=$(ls -At "$db_dir" 2>/dev/null | head -1 || true)
-    [ -n "$newest_entry" ] || continue
-    db_mtime=$(stat -c %Y "$db_dir" 2>/dev/null || stat -f %m "$db_dir" 2>/dev/null || echo 0)
-    # Directory mtime only moves when entries are added or removed, so a writer
-    # that rewrites a file in place would leave it stale. Take whichever of the
-    # directory and its newest entry is more recent: under-reporting age is the
-    # lying direction, and this bead exists because of a status line that lied.
-    entry_mtime=$(stat -c %Y "$db_dir$newest_entry" 2>/dev/null || stat -f %m "$db_dir$newest_entry" 2>/dev/null || echo 0)
-    # Written as an if, not `[ ... ] && assign`: this script runs under `set -e`
-    # (line 10) with a /bin/sh shebang, and a short-circuited AND-OR list leaves
-    # a nonzero status behind. It survives on bash-as-sh, but a health check is
-    # the wrong place to depend on that subtlety.
-    if [ "$entry_mtime" -gt "$db_mtime" ]; then
-      db_mtime="$entry_mtime"
+  for name in $backup_databases; do
+    # The manifest records the synced root. Directory mtimes and unrelated
+    # scratch files do not prove a backup, and must never refresh its age.
+    manifest="$backup_root/$name/manifest"
+    db_mtime=0
+    if [ -f "$manifest" ] && [ -r "$manifest" ] && [ -s "$manifest" ]; then
+      db_mtime=$(stat -c %Y "$manifest" 2>/dev/null || stat -f %m "$manifest" 2>/dev/null || echo 0)
+    fi
+    case "$db_mtime" in ''|*[!0-9]*) db_mtime=0 ;; esac
+    if [ "$db_mtime" -eq 0 ] || [ "$db_mtime" -gt "$(date +%s)" ]; then
+      backup_missing="$backup_missing $name"
+      continue
     fi
     if [ -z "$oldest_mtime" ] || [ "$db_mtime" -lt "$oldest_mtime" ]; then
       oldest_mtime="$db_mtime"
@@ -351,11 +372,36 @@ if [ -d "$backup_root" ]; then
       backup_stale=true
       backup_state="stale"
     fi
-  else
+  elif [ -d "$backup_root" ] || [ -n "$backup_databases" ]; then
     backup_state="absent"
     backup_stale=true
   fi
+  if [ -n "$backup_missing" ]; then
+    backup_state="absent"
+    backup_stale=true
+  fi
+  # Retired archives remain untouched and are advisory, never coverage input.
+  for db_dir in "$backup_root"/*/; do
+    [ -d "$db_dir" ] || continue
+    name=$(basename "$db_dir")
+    db_name_is_safe "$name" || continue
+    if ! printf '%s\n' "$backup_databases" | grep -Fxq -- "$name"; then
+      backup_retired="$backup_retired $name"
+    fi
+  done
+  fi
 fi
+
+# Inputs have passed db_name_is_safe, so quoting these identifiers is lossless.
+backup_names_json() {
+  _sep=""
+  printf '['
+  for _name in $1; do
+    printf '%s"%s"' "$_sep" "$_name"
+    _sep=,
+  done
+  printf ']'
+}
 
 # Find orphan databases.
 #
@@ -639,7 +685,10 @@ JSONEOF
     "dolt_freshness": "$backup_freshness",
     "dolt_age_sec": $backup_age_sec,
     "dolt_stale": $backup_stale,
-    "dolt_state": "$backup_state"
+    "dolt_state": "$backup_state",
+    "inventory_error": "$backup_inventory_error",
+    "missing_databases": $(backup_names_json "$backup_missing"),
+    "retired_databases": $(backup_names_json "$backup_retired")
   },
   "orphans": [
 JSONEOF
@@ -713,12 +762,18 @@ case "$backup_state" in
     echo "Backups: ${backup_freshness} ago${stale} (oldest of $(basename "$backup_root"))"
     ;;
   absent)
-    echo "Backups: configured at ${backup_root} but never synced [STALE]"
+    echo "Backups: missing or invalid active manifests at ${backup_root} [STALE]${backup_missing}"
+    ;;
+  unknown)
+    echo "Backups: ${backup_inventory_error} [UNKNOWN]"
     ;;
   *)
     echo "Backups: not configured (no ${backup_root})"
     ;;
 esac
+if [ -n "$backup_retired" ]; then
+  echo "Retired backup archives (preserved):${backup_retired}"
+fi
 
 if [ "$quarantine_count" -gt 0 ]; then
   echo ""
