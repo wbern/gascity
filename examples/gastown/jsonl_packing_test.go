@@ -8,7 +8,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
+
+func TestJsonlOrderCoversPackingBudget(t *testing.T) {
+	var config struct{ Order struct{ Timeout string } }
+	if _, err := toml.DecodeFile(filepath.Join(corePackDir(), "orders", "jsonl-export.toml"), &config); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := time.ParseDuration(config.Order.Timeout)
+	// Two 60s integrity checks + 300s packing + 10s kill grace leave normal
+	// export/push time inside the documented 15m order budget.
+	if err != nil || bound < 15*time.Minute {
+		t.Fatalf("JSONL order timeout %q cannot cover packing and export: %v", config.Order.Timeout, err)
+	}
+}
 
 // Packing must share export ownership, preserve refs and dirty files, and fail
 // closed when Git or its connectivity verification fails.
@@ -190,6 +205,22 @@ echo busy-proven
 				state, err := os.ReadFile(env["STATE"])
 				if err != nil || !strings.Contains(string(state), "pending_export") {
 					t.Fatalf("missing next-export proof state: %s %v", state, err)
+				}
+				var record struct {
+					Packing struct {
+						RSS  int64 `json:"max_rss_kib"`
+						Pre  int64 `json:"pre_kib"`
+						Post int64 `json:"post_kib"`
+					} `json:"packing"`
+				}
+				if err := json.Unmarshal(state, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Packing.RSS <= 0 {
+					t.Fatalf("real time process did not measure RSS: %s", state)
+				}
+				if scenario == "noop" && record.Packing.Pre != record.Packing.Post {
+					t.Fatalf("noop fixture unexpectedly changed storage: %s", state)
 				}
 			}
 		})
