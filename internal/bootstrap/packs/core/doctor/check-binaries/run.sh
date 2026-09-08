@@ -5,7 +5,7 @@
 # stdout: first line=message, rest=details
 
 missing=()
-for bin in jq; do
+for bin in jq flock; do
     if ! command -v "$bin" >/dev/null 2>&1; then
         missing+=("$bin")
     fi
@@ -28,10 +28,10 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 if [ "$gh_available" -eq 0 ]; then
-    echo "all required binaries available (jq)"
+    echo "all required binaries available (jq, flock)"
     echo "optional gh not found in PATH; GitHub gate checks will be skipped"
     exit 0
 fi
 
-echo "all required binaries available (jq); optional gh available"
+echo "all required binaries available (jq, flock); optional gh available"
 exit 0
