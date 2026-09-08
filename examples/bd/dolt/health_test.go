@@ -2405,6 +2405,7 @@ func TestHealthScriptActiveBackupCoverage(t *testing.T) {
 		stale                bool
 	}{
 		{"retired archive", "ok", "", false},
+		{"system schemas", "ok", "", false},
 		{"missing active", "absent", "crm", true},
 		{"empty active manifest", "absent", "crm", true},
 		{"future active manifest", "absent", "crm", true},
@@ -2453,7 +2454,7 @@ func TestHealthScriptActiveBackupCoverage(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "scratch"), []byte("fresh"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-			case "inventory failed", "inventory malformed", "inventory unsafe name":
+			case "inventory failed", "inventory malformed", "inventory unsafe name", "system schemas":
 				for _, entry := range env {
 					if strings.HasPrefix(entry, "PATH=") {
 						bin := strings.SplitN(strings.TrimPrefix(entry, "PATH="), string(os.PathListSeparator), 2)[0]
@@ -2463,6 +2464,9 @@ func TestHealthScriptActiveBackupCoverage(t *testing.T) {
 						}
 						if tc.name == "inventory unsafe name" {
 							result = "printf 'Database\\nhq\\nbad,name\\n'; exit 0"
+						}
+						if tc.name == "system schemas" {
+							result = "printf 'Database\\nhq\\ncrm\\ndolt\\nmysql\\ninformation_schema\\ndolt_cluster\\nperformance_schema\\nsys\\n__gc_probe\\n'; exit 0"
 						}
 						writeExecutable(t, filepath.Join(bin, "dolt"), "#!/bin/sh\ncase \"$*\" in *'SHOW DATABASES;'*) "+result+";; esac\nexit 0\n")
 					}

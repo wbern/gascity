@@ -318,7 +318,7 @@ backup_database_names() {
       _name=$(printf '%s' "$_name" | tr -d '\r' | sed 's/^"//;s/"$//')
       db_name_is_safe "$_name" || exit 1
       case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
       esac
       printf '%s\n' "$_name"
     done
