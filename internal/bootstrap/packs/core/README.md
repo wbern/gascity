@@ -118,3 +118,32 @@ Both nudge scripts use only `gc`, `bd`, and `jq` — already required by the
 other core-pack scripts. `gc bd` routes the request, then delegates to the
 underlying `bd` binary. `jq` is a hard dependency and the scripts fail loud
 at startup if it is missing.
+
+The JSONL exporter also requires `flock` (util-linux on Linux; `brew install
+flock` on macOS). Every exporter invocation holds one kernel lock for its
+archive through packing, export, commit, and push. Any other archive writer
+must use the same adjacent `<archive>.export.lock` or be retired before packing
+is enabled. Busy exports defer without changing the archive.
+
+JSONL Git packing is opt-in: set `GC_JSONL_PACK_INTERVAL_SEC=21600` on the
+existing `jsonl-export` order for a six-hour minimum interval. The default is
+zero (disabled). Archives below `GC_JSONL_PACK_MIN_LOOSE_MB` (default 256 MiB)
+of loose objects skip packing. Dirty exports are never packed. Preflight also
+requires twice the current object-store size plus `GC_JSONL_PACK_MIN_FREE_MB`
+(default 1024 MiB) free for temporary packing files.
+
+Packing uses two threads, 64 MiB per-thread windows and a 32 MiB delta cache;
+these are Git working-memory controls, not a hard RSS cap. It retains refs,
+reflogs, and unreachable objects (`gc --no-prune`), keeps automatic maintenance
+disabled, and runs bounded full integrity checks before and after packing.
+Packing is capped at 300 seconds plus a 10-second kill grace, and each integrity
+check at 60 seconds. Allow those 430 seconds **plus normal export/push time** in
+the order timeout (15 minutes is the initial GC2 budget). Packing requires
+`timeout` or `gtimeout`, and `/usr/bin/time` records peak RSS.
+
+The existing exporter state records size, elapsed time, RSS and a pending
+post-packing export obligation. Only a complete subsequent export and its
+configured push path clear that obligation; partial exports, missing inventory,
+spike halts and failed pushes remain failures. No-change exports also verify
+the configured push. Local-only archives record their mode without claiming an
+off-box backup.

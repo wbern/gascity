@@ -73,6 +73,7 @@ func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 		t.Fatalf("Symlink(bash): %v", err)
 	}
 	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(binDir, "flock"), "#!/bin/sh\nexit 0\n")
 
 	cmd := exec.Command(filepath.Join(corePackDir(), "doctor", "check-binaries", "run.sh"))
 	cmd.Env = mergeTestEnv(map[string]string{"PATH": binDir})
@@ -81,7 +82,7 @@ func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
 		t.Fatalf("check-binaries failed without gh: %v\n%s", err, out)
 	}
 	text := string(out)
-	if !strings.Contains(text, "all required binaries available (jq)") {
+	if !strings.Contains(text, "all required binaries available (jq, flock)") {
 		t.Fatalf("output = %q, want required jq success", text)
 	}
 	if !strings.Contains(text, "optional gh not found") {

@@ -11,6 +11,7 @@ set -euo pipefail
 CITY="${GC_CITY:-.}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/dolt-target.sh"
+. "$SCRIPT_DIR/jsonl-archive-maintenance.sh"
 
 # jq is a hard dependency: count_jsonl_rows below relies on it, and a missing
 # jq would silently zero every record count and could mask spikes on a stale
@@ -74,6 +75,7 @@ maintenance_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
 
+    archive_pack_verify_export || return 1
     [ -n "$target" ] || return 0
     gc session nudge "$target" "MAINTENANCE_DONE: $summary" 2>/dev/null || true
 }
@@ -761,9 +763,14 @@ elif [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
     STATE_FILE="$LEGACY_STATE_FILE"
 fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
+lock_rc=0
+archive_lock || lock_rc=$?
+if [ "$lock_rc" = 75 ]; then exit 0; fi
+[ "$lock_rc" = 0 ] || exit "$lock_rc"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 disable_unbounded_archive_maintenance
+archive_pack_if_due
 
 log_archive_mode_if_needed
 retry_pending_spike_alert
@@ -815,6 +822,7 @@ if [ -z "$DATABASES" ]; then
             echo "jsonl-export: $SUMMARY"
         fi
     fi
+    archive_pack_verify_export
     exit 0
 fi
 
