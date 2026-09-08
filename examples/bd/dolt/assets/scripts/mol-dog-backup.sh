@@ -125,8 +125,11 @@ acquire_backup_lock
 if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
     DATABASES=$(echo "$GC_BACKUP_DATABASES" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
 else
-    ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | \
-        grep -viE "$SYSTEM_DBS" || true)
+    if ! ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null); then
+        echo "backup: outcome=failed stage=database-discovery"
+        exit 1
+    fi
+    ALL_DBS=$(printf '%s\n' "$ALL_DBS" | tail -n +2 | grep -viE "$SYSTEM_DBS" || true)
     DATABASES=""
     for db in $ALL_DBS; do
         if [ -d "$DOLT_DATA_DIR/$db/.dolt" ]; then
@@ -169,17 +172,21 @@ FAILED_DBS=""
 for db in $DATABASES; do
     if ! ensure_backup_remote "$db"; then
         append_failed_db "$db(backup add failed)"
+        echo "backup: database=$db outcome=failed stage=remote-configuration"
         continue
     fi
     db_dir="$DOLT_DATA_DIR/$db"
     if [ ! -d "$db_dir/.dolt" ]; then
         append_failed_db "$db(not found)"
+        echo "backup: database=$db outcome=failed stage=source-missing"
         continue
     fi
     if (cd "$db_dir" && run_bounded 120 dolt backup sync "${db}-backup" 2>/dev/null); then
         SYNCED=$((SYNCED + 1))
+        echo "backup: database=$db outcome=synced completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     else
         append_failed_db "$db(sync failed)"
+        echo "backup: database=$db outcome=failed stage=sync"
     fi
 done
 
@@ -212,3 +219,6 @@ fi
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"
+# A successful dispatch is not proof that every database was backed up.
+# Preserve partial results above and propagate failure to the order outcome.
+[ "$FAILED_COUNT" -eq 0 ]

@@ -4652,7 +4652,10 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 1)
 
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	if runErr == nil {
+		t.Fatal("failed database sync must return a failed order outcome")
+	}
 	if !strings.Contains(out, "synced: 0/1") {
 		t.Fatalf("unexpected backup summary:\n%s", out)
 	}
@@ -4665,6 +4668,16 @@ func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
 	}
 	if !strings.Contains(string(gcLog), "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
 		t.Fatalf("backup failure escalation must use the generic default recipient:\n%s", gcLog)
+	}
+	// Failed discovery is not an empty successful inventory. Reuse this
+	// process-boundary owner with a strict discovery-only failure.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'dolt version 2.1.0'; exit 0; fi\necho synthetic-secret >&2\nexit 92\n")
+	out, runErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if runErr == nil || !strings.Contains(out, "stage=database-discovery") {
+		t.Fatalf("failed discovery was treated as empty inventory: err=%v out=%s", runErr, out)
+	}
+	if strings.Contains(out, "synthetic-secret") {
+		t.Fatal("discovery failure leaked raw command stderr")
 	}
 }
 
@@ -4764,7 +4777,10 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 1)
 
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	out, runErr := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if runErr == nil {
+		t.Fatal("partial database backup failure must return a failed order outcome")
+	}
 	if !strings.Contains(out, "synced: 1/2") {
 		t.Fatalf("unexpected backup summary:\n%s", out)
 	}

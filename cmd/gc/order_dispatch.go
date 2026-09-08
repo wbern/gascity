@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -77,7 +78,7 @@ const (
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
 	staleOrderWispCloseReason     = "order-tracking sweep: stale order wisp subtree exceeded retention window"
 
-	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
+	completedOrderTrackingCloseReason = "order dispatch finished: downstream work outcome was not observed"
 
 	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
 	// index read (RecentRunsAll). Since created-order sorts push their limit
@@ -1153,11 +1154,12 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
 // nil (raw overlay), preserving existing semantics.
 func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+	closeReason := completedOrderTrackingCloseReason
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
 	defer func() {
-		if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
+		if err := closeOrderTrackingBead(ctx, store, trackingID, closeReason); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -1200,14 +1202,14 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		if execOverlay == nil {
 			execOverlay = vars
 		}
-		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
+		closeReason = m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
 		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars)
 	}
 }
 
-func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
-	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
+func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID, reason string) error {
+	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, reason)
 	return err
 }
 
@@ -1318,9 +1320,15 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 }
 
 // dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) (closeReason string) {
 	scoped := a.ScopedName()
-	outcome := orders.RunOutcomeExec
+	outcome := orders.RunOutcomeExecFailed
+	var output []byte
+	var execErrMsg string
+	var env []string
+	defer func() {
+		closeReason = orderExecCloseReason(outcome, output, execErrMsg, append(os.Environ(), env...), time.Now())
+	}()
 	var headSeq uint64
 	var hasEventCursor bool
 	if a.Trigger == "event" && m.ep != nil {
@@ -1328,6 +1336,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		headSeq, err = m.ep.LatestSeq()
 		if err != nil {
 			errMsg := fmt.Sprintf("reading event cursor: %v", err)
+			execErrMsg = errMsg
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
 			if updateErr := front.SetOutcome(trackingID, outcome); updateErr != nil {
@@ -1345,6 +1354,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		// Event-triggered exec orders persist the cursor before the command
 		// runs; otherwise a crash after the side effect can replay the event.
 		if err := front.SetCursor(trackingID, scoped, orders.EventCursor(headSeq)); err != nil {
+			execErrMsg = fmt.Sprintf("recording event cursor: %v", err)
 			logDispatchError(m.stderr, "gc: order %s: failed to label exec event cursor on tracking bead %s: %v", scoped, trackingID, err)
 			outcome = orders.RunOutcomeExecFailed
 			if updateErr := front.SetOutcome(trackingID, outcome); updateErr != nil {
@@ -1360,9 +1370,8 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 	}
 
-	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
-	var output []byte
-	var execErrMsg string
+	var err error
+	env, err = orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1379,12 +1388,16 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 			if len(output) > 0 {
 				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
 			}
+		} else {
+			outcome = orders.RunOutcomeExec
 		}
 	}
 
 	// Label tracking bead with outcome via store (not CLI). For event execs,
 	// cursor labels were already persisted before the command ran.
 	if err := front.SetOutcome(trackingID, outcome); err != nil {
+		outcome = orders.RunOutcomeExecFailed
+		execErrMsg = "recording execution outcome failed"
 		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
 		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
 		if hasEventCursor {
@@ -1415,6 +1428,18 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	return
+}
+
+// orderExecCloseReason keeps observed command results with the tracking bead.
+// Redact before truncating: cutting a secret first can defeat value redaction.
+func orderExecCloseReason(outcome orders.RunOutcome, output []byte, execErr string, env []string, finished time.Time) string {
+	detail := execenv.RedactText(strings.TrimSpace(execErr+"\n"+string(output)), env)
+	detail, truncated := convergence.TruncateOutput([]byte(detail), convergence.MaxOutputBytes)
+	if truncated {
+		detail += "\n[output truncated]"
+	}
+	return fmt.Sprintf("order exec outcome=%s finished_at=%s\n%s", outcome.Display(), finished.UTC().Format(time.RFC3339), detail)
 }
 
 func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
