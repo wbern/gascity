@@ -73,6 +73,11 @@ const controlReadyFallbackLimit = 5000
 // for the life of the process.
 const controlReadyCacheTTL = 3 * time.Second
 
+// controlReadyCacheFailureBackoff prevents a malformed or unavailable shim
+// summary from turning the controller's readiness tick into a subprocess
+// storm. The failure remains loud to the caller throughout the bounded pause.
+const controlReadyCacheFailureBackoff = 30 * time.Second
+
 // parsedControlReadyQuery holds the values workflowServeControlReadyQueryForBeads
 // bakes into its generated shell command as env-var prefix assignments.
 type parsedControlReadyQuery struct {
@@ -299,15 +304,8 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 		args = append(args, "--include-ephemeral")
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
-	if controlReadyShimmed(env) {
-		args = append(args, "--allow-unbounded")
-	}
 	if controlReadyUsesSummary(env) {
-		result, err := controlReadyFallbackQuery(append(append([]string(nil), args...), "--summary-json"), dir, runtimeEnv)
-		if err == nil {
-			return result, nil
-		}
-		log.Printf("control-ready fallback: summarized discovery unavailable (%v); retrying unsummarized", err)
+		return controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv)
 	}
 	return controlReadyFallbackQuery(args, dir, runtimeEnv)
 }
@@ -350,7 +348,7 @@ func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string) (
 	}
 	result, err := decodeControlReadySummary([]byte(trimmed))
 	if err != nil {
-		return nil, fmt.Errorf("control-ready fallback: unexpected bd ready output: %s", trimmed)
+		return nil, fmt.Errorf("control-ready fallback: decode bd ready output: %w", err)
 	}
 	if len(result) == controlReadyFallbackLimit {
 		log.Printf("control-ready fallback: bd ready for %s returned exactly the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
@@ -359,16 +357,10 @@ func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string) (
 	return result, nil
 }
 
-// controlReadyShimmed reports whether bd is fronted by bdshim at all, without
-// regard to store scope. It gates --allow-unbounded, which the shim strips
-// before any passthrough to raw bd, so it is safe on every disposition —
-// including a rig-pinned scope, where the shim must pass through and would
-// otherwise return a firewall envelope this caller cannot decode.
-//
-// It is deliberately NOT controlReadyUsesSummary: that predicate additionally
-// requires a city scope because --summary-json cannot be served on the
-// passthrough path. Gating the exemption on it would withhold the exemption
-// from rig-scoped control dispatchers, which is exactly where it is needed.
+// controlReadyShimmed reports whether the supplied worker environment routes
+// bd through bdshim. Other control-plane paths use this to decide whether the
+// shim-private unbounded flag is understood; control-ready discovery itself
+// deliberately uses the bounded summary contract instead.
 func controlReadyShimmed(env map[string]string) bool {
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	return strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) != ""
@@ -378,12 +370,23 @@ func controlReadyShimmed(env map[string]string) bool {
 // by bdshim. The compact flag is shim-provided and must not be sent to a raw
 // bd binary, which preserves the configured bd_shim=off behavior.
 func controlReadyUsesSummary(env map[string]string) bool {
-	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
-	if strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) == "" {
+	if backend := strings.TrimSpace(env["GC_BEADS"]); backend != "" && backend != "bd" {
 		return false
 	}
-	scope := strings.TrimSpace(envListValue(runtimeEnv, "GC_STORE_SCOPE"))
-	return scope == "" || scope == "city"
+	return strings.TrimSpace(env[citylayout.RealBdEnvVar]) != ""
+}
+
+// controlReadySummaryIntegrityError reports a summary that cannot prove it
+// contains the complete ready set. Scheduling from such a projection would
+// turn omitted rows into false absence.
+type controlReadySummaryIntegrityError struct {
+	Total   int
+	Rows    int
+	Omitted int
+}
+
+func (e *controlReadySummaryIntegrityError) Error() string {
+	return fmt.Sprintf("incomplete control-ready summary: total=%d rows=%d omitted=%d", e.Total, e.Rows, e.Omitted)
 }
 
 // decodeControlReadySummary accepts either the bounded discovery projection or
@@ -403,6 +406,9 @@ func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
 	}
 	if envelope.SchemaVersion != "1" || envelope.Kind != bddispatch.BeadSummaryKind || envelope.Verb != "ready" {
 		return nil, fmt.Errorf("unrecognized summary envelope (schema_version=%q kind=%q verb=%q)", envelope.SchemaVersion, envelope.Kind, envelope.Verb)
+	}
+	if envelope.Omitted != 0 || envelope.Total != len(envelope.Beads)+envelope.Omitted {
+		return nil, &controlReadySummaryIntegrityError{Total: envelope.Total, Rows: len(envelope.Beads), Omitted: envelope.Omitted}
 	}
 	result := make([]beads.Bead, 0, len(envelope.Beads))
 	for _, summary := range envelope.Beads {
@@ -428,9 +434,14 @@ var controlReadyCacheRegistry = struct {
 }{byDir: make(map[string]*controlReadyCacheEntry)}
 
 type controlReadyCacheEntry struct {
-	cache    *beads.CachingStore
-	primedAt time.Time
+	cache      *beads.CachingStore
+	ready      []beads.Bead
+	primedAt   time.Time
+	retryAfter time.Time
+	err        error
 }
+
+var controlReadyNow = time.Now
 
 // controlReadyCacheFor returns a short-lived, best-effort in-process ready
 // snapshot for dir, reusing one primed within controlReadyCacheTTL instead of
@@ -450,20 +461,31 @@ type controlReadyCacheEntry struct {
 // singleflight if overlapping invocations against the same city/dir become
 // common (e.g. a restart handoff window), but the control-dispatcher serve
 // loop's typical call pattern is sequential-per-tick per dir.
-func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string) *beads.CachingStore {
+func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string) *controlReadyCacheEntry {
+	now := controlReadyNow()
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
+	fresh := ok && now.Sub(entry.primedAt) < controlReadyCacheTTL
+	backingOff := ok && entry.err != nil && now.Before(entry.retryAfter)
 	controlReadyCacheRegistry.mu.Unlock()
-	if fresh {
-		return entry.cache
+	if fresh || backingOff {
+		return entry
 	}
 
-	var opts []beads.BdStoreOption
-	if controlReadyShimmed(env) {
-		opts = append(opts, beads.WithBdStoreAllowUnboundedReads())
+	if controlReadyUsesSummary(env) {
+		ready, err := controlReadyFallbackReady(dir, env, false)
+		entry = &controlReadyCacheEntry{ready: ready, primedAt: now, err: err}
+		if err != nil {
+			entry.retryAfter = now.Add(controlReadyCacheFailureBackoff)
+			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, err, entry.retryAfter.Format(time.RFC3339))
+		}
+		controlReadyCacheRegistry.mu.Lock()
+		controlReadyCacheRegistry.byDir[dir] = entry
+		controlReadyCacheRegistry.mu.Unlock()
+		return entry
 	}
-	store, err := openControlStoreAtForCityWithBdOptions(dir, cityPath, cfg, opts...)
+
+	store, err := openControlStoreAtForCityWithBdOptions(dir, cityPath, cfg)
 	if err != nil {
 		return nil
 	}
@@ -474,9 +496,10 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 	}
 
 	controlReadyCacheRegistry.mu.Lock()
-	controlReadyCacheRegistry.byDir[dir] = &controlReadyCacheEntry{cache: cs, primedAt: time.Now()}
+	entry = &controlReadyCacheEntry{cache: cs, primedAt: now}
+	controlReadyCacheRegistry.byDir[dir] = entry
 	controlReadyCacheRegistry.mu.Unlock()
-	return cs
+	return entry
 }
 
 // tryControlReadyFromCacheOrFallback answers a control-dispatcher readiness
@@ -498,8 +521,14 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
 	if !parsed.includeEphemeral {
-		if cache := controlReadyCacheFor(dir, cityPath, cfg, env); cache != nil {
-			if ready, ok := cache.CachedReady(); ok {
+		if entry := controlReadyCacheFor(dir, cityPath, cfg, env); entry != nil {
+			if entry.err != nil {
+				return nil, true, entry.err
+			}
+			if entry.ready != nil {
+				return beadsToHookBeads(evaluateControlReady(entry.ready, parsed, envList)), true, nil
+			}
+			if ready, ok := entry.cache.CachedReady(); ok {
 				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
 			}
 		}
