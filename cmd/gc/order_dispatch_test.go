@@ -4432,7 +4432,7 @@ func TestCloseOrderTrackingBeadErrorsWhenVerificationStillOpen(t *testing.T) {
 	}
 	store := &noopCloseAllStore{Store: base}
 
-	err = closeOrderTrackingBead(context.Background(), store, tracking.ID)
+	err = closeOrderTrackingBead(context.Background(), store, tracking.ID, completedOrderTrackingCloseReason)
 	if err == nil {
 		t.Fatal("closeOrderTrackingBead err = nil, want read-after-close verification error")
 	}
@@ -4471,7 +4471,7 @@ func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
 	}
 	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
 
-	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID); err != nil {
+	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID, completedOrderTrackingCloseReason); err != nil {
 		t.Fatalf("closeOrderTrackingBead: %v", err)
 	}
 	if store.closeCalls != 2 {
@@ -7973,40 +7973,62 @@ func (r *memRecorder) hasSubject(subject string) bool {
 // --- dedup / tracking bead lifecycle tests ---
 
 func TestOrderDispatchClosesTrackingBead(t *testing.T) {
-	store := strictCloseReasonStore{Store: beads.NewMemStore()}
-	var rec memRecorder
-
-	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
-		return []byte("ok\n"), nil
-	}
-
-	aa := []orders.Order{{
-		Name:     "health-check",
-		Trigger:  "cooldown",
-		Interval: "1m",
-		Exec:     "scripts/health.sh",
-	}}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
-
-	ad.dispatch(context.Background(), t.TempDir(), time.Now())
-	ad.drain(context.Background())
-
-	// Tracking bead should be closed after dispatch completes.
-	all := trackingBeads(t, store, "order-run:health-check")
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:health-check" {
-				if b.Status != "closed" {
-					t.Errorf("tracking bead status = %q, want %q", b.Status, "closed")
-				}
-				if got := b.Metadata["close_reason"]; got != completedOrderTrackingCloseReason {
-					t.Errorf("close_reason = %q, want %q", got, completedOrderTrackingCloseReason)
-				}
-				return
+	for _, tc := range []struct {
+		name    string
+		err     error
+		outcome string
+	}{
+		{name: "success", outcome: "success"},
+		{name: "partial_failure", err: fmt.Errorf("exit status 1"), outcome: "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := strictCloseReasonStore{Store: beads.NewMemStore()}
+			var rec memRecorder
+			fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+				return []byte("database=one action=refreshed\nAPI_TOKEN=secret-value\n"), tc.err
 			}
+			aa := []orders.Order{{
+				Name: "health-check", Trigger: "cooldown", Interval: "1m",
+				Exec: "scripts/health.sh", Env: map[string]string{"API_TOKEN": "secret-value"},
+			}}
+			ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+			ad.dispatch(context.Background(), t.TempDir(), time.Now())
+			ad.drain(context.Background())
+			all := trackingBeads(t, store, "order-run:health-check")
+			if len(all) != 1 {
+				t.Fatalf("tracking beads = %d, want one", len(all))
+			}
+			b := all[0]
+			reason := b.Metadata["close_reason"]
+			if b.Status != "closed" || !strings.Contains(reason, "outcome="+tc.outcome) {
+				t.Fatalf("tracking status=%q reason=%q; want closed with actual outcome", b.Status, reason)
+			}
+			if !strings.Contains(reason, "database=one action=refreshed") || !strings.Contains(reason, "finished_at=") {
+				t.Fatalf("close reason lost completion evidence: %q", reason)
+			}
+			if strings.Contains(reason, "secret-value") || !strings.Contains(reason, "[redacted]") {
+				t.Fatalf("close reason failed redaction: %q", reason)
+			}
+		})
+	}
+}
+
+func TestOrderExecCloseReasonRedactsBeforeBounding(t *testing.T) {
+	secret := strings.Repeat("s", 5000)
+	output := []byte(secret + "\n" + strings.Repeat("safe ", 1500))
+	reason := orderExecCloseReason(orders.RunOutcomeExecFailed, output, "exit status 1",
+		[]string{"API_TOKEN=" + secret}, time.Date(2026, 9, 8, 21, 0, 0, 0, time.UTC))
+	if strings.Contains(reason, strings.Repeat("s", 32)) {
+		t.Fatal("truncation exposed a partial secret")
+	}
+	for _, want := range []string{"outcome=failed", "finished_at=2026-09-08T21:00:00Z", "[redacted]", "[output truncated]"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("close reason lacks %q", want)
 		}
 	}
-	t.Error("tracking bead not found")
+	if len(reason) > 4300 {
+		t.Fatalf("close reason is unbounded: %d bytes", len(reason))
+	}
 }
 
 func TestOrderDispatchSkipsOpenWork(t *testing.T) {
