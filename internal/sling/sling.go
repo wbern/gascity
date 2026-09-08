@@ -992,7 +992,9 @@ func rigNameForAgent(cfg *config.City, a config.Agent) string {
 // SlingFormulaUsesBaseBranch reports whether the formula conventionally
 // uses a base_branch variable.
 func SlingFormulaUsesBaseBranch(formulaName string) bool {
-	return strings.HasPrefix(formulaName, "mol-polecat-") || formulaName == "mol-scoped-work"
+	return strings.HasPrefix(formulaName, "mol-polecat-") ||
+		strings.HasPrefix(formulaName, "mol-gcw-polecat-") ||
+		formulaName == "mol-scoped-work"
 }
 
 // SlingFormulaUsesTargetBranch reports whether the formula conventionally

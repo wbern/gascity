@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,68 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestDoSlingGCWGraphInjectsRigDefaultBaseBranch(t *testing.T) {
+	dir := t.TempDir()
+	formulaText := `formula = "mol-gcw-polecat-work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.base_branch]
+default = ""
+
+[[steps]]
+id = "workspace-setup"
+title = "workspace"
+description = "test -n \"{{base_branch}}\"; workspace enter --target {{base_branch}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-gcw-polecat-work.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "GCI-1", Type: "task", Status: "open"}}, nil)
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+		Rigs:          []config.Rig{{Name: "gas-city-infra", Prefix: "GCI", Path: "/rigs/gas-city-infra", DefaultBranch: "main"}},
+		Agents: []config.Agent{{
+			Name:         config.ControlDispatcherAgentName,
+			StartCommand: config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}},
+	}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+	a := config.Agent{Name: "codex-polecat", Dir: "gas-city-infra", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("mol-gcw-polecat-work")}
+
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "GCI-1"}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	root, err := store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get workflow root %q: %v", result.WorkflowID, err)
+	}
+	var graphVars map[string]string
+	if err := json.Unmarshal([]byte(root.Metadata["gc.graphv2_vars.v1"]), &graphVars); err != nil {
+		t.Fatalf("decode graph vars: %v", err)
+	}
+	if got := graphVars["base_branch"]; got != "main" {
+		t.Fatalf("cooked graph base_branch = %q, want main", got)
+	}
+	children, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range children {
+		if strings.Contains(child.Description, "workspace enter") {
+			if !strings.Contains(child.Description, "--target main") {
+				t.Fatalf("workspace step did not render main: %q", child.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("cooked graph has no workspace step")
+}
 
 // TestAttachFormulaToBeadEntryShapes exercises the two attachment entry points
 // that share attachFormulaToBead — --on-formula and default-formula — and
