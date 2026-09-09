@@ -2373,7 +2373,8 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	// 2026-08-06: four items at attempts 3-5, all bearing this error.
 	// tmux/adapter.go:1324 already applies the same reasoning to the startup
 	// nudge; the queued path was simply never given it.
-	if errors.Is(cause, sessiontmux.ErrNudgeSubmitUnconfirmed) {
+	if errors.Is(cause, sessiontmux.ErrNudgeSubmitUnconfirmed) ||
+		errors.Is(cause, sessiontmux.ErrNudgeSubmitDeliveredUnobserved) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}

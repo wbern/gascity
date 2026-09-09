@@ -155,6 +155,11 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// ErrNudgeSubmitDeliveredUnobserved means the composer drained after the
+	// submit, proving that the agent consumed the message, although its busy
+	// indicator was not observed within the confirmation budget. Callers must
+	// not retry this outcome because doing so would duplicate the turn.
+	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -1856,6 +1861,13 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			// normal retry delay and spends one of its bounded attempts —
 			// the same handling as any other delivery failure — instead of
 			// silently losing the nudge.
+			promptPrefix := ""
+			if configured, prefixErr := t.GetEnvironment(session, sessionReadyPromptEnvKey); prefixErr == nil {
+				promptPrefix = configured
+			}
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message, promptPrefix) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
 		return nil
@@ -3328,6 +3340,60 @@ func paneContainsBusyIndicator(lines []string) bool {
 		}
 	}
 	return false
+}
+
+// paneShowsDrainedComposer reports positive delivery evidence: the last live
+// composer line is observable and no longer contains the beginning of the
+// submitted message. Earlier prompt-prefixed lines are scrollback.
+func paneShowsDrainedComposer(lines []string, sent, readyPromptPrefix string) bool {
+	remainder, observed := lastComposerRemainder(lines, idlePromptPrefix(readyPromptPrefix))
+	if !observed {
+		return false
+	}
+	if strings.Contains(remainder, "[Pasted Content") {
+		return false
+	}
+	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
+	return draft == "" || !strings.Contains(remainder, draft)
+}
+
+func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
+	var remainder string
+	var observed bool
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, candidate := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+			switch {
+			case strings.HasPrefix(candidate, normalizedPrefix):
+				remainder, observed = candidate[len(normalizedPrefix):], true
+			case prefixTrimmed != "" && candidate == prefixTrimmed:
+				remainder, observed = "", true
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return remainder, observed
+}
+
+func firstNonEmptyLine(value string) string {
+	for _, line := range strings.Split(value, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func firstNRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 
 // GetSessionInfo returns detailed information about a session.

@@ -70,6 +70,19 @@ func TestFailedQueuedNudge_UnconfirmedIsTerminalWhenWrapped(t *testing.T) {
 	}
 }
 
+func TestFailedQueuedNudge_DeliveredUnobservedIsTerminal(t *testing.T) {
+	item := newQueuedNudgeWithOptions("worker", "reminder", "queue", time.Now(), queuedNudgeOptions{
+		ID:        "n-delivered-unobserved",
+		SessionID: "gc-1",
+	})
+
+	_, dead := failedQueuedNudge(item, sessiontmux.ErrNudgeSubmitDeliveredUnobserved, time.Now())
+
+	if !dead {
+		t.Fatal("dead = false for delivered-unobserved submit: retry would duplicate a proven delivery")
+	}
+}
+
 // TestFailedQueuedNudge_StillRetriesOrdinaryFailures guards the other side.
 // Making unconfirmed terminal must not turn every transient delivery error into
 // a one-shot: an ordinary failure still gets its retry budget.
