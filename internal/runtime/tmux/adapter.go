@@ -1384,14 +1384,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 	if cfg.Nudge != "" {
 		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			// The startup nudge has no retry-capable caller: the keystrokes
-			// reached tmux and the session is verified alive above, so an
-			// unconfirmed submit is a warning, not a start failure. Any other
-			// error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-				return fmt.Errorf("sending startup nudge: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
+			return fmt.Errorf("sending startup nudge: %w", err)
 		}
 	}
 

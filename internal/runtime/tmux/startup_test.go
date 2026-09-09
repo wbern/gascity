@@ -951,10 +951,11 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		assertCallSequence(t, ops, wantCalls)
 	})
 
-	// The startup nudge has no retry-capable caller, so an unconfirmed submit
-	// must not fail the start: the keystrokes reached tmux and the session is
-	// already verified alive. Only genuine delivery errors are fatal (above).
-	t.Run("unconfirmed submit is not fatal", func(t *testing.T) {
+	// An unconfirmed startup submit must remain a failed delivery. Reporting a
+	// clean start here lets the lifecycle commit primed state even though the
+	// successor can still be sitting at a blank prompt with the continuation
+	// drafted but unsubmitted.
+	t.Run("unconfirmed submit is fatal", func(t *testing.T) {
 		ops := &fakeStartOps{
 			hasSessionResult: true,
 			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
@@ -965,8 +966,9 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 			Nudge:   "startup prompt",
 		}
 
-		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
-			t.Fatalf("doStartSession = %v, want nil for an unconfirmed startup nudge", err)
+		err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("doStartSession error = %v, want ErrNudgeSubmitUnconfirmed", err)
 		}
 
 		assertCallSequence(t, ops, wantCalls)
