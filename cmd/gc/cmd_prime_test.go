@@ -918,11 +918,32 @@ provider = "exec:/not-used-by-auto-handoff"
 			if strings.Contains(context, ordinary.ID) || strings.Contains(context, ordinary.Body) {
 				t.Fatalf("additionalContext = %q, must not inject ordinary mail %q at SessionStart", context, ordinary.ID)
 			}
-			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-				t.Fatalf("auto-handoff should be archived after SessionStart injection, got err=%v", err)
+			if _, err := store.Get(auto.ID); err != nil {
+				t.Fatalf("auto-handoff must remain durable after SessionStart output until a user turn is delivered: %v", err)
 			}
 			if _, err := store.Get(ordinary.ID); err != nil {
 				t.Fatalf("ordinary mail should remain for UserPromptSubmit: %v", err)
+			}
+
+			// SessionStart only stages context. A successful first user-turn hook is
+			// the delivery boundary that consumes it, exactly once.
+			var submitOut bytes.Buffer
+			if code := doMailCheck(beadmail.New(store), sessionID, true, &submitOut, &stderr); code != 0 {
+				t.Fatalf("doMailCheck(UserPromptSubmit) = %d; stderr=%q", code, stderr.String())
+			}
+			if got := strings.Count(submitOut.String(), auto.ID); got != 1 {
+				t.Fatalf("UserPromptSubmit auto-handoff occurrences = %d, want 1; output=%q", got, submitOut.String())
+			}
+			if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("delivered auto-handoff should be archived after UserPromptSubmit, got err=%v", err)
+			}
+
+			stdout.Reset()
+			if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookFormat, false); code != 0 {
+				t.Fatalf("second doPrimeWithHookFormat() = %d; stderr=%q", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), auto.ID) {
+				t.Fatalf("delivered auto-handoff was duplicated on a later SessionStart: %q", stdout.String())
 			}
 
 			// A provider-hook write failure must leave the next auto-handoff
@@ -943,7 +964,7 @@ provider = "exec:/not-used-by-auto-handoff"
 	}
 }
 
-func TestSessionStartAutoHandoffArchivesOnlyRepresentedOversizedMail(t *testing.T) {
+func TestSessionStartAutoHandoffKeepsRepresentedOversizedMailDurable(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -981,17 +1002,10 @@ func TestSessionStartAutoHandoffArchivesOnlyRepresentedOversizedMail(t *testing.
 	if len(ids) == 0 || len(ids) >= len(created) {
 		t.Fatalf("SessionStart represented ids = %d, want a strict bounded subset of %d", len(ids), len(created))
 	}
-	injection.afterDelivery()
 	for _, message := range created {
 		_, err := store.Get(message.ID)
-		if ids[message.ID] {
-			if !errors.Is(err, beads.ErrNotFound) {
-				t.Fatalf("represented auto-handoff %q should be archived, err=%v", message.ID, err)
-			}
-			continue
-		}
 		if err != nil {
-			t.Fatalf("unrepresented auto-handoff %q must remain retrievable: %v", message.ID, err)
+			t.Fatalf("auto-handoff %q must remain retrievable after SessionStart: %v", message.ID, err)
 		}
 	}
 }
@@ -1093,13 +1107,10 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
-// TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff pins the preview
-// contract of `gc prime --hook --json`: it renders exactly what the hook would
-// emit, including durable auto-handoff mail, but must not consume it. The
-// --json path buffers into a strings.Builder whose writes never fail, so a
-// consuming run would archive the handoff before the real stdout write — and
-// even on success would eat the continuation the next SessionStart must deliver.
-func TestDoPrimeWithHook_JSONModeDoesNotArchiveAutoHandoff(t *testing.T) {
+// TestDoPrimeWithHook_SessionStartPreviewAndDeliveryStayReadOnly pins that both
+// preview and real SessionStart output stage durable auto-handoff context
+// without consuming it. Only UserPromptSubmit proves a turn was delivered.
+func TestDoPrimeWithHook_SessionStartPreviewAndDeliveryStayReadOnly(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -1171,8 +1182,8 @@ prompt_template = "prompts/worker.md"
 		t.Fatalf("--json preview must leave auto-handoff durable, got err=%v", err)
 	}
 
-	// The real hook invocation still consumes it, so the preview did not
-	// merely mark the mail read in a way that suppresses later delivery.
+	// The real hook invocation also remains read-only: writing valid hook JSON
+	// does not prove that the provider submitted the successor's first turn.
 	var hookStdout bytes.Buffer
 	if code := doPrimeWithHookFormat(nil, &hookStdout, &stderr, true, "codex", false); code != 0 {
 		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
@@ -1180,8 +1191,8 @@ prompt_template = "prompts/worker.md"
 	if !strings.Contains(hookStdout.String(), auto.ID) {
 		t.Fatalf("hook output = %q, want auto-handoff %q", hookStdout.String(), auto.ID)
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto-handoff should be archived after the real SessionStart injection, got err=%v", err)
+	if _, err := store.Get(auto.ID); err != nil {
+		t.Fatalf("real SessionStart must leave auto-handoff durable until UserPromptSubmit: %v", err)
 	}
 }
 

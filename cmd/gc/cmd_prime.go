@@ -114,7 +114,7 @@ to empty output from valid conditional logic, or on suspended states
 			// consuming run here would archive durable handoff mail before
 			// the real stdout write — and even on success would eat the
 			// continuation the next SessionStart hook must deliver.
-			if doPrimeWithHookFormatOpts(args, &buf, stderr, hookMode, hookFormat, strictMode, false) != 0 {
+			if doPrimeWithHookFormatOpts(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
 				return errExit
 			}
 			agentName, _ := primeInvocationAgentName(args)
@@ -194,15 +194,11 @@ func primeInvocationAgentName(args []string) (string, bool) {
 }
 
 func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
-	return doPrimeWithHookFormatOpts(args, stdout, stderr, hookMode, hookFormat, strictMode, true)
+	return doPrimeWithHookFormatOpts(args, stdout, stderr, hookMode, hookFormat, strictMode)
 }
 
-// doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
-// the invocation non-destructive: durable auto-handoff mail is still rendered
-// into the output, but is not archived. Preview callers (--json) pass false so
-// that a diagnostic run cannot eat the continuation the real SessionStart hook
-// is supposed to deliver.
-func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) (code int) {
+// doPrimeWithHookFormatOpts is the full entry point.
+func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) (code int) {
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false
@@ -271,16 +267,16 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			return 1
 		}
 		if hookMode && primeHookSessionStart(hookContext) {
-			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 			return 0
 		}
-		injection := primeHookContextSuffix("", hookMode, hookContext, stderr, consumeHandoff)
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+		injection := primeHookContextSuffix("", hookMode, hookContext, stderr)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 		return 0
 	}
 	hookCityPath = cityPath
 	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
-		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 		return 0
 	}
 	if !strictMode && primeHookSessionStart(hookContext) {
@@ -292,8 +288,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 		return 0
 	}
 	hookEventsConfig = cfg.Events
@@ -401,8 +397,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
-				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 				return 0
 			}
 			// File is present but rendered empty. Treat as a legitimate
@@ -425,8 +421,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text)
 					return 0
 				}
 			}
@@ -437,8 +433,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 	return 0
 }
 
@@ -606,7 +602,7 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 	}
 }
 
-func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
+func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string) {
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
 		// launch payload or nudge path. SessionStart hooks add context only.
@@ -620,14 +616,10 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt += hookContextSuffix
 	}
 	if hookMode && hookFormat != "" {
-		if err := writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt); err == nil && afterDelivery != nil {
-			afterDelivery()
-		}
+		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)
 		return
 	}
-	if _, err := fmt.Fprint(stdout, prompt); err == nil && afterDelivery != nil { //nolint:errcheck // best-effort stdout
-		afterDelivery()
-	}
+	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 }
 
 func readPrimeHookContext() primeHookContext {

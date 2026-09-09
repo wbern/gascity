@@ -11,18 +11,18 @@ import (
 )
 
 type primeHookContextInjection struct {
-	text          string
-	afterDelivery func()
+	text string
 }
 
 // primeHookContextSuffix builds the single provider-hook context owned by gc
 // prime. A managed SessionStart receives durable auto-handoff mail here because
 // a recycled successor can otherwise idle before any UserPromptSubmit hook.
 //
-// consumeHandoff gates only the destructive archive: preview callers (--json)
-// still render the exact text the hook would emit, but must not consume the
-// durable mail out from under the real SessionStart invocation.
-func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+// SessionStart is only a context-staging boundary: the provider can render this
+// output while the startup prompt remains drafted and unsubmitted. Therefore it
+// never archives auto-handoff mail. The later UserPromptSubmit mail hook owns
+// archival once a real turn reaches the provider.
+func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
@@ -30,9 +30,6 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 	if primeHookSessionStart(hookContext) {
 		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text
-		if consumeHandoff {
-			injection.afterDelivery = autoHandoff.afterDelivery
-		}
 		// dip-bj7pgj: an autonomous/promptless restart runs this SessionStart
 		// hook but never the UserPromptSubmit mail hook, so also surface ordinary
 		// unread mail here so such a wake is not blind to it (including a
@@ -136,8 +133,5 @@ func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjecti
 	}
 	return primeHookContextInjection{
 		text: text,
-		afterDelivery: func() {
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
-		},
 	}, ids
 }

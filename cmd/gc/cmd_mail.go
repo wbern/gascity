@@ -724,7 +724,30 @@ func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, 
 		return 1
 	}
 
-	return doMailCheckTargetWithFormat(mp, target, inject, hookFormat, stdout, stderr, observation)
+	if !inject {
+		return doMailCheckTargetWithFormat(mp, target, false, hookFormat, stdout, stderr, observation)
+	}
+	localHandoffs, localArchiver := localAutoHandoffsForSubmit(target, stderr)
+	return doMailCheckTargetWithSources(mp, target, hookFormat, stdout, stderr, observation, localHandoffs, localArchiver)
+}
+
+// localAutoHandoffsForSubmit reads the durable continuation class from local
+// beadmail regardless of the configured ordinary-mail provider. gc handoff
+// always persists this class locally, so UserPromptSubmit must acknowledge it
+// through the same store after successful hook output.
+func localAutoHandoffsForSubmit(target resolvedMailTarget, stderr io.Writer) ([]mail.Message, mail.Provider) {
+	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc mail check")
+	if store == nil || code != 0 {
+		return nil, nil
+	}
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	mp := beadmail.NewWithStores(resolveMailMessagesStore(store, cfg, cityPath, nil), cliSessionStore(store, cfg, cityPath))
+	messages, err := mp.CheckAutoHandoffs(target.recipients)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc mail check: checking local auto handoff mail: %v\n", err) //nolint:errcheck // best-effort hook diagnostics
+		return nil, nil
+	}
+	return messages, mp
 }
 
 // doMailCheck checks for unread messages. Without --inject, prints the count
@@ -751,49 +774,7 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	}
 
 	if inject {
-		if len(messages) > 0 {
-			detailedText, archiveMessages := formatInjectOutputWithMessages(messages)
-			coordinator := mailInjectionStateCoordinator{load: mailInjectionStateLoader}
-			text, persist, stateErr := coordinator.prepare(messages)
-			stateFailed := stateErr != nil
-			if stateErr != nil {
-				fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
-			}
-			// Keep continuation observations on the priority-sorted display window.
-			// Archiving below is narrower: only complete IDs represented in the
-			// detailed hook output are retrieval-safe after delivery.
-			injectedMessages := sortMailByPriority(messages)
-			if len(injectedMessages) > mailInjectMaxMessages {
-				injectedMessages = injectedMessages[:mailInjectMaxMessages]
-			}
-			observation.injected(injectedMessages, text)
-			if stateFailed {
-				observation.fail(continuationErrorMailState)
-			}
-			if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", text); err != nil {
-				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
-				observation.fail(continuationErrorHookOutput)
-				return 0
-			}
-			if persist != nil {
-				if err := persist(); err != nil {
-					fmt.Fprintf(stderr, "gc mail check: persisting mail injection state: %v\n", err) //nolint:errcheck // a later hook fails open with full detail
-					observation.fail(continuationErrorMailState)
-				}
-			}
-			if text == detailedText {
-				archiveInjectedAutoHandoffMessages(mp, archiveMessages, stderr)
-			}
-		} else if _, persist, stateErr := (mailInjectionStateCoordinator{load: mailInjectionStateLoader}).prepare(nil); stateErr != nil {
-			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
-			observation.fail(continuationErrorMailState)
-		} else if persist != nil {
-			if err := persist(); err != nil {
-				fmt.Fprintf(stderr, "gc mail check: clearing mail injection state: %v\n", err) //nolint:errcheck // fail-visible; a later delivery fails open
-				observation.fail(continuationErrorMailState)
-			}
-		}
-		return 0 // --inject always exits 0
+		return renderMailCheckInjection(mp, nil, messages, hookFormat, stdout, stderr, observation)
 	}
 
 	// Non-inject mode: print count, return 0 if mail, 1 if empty.
@@ -804,11 +785,87 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 	return 0
 }
 
+func doMailCheckTargetWithSources(mp mail.Provider, target resolvedMailTarget, hookFormat string, stdout, stderr io.Writer, observation *mailInjectionObservation, localHandoffs []mail.Message, localArchiver mail.Provider) int {
+	messages, err := collectMailMessages(mp.Check, target.recipients)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
+		observation.fail(continuationErrorMailCheck)
+		return 0
+	}
+	messages = appendUniqueMailMessages(messages, localHandoffs)
+	return renderMailCheckInjection(mp, localArchiver, messages, hookFormat, stdout, stderr, observation)
+}
+
+func appendUniqueMailMessages(messages, extra []mail.Message) []mail.Message {
+	seen := make(map[string]struct{}, len(messages)+len(extra))
+	for _, message := range messages {
+		seen[message.ID] = struct{}{}
+	}
+	for _, message := range extra {
+		if _, ok := seen[message.ID]; ok {
+			continue
+		}
+		seen[message.ID] = struct{}{}
+		messages = append(messages, message)
+	}
+	return messages
+}
+
+func renderMailCheckInjection(mp, localArchiver mail.Provider, messages []mail.Message, hookFormat string, stdout, stderr io.Writer, observation *mailInjectionObservation) int {
+	if len(messages) > 0 {
+		detailedText, archiveMessages := formatInjectOutputWithMessages(messages)
+		coordinator := mailInjectionStateCoordinator{load: mailInjectionStateLoader}
+		text, persist, stateErr := coordinator.prepare(messages)
+		stateFailed := stateErr != nil
+		if stateErr != nil {
+			fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; full detail remains available
+		}
+		// Keep continuation observations on the priority-sorted display window.
+		// Archiving below is narrower: only complete IDs represented in the
+		// detailed hook output are retrieval-safe after delivery.
+		injectedMessages := sortMailByPriority(messages)
+		if len(injectedMessages) > mailInjectMaxMessages {
+			injectedMessages = injectedMessages[:mailInjectMaxMessages]
+		}
+		observation.injected(injectedMessages, text)
+		if stateFailed {
+			observation.fail(continuationErrorMailState)
+		}
+		if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", text); err != nil {
+			fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+			observation.fail(continuationErrorHookOutput)
+			return 0
+		}
+		if persist != nil {
+			if err := persist(); err != nil {
+				fmt.Fprintf(stderr, "gc mail check: persisting mail injection state: %v\n", err) //nolint:errcheck // a later hook fails open with full detail
+				observation.fail(continuationErrorMailState)
+			}
+		}
+		if text == detailedText {
+			archiveInjectedAutoHandoffMessages(mp, archiveMessages, stderr)
+			archiveInjectedAutoHandoffMessages(localArchiver, archiveMessages, stderr)
+		}
+	} else if _, persist, stateErr := (mailInjectionStateCoordinator{load: mailInjectionStateLoader}).prepare(nil); stateErr != nil {
+		fmt.Fprintf(stderr, "gc mail check: mail injection state: %v\n", stateErr) //nolint:errcheck // fail-visible; a later delivery fails open
+		observation.fail(continuationErrorMailState)
+	} else if persist != nil {
+		if err := persist(); err != nil {
+			fmt.Fprintf(stderr, "gc mail check: clearing mail injection state: %v\n", err) //nolint:errcheck // fail-visible; a later delivery fails open
+			observation.fail(continuationErrorMailState)
+		}
+	}
+	return 0 // --inject always exits 0
+}
+
 type injectedAutoHandoffArchiver interface {
 	ArchiveInjectedAutoHandoffs([]string) error
 }
 
 func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
+	if mp == nil {
+		return
+	}
 	archiver, ok := mp.(injectedAutoHandoffArchiver)
 	if !ok {
 		return
