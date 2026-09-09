@@ -3757,6 +3757,89 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	}
 }
 
+func TestCmdMailCheckInjectArchivesLocalAutoHandoffWithConfiguredFakeProvider(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_SESSION_ID", "session-1")
+	t.Setenv("GC_ALIAS", "worker")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[mail]
+provider = "fake"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		ID:     "session-1",
+		Type:   "session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	auto, err := store.Create(beads.Bead{
+		Title:    "context cycle",
+		Type:     "message",
+		Assignee: "session-1",
+		From:     "worker",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create auto handoff: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("UserPromptSubmit output missing local auto handoff %s:\n%s", auto.ID, stdout.String())
+	}
+	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("delivered local auto handoff should be archived exactly once, got err=%v", err)
+	}
+
+	stdout.Reset()
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("second cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), auto.ID) {
+		t.Fatalf("archived auto handoff was duplicated on a later submit: %q", stdout.String())
+	}
+
+	undelivered, err := store.Create(beads.Bead{
+		Title:    "retry context cycle",
+		Type:     "message",
+		Assignee: "session-1",
+		From:     "worker",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create undelivered auto handoff: %v", err)
+	}
+	if code := cmdMailCheckWithFormat(nil, true, hookOutputFormatCodex, errWriter{}, &stderr); code != 0 {
+		t.Fatalf("failed-output cmdMailCheckWithFormat = %d; stderr=%q", code, stderr.String())
+	}
+	if _, err := store.Get(undelivered.ID); err != nil {
+		t.Fatalf("failed UserPromptSubmit output must leave local auto handoff durable: %v", err)
+	}
+}
+
 func TestCmdMailCheckInjectRecordsUserPromptSubmitObservation(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	cityPath := t.TempDir()
