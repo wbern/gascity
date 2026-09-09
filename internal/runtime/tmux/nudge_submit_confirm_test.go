@@ -141,3 +141,30 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
 	}
 }
+
+func TestPaneShowsDrainedComposer(t *testing.T) {
+	tests := []struct {
+		name   string
+		lines  []string
+		sent   string
+		prefix string
+		want   bool
+	}{
+		{name: "no composer observed", lines: []string{"some output"}, sent: "continue the work", want: false},
+		{name: "claude draft remains", lines: []string{"❯ continue the work"}, sent: "continue the work", want: false},
+		{name: "claude composer drained", lines: []string{"❯ "}, sent: "continue the work", want: true},
+		{name: "codex draft remains", lines: []string{"› continue the work"}, sent: "continue the work", prefix: "› ", want: false},
+		{name: "codex composer drained", lines: []string{"› "}, sent: "continue the work", prefix: "› ", want: true},
+		{name: "configured prefix", lines: []string{"agent> "}, sent: "continue the work", prefix: "agent> ", want: true},
+		{name: "paste marker is not drained", lines: []string{"› [Pasted Content 2048 chars]"}, sent: "continue the work", prefix: "› ", want: false},
+		{name: "last composer is live", lines: []string{"❯ continue the work", "• Worked", "❯ "}, sent: "continue the work", want: true},
+		{name: "multiline compares first content", lines: []string{"❯ continue the work"}, sent: "\ncontinue the work\nwith context", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := paneShowsDrainedComposer(tt.lines, tt.sent, tt.prefix); got != tt.want {
+				t.Fatalf("paneShowsDrainedComposer(%v, %q, %q) = %v, want %v", tt.lines, tt.sent, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}

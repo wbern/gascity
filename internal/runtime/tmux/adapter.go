@@ -1388,10 +1388,10 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// reached tmux and the session is verified alive above, so an
 			// unconfirmed submit is a warning, not a start failure. Any other
 			// error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but busy state was not observed: %v\n", name, err)
 		}
 	}
 

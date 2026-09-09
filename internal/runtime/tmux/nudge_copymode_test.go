@@ -13,11 +13,12 @@ import (
 // implementation detail, so a positional fake (fakeExecutor.outs) would pin the
 // wrong thing and break on any reordering.
 type nudgeRoutingExecutor struct {
-	calls    [][]string
-	inMode   string               // reply to the #{pane_in_mode} probe: "1" parked, "0" not
-	provider string               // reply to show-environment GC_PROVIDER; "" = unset
-	pane     string               // reply to capture-pane (the busy/idle footer)
-	errFor   func([]string) error // optional injected tmux command failure
+	calls       [][]string
+	inMode      string               // reply to the #{pane_in_mode} probe: "1" parked, "0" not
+	provider    string               // reply to show-environment GC_PROVIDER; "" = unset
+	readyPrefix string               // reply to show-environment GC_READY_PROMPT_PREFIX
+	pane        string               // reply to capture-pane (the busy/idle footer)
+	errFor      func([]string) error // optional injected tmux command failure
 }
 
 func (e *nudgeRoutingExecutor) execute(args []string) (string, error) {
@@ -35,6 +36,9 @@ func (e *nudgeRoutingExecutor) execute(args []string) (string, error) {
 	case strings.Contains(joined, "#{pane_in_mode}"):
 		return e.inMode, nil
 	case callHasTokens(args, "show-environment"):
+		if args[len(args)-1] == sessionReadyPromptEnvKey && e.readyPrefix != "" {
+			return sessionReadyPromptEnvKey + "=" + e.readyPrefix, nil
+		}
 		if e.provider == "" {
 			return "", nil // unparseable -> providerEnv reports ""
 		}
@@ -250,6 +254,24 @@ func TestNudgeSessionConfirmsSubmitForCodex(t *testing.T) {
 	if busyProbes := countCallsWithTokens(fe.calls, "capture-pane"); busyProbes == 0 {
 		t.Fatalf("expected the busy indicator to be polled for codex; calls=%v", fe.calls)
 	}
+}
+
+func TestNudgeSessionDistinguishesCodexDraftFromDrainedComposer(t *testing.T) {
+	t.Run("draft remains unconfirmed", func(t *testing.T) {
+		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", readyPrefix: "› ", pane: "› continue the work"}
+		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+		if err := tm.NudgeSession("sess", "continue the work"); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("NudgeSession error = %v, want drafted ErrNudgeSubmitUnconfirmed", err)
+		}
+	})
+
+	t.Run("drained composer proves delivery", func(t *testing.T) {
+		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", readyPrefix: "› ", pane: "› "}
+		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+		if err := tm.NudgeSession("sess", "continue the work"); !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+			t.Fatalf("NudgeSession error = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
+		}
+	})
 }
 
 // TestNudgeBodyTakesBracketedPastePath pins the gcw-3e62 truncation. Codex
