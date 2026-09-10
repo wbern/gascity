@@ -718,6 +718,16 @@ func TestControlReadyUsesSummaryOnlyForBdBackend(t *testing.T) {
 	}
 }
 
+func TestControlReadyUsesSummaryWithAmbientShimConfiguration(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv(citylayout.RealBdEnvVar, "/real/bd")
+	t.Setenv("GC_BEADS", "bd")
+
+	if !controlReadyUsesSummary(map[string]string{"GC_STORE_SCOPE": "rig"}) {
+		t.Fatal("ambient shim configuration was ignored")
+	}
+}
+
 func TestControlReadyFallbackReadyFailsClosedWhenSummaryQueryFails(t *testing.T) {
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
@@ -893,7 +903,7 @@ func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
 
 	dir := t.TempDir()
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_STORE_SCOPE": "rig"}
+	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd", "GC_STORE_SCOPE": "rig"}
 	for i := 0; i < 2; i++ {
 		queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
 		var integrityErr *controlReadySummaryIntegrityError

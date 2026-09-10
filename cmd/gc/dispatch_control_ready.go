@@ -374,10 +374,11 @@ func controlReadyShimmed(env map[string]string) bool {
 // by bdshim. The compact flag is shim-provided and must not be sent to a raw
 // bd binary, which preserves the configured bd_shim=off behavior.
 func controlReadyUsesSummary(env map[string]string) bool {
-	if backend := strings.TrimSpace(env["GC_BEADS"]); backend != "" && backend != "bd" {
+	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
+	if backend := strings.TrimSpace(envListValue(runtimeEnv, "GC_BEADS")); backend != "" && backend != "bd" {
 		return false
 	}
-	return strings.TrimSpace(env[citylayout.RealBdEnvVar]) != ""
+	return strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) != ""
 }
 
 // controlReadySummaryIntegrityError reports a summary that cannot prove it

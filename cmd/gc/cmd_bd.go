@@ -426,7 +426,6 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	}
 	bdPath, err := resolveBdCommandPath(cityPath, env)
 	if err != nil {
-		endPrepareSubprocess()
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
