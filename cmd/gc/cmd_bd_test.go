@@ -17,10 +17,65 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
+
+func TestResolveBdCommandPathPrefersConfiguredCityShim(t *testing.T) {
+	cityDir := t.TempDir()
+	shimDir := citylayout.ShimbinDir(cityDir)
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("mkdir shimbin: %v", err)
+	}
+	shimBd := filepath.Join(shimDir, "bd")
+	if err := os.WriteFile(shimBd, []byte("#!/bin/sh\nprintf shim"), 0o755); err != nil {
+		t.Fatalf("write shim bd: %v", err)
+	}
+	rawDir := t.TempDir()
+	rawBd := filepath.Join(rawDir, "bd")
+	if err := os.WriteFile(rawBd, []byte("#!/bin/sh\nprintf raw"), 0o755); err != nil {
+		t.Fatalf("write raw bd: %v", err)
+	}
+	t.Setenv("PATH", rawDir)
+
+	env := mergeRuntimeEnv(os.Environ(), map[string]string{
+		citylayout.RealBdEnvVar: rawBd,
+		"GC_STORE_SCOPE":        "rig",
+	})
+	got, err := resolveBdCommandPath(cityDir, env)
+	if err != nil {
+		t.Fatalf("resolveBdCommandPath: %v", err)
+	}
+	cmd := exec.Command(got)
+	cmd.Env = env
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run resolved bd: %v", err)
+	}
+	if string(output) != "shim" {
+		t.Fatalf("resolved bd output = %q, want shim (controller PATH points at raw %q)", output, rawBd)
+	}
+}
+
+func TestResolveBdCommandPathUsesAmbientBdWithoutShimConfiguration(t *testing.T) {
+	cityDir := t.TempDir()
+	rawDir := t.TempDir()
+	rawBd := filepath.Join(rawDir, "bd")
+	if err := os.WriteFile(rawBd, []byte("#!/bin/sh\nprintf raw"), 0o755); err != nil {
+		t.Fatalf("write raw bd: %v", err)
+	}
+	t.Setenv("PATH", rawDir)
+
+	got, err := resolveBdCommandPath(cityDir, os.Environ())
+	if err != nil {
+		t.Fatalf("resolveBdCommandPath: %v", err)
+	}
+	if got != rawBd {
+		t.Fatalf("resolved bd = %q, want ambient raw bd %q", got, rawBd)
+	}
+}
 
 func TestExtractRigFlag(t *testing.T) {
 	tests := []struct {
