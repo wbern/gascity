@@ -2,6 +2,7 @@ package bddispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -43,6 +44,20 @@ func TestSummaryRoutingMetadataKeysPinned(t *testing.T) {
 func TestBeadSummaryKindPinned(t *testing.T) {
 	if BeadSummaryKind != "gc.bead_summary" {
 		t.Fatalf("BeadSummaryKind = %q, want %q", BeadSummaryKind, "gc.bead_summary")
+	}
+}
+
+func TestBeadSummaryEnvelopeCountersReconcileWhenRowsAreOmitted(t *testing.T) {
+	input := make([]beads.Bead, MaxBeadSummaryRows+7)
+	for i := range input {
+		input[i] = beads.Bead{ID: fmt.Sprintf("gcw-%03d", i), Status: "open"}
+	}
+	envelope := NewBeadSummaryEnvelope("ready", input, 1<<20)
+	if envelope.Omitted == 0 {
+		t.Fatal("oversized candidate omitted no rows")
+	}
+	if envelope.Total != len(envelope.Beads)+envelope.Omitted {
+		t.Fatalf("summary counters do not reconcile: total=%d rows=%d omitted=%d", envelope.Total, len(envelope.Beads), envelope.Omitted)
 	}
 }
 

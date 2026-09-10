@@ -126,6 +126,7 @@ func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t
 // format bd emits, so substituting the Go constants here would defeat it.
 // (End-to-end coverage originates from PR #4787.)
 func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsOnFallbackPath(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {

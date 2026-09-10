@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,7 +49,7 @@ func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
 	controlReadyCommandRunner = func(name string, args []string, display, dir string, env []string) (string, error) {
 		gotName, gotDisplay, gotDir = name, display, dir
 		gotArgs, gotEnv = append([]string(nil), args...), append([]string(nil), env...)
-		return "[]", nil
+		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`, nil
 	}
 
 	dir := t.TempDir()
@@ -61,7 +62,7 @@ func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
 	if gotName != "/opt/gascity/current/gc" {
 		t.Fatalf("executable = %q, want absolute current gc", gotName)
 	}
-	wantArgs := []string{"bd", "--readonly", "--sandbox", "ready", "--json", "--exclude-type=epic", "--limit=5000", "--allow-unbounded"}
+	wantArgs := []string{"bd", "--readonly", "--sandbox", "ready", "--json", "--exclude-type=epic", "--limit=5000", "--summary-json"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}
@@ -401,7 +402,8 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
-func TestControlReadyCachePrimeUsesUnboundedReadOnlyForShimmedDispatcher(t *testing.T) {
+func TestControlReadyCachePrimeUsesBoundedSummaryForShimmedDispatcher(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -413,10 +415,7 @@ func TestControlReadyCachePrimeUsesUnboundedReadOnlyForShimmedDispatcher(t *test
 	bdPath := filepath.Join(tmp, "bd")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
-case "$*" in
-  *--allow-unbounded*) printf '[]' ;;
-  *) printf '{"reason":"byte_budget_exceeded"}' ;;
-esac
+printf '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}'
 `, argsPath)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
@@ -424,7 +423,7 @@ esac
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
 	if cache == nil {
 		t.Fatal("controlReadyCacheFor returned nil; shimmed control cache prime must decode its full read")
 	}
@@ -432,8 +431,8 @@ esac
 	if err != nil {
 		t.Fatalf("read bd args: %v", err)
 	}
-	if !strings.Contains(string(args), "list") || !strings.Contains(string(args), "--allow-unbounded") {
-		t.Fatalf("cache-prime bd args = %q, want a list read with --allow-unbounded", args)
+	if !strings.Contains(string(args), "ready") || !strings.Contains(string(args), "--summary-json") || strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("cache-prime bd args = %q, want bounded ready summary", args)
 	}
 }
 
@@ -492,6 +491,7 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 // `list`) and asserts the fallback makes exactly one bd invocation covering
 // the whole tick, not the shell script's N per-candidate/route calls.
 func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -642,7 +642,7 @@ func TestControlReadyFallbackReadyConsumesSummaryProjection(t *testing.T) {
 	bdPath := filepath.Join(tmp, "bd")
 	script := fmt.Sprintf(`#!/bin/sh
 printf '%%s' "$*" > %q
-	printf '%%s' '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","beads":[{"id":"gcw-summary","status":"open","type":"epic","created_at":"2026-08-12T08:40:00Z","assignee":"control","labels":["pool:worker"],"routing_metadata":{"gc.routed_to":"rig/control"}}]}'
+	printf '%%s' '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":1,"omitted":0,"beads":[{"id":"gcw-summary","status":"open","type":"epic","created_at":"2026-08-12T08:40:00Z","assignee":"control","labels":["pool:worker"],"routing_metadata":{"gc.routed_to":"rig/control"}}]}'
 `, argsPath)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
@@ -670,18 +670,18 @@ printf '%%s' "$*" > %q
 	if !strings.Contains(string(args), "--summary-json") {
 		t.Fatalf("bd args = %q, want --summary-json", args)
 	}
-	if !strings.Contains(string(args), "--allow-unbounded") {
-		t.Fatalf("bd args = %q, want --allow-unbounded for the control-plane read", args)
+	if strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("bd args = %q, control-ready summary must remain bounded", args)
 	}
 }
 
-func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityScope(t *testing.T) {
+func TestControlReadyFallbackReadyUsesBoundedSummaryForPinnedRigScope(t *testing.T) {
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
 	argsPath := filepath.Join(tmp, "args")
 	bdPath := filepath.Join(tmp, "bd")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %q\nprintf '[{\"id\":\"gcw-plain\"}]'\n", argsPath)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %q\nprintf '{\"schema_version\":\"1\",\"kind\":\"gc.bead_summary\",\"verb\":\"ready\",\"total\":1,\"omitted\":0,\"beads\":[{\"id\":\"gcw-summary\"}]}'\n", argsPath)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
@@ -695,28 +695,40 @@ func TestControlReadyFallbackReadyOmitsSummaryButKeepsUnboundedForPinnedNonCityS
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
-	if len(result) != 1 || result[0].ID != "gcw-plain" {
-		t.Fatalf("result = %#v, want plain bead", result)
+	if len(result) != 1 || result[0].ID != "gcw-summary" {
+		t.Fatalf("result = %#v, want summary bead", result)
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatalf("read bd args: %v", err)
 	}
-	if strings.Contains(string(args), "--summary-json") {
-		t.Fatalf("bd args = %q, must not request shim summary for pinned rig scope", args)
+	if !strings.Contains(string(args), "--summary-json") {
+		t.Fatalf("bd args = %q, want shim summary for pinned rig scope", args)
 	}
-	// A pinned rig scope is the control dispatcher's ALWAYS-case
-	// (work_query_probe.go sets GC_STORE_SCOPE=rig for any rig-qualified
-	// agent), and its ready set exceeds a megabyte. Without the exemption the
-	// shim returns a gc.output_firewall envelope this caller cannot decode,
-	// which is what took the dispatcher down in gcw-78nf4. The scope governs
-	// --summary-json only; it must not withhold --allow-unbounded.
-	if !strings.Contains(string(args), "--allow-unbounded") {
-		t.Fatalf("bd args = %q, want --allow-unbounded: a rig-pinned control-plane read must not be firewall-bounded", args)
+	if strings.Contains(string(args), "--allow-unbounded") {
+		t.Fatalf("bd args = %q, bounded summary must not request --allow-unbounded", args)
 	}
 }
 
-func TestControlReadyFallbackReadyDegradesWhenSummaryQueryFails(t *testing.T) {
+func TestControlReadyUsesSummaryOnlyForBdBackend(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "file"}
+	if controlReadyUsesSummary(env) {
+		t.Fatal("file-backed store was mistaken for a shimmed bd backend")
+	}
+}
+
+func TestControlReadyUsesSummaryWithAmbientShimConfiguration(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv(citylayout.RealBdEnvVar, "/real/bd")
+	t.Setenv("GC_BEADS", "bd")
+
+	if !controlReadyUsesSummary(map[string]string{"GC_STORE_SCOPE": "rig"}) {
+		t.Fatal("ambient shim configuration was ignored")
+	}
+}
+
+func TestControlReadyFallbackReadyFailsClosedWhenSummaryQueryFails(t *testing.T) {
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
@@ -736,24 +748,171 @@ printf '[{"id":"gcw-plain"}]'
 	t.Setenv("GC_BEADS", "bd")
 
 	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
-	if err != nil {
-		t.Fatalf("controlReadyFallbackReady: %v", err)
-	}
-	if len(result) != 1 || result[0].ID != "gcw-plain" {
-		t.Fatalf("result = %#v, want plain bead after degradation", result)
+	if err == nil || result != nil {
+		t.Fatalf("controlReadyFallbackReady = %#v, %v; want fail-closed summary error", result, err)
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatalf("read bd args: %v", err)
 	}
-	if got := strings.Count(string(args), "ready"); got != 2 {
-		t.Fatalf("bd calls = %q, want summarized then unsummarized retry", args)
+	if got := strings.Count(string(args), "ready"); got != 1 {
+		t.Fatalf("bd calls = %q, want one summarized attempt", args)
 	}
 }
 
 func TestDecodeControlReadySummaryRejectsUnrecognizedEnvelope(t *testing.T) {
 	if _, err := decodeControlReadySummary([]byte(`{"beads":[{"id":"gcw-unknown"}]}`)); err == nil {
 		t.Fatal("decodeControlReadySummary accepted an unrecognized envelope")
+	}
+}
+
+func TestControlReadyFallbackRequiresSummaryOnlyInShimMode(t *testing.T) {
+	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/gc", nil }
+	payloads := []string{"", "null", "No ready work found", "[]", `[{"id":"raw"}]`}
+	for _, payload := range payloads {
+		for _, shimmed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("shim=%v/output=%q", shimmed, payload), func(t *testing.T) {
+				calls := 0
+				controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+					calls++
+					if strings.Contains(strings.Join(args, " "), "--summary-json") != shimmed {
+						t.Fatalf("summary flag does not match shim mode: %v", args)
+					}
+					if strings.Contains(strings.Join(args, " "), "--allow-unbounded") {
+						t.Fatalf("unbounded request: %v", args)
+					}
+					return payload, nil
+				}
+				env := map[string]string{"GC_BEADS": "bd", citylayout.RealBdEnvVar: ""}
+				if shimmed {
+					env[citylayout.RealBdEnvVar] = "/real/bd"
+				}
+				got, err := controlReadyFallbackReady("/unused", env, false)
+				if shimmed && (err == nil || got != nil) {
+					t.Fatalf("summary result = %#v, %v; want malformed-summary error", got, err)
+				}
+				if !shimmed && err != nil {
+					t.Fatalf("raw compatibility error: %v", err)
+				}
+				if !shimmed && payload == `[{"id":"raw"}]` && (len(got) != 1 || got[0].ID != "raw") {
+					t.Fatalf("raw result = %#v; want raw bead", got)
+				}
+				if calls != 1 {
+					t.Fatalf("calls = %d; want exactly one attempt", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeControlReadySummaryRejectsIncompleteAndInconsistentEnvelope(t *testing.T) {
+	tests := []string{
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":3,"omitted":0,"beads":[{"id":"gcw-one"}]}`,
+	}
+	for _, payload := range tests {
+		_, err := decodeControlReadySummary([]byte(payload))
+		var integrityErr *controlReadySummaryIntegrityError
+		if !errors.As(err, &integrityErr) {
+			t.Fatalf("decodeControlReadySummary(%s) error = %v, want typed integrity error", payload, err)
+		}
+	}
+}
+
+func TestDecodeControlReadySummaryRequiresCompletenessFields(t *testing.T) {
+	for _, payload := range []string{
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":null,"omitted":0,"beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":null}`,
+	} {
+		if _, err := decodeControlReadySummary([]byte(payload)); err == nil {
+			t.Errorf("accepted incomplete summary: %s", payload)
+		}
+	}
+}
+
+func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner, controlReadyNow = originalExecutable, originalRunner, originalNow
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/gc", nil }
+	for _, payload := range []string{"{", `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`} {
+		t.Run(payload, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			controlReadyNow = func() time.Time { return now }
+			calls := 0
+			controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+				calls++
+				if !strings.Contains(strings.Join(args, " "), "--include-ephemeral") {
+					t.Fatalf("ephemeral query lost its flag: %v", args)
+				}
+				return payload, nil
+			}
+			dir, otherDir := t.TempDir(), t.TempDir()
+			query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName}) + " --include-ephemeral"
+			env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd"}
+			check := func(dir string) {
+				t.Helper()
+				queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+				if !handled || len(queue) != 0 || err == nil {
+					t.Fatalf("result = %#v, %v, %v; want error without scheduled work", queue, handled, err)
+				}
+			}
+			check(dir)
+			now = now.Add(controlReadyCacheTTL + time.Second)
+			check(dir)
+			if calls != 1 {
+				t.Fatalf("calls during backoff = %d; want 1", calls)
+			}
+			check(otherDir)
+			if calls != 2 {
+				t.Fatalf("calls after independent directory = %d; want 2", calls)
+			}
+			now = now.Add(controlReadyCacheFailureBackoff)
+			check(dir)
+			if calls != 3 {
+				t.Fatalf("calls after backoff expires = %d; want 3", calls)
+			}
+		})
+	}
+}
+
+func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	originalExecutable := controlReadyExecutable
+	originalRunner := controlReadyCommandRunner
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
+	calls := 0
+	controlReadyCommandRunner = func(string, []string, string, string, []string) (string, error) {
+		calls++
+		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`, nil
+	}
+	t.Cleanup(func() {
+		controlReadyExecutable = originalExecutable
+		controlReadyCommandRunner = originalRunner
+	})
+
+	dir := t.TempDir()
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd", "GC_STORE_SCOPE": "rig"}
+	for i := 0; i < 2; i++ {
+		queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+		var integrityErr *controlReadySummaryIntegrityError
+		if !handled || queue != nil || !errors.As(err, &integrityErr) {
+			t.Fatalf("attempt %d = queue:%#v handled:%v err:%v; want typed fail-closed error", i+1, queue, handled, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("summary calls = %d, want 1 during %s backoff", calls, controlReadyCacheFailureBackoff)
 	}
 }
 

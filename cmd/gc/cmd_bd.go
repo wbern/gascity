@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bdshim"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processretry"
 	"github.com/spf13/cobra"
@@ -168,6 +169,18 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides[bdProfileDirEnv] = ""
 	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func resolveBdCommandPath(cityPath string, env []string) (string, error) {
+	if strings.TrimSpace(envListValue(env, citylayout.RealBdEnvVar)) != "" {
+		shimBd := filepath.Join(citylayout.ShimbinDir(cityPath), "bd")
+		path, err := exec.LookPath(shimBd)
+		if err != nil {
+			return "", fmt.Errorf("resolve configured bd shim %q: %w", shimBd, err)
+		}
+		return path, nil
+	}
+	return exec.LookPath("bd")
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -399,13 +412,6 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
-	if err != nil {
-		endPrepareSubprocess()
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
 	// marker. Only stderr is teed: bd writes its auto-import banner there,
@@ -414,6 +420,11 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	endPrepareSubprocess()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	bdPath, err := resolveBdCommandPath(cityPath, env)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
