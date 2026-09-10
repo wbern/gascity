@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -60,6 +61,7 @@ func TestResolveBdCommandPathPrefersConfiguredCityShim(t *testing.T) {
 }
 
 func TestResolveBdCommandPathUsesAmbientBdWithoutShimConfiguration(t *testing.T) {
+	t.Setenv(citylayout.RealBdEnvVar, "")
 	cityDir := t.TempDir()
 	rawDir := t.TempDir()
 	rawBd := filepath.Join(rawDir, "bd")
@@ -74,6 +76,36 @@ func TestResolveBdCommandPathUsesAmbientBdWithoutShimConfiguration(t *testing.T)
 	}
 	if got != rawBd {
 		t.Fatalf("resolved bd = %q, want ambient raw bd %q", got, rawBd)
+	}
+}
+
+func TestResolveBdCommandPathFailsClosedWhenConfiguredShimUnavailable(t *testing.T) {
+	rawDir := t.TempDir()
+	rawBd := filepath.Join(rawDir, "bd")
+	if err := os.WriteFile(rawBd, []byte("#!/bin/sh\nprintf raw"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", rawDir)
+	for _, missing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			cityDir := t.TempDir()
+			shimBd := filepath.Join(citylayout.ShimbinDir(cityDir), "bd")
+			if !missing {
+				if err := os.MkdirAll(filepath.Dir(shimBd), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(shimBd, []byte("#!/bin/sh\nprintf shim"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := resolveBdCommandPath(cityDir, []string{citylayout.RealBdEnvVar + "=" + rawBd})
+			if err == nil || got != "" {
+				t.Fatalf("resolve unavailable shim = %q, %v; want error without raw PATH fallback", got, err)
+			}
+			if !strings.Contains(err.Error(), shimBd) {
+				t.Fatalf("error = %v; want configured shim path %s", err, shimBd)
+			}
+		})
 	}
 }
 

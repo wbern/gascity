@@ -174,9 +174,11 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 func resolveBdCommandPath(cityPath string, env []string) (string, error) {
 	if strings.TrimSpace(envListValue(env, citylayout.RealBdEnvVar)) != "" {
 		shimBd := filepath.Join(citylayout.ShimbinDir(cityPath), "bd")
-		if path, err := exec.LookPath(shimBd); err == nil {
-			return path, nil
+		path, err := exec.LookPath(shimBd)
+		if err != nil {
+			return "", fmt.Errorf("resolve configured bd shim %q: %w", shimBd, err)
 		}
+		return path, nil
 	}
 	return exec.LookPath("bd")
 }
@@ -425,7 +427,7 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 	bdPath, err := resolveBdCommandPath(cityPath, env)
 	if err != nil {
 		endPrepareSubprocess()
-		fmt.Fprintln(stderr, "gc bd: bd not found in configured shim or PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if allowUnbounded {

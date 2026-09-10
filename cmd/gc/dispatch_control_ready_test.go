@@ -49,7 +49,7 @@ func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
 	controlReadyCommandRunner = func(name string, args []string, display, dir string, env []string) (string, error) {
 		gotName, gotDisplay, gotDir = name, display, dir
 		gotArgs, gotEnv = append([]string(nil), args...), append([]string(nil), env...)
-		return "[]", nil
+		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`, nil
 	}
 
 	dir := t.TempDir()
@@ -423,7 +423,7 @@ printf '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	cache := controlReadyCacheFor(cityDir, cityDir, nil, map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
 	if cache == nil {
 		t.Fatal("controlReadyCacheFor returned nil; shimmed control cache prime must decode its full read")
 	}
@@ -491,6 +491,7 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 // `list`) and asserts the fallback makes exactly one bd invocation covering
 // the whole tick, not the shell script's N per-candidate/route calls.
 func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -755,6 +756,49 @@ func TestDecodeControlReadySummaryRejectsUnrecognizedEnvelope(t *testing.T) {
 	}
 }
 
+func TestControlReadyFallbackRequiresSummaryOnlyInShimMode(t *testing.T) {
+	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/gc", nil }
+	payloads := []string{"", "null", "No ready work found", "[]", `[{"id":"raw"}]`}
+	for _, payload := range payloads {
+		for _, shimmed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("shim=%v/output=%q", shimmed, payload), func(t *testing.T) {
+				calls := 0
+				controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+					calls++
+					if strings.Contains(strings.Join(args, " "), "--summary-json") != shimmed {
+						t.Fatalf("summary flag does not match shim mode: %v", args)
+					}
+					if strings.Contains(strings.Join(args, " "), "--allow-unbounded") {
+						t.Fatalf("unbounded request: %v", args)
+					}
+					return payload, nil
+				}
+				env := map[string]string{"GC_BEADS": "bd", citylayout.RealBdEnvVar: ""}
+				if shimmed {
+					env[citylayout.RealBdEnvVar] = "/real/bd"
+				}
+				got, err := controlReadyFallbackReady("/unused", env, false)
+				if shimmed && (err == nil || got != nil) {
+					t.Fatalf("summary result = %#v, %v; want malformed-summary error", got, err)
+				}
+				if !shimmed && err != nil {
+					t.Fatalf("raw compatibility error: %v", err)
+				}
+				if !shimmed && payload == `[{"id":"raw"}]` && (len(got) != 1 || got[0].ID != "raw") {
+					t.Fatalf("raw result = %#v; want raw bead", got)
+				}
+				if calls != 1 {
+					t.Fatalf("calls = %d; want exactly one attempt", calls)
+				}
+			})
+		}
+	}
+}
+
 func TestDecodeControlReadySummaryRejectsIncompleteAndInconsistentEnvelope(t *testing.T) {
 	tests := []string{
 		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`,
@@ -766,6 +810,69 @@ func TestDecodeControlReadySummaryRejectsIncompleteAndInconsistentEnvelope(t *te
 		if !errors.As(err, &integrityErr) {
 			t.Fatalf("decodeControlReadySummary(%s) error = %v, want typed integrity error", payload, err)
 		}
+	}
+}
+
+func TestDecodeControlReadySummaryRequiresCompletenessFields(t *testing.T) {
+	for _, payload := range []string{
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":null,"omitted":0,"beads":[]}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0}`,
+		`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":null}`,
+	} {
+		if _, err := decodeControlReadySummary([]byte(payload)); err == nil {
+			t.Errorf("accepted incomplete summary: %s", payload)
+		}
+	}
+}
+
+func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner, controlReadyNow = originalExecutable, originalRunner, originalNow
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/gc", nil }
+	for _, payload := range []string{"{", `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`} {
+		t.Run(payload, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			controlReadyNow = func() time.Time { return now }
+			calls := 0
+			controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+				calls++
+				if !strings.Contains(strings.Join(args, " "), "--include-ephemeral") {
+					t.Fatalf("ephemeral query lost its flag: %v", args)
+				}
+				return payload, nil
+			}
+			dir, otherDir := t.TempDir(), t.TempDir()
+			query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName}) + " --include-ephemeral"
+			env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd"}
+			check := func(dir string) {
+				t.Helper()
+				queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+				if !handled || len(queue) != 0 || err == nil {
+					t.Fatalf("result = %#v, %v, %v; want error without scheduled work", queue, handled, err)
+				}
+			}
+			check(dir)
+			now = now.Add(controlReadyCacheTTL + time.Second)
+			check(dir)
+			if calls != 1 {
+				t.Fatalf("calls during backoff = %d; want 1", calls)
+			}
+			check(otherDir)
+			if calls != 2 {
+				t.Fatalf("calls after independent directory = %d; want 2", calls)
+			}
+			now = now.Add(controlReadyCacheFailureBackoff)
+			check(dir)
+			if calls != 3 {
+				t.Fatalf("calls after backoff expires = %d; want 3", calls)
+			}
+		})
 	}
 }
 

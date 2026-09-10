@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -305,9 +304,9 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	if controlReadyUsesSummary(env) {
-		return controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv)
+		return controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv, true)
 	}
-	return controlReadyFallbackQuery(args, dir, runtimeEnv)
+	return controlReadyFallbackQuery(args, dir, runtimeEnv, false)
 }
 
 var controlReadyExecutable = os.Executable
@@ -332,7 +331,7 @@ func controlReadyExecutablePath() (string, error) {
 	return exe, nil
 }
 
-func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string) ([]beads.Bead, error) {
+func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string, requireSummary bool) ([]beads.Bead, error) {
 	exe, err := controlReadyExecutablePath()
 	if err != nil {
 		return nil, err
@@ -343,10 +342,15 @@ func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string) (
 		return nil, err
 	}
 	trimmed := strings.TrimSpace(output)
-	if !workQueryHasReadyWork(trimmed) {
-		return nil, nil
+	var result []beads.Bead
+	if requireSummary {
+		result, err = decodeControlReadySummary([]byte(trimmed))
+	} else {
+		if !workQueryHasReadyWork(trimmed) {
+			return nil, nil
+		}
+		err = json.Unmarshal([]byte(trimmed), &result)
 	}
-	result, err := decodeControlReadySummary([]byte(trimmed))
 	if err != nil {
 		return nil, fmt.Errorf("control-ready fallback: decode bd ready output: %w", err)
 	}
@@ -389,26 +393,25 @@ func (e *controlReadySummaryIntegrityError) Error() string {
 	return fmt.Sprintf("incomplete control-ready summary: total=%d rows=%d omitted=%d", e.Total, e.Rows, e.Omitted)
 }
 
-// decodeControlReadySummary accepts either the bounded discovery projection or
-// the full bd array and returns the scheduling fields used by the
-// control-ready evaluator.
+// decodeControlReadySummary requires a complete bounded discovery projection
+// and returns the scheduling fields used by the control-ready evaluator.
 func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
-	if bytes.HasPrefix(bytes.TrimSpace(data), []byte("[")) {
-		var result []beads.Bead
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, err
-		}
-		return result, nil
+	var envelope struct {
+		bddispatch.BeadSummaryEnvelope
+		Total   *int `json:"total"`
+		Omitted *int `json:"omitted"`
 	}
-	var envelope bddispatch.BeadSummaryEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return nil, err
 	}
 	if envelope.SchemaVersion != "1" || envelope.Kind != bddispatch.BeadSummaryKind || envelope.Verb != "ready" {
 		return nil, fmt.Errorf("unrecognized summary envelope (schema_version=%q kind=%q verb=%q)", envelope.SchemaVersion, envelope.Kind, envelope.Verb)
 	}
-	if envelope.Omitted != 0 || envelope.Total != len(envelope.Beads)+envelope.Omitted {
-		return nil, &controlReadySummaryIntegrityError{Total: envelope.Total, Rows: len(envelope.Beads), Omitted: envelope.Omitted}
+	if envelope.Total == nil || envelope.Omitted == nil || envelope.Beads == nil {
+		return nil, fmt.Errorf("incomplete control-ready summary: total, omitted and beads are required")
+	}
+	if *envelope.Omitted != 0 || *envelope.Total != len(envelope.Beads)+*envelope.Omitted {
+		return nil, &controlReadySummaryIntegrityError{Total: *envelope.Total, Rows: len(envelope.Beads), Omitted: *envelope.Omitted}
 	}
 	result := make([]beads.Bead, 0, len(envelope.Beads))
 	for _, summary := range envelope.Beads {
@@ -434,11 +437,12 @@ var controlReadyCacheRegistry = struct {
 }{byDir: make(map[string]*controlReadyCacheEntry)}
 
 type controlReadyCacheEntry struct {
-	cache      *beads.CachingStore
-	ready      []beads.Bead
-	primedAt   time.Time
-	retryAfter time.Time
-	err        error
+	cache            *beads.CachingStore
+	ready            []beads.Bead
+	primedAt         time.Time
+	retryAfter       time.Time
+	err              error
+	includeEphemeral bool
 }
 
 var controlReadyNow = time.Now
@@ -461,11 +465,11 @@ var controlReadyNow = time.Now
 // singleflight if overlapping invocations against the same city/dir become
 // common (e.g. a restart handoff window), but the control-dispatcher serve
 // loop's typical call pattern is sequential-per-tick per dir.
-func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string) *controlReadyCacheEntry {
+func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string, includeEphemeral bool) *controlReadyCacheEntry {
 	now := controlReadyNow()
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	fresh := ok && now.Sub(entry.primedAt) < controlReadyCacheTTL
+	fresh := ok && entry.includeEphemeral == includeEphemeral && now.Sub(entry.primedAt) < controlReadyCacheTTL
 	backingOff := ok && entry.err != nil && now.Before(entry.retryAfter)
 	controlReadyCacheRegistry.mu.Unlock()
 	if fresh || backingOff {
@@ -473,8 +477,8 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 	}
 
 	if controlReadyUsesSummary(env) {
-		ready, err := controlReadyFallbackReady(dir, env, false)
-		entry = &controlReadyCacheEntry{ready: ready, primedAt: now, err: err}
+		ready, err := controlReadyFallbackReady(dir, env, includeEphemeral)
+		entry = &controlReadyCacheEntry{ready: ready, primedAt: now, err: err, includeEphemeral: includeEphemeral}
 		if err != nil {
 			entry.retryAfter = now.Add(controlReadyCacheFailureBackoff)
 			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, err, entry.retryAfter.Format(time.RFC3339))
@@ -520,8 +524,8 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
-	if !parsed.includeEphemeral {
-		if entry := controlReadyCacheFor(dir, cityPath, cfg, env); entry != nil {
+	if !parsed.includeEphemeral || controlReadyUsesSummary(env) {
+		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral); entry != nil {
 			if entry.err != nil {
 				return nil, true, entry.err
 			}
