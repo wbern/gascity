@@ -869,7 +869,10 @@ func prepareStartCandidateForCity(
 	} else {
 		candidate.info = candidate.info.ApplyPatch(fold)
 	}
-	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	candidate, err := refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
+	if err != nil {
+		return nil, err
+	}
 	// buildPreparedStart folds its own post-append mutations (stale-resume clears,
 	// session_key / instance_token mints) onto candidate.info at their write sites, so
 	// the returned prepared.candidate.info stays coherent with the store WITHOUT a
@@ -890,9 +893,9 @@ func refreshConfiguredNamedStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
-) startCandidate {
+) (startCandidate, error) {
 	if strings.TrimSpace(candidate.info.ID) == "" || cfg == nil || store == nil || !isNamedSessionInfo(candidate.info) {
-		return candidate
+		return candidate, nil
 	}
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
@@ -902,7 +905,7 @@ func refreshConfiguredNamedStartCandidate(
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: listing sessions: %v\n", candidate.name(), err) //nolint:errcheck
 		}
-		return candidate
+		return candidate, nil
 	}
 	refreshed, refreshedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), candidate.info, clk, stderr)
 	if err != nil {
@@ -910,7 +913,7 @@ func refreshConfiguredNamedStartCandidate(
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
 		}
 		candidate.info = refreshedInfo // the bind may have cleared the stamp durably before the resolve failed
-		return candidate
+		return candidate, nil
 	}
 	candidate.tp = refreshed
 	// Fold the resolver's Info too, not just the params: the resolve may have
@@ -920,7 +923,50 @@ func refreshConfiguredNamedStartCandidate(
 	// pre-call Info here would hand the seat starting on the clearing tick the
 	// stale GC_TRIGGER_BEAD_ID the clear just removed.
 	candidate.info = refreshedInfo
-	return candidate
+	if patch := resolvedProviderProjectionPatch(candidate.info, refreshed); len(patch) > 0 {
+		next, err := sessionFrontDoor(store).ApplyPatchInfo(candidate.info, patch)
+		if err != nil {
+			return candidate, fmt.Errorf("persisting named session provider projection %q: %w", candidate.name(), err)
+		}
+		candidate.info = next
+	}
+	return candidate, nil
+}
+
+// resolvedProviderProjectionPatch returns the stored provider fields that must
+// match a successfully resolved start candidate. A named session can bypass the
+// ordinary session-bead sync while it is preserved across reconciler passes;
+// without this start-boundary refresh, the runtime receives stale GC_PROVIDER
+// and resume metadata from a prior provider family.
+func resolvedProviderProjectionPatch(info sessionpkg.Info, tp TemplateParams) sessionpkg.MetadataPatch {
+	if tp.ResolvedProvider == nil {
+		return nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	queue := func(key, current, next string) {
+		if current != next {
+			patch[key] = next
+		}
+	}
+	name := strings.TrimSpace(tp.ResolvedProvider.Name)
+	if name != "" {
+		queue("provider", info.Provider, name)
+	}
+	if family := resolvedProviderLaunchFamily(tp.ResolvedProvider); family != "" {
+		queue("provider_kind", info.ProviderKind, family)
+	}
+	ancestor := strings.TrimSpace(tp.ResolvedProvider.BuiltinAncestor)
+	if ancestor == name {
+		ancestor = ""
+	}
+	queue("builtin_ancestor", info.BuiltinAncestor, ancestor)
+	queue("resume_flag", info.ResumeFlag, tp.ResolvedProvider.ResumeFlag)
+	queue("resume_style", info.ResumeStyle, tp.ResolvedProvider.ResumeStyle)
+	queue("resume_command", info.ResumeCommand, tp.ResolvedProvider.ResumeCommand)
+	if command := strings.TrimSpace(tp.Command); command != "" {
+		queue("command", info.Command, command)
+	}
+	return patch
 }
 
 func buildPreparedStart(

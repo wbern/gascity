@@ -65,6 +65,21 @@ func (s *failNthMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type failingNamedProviderProjectionStore struct {
+	*beads.MemStore
+}
+
+func (s *failingNamedProviderProjectionStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if kvs["provider_kind"] == "codex" {
+		return errors.New("injected named provider projection write failure")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *failingNamedProviderProjectionStore) Tx(_ string, fn func(beads.Tx) error) error {
+	return fn(s)
+}
+
 // failPostCloseSessionNameStore models a non-atomic Store.Tx backend
 // (FileStore, or BdStore whose apply() splits the callback into separate bd
 // writes) that fails ONLY the post-close session_name clear. The pre-close
@@ -4446,7 +4461,7 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 		WorkDir:      cityPath,
 	}
 	candidate := startCandidate{info: sessiontest.SeedBead(t, bead), tp: stale}
-	refreshed := refreshConfiguredNamedStartCandidate(
+	refreshed, err := refreshConfiguredNamedStartCandidate(
 		candidate,
 		cityPath,
 		cfg.Workspace.Name,
@@ -4456,6 +4471,9 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 		&clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)},
 		ioDiscard{},
 	)
+	if err != nil {
+		t.Fatalf("refresh named start candidate: %v", err)
+	}
 
 	if _, ok := stale.FPExtra["skills:plan"]; ok {
 		t.Fatal("test setup invalid: stale candidate already had skills fingerprint")
@@ -4468,6 +4486,134 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 	}
 	if runtime.CoreFingerprint(templateParamsToConfig(refreshed.tp)) == runtime.CoreFingerprint(templateParamsToConfig(stale)) {
 		t.Fatal("refreshed candidate core fingerprint did not change after skill FPExtra refresh")
+	}
+}
+
+func TestRefreshConfiguredNamedStartCandidateRefreshesProviderProjection(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	base := "builtin:codex"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "codex"},
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: map[string]config.ProviderSpec{
+			"codex": {
+				Base:          &base,
+				Command:       "true",
+				PromptMode:    "none",
+				ResumeCommand: "codex resume {{.SessionKey}}",
+			},
+		},
+		Agents: []config.Agent{{Name: "worker", Scope: "city", Provider: "codex"}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "always",
+		}},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "worker",
+			"session_name_explicit":      boolMetadata(true),
+			"template":                   "worker",
+			"agent_name":                 "worker",
+			"state":                      string(sessionpkg.StateCreating),
+			"pending_create_claim":       "true",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+			"provider":                   "claude",
+			"provider_kind":              "claude",
+			"resume_command":             "claude --resume {{.SessionKey}}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	prepared, err := prepareStartCandidateForCity(
+		startCandidate{
+			info: sessiontest.SeedBead(t, bead),
+			tp:   TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude"},
+		},
+		cityPath, cfg.Workspace.Name, cfg, sp, store,
+		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil,
+	)
+	if err != nil {
+		t.Fatalf("prepare named start: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_PROVIDER"]; got != "codex" {
+		t.Fatalf("prepared GC_PROVIDER = %q, want codex", got)
+	}
+	if _, err := startPreparedStartCandidate(context.Background(), *prepared, cityPath, store, sp, cfg, nil, immediateSessionStaleKeyDetectionWaiter); err != nil {
+		t.Fatalf("start prepared named session: %v", err)
+	}
+	var start *runtime.Call
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			callCopy := call
+			start = &callCopy
+			break
+		}
+	}
+	if start == nil {
+		t.Fatalf("expected runtime Start, calls=%#v", sp.Calls)
+	}
+	if got := start.Config.Env["GC_PROVIDER"]; got != "codex" {
+		t.Fatalf("runtime GC_PROVIDER = %q, want codex", got)
+	}
+	if prepared.candidate.tp.ResolvedProvider == nil {
+		t.Fatal("prepared named session has no resolved provider")
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"provider":       "codex",
+		"provider_kind":  "codex",
+		"resume_command": prepared.candidate.tp.ResolvedProvider.ResumeCommand,
+	} {
+		if got := after.Metadata[key]; got != want {
+			t.Errorf("stored %s = %q, want %q", key, got, want)
+		}
+	}
+
+	if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		"provider":             "claude",
+		"provider_kind":        "claude",
+		"resume_command":       "claude --resume {{.SessionKey}}",
+		"state":                string(sessionpkg.StateCreating),
+		"pending_create_claim": "true",
+	}); err != nil {
+		t.Fatalf("reset stale provider projection: %v", err)
+	}
+	stale, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get reset session: %v", err)
+	}
+	failingStore := &failingNamedProviderProjectionStore{MemStore: store}
+	failingRuntime := runtime.NewFake()
+	failed, err := prepareStartCandidateForCity(
+		startCandidate{
+			info: sessiontest.SeedBead(t, stale),
+			tp:   TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude"},
+		},
+		cityPath, cfg.Workspace.Name, cfg, failingRuntime, failingStore,
+		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "persisting named session provider projection") {
+		t.Fatalf("prepare with failed provider projection error = %v, want projection error", err)
+	}
+	if failed != nil {
+		t.Fatal("prepare with failed provider projection returned a prepared start")
+	}
+	if len(failingRuntime.Calls) != 0 {
+		t.Fatalf("provider projection failure must abort before runtime start, calls=%#v", failingRuntime.Calls)
 	}
 }
 
