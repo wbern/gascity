@@ -515,6 +515,7 @@ type ReadyParams struct {
 	metadataEquals map[string]string // --metadata-field k=v (all must match)
 	unassigned     bool              // --unassigned
 	excludeTypes   map[string]bool   // --exclude-type=T (repeatable)
+	excludeLabels  map[string]bool   // --exclude-label=L (repeatable)
 	limit          int               // --limit / -n
 }
 
@@ -525,7 +526,7 @@ type ReadyParams struct {
 // ready set is already created-asc which is bd's "oldest" order). Non-routable
 // flags never reach here — the classifier passes those through.
 func ParseReadyParams(args []string) (ReadyParams, error) {
-	p := ReadyParams{metadataEquals: map[string]string{}, excludeTypes: map[string]bool{}}
+	p := ReadyParams{metadataEquals: map[string]string{}, excludeTypes: map[string]bool{}, excludeLabels: map[string]bool{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -552,6 +553,11 @@ func ParseReadyParams(args []string) (ReadyParams, error) {
 			i++
 		case strings.HasPrefix(a, "--exclude-type="):
 			p.excludeTypes[strings.TrimPrefix(a, "--exclude-type=")] = true
+		case a == "--exclude-label" && i+1 < len(args):
+			p.excludeLabels[args[i+1]] = true
+			i++
+		case strings.HasPrefix(a, "--exclude-label="):
+			p.excludeLabels[strings.TrimPrefix(a, "--exclude-label=")] = true
 		case (a == "--limit" || a == "-n") && i+1 < len(args):
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil {
@@ -595,6 +601,16 @@ func applyReadyParams(in []beads.Bead, p ReadyParams) []beads.Bead {
 			continue
 		}
 		if p.excludeTypes[b.Type] {
+			continue
+		}
+		excluded := false
+		for _, label := range b.Labels {
+			if p.excludeLabels[label] {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
 		match := true

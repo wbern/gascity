@@ -192,6 +192,20 @@ func controlReadyRoutes(parsed parsedControlReadyQuery) []string {
 	return routes
 }
 
+// controlReadyScopedQueryKey identifies the exact sequence of bounded
+// assignee and route queries. A cache entry for another dispatcher, or for a
+// changed session identity, is not a valid readiness snapshot.
+func controlReadyScopedQueryKey(parsed parsedControlReadyQuery, envList []string) string {
+	return strings.Join([]string{
+		strings.Join(controlReadyCandidates(parsed, envList), "\x00"),
+		strings.Join(controlReadyRoutes(parsed), "\x00"),
+		fmt.Sprintf("ephemeral=%t", parsed.includeEphemeral),
+		"backend=" + envListValue(envList, "GC_BEADS"),
+		"scope=" + envListValue(envList, "GC_STORE_SCOPE"),
+		"shim=" + envListValue(envList, citylayout.RealBdEnvVar),
+	}, "\x01")
+}
+
 // filterReadyByAssignee mirrors `bd ready --assignee=$cand --exclude-type=epic --limit=N`.
 // ready is expected to already be in canonical ready order (CachedReady/
 // SortBeadsReadyOrder), matching bd's own default (no --sort) ready order.
@@ -304,9 +318,61 @@ func controlReadyFallbackReady(dir string, env map[string]string, includeEphemer
 	}
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	if controlReadyUsesSummary(env) {
-		return controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv, true)
+		return controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv, true, true)
 	}
-	return controlReadyFallbackQuery(args, dir, runtimeEnv, false)
+	return controlReadyFallbackQuery(args, dir, runtimeEnv, false, true)
+}
+
+// controlReadyScopedSummaryQueue mirrors the legacy shell query's individual
+// assignee and route reads for shimmed bd. Each bounded summary is over one
+// legacy slice (at most workflowServeScanLimit rows), rather than attempting
+// to project a whole city's ready inventory through the fixed summary budget.
+// It therefore preserves the summary completeness contract without silently
+// dropping a controller's own work when unrelated city work is large.
+func controlReadyScopedSummaryQueue(dir string, env map[string]string, parsed parsedControlReadyQuery) ([]hookBead, error) {
+	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
+	includeEphemeral := parsed.includeEphemeral
+	var groups [][]beads.Bead
+
+	query := func(args []string) error {
+		result, err := controlReadyFallbackQuery(append(args, "--summary-json"), dir, runtimeEnv, true, false)
+		if err != nil {
+			return err
+		}
+		groups = append(groups, result)
+		return nil
+	}
+	for _, candidate := range controlReadyCandidates(parsed, runtimeEnv) {
+		args := []string{"bd", "--readonly", "--sandbox", "ready"}
+		if includeEphemeral {
+			args = append(args, "--include-ephemeral")
+		}
+		args = append(args, "--assignee="+candidate, "--exclude-type="+controlReadyExcludeType, "--json", fmt.Sprintf("--limit=%d", workflowServeScanLimit))
+		if err := query(args); err != nil {
+			return nil, fmt.Errorf("control-ready assignee summary %q: %w", candidate, err)
+		}
+	}
+	for _, route := range controlReadyRoutes(parsed) {
+		for _, metadataKey := range []string{beadmeta.RunTargetMetadataKey, beadmeta.RoutedToMetadataKey} {
+			args := []string{"bd", "--readonly", "--sandbox", "ready"}
+			if includeEphemeral {
+				args = append(args, "--include-ephemeral")
+			}
+			args = append(args,
+				"--metadata-field", metadataKey+"="+route,
+				"--unassigned",
+				"--exclude-type="+controlReadyExcludeType,
+			)
+			for _, label := range beadmeta.DispatchHoldLabels {
+				args = append(args, "--exclude-label", label)
+			}
+			args = append(args, "--json", "--sort", "oldest", fmt.Sprintf("--limit=%d", workflowServeScanLimit))
+			if err := query(args); err != nil {
+				return nil, fmt.Errorf("control-ready route summary %s=%q: %w", metadataKey, route, err)
+			}
+		}
+	}
+	return beadsToHookBeads(mergeControlReadyGroups(groups...)), nil
 }
 
 var controlReadyExecutable = os.Executable
@@ -331,7 +397,7 @@ func controlReadyExecutablePath() (string, error) {
 	return exe, nil
 }
 
-func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string, requireSummary bool) ([]beads.Bead, error) {
+func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string, requireSummary, sortReady bool) ([]beads.Bead, error) {
 	exe, err := controlReadyExecutablePath()
 	if err != nil {
 		return nil, err
@@ -357,7 +423,9 @@ func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string, r
 	if len(result) == controlReadyFallbackLimit {
 		log.Printf("control-ready fallback: bd ready for %s returned exactly the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
 	}
-	beads.SortBeadsReadyOrder(result)
+	if sortReady {
+		beads.SortBeadsReadyOrder(result)
+	}
 	return result, nil
 }
 
@@ -416,6 +484,11 @@ func decodeControlReadySummary(data []byte) ([]beads.Bead, error) {
 	}
 	result := make([]beads.Bead, 0, len(envelope.Beads))
 	for _, summary := range envelope.Beads {
+		for _, omitted := range summary.FieldsOmitted {
+			if omitted == "routing_metadata."+beadmeta.InstantiatingMetadataKey {
+				return nil, fmt.Errorf("incomplete control-ready summary: required %s omitted for %q", beadmeta.InstantiatingMetadataKey, summary.ID)
+			}
+		}
 		result = append(result, beads.Bead{
 			ID:        summary.ID,
 			Title:     summary.Title,
@@ -440,6 +513,9 @@ var controlReadyCacheRegistry = struct {
 type controlReadyCacheEntry struct {
 	cache            *beads.CachingStore
 	ready            []beads.Bead
+	queue            []hookBead
+	queueSet         bool
+	queryKey         string
 	primedAt         time.Time
 	retryAfter       time.Time
 	err              error
@@ -466,23 +542,32 @@ var controlReadyNow = time.Now
 // singleflight if overlapping invocations against the same city/dir become
 // common (e.g. a restart handoff window), but the control-dispatcher serve
 // loop's typical call pattern is sequential-per-tick per dir.
-func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string, includeEphemeral bool) *controlReadyCacheEntry {
+func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string]string, includeEphemeral bool, parsed ...parsedControlReadyQuery) *controlReadyCacheEntry {
 	now := controlReadyNow()
+	queryKey := ""
+	if len(parsed) > 0 {
+		queryKey = controlReadyScopedQueryKey(parsed[0], mergeRuntimeEnv(os.Environ(), env))
+	}
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	fresh := ok && entry.includeEphemeral == includeEphemeral && now.Sub(entry.primedAt) < controlReadyCacheTTL
-	backingOff := ok && entry.err != nil && now.Before(entry.retryAfter)
+	fresh := ok && entry.includeEphemeral == includeEphemeral && entry.queryKey == queryKey && now.Sub(entry.primedAt) < controlReadyCacheTTL
+	backingOff := ok && entry.includeEphemeral == includeEphemeral && entry.queryKey == queryKey && entry.err != nil && now.Before(entry.retryAfter)
 	controlReadyCacheRegistry.mu.Unlock()
 	if fresh || backingOff {
 		return entry
 	}
 
 	if controlReadyUsesSummary(env) {
-		ready, err := controlReadyFallbackReady(dir, env, includeEphemeral)
-		entry = &controlReadyCacheEntry{ready: ready, primedAt: now, err: err, includeEphemeral: includeEphemeral}
-		if err != nil {
+		if len(parsed) > 0 {
+			queue, err := controlReadyScopedSummaryQueue(dir, env, parsed[0])
+			entry = &controlReadyCacheEntry{queue: queue, queueSet: true, queryKey: queryKey, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
+		} else {
+			ready, err := controlReadyFallbackReady(dir, env, includeEphemeral)
+			entry = &controlReadyCacheEntry{ready: ready, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
+		}
+		if entry.err != nil {
 			entry.retryAfter = now.Add(controlReadyCacheFailureBackoff)
-			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, err, entry.retryAfter.Format(time.RFC3339))
+			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, entry.err, entry.retryAfter.Format(time.RFC3339))
 		}
 		controlReadyCacheRegistry.mu.Lock()
 		controlReadyCacheRegistry.byDir[dir] = entry
@@ -501,7 +586,7 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 	}
 
 	controlReadyCacheRegistry.mu.Lock()
-	entry = &controlReadyCacheEntry{cache: cs, primedAt: now}
+	entry = &controlReadyCacheEntry{cache: cs, queryKey: queryKey, primedAt: now}
 	controlReadyCacheRegistry.byDir[dir] = entry
 	controlReadyCacheRegistry.mu.Unlock()
 	return entry
@@ -526,9 +611,12 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
 	if !parsed.includeEphemeral || controlReadyUsesSummary(env) {
-		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral); entry != nil {
+		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral, parsed); entry != nil {
 			if entry.err != nil {
 				return nil, true, entry.err
+			}
+			if entry.queueSet {
+				return entry.queue, true, nil
 			}
 			if entry.ready != nil {
 				return beadsToHookBeads(evaluateControlReady(entry.ready, parsed, envList)), true, nil
@@ -539,6 +627,13 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 		}
 	}
 
+	if controlReadyUsesSummary(env) {
+		queue, err := controlReadyScopedSummaryQueue(dir, env, parsed)
+		if err != nil {
+			return nil, true, err
+		}
+		return queue, true, nil
+	}
 	ready, err := controlReadyFallbackReady(dir, env, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err

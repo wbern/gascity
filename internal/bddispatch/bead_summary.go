@@ -70,7 +70,9 @@ type BeadShowSummary struct {
 }
 
 var summaryRoutingMetadataKeys = []string{
+	beadmeta.RunTargetMetadataKey,
 	beadmeta.RoutedToMetadataKey,
+	beadmeta.InstantiatingMetadataKey,
 	beadmeta.RootBeadIDMetadataKey,
 	beadmeta.SessionIDMetadataKey,
 	beadmeta.SessionNameMetadataKey,
@@ -105,6 +107,7 @@ func NewBeadSummaryEnvelope(verb string, input []beads.Bead, budget int) BeadSum
 		Verb:          verb,
 		BudgetBytes:   budget,
 		Total:         len(input),
+		Omitted:       len(input),
 		Beads:         make([]BeadSummary, 0, len(input)),
 	}
 	for _, bead := range input {
@@ -117,7 +120,6 @@ func NewBeadSummaryEnvelope(verb string, input []beads.Bead, budget int) BeadSum
 		candidate.Omitted = len(input) - len(candidate.Beads)
 		payload, err := json.Marshal(candidate)
 		if err != nil || len(payload) > budget-256 {
-			envelope.Omitted++
 			continue
 		}
 		envelope = candidate

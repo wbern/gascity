@@ -55,6 +55,7 @@ func TestReadyWithJSONStillRoutes(t *testing.T) {
 		{"json and limit", []string{"--json", "--limit", "1"}},
 		{"assignee json limit", []string{"--assignee=w", "--json", "--limit", "1"}},
 		{"discovery post-filter shape", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--json"}},
+		{"held route discovery", []string{"--metadata-field", "gc.routed_to=x", "--unassigned", "--exclude-label", "hold:mayor", "--json"}},
 		{"json equals form", []string{"--json=true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
