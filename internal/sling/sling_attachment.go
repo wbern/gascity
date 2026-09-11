@@ -61,8 +61,8 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 
 	if childQuerier != nil {
 		children, err := childQuerier.List(beads.ListQuery{
-			ParentID: parent.ID,
-			Sort:     beads.SortCreatedAsc,
+			ParentID: parent.ID, IncludeClosed: true, Live: true,
+			Sort: beads.SortCreatedAsc,
 		})
 		if err != nil {
 			if firstErr == nil {
@@ -78,6 +78,30 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 				}
 				seen[child.ID] = struct{}{}
 				attachments = append(attachments, child)
+			}
+		}
+	}
+	// A legacy launcher could overwrite molecule_id without parenting the old
+	// root. Query the durable source links too; pointer-only discovery cannot
+	// reconcile those families. Filter roots explicitly because vars also occur
+	// on executable children. Live reads fence cached admission decisions.
+	if store != nil && parent.ID != "" {
+		for _, key := range []string{beadmeta.SourceBeadIDMetadataKey, "gc.var.issue"} {
+			roots, err := store.List(beads.ListQuery{Metadata: map[string]string{key: parent.ID}, IncludeClosed: true, Live: true, TierMode: beads.TierBoth})
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			for _, root := range roots {
+				if !IsMoleculeAttachment(root) || IsWorkflowAttachment(root) || root.Metadata[key] != parent.ID {
+					continue
+				}
+				if _, ok := seen[root.ID]; !ok {
+					seen[root.ID] = struct{}{}
+					attachments = append(attachments, root)
+				}
 			}
 		}
 	}
@@ -200,8 +224,8 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 		childQuerier = cq
 	}
 	attachments, err := CollectAttachedBeads(parent, store, childQuerier)
-	if err != nil && len(attachments) == 0 {
-		return nil
+	if err != nil {
+		return fmt.Errorf("inspect attachments for %s: %w", beadID, err)
 	}
 
 	for _, attached := range attachments {

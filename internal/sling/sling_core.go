@@ -532,13 +532,13 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // --on-formula and default-formula paths: prepare the graph invocation,
 // validate runtime vars, then either drive the graph-v2 branch
 // (lock -> snapshot -> instantiate -> start -> rollback) or the legacy branch
-// (check attachments -> instantiate -> set molecule_id -> finalize). The
+// (source lock -> discover/reuse -> instantiate -> publish -> finalize). The
 // caller supplies the formula name, the sling method, and the error-label
 // prefix ("formula" vs "default formula"); graph-vs-legacy behavior is
 // byte-identical across both entry points.
 //
 // fallbackToPlainOnMoleculeConflict governs the legacy branch's reaction to a
-// *MoleculeAttachedError from CheckNoMoleculeChildren: an explicit --on
+// *MoleculeAttachedError for an unrelated legacy attachment: an explicit --on
 // request (slingOnFormula) passes false and always hard-fails on a
 // pre-existing attachment, but an implicit default_sling_formula
 // (slingDefaultFormula) passes true, since the caller never actually asked
@@ -632,72 +632,24 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	}); err != nil {
 		return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 	}
-	// The graph path returned above, so this is the legacy (non-graph) region:
-	// isGraph is always false here, so the former `isGraph && opts.Force`
-	// live-workflow allowance could never fire. Attachments are always checked
-	// with CheckNoMoleculeChildren on this path.
-	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
-		var molErr *MoleculeAttachedError
-		if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
-			// The caller never asked for this formula attach -- it was only
-			// implied by the target's default_sling_formula config -- so an
-			// unrelated live molecule/wisp is not a reason to block the
-			// sling. Warn and route as a plain bead instead, so gc.routed_to
-			// still gets set. A workflow conflict or metadata-clear error is
-			// not this specific error class and keeps hard-failing above.
-			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
-			return finalize(opts, deps, beadID, "bead", result)
-		}
-		return result, fmt.Errorf("%w", err)
-	}
-	run := func() (SlingResult, error) {
-		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:            opts.Title,
-			Vars:             formulaVars,
+	create := func() (*molecule.Result, error) {
+		return InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
+			Title: opts.Title, Vars: formulaVars,
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
-		}
-		wispRootID := mResult.RootID
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
-			wfResult.FormulaName = formulaName
-			return wfResult, wfErr
-		}
-		if err := deps.Store.SetMetadata(beadID, beadmeta.MoleculeIDMetadataKey, wispRootID); err != nil {
-			result.MetadataErrors = append(result.MetadataErrors,
-				fmt.Sprintf("setting molecule_id on %s: %v", beadID, err))
-		}
-		result.WispRootID = wispRootID
+	}
+	finish := func(mResult *molecule.Result) (SlingResult, error) {
+		result.WispRootID = mResult.RootID
 		result.FormulaName = formulaName
-		// Route the SOURCE bead, not wispRootID. An attached wisp (--on
-		// <formula> or default formula) is driven through its source bead: the
-		// source carries gc.routed_to + molecule_id and is the claimable unit
-		// of work, while the wisp root is deliberately left unrouted (and, when
-		// root-only, privatized out of Ready() by privatizeAttachedRootOnlyWisp).
-		// ApplyGraphRouting likewise stamps no routing on an attached recipe
-		// (graphroute: sourceBeadID != "" early-return). This is the
-		// intentional counterpart to slingFormula, which routes the standalone
-		// wisp root. Do not "fix" this to wispRootID — it would orphan the
-		// work. See gastownhall/gascity#2848 and TestOnFormulaAttachesAndRoutes.
 		return finalize(opts, deps, beadID, method, result)
 	}
-	runGraph := func() (pendingSourceWorkflowLaunch, error) {
-		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:            opts.Title,
-			Vars:             formulaVars,
-			PriorityOverride: BeadPriorityOverride(querier, beadID),
-		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
-		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, a, method, formulaName, deps), nil
+	lockedResult, err := withLegacyAttachment(context.Background(), deps, beadID, formulaName, formulaVars, create, finish)
+	var molErr *MoleculeAttachedError
+	if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
+		return finalize(opts, deps, beadID, "bead", result)
 	}
-	if !isGraph {
-		return run()
-	}
-	return withSourceWorkflowLaunchLock(context.Background(), deps, beadID, opts.Force, runGraph)
+	return lockedResult, err
 }
 
 // slingPlainBead handles plain bead routing (no formula).
@@ -1405,32 +1357,14 @@ func sourceWorkflowRootByIDInStore(store beads.Store, sourceBeadID, workflowID, 
 // compile per batch.
 func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool) (SlingResult, error) {
 	childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
-	run := func() (SlingResult, error) {
-		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:            opts.Title,
-			Vars:             childVars,
-			PriorityOverride: ClonePriorityPtr(child.Priority),
-		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
-		if err != nil {
-			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
-		}
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, a, method, deps)
-			wfResult.FormulaName = formulaName
-			return wfResult, wfErr
-		}
-		result := SlingResult{
-			BeadID:      child.ID,
-			Target:      a.QualifiedName(),
-			Method:      method,
-			WispRootID:  mResult.RootID,
-			FormulaName: formulaName,
-		}
-		if err := deps.Store.SetMetadata(child.ID, beadmeta.MoleculeIDMetadataKey, mResult.RootID); err != nil {
-			result.MetadataErrors = append(result.MetadataErrors,
-				fmt.Sprintf("setting molecule_id on %s: %v", child.ID, err))
-		}
-		return result, nil
+	if !isGraph {
+		return withLegacyAttachment(ctx, deps, child.ID, formulaName, childVars, func() (*molecule.Result, error) {
+			return InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
+				Title: opts.Title, Vars: childVars, PriorityOverride: ClonePriorityPtr(child.Priority),
+			}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
+		}, func(root *molecule.Result) (SlingResult, error) {
+			return SlingResult{BeadID: child.ID, Target: a.QualifiedName(), Method: method, WispRootID: root.RootID, FormulaName: formulaName}, nil
+		})
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
@@ -1442,9 +1376,6 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
 		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, a, method, formulaName, deps), nil
-	}
-	if !isGraph {
-		return run()
 	}
 	return withSourceWorkflowLaunchLock(ctx, deps, child.ID, opts.Force, runGraph)
 }
@@ -1666,8 +1597,10 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		if isGraph && opts.Force {
 			checkAttachments = CheckBatchNoMoleculeChildrenAllowLiveWorkflow
 		}
-		if err := checkAttachments(querier, open, deps.Store, &batchResult); err != nil {
-			return batchResult, fmt.Errorf("%w", err)
+		if isGraph {
+			if err := checkAttachments(querier, open, deps.Store, &batchResult); err != nil {
+				return batchResult, fmt.Errorf("%w", err)
+			}
 		}
 	}
 

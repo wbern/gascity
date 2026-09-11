@@ -1323,6 +1323,24 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		return nil, err
 	}
 	graphWorkflow := graphroute.IsCompiledGraphWorkflow(recipe)
+	if !graphWorkflow && sourceBeadID != "" {
+		// Stamp identity in the create payload, before any source pointer or
+		// route becomes visible. Copy the recipe so repeated compiled callers
+		// cannot change each other's source identity.
+		copyRecipe := *recipe
+		copyRecipe.Steps = append([]formula.RecipeStep(nil), recipe.Steps...)
+		copyRecipe.Steps[0].Metadata = mapsCloneWithout(recipe.Steps[0].Metadata, "")
+		if copyRecipe.Steps[0].Metadata == nil {
+			copyRecipe.Steps[0].Metadata = make(map[string]string)
+		}
+		copyRecipe.Steps[0].Metadata[beadmeta.SourceBeadIDMetadataKey] = sourceBeadID
+		copyRecipe.Steps[0].Metadata[beadmeta.SourceStoreRefMetadataKey] = deps.StoreRef
+		copyRecipe.Steps[0].Metadata[legacyAttachmentStateKey] = "preparing"
+		recipe = &copyRecipe
+		if deps.GraphStore == nil {
+			opts.ParentID = sourceBeadID
+		}
+	}
 	rootKey := ""
 	if graphWorkflow {
 		stampGraphV2RootMetadata(recipe, formulaName, opts.Vars, scopeKind, scopeRef)
