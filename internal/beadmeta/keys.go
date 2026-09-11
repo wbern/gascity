@@ -128,6 +128,7 @@ const (
 	LastFailureClassMetadataKey          = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
 	LastHeartbeatAtMetadataKey           = "gc.last_heartbeat_at"
+	LegacyAttachmentStateMetadataKey     = "gc.legacy_attachment_state"
 	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
 	MaxAttemptsMetadataKey               = "gc.max_attempts"
 	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
@@ -378,6 +379,7 @@ var KnownMetadataKeys = []string{
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LastHeartbeatAtMetadataKey,
+	LegacyAttachmentStateMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
