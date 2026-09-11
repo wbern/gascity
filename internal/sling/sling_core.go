@@ -641,9 +641,17 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	finish := func(mResult *molecule.Result) (SlingResult, error) {
 		result.WispRootID = mResult.RootID
 		result.FormulaName = formulaName
-		return finalize(opts, deps, beadID, method, result)
+		result.legacyRoutePublished = true
+		return finalizePublished(opts, deps, beadID, method, result)
 	}
-	lockedResult, err := withLegacyAttachment(context.Background(), deps, beadID, formulaName, formulaVars, create, finish)
+	if IsCustomSlingQuery(a) {
+		return result, fmt.Errorf("legacy formula attachment cannot fence custom sling_query; refusing materialization")
+	}
+	if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
+		return result, err
+	}
+	route := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&a))
+	lockedResult, err := withLegacyAttachment(context.Background(), deps, beadID, formulaName, formulaVars, create, finish, route)
 	var molErr *MoleculeAttachedError
 	if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
 		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
@@ -692,6 +700,14 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
+	return finalizePublished(opts, deps, beadID, method, result)
+}
+
+// finalizePublished performs bookkeeping only. Legacy attachment publishes its
+// built-in route with the source pointer in one revision-fenced write; invoking
+// Router or Runner again here would reopen the close-before-route race.
+func finalizePublished(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
+	a := opts.Target
 
 	// Merge strategy metadata.
 	if opts.Merge != "" && deps.Store != nil {
@@ -1358,13 +1374,17 @@ func sourceWorkflowRootByIDInStore(store beads.Store, sourceBeadID, workflowID, 
 func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool) (SlingResult, error) {
 	childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
 	if !isGraph {
+		if IsCustomSlingQuery(a) {
+			return SlingResult{}, fmt.Errorf("legacy formula attachment cannot fence custom sling_query; refusing materialization")
+		}
+		route := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&a))
 		return withLegacyAttachment(ctx, deps, child.ID, formulaName, childVars, func() (*molecule.Result, error) {
 			return InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 				Title: opts.Title, Vars: childVars, PriorityOverride: ClonePriorityPtr(child.Priority),
 			}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		}, func(root *molecule.Result) (SlingResult, error) {
-			return SlingResult{BeadID: child.ID, Target: a.QualifiedName(), Method: method, WispRootID: root.RootID, FormulaName: formulaName}, nil
-		})
+			return SlingResult{BeadID: child.ID, Target: a.QualifiedName(), Method: method, WispRootID: root.RootID, FormulaName: formulaName, legacyRoutePublished: true}, nil
+		}, route)
 	}
 	runGraph := func() (pendingSourceWorkflowLaunch, error) {
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
@@ -1668,7 +1688,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			childResult.FormulaName = formulaResult.FormulaName
 			childResult.WorkflowID = formulaResult.WorkflowID
 			childResult.WispRootID = formulaResult.WispRootID
-			if formulaResult.WorkflowID != "" {
+			if formulaResult.WorkflowID != "" || formulaResult.legacyRoutePublished {
 				childResult.Routed = true
 				batchResult.Children = append(batchResult.Children, childResult)
 				routed++

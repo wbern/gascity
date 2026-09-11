@@ -181,15 +181,16 @@ func (deps SlingDeps) graphrouteDeps() graphroute.Deps {
 // SlingResult holds the structured output of a sling operation.
 // Contains only data fields -- callers format display strings.
 type SlingResult struct {
-	BeadID      string // the routed bead ID (or wisp root for formula)
-	Target      string // qualified agent name
-	Method      string // "bead", "formula", "on-formula", "default-on-formula"
-	WorkflowID  string // non-empty for graph workflow launches
-	ConvoyID    string // non-empty if auto-convoy was created
-	WispRootID  string // non-empty for on-formula/default-formula attachment
-	FormulaName string // formula used (for display)
-	Idempotent  bool   // true if bead was already routed (skipped)
-	DryRun      bool   // true if this was a dry-run (no mutations)
+	legacyRoutePublished bool
+	BeadID               string // the routed bead ID (or wisp root for formula)
+	Target               string // qualified agent name
+	Method               string // "bead", "formula", "on-formula", "default-on-formula"
+	WorkflowID           string // non-empty for graph workflow launches
+	ConvoyID             string // non-empty if auto-convoy was created
+	WispRootID           string // non-empty for on-formula/default-formula attachment
+	FormulaName          string // formula used (for display)
+	Idempotent           bool   // true if bead was already routed (skipped)
+	DryRun               bool   // true if this was a dry-run (no mutations)
 
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended

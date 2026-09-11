@@ -14,7 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-type legacyLinkFailureStore struct{ beads.Store }
+type legacyLinkFailureStore struct{ *beads.MemStore }
 
 func TestLegacyAttachmentPointerCannotOverrideLiveRootState(t *testing.T) {
 	store := seededStore("work")
@@ -36,20 +36,17 @@ func TestLegacyAttachmentPointerCannotOverrideLiveRootState(t *testing.T) {
 	}
 }
 
-type legacyUncertainLinkStore struct{ beads.Store }
+type legacyUncertainLinkStore struct{ *beads.MemStore }
 
-func (s legacyUncertainLinkStore) SetMetadata(id, key, value string) error {
-	if err := s.Store.SetMetadata(id, key, value); err != nil {
+func (s legacyUncertainLinkStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if err := s.MemStore.UpdateIfMatch(id, revision, opts); err != nil {
 		return err
 	}
-	if key == beadmeta.MoleculeIDMetadataKey && value != "" {
-		return errors.New("publication acknowledgement lost")
-	}
-	return nil
+	return errors.New("publication acknowledgement lost")
 }
 
 func TestLegacyAmbiguousPublicationRetainsPublishedFamily(t *testing.T) {
-	store := legacyUncertainLinkStore{Store: seededStore("work")}
+	store := legacyUncertainLinkStore{MemStore: seededStore("work")}
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) { return "", nil })
 	deps.Store, deps.CityPath = store, t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
@@ -63,7 +60,7 @@ func TestLegacyAmbiguousPublicationRetainsPublishedFamily(t *testing.T) {
 		t.Fatalf("ambiguous publication rolled back published family: %+v, %v", root, err)
 	}
 	res, err := DoSling(opts, deps, store)
-	if err != nil || res.WispRootID != root.ID {
+	if err != nil || !res.Idempotent {
 		t.Fatalf("retry did not converge to published family: %+v, %v", res, err)
 	}
 }
@@ -130,32 +127,25 @@ func TestLegacyClosedRootWithLiveDescendantIsNotForgotten(t *testing.T) {
 	}
 }
 
-func (s legacyLinkFailureStore) SetMetadata(id, key, value string) error {
-	if key == beadmeta.MoleculeIDMetadataKey && value != "" {
-		return errors.New("link write failed")
-	}
-	return s.Store.SetMetadata(id, key, value)
+func (s legacyLinkFailureStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return errors.New("link write failed")
 }
 
-func TestLegacyRouteRetryKeepsOneFamily(t *testing.T) {
+func TestLegacyRepeatedRouteKeepsOneFamily(t *testing.T) {
 	store := seededStore("work")
-	attempts := 0
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) {
-		attempts++
-		if attempts == 1 {
-			return "", errors.New("route acknowledgement lost")
-		}
+		t.Error("legacy route invoked unfenced Runner")
 		return "", nil
 	})
 	deps.Store, deps.CityPath = store, t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	opts := SlingOpts{Target: a, BeadOrFormula: "work", OnFormula: "code-review", NoConvoy: true}
-	if _, err := DoSling(opts, deps, store); err == nil {
-		t.Fatal("failed route reported success")
+	if _, err := DoSling(opts, deps, store); err != nil {
+		t.Fatal(err)
 	}
 	before, _ := store.Get("work")
 	result, err := DoSling(opts, deps, store)
-	if err != nil || result.WispRootID != before.Metadata[beadmeta.MoleculeIDMetadataKey] {
+	if err != nil || !result.Idempotent || before.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
 		t.Fatalf("retry failed to reuse family: %+v, %v", result, err)
 	}
 	roots, _ := store.List(beads.ListQuery{Type: "molecule", IncludeClosed: true})
@@ -192,8 +182,8 @@ func TestLegacyClosedSourceAndChangedCustodyNeverRoute(t *testing.T) {
 			t.Fatalf("terminal source created=%v err=%v", created, err)
 		}
 		roots, _ := store.List(beads.ListQuery{Type: "molecule"})
-		if len(roots) != 0 {
-			t.Fatalf("failed source fence left live family %v", roots)
+		if !closeBefore && (len(roots) != 1 || roots[0].Status != "open") {
+			t.Fatalf("failed source fence did not retain its family %v", roots)
 		}
 	}
 }
@@ -284,7 +274,7 @@ func TestLegacyAttachmentPublishesParentAndRollsBackLinkFailure(t *testing.T) {
 			mem := seededStore("work")
 			var store beads.Store = mem
 			if fail {
-				store = legacyLinkFailureStore{Store: mem}
+				store = legacyLinkFailureStore{MemStore: mem}
 			}
 			routed := false
 			deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) {
@@ -304,8 +294,8 @@ func TestLegacyAttachmentPublishesParentAndRollsBackLinkFailure(t *testing.T) {
 					t.Fatalf("failed metadata routed=%v err=%v", routed, err)
 				}
 				roots, _ := mem.List(beads.ListQuery{Type: "molecule"})
-				if len(roots) != 0 {
-					t.Fatalf("failed publication left live roots: %v", roots)
+				if len(roots) != 1 || roots[0].Status != "open" {
+					t.Fatalf("failed publication did not retain discoverable family: %v", roots)
 				}
 				return
 			}
