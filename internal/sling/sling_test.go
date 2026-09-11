@@ -1517,7 +1517,7 @@ func TestDoSlingNoBranchWarningWhenNoLiveOwner(t *testing.T) {
 	}
 }
 
-func TestCheckBatchBurnOutputsWarn(t *testing.T) {
+func TestCheckBatchRefusesLiveAttachmentWithoutBurning(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-2", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-2"},
@@ -1526,12 +1526,12 @@ func TestCheckBatchBurnOutputsWarn(t *testing.T) {
 	var result SlingResult
 	// Pass store as both the store and querier (MemStore implements BeadChildQuerier)
 	err := CheckBatchNoMoleculeChildren(store, []beads.Bead{child}, store, &result)
-	t.Logf("err=%v autoburned=%d", err, len(result.AutoBurned))
-	if len(result.AutoBurned) == 0 {
-		t.Error("expected auto-burn")
+	if err == nil {
+		t.Fatal("expected live-attachment refusal")
 	}
-	if result.AutoBurned[0] != "MOL-1" {
-		t.Errorf("AutoBurned[0] = %q, want MOL-1", result.AutoBurned[0])
+	root, getErr := store.Get("MOL-1")
+	if getErr != nil || root.Status != "open" || len(result.AutoBurned) != 0 {
+		t.Fatalf("preflight mutated live attachment: root=%v err=%v burned=%v", root, getErr, result.AutoBurned)
 	}
 }
 

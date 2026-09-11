@@ -12,7 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
-const legacyAttachmentStateKey = "gc.legacy_attachment_state"
+const legacyAttachmentStateKey = beadmeta.LegacyAttachmentStateMetadataKey
 
 // withLegacyAttachment serializes discovery, materialization, linkage and the
 // caller's routing step. Re-deliveries reuse an existing matching family;
@@ -73,7 +73,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			if IsWorkflowAttachment(root) {
 				return &sourceworkflow.ConflictError{SourceBeadID: sourceID, WorkflowIDs: []string{root.ID}}
 			}
-			matches := len(live) == 1 && IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) && root.Metadata[beadmeta.FormulaNameMetadataKey] == formulaName
+			matches := len(live) == 1 && IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) && root.Metadata[beadmeta.FormulaNameMetadataKey] == formulaName && root.Metadata[beadmeta.SourceBeadIDMetadataKey] == sourceID
 			for key, value := range vars {
 				matches = matches && root.Metadata["gc.var."+key] == value
 			}

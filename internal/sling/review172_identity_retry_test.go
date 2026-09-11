@@ -53,3 +53,30 @@ func TestReview172InterveningSourceRouteMustNotBeOverwritten(t *testing.T) {
 		t.Fatalf("route changed during creation was overwritten: error=%v metadata=%v", err, current.Metadata)
 	}
 }
+
+func TestReview172PointerCannotAdoptAnotherSourceIdentity(t *testing.T) {
+	source := seededStore("work")
+	foreign, _ := source.Create(beads.Bead{Type: "molecule", Status: "open", Metadata: map[string]string{
+		beadmeta.SourceBeadIDMetadataKey: "different-source", beadmeta.SourceStoreRefMetadataKey: "city:test",
+		beadmeta.FormulaNameMetadataKey: "review", legacyAttachmentStateKey: "ready", "gc.var.issue": "work",
+	}})
+	if err := source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, foreign.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) { t.Fatal("must refuse corrupt pointer"); return nil, nil }, func(r *molecule.Result) (SlingResult, error) { return SlingResult{WispRootID: r.RootID}, nil }, "worker")
+	if err == nil {
+		t.Fatal("pointer adopted root whose canonical source ID belongs to different source")
+	}
+}
+
+func TestReview172GraphPreflightMustNotBurnNewlyDiscoveredLiveHistory(t *testing.T) {
+	store := seededStore("work")
+	root, _ := store.Create(beads.Bead{Type: "molecule", Status: "open", Metadata: map[string]string{"gc.var.issue": "work"}})
+	child, _ := store.Create(beads.Bead{Type: "step", Status: "open", ParentID: root.ID, Assignee: "live-reviewer"})
+	result := SlingResult{}
+	err := CheckNoMoleculeChildrenAllowLiveWorkflow(store, "work", store, &result)
+	current, _ := store.Get(child.ID)
+	if current.Status == "closed" {
+		t.Fatalf("broadened discovery burns detached live family during graph preflight: child=%+v error=%v burned=%v", current, err, result.AutoBurned)
+	}
+}
