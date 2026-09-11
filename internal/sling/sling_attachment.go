@@ -45,7 +45,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 		if _, ok := seen[id]; ok {
 			return
 		}
-		attached, err := store.Get(id)
+		attached, err := beads.HandlesFor(store).Live.Get(id)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

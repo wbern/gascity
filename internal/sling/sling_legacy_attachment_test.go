@@ -16,6 +16,26 @@ import (
 
 type legacyLinkFailureStore struct{ beads.Store }
 
+func TestLegacyAttachmentPointerCannotOverrideLiveRootState(t *testing.T) {
+	store := seededStore("work")
+	root, _ := store.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
+	if err := store.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatal(err)
+	}
+	source, _ := store.Get("work")
+	roots, err := CollectAttachedBeads(source, cache, cache)
+	if err != nil || len(roots) != 1 || roots[0].Status != "closed" {
+		t.Fatalf("cached attachment pointer overrode live closure: %v, %v", roots, err)
+	}
+}
+
 type legacyUncertainLinkStore struct{ beads.Store }
 
 func (s legacyUncertainLinkStore) SetMetadata(id, key, value string) error {
