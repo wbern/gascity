@@ -3,6 +3,7 @@ package sling
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -17,6 +18,9 @@ const legacyAttachmentStateKey = "gc.legacy_attachment_state"
 // caller's routing step. Re-deliveries reuse an existing matching family;
 // unassigned does not mean abandoned and never authorizes burning a live root.
 func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formulaName string, vars map[string]string, create func() (*molecule.Result, error), finish func(*molecule.Result) (SlingResult, error), routeTarget ...string) (SlingResult, error) {
+	if deps.GraphStore != nil && strings.TrimSpace(deps.StoreRef) == "" {
+		return SlingResult{}, fmt.Errorf("legacy source %s requires a source-store identity before shared-store materialization", sourceID)
+	}
 	writer, ok := beads.ConditionalWriterFor(deps.Store)
 	if !ok {
 		return SlingResult{}, fmt.Errorf("legacy source %s requires conditional publication; refusing unfenced materialization", sourceID)
@@ -92,7 +96,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 		// Re-read after materialization: external claim/close operations do not
 		// participate in this launcher lock. Never overwrite changed custody.
 		fresh, err := beads.HandlesFor(deps.Store).Live.Get(sourceID)
-		if err == nil && (fresh.Status != source.Status || fresh.Assignee != source.Assignee || fresh.Metadata[beadmeta.MoleculeIDMetadataKey] != source.Metadata[beadmeta.MoleculeIDMetadataKey]) {
+		if err == nil && (fresh.Status != source.Status || fresh.Assignee != source.Assignee || fresh.ClaimFence != source.ClaimFence || fresh.ParentID != source.ParentID || !maps.Equal(fresh.Metadata, source.Metadata)) {
 			err = fmt.Errorf("legacy source %s changed during materialization", sourceID)
 		}
 		if err == nil {

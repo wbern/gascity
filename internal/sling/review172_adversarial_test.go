@@ -103,7 +103,7 @@ func TestReview172RollbackCannotCloseCachedClaimedMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := &review172PublicationFailure{MemStore: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: cache, CityPath: t.TempDir()}, "work", "review", nil,
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: cache, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
 		func() (*molecule.Result, error) { return &molecule.Result{RootID: root.ID}, nil },
 		func(*molecule.Result) (SlingResult, error) {
 			t.Fatal("failed publication finished")
@@ -143,7 +143,7 @@ func TestReview172RollbackCannotRaceClaim(t *testing.T) {
 	child, _ := mem.Create(beads.Bead{Type: "step", Status: "open", ParentID: root.ID})
 	s := &review172ClaimDuringClose{Store: mem, root: root.ID, child: child.ID}
 	source := &review172PublicationFailure{MemStore: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: s, CityPath: t.TempDir()}, "work", "review", nil,
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: s, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
 		func() (*molecule.Result, error) { return &molecule.Result{RootID: root.ID}, nil },
 		func(*molecule.Result) (SlingResult, error) {
 			t.Fatal("failed publication finished")
