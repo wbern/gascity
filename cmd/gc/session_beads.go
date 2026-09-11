@@ -231,9 +231,9 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 // freshly resolved value differs from what is stored, mirroring the command
 // refresh so a provider switch in agent.toml is reflected on the session bead
 // (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
-// write-if-changed reconcile contract) and never clobbers a stored value with
-// an empty resolved one — a transient resolution failure must not wipe good
-// metadata.
+// write-if-changed reconcile contract). A nil resolved provider leaves stored
+// metadata untouched, while a successful resolution is authoritative and clears
+// obsolete higher-priority family rungs from a prior provider.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
@@ -242,10 +242,14 @@ func queueChangedResolvedProviderSessionMetadata(existing map[string]string, que
 	if name != "" && existing["provider"] != name {
 		queue("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); family != "" && existing["provider_kind"] != family {
+	if family := resolvedProviderLaunchFamily(resolved); family != "" && existing["provider_kind"] != family {
 		queue("provider_kind", family)
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name && existing["builtin_ancestor"] != ancestor {
+	ancestor := strings.TrimSpace(resolved.BuiltinAncestor)
+	if ancestor == name {
+		ancestor = ""
+	}
+	if existing["builtin_ancestor"] != ancestor {
 		queue("builtin_ancestor", ancestor)
 	}
 }
