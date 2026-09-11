@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 )
 
 func writeMCPSource(t *testing.T, path string, body string) {
@@ -284,6 +285,58 @@ args = ["deputy-notes"]
 	}
 }
 
+func TestValidateStage2TargetClaimantsSkipsCatalogResolutionForDisjointTargets(t *testing.T) {
+	// Disjoint same-provider peers cannot race for the caller's MCP target.
+	// Resolving their catalogs first needlessly expands DefaultBranch, which
+	// invokes Git once or more per peer during the fixed pre-start budget.
+	cityPath := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-invoked")
+	fakeGitDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeGitDir, "git"), []byte("#!/bin/sh\nprintf 'git\\n' >> \"$GC_TEST_GIT_MARKER\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_MARKER", marker)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	callerWorkdir := filepath.Join(cityPath, ".gc", "worktrees", "caller")
+	peerOneWorkdir := filepath.Join(cityPath, ".gc", "worktrees", "peer-one")
+	peerTwoWorkdir := filepath.Join(cityPath, ".gc", "worktrees", "peer-two")
+	for _, workdir := range []string{callerWorkdir, peerOneWorkdir, peerTwoWorkdir} {
+		if err := os.MkdirAll(workdir, 0o755); err != nil {
+			t.Fatalf("create workdir %q: %v", workdir, err)
+		}
+	}
+	peerOneMCPDir := filepath.Join(cityPath, "mcp", "peer-one")
+	peerTwoMCPDir := filepath.Join(cityPath, "mcp", "peer-two")
+	writeMCPSource(t, filepath.Join(peerOneMCPDir, "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\n")
+	writeMCPSource(t, filepath.Join(peerTwoMCPDir, "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\n")
+	want, err := materialize.BuildMCPProjection(materialize.MCPProviderGemini, callerWorkdir, nil)
+	if err != nil {
+		t.Fatalf("build caller projection: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "gemini"},
+		Providers: map[string]config.ProviderSpec{
+			"gemini": {Command: "echo", PromptMode: "none"},
+		},
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "caller", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/caller", MaxActiveSessions: intPtr(2)},
+			{Name: "peer-one", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/peer-one", MaxActiveSessions: intPtr(2), MCPDir: peerOneMCPDir},
+			{Name: "peer-two", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/peer-two", MaxActiveSessions: intPtr(2), MCPDir: peerTwoMCPDir},
+		},
+	}
+
+	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], want, stubLookPath); err != nil {
+		t.Fatalf("validate disjoint peers: %v", err)
+	}
+	if calls, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("disjoint peers invoked Git while resolving irrelevant MCP catalogs:\n%s", calls)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read git marker: %v", err)
+	}
+}
+
 func TestValidateStage2TargetClaimantsRejectsRealConflicts(t *testing.T) {
 	// Two agents sharing the same WorkDir template with different MCP
 	// catalogs must conflict — this is the safety contract we are
@@ -328,6 +381,39 @@ args = ["beta-notes"]
 	}
 	if !strings.Contains(err.Error(), "MCP target conflict") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateStage2TargetClaimantsAllowsMatchingSharedTarget(t *testing.T) {
+	// The target-first fast path must retain full payload validation for
+	// genuine target claimants, while allowing identical catalogs to share it.
+	cityPath := t.TempDir()
+	mcpDir := filepath.Join(cityPath, "mcp")
+	writeMCPSource(t, filepath.Join(mcpDir, "notes.toml"), `
+name = "notes"
+command = "uvx"
+args = ["shared-notes"]
+`)
+	shared := ".gc/worktrees/shared"
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "gemini"},
+		Providers: map[string]config.ProviderSpec{
+			"gemini": {Command: "echo", PromptMode: "none"},
+		},
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "alpha", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: mcpDir},
+			{Name: "beta", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: mcpDir},
+		},
+	}
+
+	sharedWorkdir := filepath.Join(cityPath, shared)
+	_, want, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", sharedWorkdir, "gemini")
+	if err != nil {
+		t.Fatalf("resolve alpha projection: %v", err)
+	}
+	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], want, stubLookPath); err != nil {
+		t.Fatalf("identical shared target should be allowed: %v", err)
 	}
 }
 

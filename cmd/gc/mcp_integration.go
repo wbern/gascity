@@ -505,12 +505,26 @@ func validateStage2TargetClaimants(
 		if err != nil {
 			continue
 		}
+		// A provider-native target depends only on provider family and
+		// workdir, not on the MCP catalog. Resolve it before loading the
+		// peer catalog so unrelated same-provider peers cannot consume the
+		// caller's fixed pre-start budget with template expansion and Git
+		// branch probes.
+		otherTarget, err := materialize.BuildMCPProjection(otherKind, otherWorkDir, nil)
+		if err != nil {
+			continue
+		}
+		if otherTarget.Target != want.Target {
+			continue
+		}
 		_, projection, err := resolveAgentMCPProjection(cityPath, cfg, other, identity, otherWorkDir, otherKind)
 		if err != nil {
 			continue
 		}
 		if projection.Provider != want.Provider || projection.Target != want.Target {
-			// Different physical target, no conflict.
+			// The full projection must agree with the target-only derivation
+			// above. Treat an unexpected mismatch as non-conflicting rather
+			// than risking a false-positive startup failure.
 			continue
 		}
 		if projection.Hash() != wantHash {
