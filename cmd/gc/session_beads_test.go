@@ -4555,6 +4555,42 @@ func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *t
 		t.Errorf("tick 4: nil ResolvedProvider clobbered provider: got %q, want omp-azure", got)
 	}
 
+	// Tick 5: a direct built-in provider is its own launch family. The former
+	// projection helper only wrote provider_kind when BuiltinAncestor differed
+	// from Name, so this switch left the prior omp family in both higher-priority
+	// rungs even though provider itself became codex.
+	codexCmd := "codex --dangerously-bypass-approvals-and-sandbox"
+	ds["mayor"] = TemplateParams{
+		TemplateName: "mayor",
+		Command:      codexCmd,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name: "codex", BuiltinAncestor: "codex",
+			ResumeFlag: "resume", ResumeStyle: "subcommand", ResumeCommand: "codex resume {{.SessionKey}}",
+		},
+	}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	got = allSessionBeads(t, cs)[0].Metadata
+	for _, c := range []struct{ key, want string }{
+		{"command", codexCmd},
+		{"provider", "codex"},
+		{"provider_kind", "codex"},
+		{"builtin_ancestor", ""},
+		{"resume_flag", "resume"},
+		{"resume_style", "subcommand"},
+		{"resume_command", "codex resume {{.SessionKey}}"},
+	} {
+		if got[c.key] != c.want {
+			t.Errorf("tick 5: %s = %q, want %q; a direct provider switch must replace all provider-family rungs", c.key, got[c.key], c.want)
+		}
+	}
+	writesBefore = cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("tick 6: unchanged direct-provider sync wrote metadata (%d -> %d writes)", writesBefore, cs.writes)
+	}
+
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
