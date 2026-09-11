@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish that projection is left stamped rather than risk a wrong clear, as
   are cross-store targets this reconciler tick cannot reach. (gascity#4373)
 
+- **The dashboard's bead dependency graph preserves relation type on inverse
+  ("Blocks") edges instead of collapsing every downstream relation to a
+  plain, untyped blocker.** `buildBeadGraph`'s inverse-edge pass previously
+  stored only the raw dependent bead, discarding the `dependencies[].type`
+  (or `needs`) that produced the forward edge; the `BeadDependencies` detail
+  view then rendered every downstream relation — `tracks`, `parent-child`,
+  or a genuine `blocks` need alike — under the same unlabeled "Blocks"
+  heading. A `tracks` relation (e.g. a workflow root tracking a finalizer)
+  could therefore read as a second hard dependency. The inverse edge now
+  carries the same `kind` as its forward counterpart, and the detail view
+  labels it the same way the "Needs" section already labels non-`needs`
+  forward edges. (gascity#4365)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
@@ -39,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permanently unreferenced (`dolt backup` has no prune verb). The fallback
   now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
   streaming output instead of buffering it. (gascity#4823)
+
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
