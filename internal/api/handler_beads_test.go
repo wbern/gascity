@@ -815,67 +815,6 @@ func TestBeadReady(t *testing.T) {
 	}
 }
 
-// TestBeadReadySummaryBoundsResponseBeforeHTTP asserts that the control-ready
-// endpoint filters before producing its wire response. The giant notes are
-// intentionally representative of a routed city whose ready set cannot safely
-// be sent to every controller discovery query.
-func TestBeadReadySummaryBoundsResponseBeforeHTTP(t *testing.T) {
-	state := newFakeState(t)
-	store := state.stores["myrig"]
-	giantNotes := strings.Repeat("evidence ", 20_000)
-	matched, err := store.Create(beads.Bead{
-		Title:     "selected control work",
-		Assignee:  "worker-a",
-		Metadata:  beads.StringMap{"gc.routed_to": "rig/worker-a"},
-		Notes:     giantNotes,
-		Labels:    []string{"control"},
-		CreatedAt: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("Create(matched): %v", err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:    "another worker's huge evidence",
-		Assignee: "worker-b",
-		Metadata: beads.StringMap{"gc.routed_to": "rig/worker-b"},
-		Notes:    giantNotes,
-		Type:     "message",
-	}); err != nil {
-		t.Fatalf("Create(unmatched): %v", err)
-	}
-	if _, err := store.Create(beads.Bead{
-		Title:    "held control work",
-		Assignee: "worker-a",
-		Metadata: beads.StringMap{"gc.routed_to": "rig/worker-a"},
-		Labels:   []string{"hold:external"},
-	}); err != nil {
-		t.Fatalf("Create(held): %v", err)
-	}
-	h := newTestCityHandler(t, state)
-
-	req := httptest.NewRequest(http.MethodGet,
-		cityURL(state, "/beads/ready/summary?assignee=worker-a&metadata_key=gc.routed_to&metadata_value=rig%2Fworker-a&exclude_type=message&exclude_label=hold%3Amayor,hold%3Aexternal&limit=42"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET ready summary = %d, want 200 (body %s)", rec.Code, rec.Body.String())
-	}
-	if rec.Body.Len() > beads.DefaultDiscoverySummaryBudget {
-		t.Fatalf("ready summary response is %d bytes, want at most %d", rec.Body.Len(), beads.DefaultDiscoverySummaryBudget)
-	}
-	if strings.Contains(rec.Body.String(), giantNotes) {
-		t.Fatal("ready summary response leaked giant notes")
-	}
-	var got beads.DiscoverySummaryEnvelope
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decoding ready summary: %v", err)
-	}
-	if got.Kind != beads.DiscoverySummaryKind || got.Total != 1 || len(got.Beads) != 1 || got.Beads[0].ID != matched.ID {
-		t.Fatalf("ready summary = %+v, want only selected %q", got, matched.ID)
-	}
-}
-
 // TestBeadReadyFederatesCityStore asserts that city-scope ready work surfaces
 // through GET /beads/ready. The pre-fix handler queried only the per-rig
 // BeadStores() and dropped beads that live in the city store.

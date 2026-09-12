@@ -305,7 +305,6 @@ var ReadyRoutableFlags = map[string]bool{
 	"--metadata-field": true,
 	"--unassigned":     true,
 	"--exclude-type":   true,
-	"--exclude-label":  true,
 	"--sort":           true,
 }
 

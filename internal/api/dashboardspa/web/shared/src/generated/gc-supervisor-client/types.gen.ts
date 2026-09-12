@@ -813,34 +813,6 @@ export type Dep = {
     type: string;
 };
 
-export type DiscoverySummary = {
-    assignee?: string;
-    created_at?: string;
-    details_omitted: Array<string> | null;
-    fields_omitted?: Array<string> | null;
-    id: string;
-    labels?: Array<string> | null;
-    parent?: string;
-    priority?: number;
-    routing_metadata?: {
-        [key: string]: string;
-    };
-    source_serialized_bytes: number;
-    status: string;
-    title?: string;
-    type?: string;
-};
-
-export type DiscoverySummaryEnvelope = {
-    beads: Array<DiscoverySummary> | null;
-    budget_bytes: number;
-    kind: string;
-    omitted: number;
-    schema_version: string;
-    total: number;
-    verb: string;
-};
-
 export type ErrorDetail = {
     /**
      * Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -11087,85 +11059,6 @@ export type GetV0CityByCityNameBeadsReadyResponses = {
 };
 
 export type GetV0CityByCityNameBeadsReadyResponse = GetV0CityByCityNameBeadsReadyResponses[keyof GetV0CityByCityNameBeadsReadyResponses];
-
-export type GetV0CityByCityNameBeadsReadySummaryData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Filter by rig.
-         */
-        rig?: string;
-        /**
-         * Filter by assignee.
-         */
-        assignee?: string;
-        /**
-         * Include only unassigned beads.
-         */
-        unassigned?: boolean;
-        /**
-         * Metadata key to match; requires metadata_value.
-         */
-        metadata_key?: string;
-        /**
-         * Metadata value to match; requires metadata_key.
-         */
-        metadata_value?: string;
-        /**
-         * Bead types to exclude.
-         */
-        exclude_type?: Array<string> | null;
-        /**
-         * Bead labels to exclude.
-         */
-        exclude_label?: Array<string> | null;
-        /**
-         * Maximum matching entries to consider. The compact response remains capped at 100 rows.
-         */
-        limit?: number;
-    };
-    url: '/v0/city/{cityName}/beads/ready/summary';
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryError = GetV0CityByCityNameBeadsReadySummaryErrors[keyof GetV0CityByCityNameBeadsReadySummaryErrors];
-
-export type GetV0CityByCityNameBeadsReadySummaryResponses = {
-    /**
-     * OK
-     */
-    200: DiscoverySummaryEnvelope;
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryResponse = GetV0CityByCityNameBeadsReadySummaryResponses[keyof GetV0CityByCityNameBeadsReadySummaryResponses];
 
 export type GetV0CityByCityNameConfigData = {
     body?: never;

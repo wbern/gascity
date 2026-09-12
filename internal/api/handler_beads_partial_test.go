@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -116,24 +115,6 @@ func TestBeadListSurfacesStoreErrorsAsPartial(t *testing.T) {
 	}
 	if len(body.Items) == 0 {
 		t.Errorf("Items empty, want the good rig's bead to survive")
-	}
-}
-
-// TestBeadReadySummaryRejectsPartialFederation ensures a control decision is
-// never made from the surviving subset of a failed federated ready read.
-func TestBeadReadySummaryRejectsPartialFederation(t *testing.T) {
-	fs := newPartialListState(t, nil, errors.New("ready store unavailable"))
-	h := newTestCityHandler(t, fs)
-
-	req := httptest.NewRequest("GET", cityURL(fs, "/beads/ready/summary"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != 503 {
-		t.Fatalf("GET ready summary with partial federation = %d, want 503 (body %s)", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "incomplete") {
-		t.Fatalf("partial ready summary response = %s, want incomplete diagnostic", rec.Body.String())
 	}
 }
 

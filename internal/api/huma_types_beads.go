@@ -51,22 +51,6 @@ type BeadReadyInput struct {
 	Rig string `query:"rig" required:"false" doc:"Filter by rig."`
 }
 
-// BeadReadySummaryInput is the Huma input for the bounded control-plane
-// projection at GET /v0/city/{cityName}/beads/ready/summary. It deliberately
-// accepts only the selectors used by the controller's ready discovery path;
-// the server applies them before serializing a compact summary.
-type BeadReadySummaryInput struct {
-	CityScope
-	Rig           string   `query:"rig" required:"false" doc:"Filter by rig."`
-	Assignee      string   `query:"assignee" required:"false" doc:"Filter by assignee."`
-	Unassigned    bool     `query:"unassigned" required:"false" doc:"Include only unassigned beads."`
-	MetadataKey   string   `query:"metadata_key" required:"false" doc:"Metadata key to match; requires metadata_value."`
-	MetadataValue string   `query:"metadata_value" required:"false" doc:"Metadata value to match; requires metadata_key."`
-	ExcludeTypes  []string `query:"exclude_type" required:"false" doc:"Bead types to exclude."`
-	ExcludeLabels []string `query:"exclude_label" required:"false" doc:"Bead labels to exclude."`
-	Limit         int      `query:"limit" minimum:"0" maximum:"5000" default:"100" required:"false" doc:"Maximum matching entries to consider. The compact response remains capped at 100 rows."`
-}
-
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.
 type BeadGraphInput struct {
 	CityScope
