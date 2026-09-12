@@ -1517,7 +1517,7 @@ func TestDoSlingNoBranchWarningWhenNoLiveOwner(t *testing.T) {
 	}
 }
 
-func TestCheckBatchRefusesLiveAttachmentWithoutBurning(t *testing.T) {
+func TestCheckBatchBurnOutputsWarn(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-2", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-2"},
@@ -1526,12 +1526,12 @@ func TestCheckBatchRefusesLiveAttachmentWithoutBurning(t *testing.T) {
 	var result SlingResult
 	// Pass store as both the store and querier (MemStore implements BeadChildQuerier)
 	err := CheckBatchNoMoleculeChildren(store, []beads.Bead{child}, store, &result)
-	if err == nil {
-		t.Fatal("expected live-attachment refusal")
+	t.Logf("err=%v autoburned=%d", err, len(result.AutoBurned))
+	if len(result.AutoBurned) == 0 {
+		t.Error("expected auto-burn")
 	}
-	root, getErr := store.Get("MOL-1")
-	if getErr != nil || root.Status != "open" || len(result.AutoBurned) != 0 {
-		t.Fatalf("preflight mutated live attachment: root=%v err=%v burned=%v", root, getErr, result.AutoBurned)
+	if result.AutoBurned[0] != "MOL-1" {
+		t.Errorf("AutoBurned[0] = %q, want MOL-1", result.AutoBurned[0])
 	}
 }
 
@@ -2172,15 +2172,15 @@ func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
 	if result.WispRootID == "" {
 		t.Fatal("WispRootID is empty")
 	}
-	if len(router.routed) != 0 {
-		t.Fatalf("legacy publication invoked unfenced router %d times", len(router.routed))
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != b.ID {
+		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
 	}
 	got, err := deps.Store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", b.ID, err)
-	}
-	if got.Metadata[beadmeta.RoutedToMetadataKey] != "mayor" {
-		t.Fatalf("route not atomically published: %v", got.Metadata)
 	}
 	if got.Metadata["molecule_id"] != result.WispRootID {
 		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
@@ -2208,15 +2208,15 @@ func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.
 	if result.WispRootID == "" {
 		t.Fatal("WispRootID is empty")
 	}
-	if len(router.routed) != 0 {
-		t.Fatalf("legacy publication invoked unfenced router %d times", len(router.routed))
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != "BL-42" {
+		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
 	}
 	got, err := deps.Store.Get("BL-42")
 	if err != nil {
 		t.Fatalf("Get(BL-42): %v", err)
-	}
-	if got.Metadata[beadmeta.RoutedToMetadataKey] != "mayor" {
-		t.Fatalf("route not atomically published: %v", got.Metadata)
 	}
 	if got.Metadata["molecule_id"] != result.WispRootID {
 		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)

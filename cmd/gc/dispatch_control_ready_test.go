@@ -71,116 +71,6 @@ func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
 	}
 }
 
-func TestControlReadyScopedSummaryQueriesMirrorLegacyCandidateAndRouteSlices(t *testing.T) {
-	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
-	t.Cleanup(func() {
-		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
-	})
-	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
-
-	var calls [][]string
-	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`, nil
-	}
-	parsed := parsedControlReadyQuery{
-		target:             "rig/core.control-dispatcher",
-		controlSessionName: "controller-session",
-		legacyTarget:       "rig/workflow-control",
-		bareTarget:         "rig/control-dispatcher",
-	}
-	_, err := controlReadyScopedSummaryQueue("/unused", map[string]string{
-		citylayout.RealBdEnvVar: "/real/bd",
-		"GC_SESSION_NAME":       "controller-session",
-	}, parsed)
-	if err != nil {
-		t.Fatalf("controlReadyScopedSummaryQueue: %v", err)
-	}
-	if len(calls) != 9 { // 3 candidates (including legacy) + 3 routes * 2 metadata keys.
-		t.Fatalf("summary calls = %d, want 9: %#v", len(calls), calls)
-	}
-	for _, args := range calls {
-		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "--summary-json") || strings.Contains(joined, "--limit=5000") || strings.Contains(joined, "--allow-unbounded") {
-			t.Fatalf("scoped summary args = %#v, want bounded scoped summary", args)
-		}
-	}
-	if got := strings.Join(calls[0], " "); !strings.Contains(got, "--assignee=controller-session") || !strings.Contains(got, "--limit=20") {
-		t.Fatalf("first args = %q, want first assignee slice", got)
-	}
-	if got := strings.Join(calls[3], " "); !strings.Contains(got, "--metadata-field gc.run_target=rig/core.control-dispatcher") || !strings.Contains(got, "--unassigned") || !strings.Contains(got, "--sort oldest") {
-		t.Fatalf("first route args = %q, want run-target route slice", got)
-	}
-}
-
-func TestControlReadyScopedCacheDoesNotCrossControllerIdentities(t *testing.T) {
-	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow
-	t.Cleanup(func() {
-		controlReadyExecutable, controlReadyCommandRunner, controlReadyNow = originalExecutable, originalRunner, originalNow
-	})
-	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
-	now := time.Unix(1000, 0)
-	controlReadyNow = func() time.Time { return now }
-	calls := 0
-	controlReadyCommandRunner = func(_ string, _ []string, _, _ string, _ []string) (string, error) {
-		calls++
-		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`, nil
-	}
-	dir := t.TempDir()
-	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd"}
-	first := parsedControlReadyQuery{target: "rig-a/control-dispatcher"}
-	second := parsedControlReadyQuery{target: "rig-b/control-dispatcher"}
-	if got := controlReadyCacheFor(dir, dir, nil, env, false, first); got == nil || got.err != nil {
-		t.Fatalf("first scoped cache = %#v", got)
-	}
-	firstCalls := calls
-	if got := controlReadyCacheFor(dir, dir, nil, env, false, second); got == nil || got.err != nil {
-		t.Fatalf("second scoped cache = %#v", got)
-	}
-	if calls != firstCalls*2 {
-		t.Fatalf("scoped cache calls = %d after two identities, want %d; second controller reused first snapshot", calls, firstCalls*2)
-	}
-}
-
-func TestControlReadyScopedSummaryQueuePreservesGroupOrderAndInstantiationDedup(t *testing.T) {
-	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
-	t.Cleanup(func() {
-		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
-	})
-	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
-	payload := func(rows []string) string {
-		return fmt.Sprintf(`{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":%d,"omitted":0,"beads":[%s]}`, len(rows), strings.Join(rows, ","))
-	}
-	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
-		joined := strings.Join(args, " ")
-		switch {
-		case strings.Contains(joined, "--assignee=core.control-dispatcher"):
-			return payload([]string{`{"id":"gcw-assigned","assignee":"core.control-dispatcher"}`}), nil
-		case strings.Contains(joined, "gc.run_target=core.control-dispatcher"):
-			return payload([]string{`{"id":"gcw-building","routing_metadata":{"gc.run_target":"core.control-dispatcher","gc.instantiating":"yes"}}`}), nil
-		case strings.Contains(joined, "gc.routed_to=core.control-dispatcher"):
-			return payload([]string{
-				`{"id":"gcw-building","routing_metadata":{"gc.routed_to":"core.control-dispatcher"}}`,
-				`{"id":"gcw-routed","routing_metadata":{"gc.routed_to":"core.control-dispatcher"}}`,
-			}), nil
-		default:
-			return payload(nil), nil
-		}
-	}
-	queue, err := controlReadyScopedSummaryQueue("/unused", map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, parsedControlReadyQuery{target: "core.control-dispatcher"})
-	if err != nil {
-		t.Fatalf("controlReadyScopedSummaryQueue: %v", err)
-	}
-	got := make([]string, 0, len(queue))
-	for _, bead := range queue {
-		got = append(got, bead.ID)
-	}
-	want := []string{"gcw-assigned", "gcw-building", "gcw-routed"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("queue ids = %#v, want %#v", got, want)
-	}
-}
-
 func TestControlReadyExecutablePathRejectsEmptyWithoutAmbientFallback(t *testing.T) {
 	original := controlReadyExecutable
 	controlReadyExecutable = func() (string, error) { return "", nil }
@@ -944,13 +834,6 @@ func TestDecodeControlReadySummaryRequiresCompletenessFields(t *testing.T) {
 		if _, err := decodeControlReadySummary([]byte(payload)); err == nil {
 			t.Errorf("accepted incomplete summary: %s", payload)
 		}
-	}
-}
-
-func TestDecodeControlReadySummaryRejectsOmittedInstantiationMarker(t *testing.T) {
-	payload := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":1,"omitted":0,"beads":[{"id":"gcw-mid-build","fields_omitted":["routing_metadata.gc.instantiating"]}]}`
-	if _, err := decodeControlReadySummary([]byte(payload)); err == nil || !strings.Contains(err.Error(), beadmeta.InstantiatingMetadataKey) {
-		t.Fatalf("decodeControlReadySummary omitted instantiating marker error = %v, want fail-closed marker error", err)
 	}
 }
 

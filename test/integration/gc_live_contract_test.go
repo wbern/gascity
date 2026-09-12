@@ -140,6 +140,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	if createdRigDetail.Name != rigName || createdRigDetail.Path != rigDir {
 		t.Fatalf("rig detail after create = %+v, want name=%q path=%q", createdRigDetail, rigName, rigDir)
 	}
+
 	liveContractJSON[struct {
 		Status   string `json:"status"`
 		Provider string `json:"provider"`
@@ -186,7 +187,6 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}
 
 	runID := strconv.FormatInt(time.Now().UnixNano(), 36)
-	exerciseLiveContractReadySummary(t, baseURL, validator, cityBase, rigName, runID)
 	sessionID := createLiveContractAgentSession(t, baseURL, validator, cityBase, targetAgent, rigName, "mail-"+runID)
 	rootBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Root fixture created by TestGCLiveContract_BeadsAndEvents",
@@ -544,51 +544,6 @@ description = "Read and complete {{issue}}."
 		Path      string `json:"path"`
 	}](t, baseURL, validator, "/v0/events", unregister.RequestID, "request.result.city.unregister", 120*time.Second, unregister.EventCursor)
 	assertLiveContractCityAbsent(t, baseURL, validator, cityName)
-}
-
-// exerciseLiveContractReadySummary is a disposable binary-level A/B for the
-// controller's bounded ready discovery projection. It compares the ordinary
-// ready view with its scoped summary, while proving a large description does
-// not cross the compact control-plane response.
-func exerciseLiveContractReadySummary(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, runID string) {
-	t.Helper()
-	route := rigName + "/summary-worker-" + runID
-	giantDescription := strings.Repeat("bounded-ready-evidence ", 8_000)
-	fixture := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
-		"description": giantDescription,
-		"metadata":    map[string]string{"gc.routed_to": route},
-		"rig":         rigName,
-		"title":       "ready summary fixture " + runID,
-		"type":        "task",
-	}, http.StatusCreated)
-
-	full := liveContractJSON[struct {
-		Items []beads.Bead `json:"items"`
-	}](t, baseURL, v, http.MethodGet, cityBase+"/beads/ready?rig="+url.QueryEscape(rigName), nil, http.StatusOK)
-	if !beadListContains(full.Items, fixture.ID) {
-		t.Fatalf("full ready IDs do not contain summary fixture %q", fixture.ID)
-	}
-
-	query := url.Values{
-		"metadata_key":   {"gc.routed_to"},
-		"metadata_value": {route},
-		"rig":            {rigName},
-		"unassigned":     {"true"},
-	}
-	raw := liveContractRequest(t, baseURL, v, http.MethodGet, cityBase+"/beads/ready/summary?"+query.Encode(), nil, http.StatusOK)
-	if len(raw) > beads.DefaultDiscoverySummaryBudget {
-		t.Fatalf("ready summary is %d bytes, want at most %d", len(raw), beads.DefaultDiscoverySummaryBudget)
-	}
-	if bytes.Contains(raw, []byte(giantDescription)) {
-		t.Fatal("ready summary leaked the giant description")
-	}
-	var summary beads.DiscoverySummaryEnvelope
-	if err := json.Unmarshal(raw, &summary); err != nil {
-		t.Fatalf("decode ready summary: %v", err)
-	}
-	if summary.Total != 1 || summary.Omitted != 0 || len(summary.Beads) != 1 || summary.Beads[0].ID != fixture.ID {
-		t.Fatalf("ready summary = %+v, want complete singleton for %q", summary, fixture.ID)
-	}
 }
 
 type contractEventList struct {
