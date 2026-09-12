@@ -5549,7 +5549,7 @@ func TestOnFormulaExistingWispErrors(t *testing.T) {
 	}
 }
 
-func TestOnFormulaRefusesLiveMoleculeWithoutBurning(t *testing.T) {
+func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -5557,26 +5557,25 @@ func TestOnFormulaRefusesLiveMoleculeWithoutBurning(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open", Assignee: ""}
-	q.childrenOf["BL-42"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-42"}}
+	q.childrenOf["BL-42"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-42"},
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
 	}, nil)
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
 	code := doSling(opts, deps, q, stdout, stderr)
 
-	if code == 0 {
-		t.Fatalf("live attachment was silently replaced; stderr: %s", stderr.String())
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (auto-burn should unblock); stderr: %s", code, stderr.String())
 	}
-	root, err := deps.Store.Get("MOL-1")
-	source, _ := deps.Store.Get("BL-42")
-	if err != nil || root.Status != "open" || source.Metadata["gc.routed_to"] != "" {
-		t.Fatalf("preflight changed live family: root=%v source=%v err=%v", root, source, err)
+	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
+		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
 	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
 }
 
 func TestOnFormulaMetadataAttachmentSkipsIdempotentRetry(t *testing.T) {
@@ -5972,7 +5971,7 @@ func TestBatchOnFailFastMolecule(t *testing.T) {
 	}
 }
 
-func TestBatchRefusesLiveMoleculesWithoutBurning(t *testing.T) {
+func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -5981,28 +5980,28 @@ func TestBatchRefusesLiveMoleculesWithoutBurning(t *testing.T) {
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
 	q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}, {ID: "BL-2", Status: "open"}}
-	q.childrenOf["BL-2"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-2"}}
+	q.childrenOf["BL-2"] = []beads.Bead{{ID: "MOL-1", Type: "molecule", Status: "open"}}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "CVY-1", Title: "Batch", Type: "convoy", Status: "open"},
 		{ID: "BL-1", Title: "One", Type: "task", Status: "open"},
 		{ID: "BL-2", Title: "Two", Type: "task", Status: "open"},
-		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-2"},
+		{ID: "MOL-1", Type: "molecule", Status: "open"},
 	}, nil)
 
 	opts := testOpts(a, "CVY-1")
 	opts.OnFormula = "code-review"
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
 
-	if code == 0 {
-		t.Fatalf("batch silently replaced live attachment; stderr: %s", stderr.String())
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0 (auto-burn should unblock); stderr: %s", code, stderr.String())
 	}
-	root, err := deps.Store.Get("MOL-1")
-	source, _ := deps.Store.Get("BL-2")
-	if err != nil || root.Status != "open" || source.Metadata["gc.routed_to"] != "" {
-		t.Fatalf("batch changed live family: root=%v source=%v err=%v", root, source, err)
+	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
+		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
 	}
+	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
+	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
 }
 
 func TestOnFormulaPoolAttachmentKeepsLegacyStepsPrivate(t *testing.T) {
