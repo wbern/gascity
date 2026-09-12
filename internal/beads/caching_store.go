@@ -85,6 +85,7 @@ var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
 	_ ActorClaimer                  = (*CachingStore)(nil)
 	_ AtomicTxStore                 = (*CachingStore)(nil)
+	_ ConditionalHumanGateResolver  = (*CachingStore)(nil)
 )
 
 type cacheState int
