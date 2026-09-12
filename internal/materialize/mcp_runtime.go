@@ -29,6 +29,10 @@ func EffectiveMCPForSession(
 			cfgForMCP = &clone
 		}
 	}
+	sources := MCPPackSourcesForAgent(cfgForMCP, agent)
+	if len(sources) == 0 {
+		return EffectiveMCPForAgent(cfgForMCP, agent, nil)
+	}
 	return EffectiveMCPForAgent(cfgForMCP, agent, MCPTemplateData(cfgForMCP, cityPath, agent, identity, workDir))
 }
 
