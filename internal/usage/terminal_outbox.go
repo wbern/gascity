@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -258,6 +259,9 @@ func readTerminalOutbox(path string) (terminalOutboxState, error) {
 				if strings.TrimSpace(entry.Key) == "" {
 					return terminalOutboxState{}, fmt.Errorf("terminal outbox acknowledgement at %s:%d has empty key", path, lineNo)
 				}
+				if _, exists := state.enqueued[entry.Key]; !exists {
+					return terminalOutboxState{}, fmt.Errorf("terminal outbox acknowledgement at %s:%d has no enqueue", path, lineNo)
+				}
 				state.delivered[entry.Key] = struct{}{}
 			default:
 				return terminalOutboxState{}, fmt.Errorf("terminal outbox entry at %s:%d has unknown kind %q", path, lineNo, entry.Kind)
@@ -272,6 +276,9 @@ func readTerminalOutbox(path string) (terminalOutboxState, error) {
 			state.pending = append(state.pending, outcome)
 		}
 	}
+	sort.Slice(state.pending, func(i, j int) bool {
+		return state.pending[i].Key < state.pending[j].Key
+	})
 	return state, nil
 }
 

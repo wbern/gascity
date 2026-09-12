@@ -102,6 +102,28 @@ func TestTerminalOutboxRejectsConflictingOutcomeForSameAttempt(t *testing.T) {
 	}
 }
 
+func TestTerminalOutboxRejectsAcknowledgementBeforeEnqueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "terminal-outbox.jsonl")
+	outcome, err := NewTerminalOutcome("gc2", "gas-city", "work-1", "1", "shipped", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendTerminalOutboxEntry(path, terminalOutboxEntry{Kind: terminalOutboxDelivered, Key: outcome.Key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendTerminalOutboxEntry(path, terminalOutboxEntry{Kind: terminalOutboxEnqueued, Outcome: outcome}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = NewTerminalOutbox(path).Deliver(context.Background(), func(context.Context, TerminalOutcome) error {
+		t.Fatal("corrupt outbox entry was delivered")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("acknowledgement before enqueue was accepted")
+	}
+}
+
 func TestTerminalOutcomeRejectsUnboundedOutcomeValues(t *testing.T) {
 	if _, err := NewTerminalOutcome("gc2", "gas-city", "work-1", "1", "secret-looking-freeform-outcome", 1); err == nil {
 		t.Fatal("freeform terminal outcome was accepted")
