@@ -65,16 +65,22 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 	if registry == nil {
 		registry = defaultPricingRegistry()
 	}
+	headObserver := cfg.HeadObserver
+	if headObserver == nil {
+		headObserver = ObserveGitHead
+	}
 
 	return &SessionHandle{
-		manager:     cfg.Manager,
-		adapter:     adapter,
-		recorder:    recorder,
-		usageSink:   usageSink,
-		searchPaths: searchPaths,
-		session:     spec,
-		sessionID:   strings.TrimSpace(spec.ID),
-		pricing:     registry,
+		manager:          cfg.Manager,
+		adapter:          adapter,
+		recorder:         recorder,
+		usageSink:        usageSink,
+		invocationLedger: cfg.InvocationLedger,
+		headObserver:     headObserver,
+		searchPaths:      searchPaths,
+		session:          spec,
+		sessionID:        strings.TrimSpace(spec.ID),
+		pricing:          registry,
 	}, nil
 }
 
