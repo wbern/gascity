@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -118,6 +119,19 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 			fmt.Fprintf(stderr, "gc bd-shim: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if summaryJSONRequested(args) {
+			opts, err := readySummaryOpts(p)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd-shim: ready summary: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			read, err := client.ReadySummary(opts)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd-shim: ready summary via API: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			return WriteManagedJSON(context.Background(), "managed_bd_summary", "ready", read.Body, stdout, stderr)
+		}
 		read, err := client.ReadyBeads()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd-shim: ready via API: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -126,9 +140,6 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		// /v0/beads/ready takes no predicates; apply the discovery post-filter
 		// (assignee/metadata-field/unassigned/exclude-type/limit) client-side.
 		result := applyReadyParams(read.Body, p)
-		if summaryJSONRequested(args) {
-			return WriteManagedJSON(context.Background(), "managed_bd_summary", "ready", NewBeadSummaryEnvelope("ready", result, DefaultBeadSummaryBudget), stdout, stderr)
-		}
 		return WriteManagedReadJSONForVerb("ready", result, stdout, stderr)
 	case "list":
 		opts, err := ParseListOpts(args)
@@ -195,6 +206,36 @@ func DispatchViaAPI(client *beadclient.Client, verb string, args []string, stdou
 		fmt.Fprintf(stderr, "gc bd-shim: no routed API handler for %q\n", verb) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+func readySummaryOpts(p ReadyParams) (beadclient.ReadySummaryOpts, error) {
+	opts := beadclient.ReadySummaryOpts{
+		Assignee:   p.query.Assignee,
+		Unassigned: p.unassigned || (p.assigneeSet && p.query.Assignee == ""),
+		Limit:      p.limit,
+	}
+	if len(p.metadataEquals) > 1 {
+		return beadclient.ReadySummaryOpts{}, fmt.Errorf("at most one --metadata-field is supported")
+	}
+	for key, value := range p.metadataEquals {
+		if key == "" || value == "" {
+			return beadclient.ReadySummaryOpts{}, fmt.Errorf("--metadata-field requires a non-empty key and value")
+		}
+		opts.MetadataKey = key
+		opts.MetadataValue = value
+	}
+	for typ := range p.excludeTypes {
+		opts.ExcludeTypes = append(opts.ExcludeTypes, typ)
+	}
+	for label := range p.excludeLabels {
+		opts.ExcludeLabels = append(opts.ExcludeLabels, label)
+	}
+	slices.Sort(opts.ExcludeTypes)
+	slices.Sort(opts.ExcludeLabels)
+	if opts.Assignee != "" && opts.Unassigned {
+		return beadclient.ReadySummaryOpts{}, fmt.Errorf("--assignee and --unassigned cannot be combined")
+	}
+	return opts, nil
 }
 
 // ParseListOpts maps a routable `bd list` arg list onto beadclient.ListBeadsOpts. The
@@ -515,6 +556,7 @@ type ReadyParams struct {
 	metadataEquals map[string]string // --metadata-field k=v (all must match)
 	unassigned     bool              // --unassigned
 	excludeTypes   map[string]bool   // --exclude-type=T (repeatable)
+	excludeLabels  map[string]bool   // --exclude-label=L (repeatable)
 	limit          int               // --limit / -n
 }
 
@@ -525,7 +567,7 @@ type ReadyParams struct {
 // ready set is already created-asc which is bd's "oldest" order). Non-routable
 // flags never reach here — the classifier passes those through.
 func ParseReadyParams(args []string) (ReadyParams, error) {
-	p := ReadyParams{metadataEquals: map[string]string{}, excludeTypes: map[string]bool{}}
+	p := ReadyParams{metadataEquals: map[string]string{}, excludeTypes: map[string]bool{}, excludeLabels: map[string]bool{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -552,6 +594,11 @@ func ParseReadyParams(args []string) (ReadyParams, error) {
 			i++
 		case strings.HasPrefix(a, "--exclude-type="):
 			p.excludeTypes[strings.TrimPrefix(a, "--exclude-type=")] = true
+		case a == "--exclude-label" && i+1 < len(args):
+			p.excludeLabels[args[i+1]] = true
+			i++
+		case strings.HasPrefix(a, "--exclude-label="):
+			p.excludeLabels[strings.TrimPrefix(a, "--exclude-label=")] = true
 		case (a == "--limit" || a == "-n") && i+1 < len(args):
 			n, err := strconv.Atoi(args[i+1])
 			if err != nil {
@@ -595,6 +642,16 @@ func applyReadyParams(in []beads.Bead, p ReadyParams) []beads.Bead {
 			continue
 		}
 		if p.excludeTypes[b.Type] {
+			continue
+		}
+		excluded := false
+		for _, label := range b.Labels {
+			if p.excludeLabels[label] {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
 		match := true

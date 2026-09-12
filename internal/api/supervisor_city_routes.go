@@ -199,6 +199,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/beads/ready/summary", (*Server).humaHandleBeadReadySummary, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/ephemeral", (*Server).humaHandleBeadEphemeral, errorStatuses(http.StatusBadRequest, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",

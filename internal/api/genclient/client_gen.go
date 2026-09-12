@@ -1624,6 +1624,34 @@ type Dep struct {
 	Type        string  `json:"type"`
 }
 
+// DiscoverySummary defines model for DiscoverySummary.
+type DiscoverySummary struct {
+	Assignee              *string            `json:"assignee,omitempty"`
+	CreatedAt             *time.Time         `json:"created_at,omitempty"`
+	DetailsOmitted        *[]string          `json:"details_omitted"`
+	FieldsOmitted         *[]string          `json:"fields_omitted,omitempty"`
+	Id                    string             `json:"id"`
+	Labels                *[]string          `json:"labels,omitempty"`
+	Parent                *string            `json:"parent,omitempty"`
+	Priority              *int64             `json:"priority,omitempty"`
+	RoutingMetadata       *map[string]string `json:"routing_metadata,omitempty"`
+	SourceSerializedBytes int64              `json:"source_serialized_bytes"`
+	Status                string             `json:"status"`
+	Title                 *string            `json:"title,omitempty"`
+	Type                  *string            `json:"type,omitempty"`
+}
+
+// DiscoverySummaryEnvelope defines model for DiscoverySummaryEnvelope.
+type DiscoverySummaryEnvelope struct {
+	Beads         *[]DiscoverySummary `json:"beads"`
+	BudgetBytes   int64               `json:"budget_bytes"`
+	Kind          string              `json:"kind"`
+	Omitted       int64               `json:"omitted"`
+	SchemaVersion string              `json:"schema_version"`
+	Total         int64               `json:"total"`
+	Verb          string              `json:"verb"`
+}
+
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
 	// Location Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -8654,6 +8682,33 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Rig Filter by rig.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+}
+
+// GetV0CityByCityNameBeadsReadySummaryParams defines parameters for GetV0CityByCityNameBeadsReadySummary.
+type GetV0CityByCityNameBeadsReadySummaryParams struct {
+	// Rig Filter by rig.
+	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// Assignee Filter by assignee.
+	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// Unassigned Include only unassigned beads.
+	Unassigned *bool `form:"unassigned,omitempty" json:"unassigned,omitempty"`
+
+	// MetadataKey Metadata key to match; requires metadata_value.
+	MetadataKey *string `form:"metadata_key,omitempty" json:"metadata_key,omitempty"`
+
+	// MetadataValue Metadata value to match; requires metadata_key.
+	MetadataValue *string `form:"metadata_value,omitempty" json:"metadata_value,omitempty"`
+
+	// ExcludeType Bead types to exclude.
+	ExcludeType *[]string `form:"exclude_type,omitempty" json:"exclude_type,omitempty"`
+
+	// ExcludeLabel Bead labels to exclude.
+	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
+
+	// Limit Maximum matching entries to consider. The compact response remains capped at 100 rows.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
@@ -17788,6 +17843,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameBeadsReady request
 	GetV0CityByCityNameBeadsReady(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameBeadsReadySummary request
+	GetV0CityByCityNameBeadsReadySummary(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadySummaryParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameConfig request
 	GetV0CityByCityNameConfig(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18762,6 +18820,18 @@ func (c *Client) GetV0CityByCityNameBeadsGraphByRootId(ctx context.Context, city
 
 func (c *Client) GetV0CityByCityNameBeadsReady(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameBeadsReadyRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameBeadsReadySummary(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadySummaryParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadsReadySummaryRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -22995,6 +23065,174 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 		if params.Rig != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "rig", *params.Rig, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameBeadsReadySummaryRequest generates requests for GetV0CityByCityNameBeadsReadySummary
+func NewGetV0CityByCityNameBeadsReadySummaryRequest(server string, cityName string, params *GetV0CityByCityNameBeadsReadySummaryParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/beads/ready/summary", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Rig != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "rig", *params.Rig, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Assignee != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "assignee", *params.Assignee, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Unassigned != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "unassigned", *params.Unassigned, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MetadataKey != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "metadata_key", *params.MetadataKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MetadataValue != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "metadata_value", *params.MetadataValue, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ExcludeType != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "exclude_type", *params.ExcludeType, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ExcludeLabel != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "exclude_label", *params.ExcludeLabel, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -31633,6 +31871,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameBeadsReadyWithResponse request
 	GetV0CityByCityNameBeadsReadyWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadyParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsReadyResponse, error)
 
+	// GetV0CityByCityNameBeadsReadySummaryWithResponse request
+	GetV0CityByCityNameBeadsReadySummaryWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadySummaryParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsReadySummaryResponse, error)
+
 	// GetV0CityByCityNameConfigWithResponse request
 	GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error)
 
@@ -32987,6 +33228,33 @@ func (r GetV0CityByCityNameBeadsReadyResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameBeadsReadyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameBeadsReadySummaryResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *DiscoverySummaryEnvelope
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameBeadsReadySummaryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameBeadsReadySummaryResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -36970,6 +37238,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadsReadyWithResponse(ctx cont
 	return ParseGetV0CityByCityNameBeadsReadyResponse(rsp)
 }
 
+// GetV0CityByCityNameBeadsReadySummaryWithResponse request returning *GetV0CityByCityNameBeadsReadySummaryResponse
+func (c *ClientWithResponses) GetV0CityByCityNameBeadsReadySummaryWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsReadySummaryParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsReadySummaryResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadsReadySummary(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameBeadsReadySummaryResponse(rsp)
+}
+
 // GetV0CityByCityNameConfigWithResponse request returning *GetV0CityByCityNameConfigResponse
 func (c *ClientWithResponses) GetV0CityByCityNameConfigWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigResponse, error) {
 	rsp, err := c.GetV0CityByCityNameConfig(ctx, cityName, reqEditors...)
@@ -40425,6 +40702,67 @@ func ParseGetV0CityByCityNameBeadsReadyResponse(rsp *http.Response) (*GetV0CityB
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameBeadsReadySummaryResponse parses an HTTP response from a GetV0CityByCityNameBeadsReadySummaryWithResponse call
+func ParseGetV0CityByCityNameBeadsReadySummaryResponse(rsp *http.Response) (*GetV0CityByCityNameBeadsReadySummaryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameBeadsReadySummaryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DiscoverySummaryEnvelope
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

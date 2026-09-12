@@ -835,6 +835,128 @@ func (c *Client) ReadyBeads() (CachedRead[[]beads.Bead], error) {
 	}, nil
 }
 
+// ReadySummaryOpts declares the server-side filters for a bounded ready
+// discovery projection. One metadata key/value and repeatable type and label
+// exclusions match the controller's scoped control-ready queries.
+type ReadySummaryOpts struct {
+	Rig           string
+	Assignee      string
+	Unassigned    bool
+	MetadataKey   string
+	MetadataValue string
+	ExcludeTypes  []string
+	ExcludeLabels []string
+	Limit         int
+}
+
+// ReadySummary fetches the compact ready projection after the supervisor has
+// applied the declared selectors. Unlike ReadyBeads, it never transfers full
+// bead descriptions, notes, or other unbounded fields to the caller.
+func (c *Client) ReadySummary(opts ReadySummaryOpts) (CachedRead[beads.DiscoverySummaryEnvelope], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[beads.DiscoverySummaryEnvelope]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsReadySummaryParams{}
+	if opts.Rig != "" {
+		params.Rig = &opts.Rig
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Unassigned {
+		params.Unassigned = &opts.Unassigned
+	}
+	if opts.MetadataKey != "" {
+		params.MetadataKey = &opts.MetadataKey
+		params.MetadataValue = &opts.MetadataValue
+	}
+	if len(opts.ExcludeTypes) > 0 {
+		params.ExcludeType = &opts.ExcludeTypes
+	}
+	if len(opts.ExcludeLabels) > 0 {
+		params.ExcludeLabel = &opts.ExcludeLabels
+	}
+	if opts.Limit > 0 {
+		limit := int64(opts.Limit)
+		params.Limit = &limit
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadySummaryWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[beads.DiscoverySummaryEnvelope]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[beads.DiscoverySummaryEnvelope]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return CachedRead[beads.DiscoverySummaryEnvelope]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[beads.DiscoverySummaryEnvelope]{}, &connError{err: fmt.Errorf("empty ready summary response")}
+	}
+	return CachedRead[beads.DiscoverySummaryEnvelope]{
+		Body:       discoverySummaryEnvelopeFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+func discoverySummaryEnvelopeFromGen(in genclient.DiscoverySummaryEnvelope) beads.DiscoverySummaryEnvelope {
+	out := beads.DiscoverySummaryEnvelope{
+		SchemaVersion: in.SchemaVersion,
+		Kind:          in.Kind,
+		Verb:          in.Verb,
+		BudgetBytes:   int(in.BudgetBytes),
+		Total:         int(in.Total),
+		Omitted:       int(in.Omitted),
+	}
+	if in.Beads == nil {
+		return out
+	}
+	out.Beads = make([]beads.DiscoverySummary, 0, len(*in.Beads))
+	for _, bead := range *in.Beads {
+		item := beads.DiscoverySummary{
+			ID:                    bead.Id,
+			Status:                bead.Status,
+			SourceSerializedBytes: int(bead.SourceSerializedBytes),
+		}
+		if bead.Assignee != nil {
+			item.Assignee = *bead.Assignee
+		}
+		if bead.CreatedAt != nil {
+			item.CreatedAt = *bead.CreatedAt
+		}
+		if bead.DetailsOmitted != nil {
+			item.DetailsOmitted = append([]string(nil), (*bead.DetailsOmitted)...)
+		}
+		if bead.FieldsOmitted != nil {
+			item.FieldsOmitted = append([]string(nil), (*bead.FieldsOmitted)...)
+		}
+		if bead.Labels != nil {
+			item.Labels = append([]string(nil), (*bead.Labels)...)
+		}
+		if bead.Parent != nil {
+			item.Parent = *bead.Parent
+		}
+		if bead.Priority != nil {
+			priority := int(*bead.Priority)
+			item.Priority = &priority
+		}
+		if bead.RoutingMetadata != nil {
+			item.RoutingMetadata = make(map[string]string, len(*bead.RoutingMetadata))
+			for key, value := range *bead.RoutingMetadata {
+				item.RoutingMetadata[key] = value
+			}
+		}
+		if bead.Title != nil {
+			item.Title = *bead.Title
+		}
+		if bead.Type != nil {
+			item.Type = *bead.Type
+		}
+		out.Beads = append(out.Beads, item)
+	}
+	return out
+}
+
 // CloseBead closes a bead via POST /v0/city/{cityName}/bead/{id}/close.
 func (c *Client) CloseBead(id string) error {
 	if err := c.requireCityScope(); err != nil {

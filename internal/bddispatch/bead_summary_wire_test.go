@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -21,7 +22,9 @@ import (
 // value-side backstop the constants cannot provide themselves.
 func TestSummaryRoutingMetadataKeysPinned(t *testing.T) {
 	want := []string{
+		"gc.run_target",
 		"gc.routed_to",
+		"gc.instantiating",
 		"gc.root_bead_id",
 		"gc.session_id",
 		"gc.session_name",
@@ -58,6 +61,27 @@ func TestBeadSummaryEnvelopeCountersReconcileWhenRowsAreOmitted(t *testing.T) {
 	}
 	if envelope.Total != len(envelope.Beads)+envelope.Omitted {
 		t.Fatalf("summary counters do not reconcile: total=%d rows=%d omitted=%d", envelope.Total, len(envelope.Beads), envelope.Omitted)
+	}
+}
+
+// A budget rejection happens after prior accepted rows have already set
+// Omitted to the number of remaining input rows. Rejections must not count
+// those future rows a second time.
+func TestBeadSummaryEnvelopeCountersReconcileWhenBudgetOmitsRows(t *testing.T) {
+	input := make([]beads.Bead, MaxBeadSummaryRows)
+	for i := range input {
+		input[i] = beads.Bead{
+			ID:     fmt.Sprintf("gcw-budget-%03d", i),
+			Status: "open",
+			Labels: []string{strings.Repeat("x", 512), strings.Repeat("y", 512)},
+		}
+	}
+	envelope := NewBeadSummaryEnvelope("ready", input, DefaultBeadSummaryBudget)
+	if len(envelope.Beads) == 0 || envelope.Omitted == 0 {
+		t.Fatalf("fixture did not exercise accepted rows followed by budget omissions: rows=%d omitted=%d", len(envelope.Beads), envelope.Omitted)
+	}
+	if envelope.Total != len(envelope.Beads)+envelope.Omitted {
+		t.Fatalf("summary counters do not reconcile after budget omission: total=%d rows=%d omitted=%d", envelope.Total, len(envelope.Beads), envelope.Omitted)
 	}
 }
 
