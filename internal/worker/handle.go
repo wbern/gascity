@@ -49,6 +49,12 @@ type MessagingHandle interface {
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
 }
 
+// InvocationAttributionHandle accepts exact terminal observations supplied by a
+// provider adapter after it completes an explicitly bound turn.
+type InvocationAttributionHandle interface {
+	CompleteInvocation(context.Context, InvocationCompletion) (usage.InvocationRecord, error)
+}
+
 // HistoryHandle exposes normalized transcript history reads.
 type HistoryHandle interface {
 	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
@@ -139,6 +145,10 @@ type MessageRequest struct {
 	Text       string         `json:"text"`
 	Delivery   DeliveryIntent `json:"delivery,omitempty"`
 	ReplaceKey string         `json:"replace_key,omitempty"`
+	// Binding is optional. A nil binding leaves persistent and manually named
+	// sessions explicitly unbound; the worker never derives work identity from
+	// current session metadata.
+	Binding *InvocationBinding `json:"binding,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -177,6 +187,8 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// Binding has the same exact producer-side semantics as MessageRequest.
+	Binding *InvocationBinding `json:"binding,omitempty"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -247,12 +259,14 @@ type SessionSpec struct {
 
 // SessionHandleConfig configures a [SessionHandle].
 type SessionHandleConfig struct {
-	Manager     *sessionpkg.Manager
-	SearchPaths []string
-	Adapter     SessionLogAdapter
-	Recorder    events.Recorder
-	UsageSink   usage.Sink
-	Session     SessionSpec
+	Manager          *sessionpkg.Manager
+	SearchPaths      []string
+	Adapter          SessionLogAdapter
+	Recorder         events.Recorder
+	UsageSink        usage.Sink
+	InvocationLedger *usage.InvocationLedger
+	HeadObserver     HeadObserver
+	Session          SessionSpec
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
@@ -260,18 +274,20 @@ type SessionHandleConfig struct {
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
-	mu             sync.Mutex
-	manager        *sessionpkg.Manager
-	adapter        SessionLogAdapter
-	recorder       events.Recorder
-	usageSink      usage.Sink
-	searchPaths    []string
-	session        SessionSpec
-	sessionID      string
-	history        *HistorySnapshot
-	historyRaw     historyGeneration
-	pricing        *pricing.Registry
-	invTelemetryMu sync.Mutex
+	mu               sync.Mutex
+	manager          *sessionpkg.Manager
+	adapter          SessionLogAdapter
+	recorder         events.Recorder
+	usageSink        usage.Sink
+	invocationLedger *usage.InvocationLedger
+	headObserver     HeadObserver
+	searchPaths      []string
+	session          SessionSpec
+	sessionID        string
+	history          *HistorySnapshot
+	historyRaw       historyGeneration
+	pricing          *pricing.Registry
+	invTelemetryMu   sync.Mutex
 	// sidecarDoneID is the session id whose transcript-session sidecar has been
 	// confirmed written, guarded by sidecarMu. The keyed transcript path is stable
 	// once the session key exists, so a matching id lets repeated turn/poll calls
@@ -281,14 +297,15 @@ type SessionHandle struct {
 }
 
 var (
-	_ Handle                = (*SessionHandle)(nil)
-	_ LifecycleHandle       = (*SessionHandle)(nil)
-	_ MessagingHandle       = (*SessionHandle)(nil)
-	_ TranscriptHandle      = (*SessionHandle)(nil)
-	_ HistoryHandle         = (*SessionHandle)(nil)
-	_ InteractionHandle     = (*SessionHandle)(nil)
-	_ PeekHandle            = (*SessionHandle)(nil)
-	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ Handle                      = (*SessionHandle)(nil)
+	_ LifecycleHandle             = (*SessionHandle)(nil)
+	_ MessagingHandle             = (*SessionHandle)(nil)
+	_ InvocationAttributionHandle = (*SessionHandle)(nil)
+	_ TranscriptHandle            = (*SessionHandle)(nil)
+	_ HistoryHandle               = (*SessionHandle)(nil)
+	_ InteractionHandle           = (*SessionHandle)(nil)
+	_ PeekHandle                  = (*SessionHandle)(nil)
+	_ LiveObservationHandle       = (*SessionHandle)(nil)
 )
 
 type historyGeneration struct {

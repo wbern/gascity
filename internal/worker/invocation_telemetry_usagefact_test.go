@@ -132,6 +132,9 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 	if f.IdempotencyKey != usage.ModelIdempotencyKey(f.RunID, "u1") {
 		t.Fatalf("IdempotencyKey = %q, want ModelIdempotencyKey(%q, u1)", f.IdempotencyKey, f.RunID)
 	}
+	if f.AttributionV2 == nil || f.AttributionV2.State != usage.AttributionUnbound {
+		t.Fatalf("persistent session usage must stay explicitly unbound without a turn binding: %+v", f.AttributionV2)
+	}
 
 	wantCost, ok := pricing.BuildRegistry(nil, nil).Estimate("claude", "claude-opus-4-7", pricing.Usage{
 		PromptTokens:        100,
@@ -147,6 +150,51 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 	}
 	if f.CostUSDEstimate != wantCost {
 		t.Fatalf("CostUSDEstimate = %v, want %v", f.CostUSDEstimate, wantCost)
+	}
+}
+
+func TestDelayedTranscriptFactUsesCompletedInvocationBinding(t *testing.T) {
+	handle, transcriptPath, sinkPath := newUsageFactHandle(t)
+	handle.invocationLedger = usage.NewInvocationLedger(filepath.Join(t.TempDir(), "invocations.jsonl"))
+
+	if _, err := handle.Message(context.Background(), MessageRequest{
+		Text: "do the original work",
+		Binding: &InvocationBinding{
+			City:         "gc2",
+			Rig:          "gas-city",
+			WorkBeadID:   "work-original",
+			Attempt:      "1",
+			InvocationID: "turn-1",
+		},
+	}); err != nil {
+		t.Fatalf("Message(bound): %v", err)
+	}
+	if _, err := handle.CompleteInvocation(context.Background(), InvocationCompletion{
+		InvocationID:      "turn-1",
+		UpstreamRequestID: "provider-response-1",
+		CompletionHead:    usage.Head{State: usage.HeadDirty, SHA: "finish"},
+	}); err != nil {
+		t.Fatalf("CompleteInvocation: %v", err)
+	}
+
+	// The original turn's usage arrives only after the next prompt operation.
+	// The collector may not consult the mutable session assignment to join it.
+	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
+		usageEntry("provider-response-1", "claude-opus-4-7", 100, 50, 0, 0),
+	})
+	if _, err := handle.Message(context.Background(), MessageRequest{Text: "next prompt"}); err != nil {
+		t.Fatalf("Message(delayed collection): %v", err)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 || len(facts) != 1 {
+		t.Fatalf("facts/warnings = %+v / %v, want one clean fact", facts, warnings)
+	}
+	if facts[0].AttributionV2 == nil || facts[0].AttributionV2.State != usage.AttributionBound || facts[0].AttributionV2.WorkBeadID != "work-original" {
+		t.Fatalf("delayed fact attribution = %+v, want immutable original binding", facts[0].AttributionV2)
 	}
 }
 

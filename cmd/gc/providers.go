@@ -1013,6 +1013,17 @@ func usageSinkForCity(cfg *config.City, cityPath string) usage.Sink {
 	return newUsageSinkByName(provider, filepath.Join(cityPath, ".gc", "usage.jsonl"))
 }
 
+// invocationLedgerForCity returns the durable v2 producer-binding ledger for a
+// city. It is independent of the configured usage sink: a turn binding must
+// survive a transient exporter failure so a provider adapter can settle it
+// later without consulting mutable session assignment metadata.
+func invocationLedgerForCity(cityPath string) *usage.InvocationLedger {
+	if strings.TrimSpace(cityPath) == "" {
+		return nil
+	}
+	return usage.NewInvocationLedger(filepath.Join(cityPath, ".gc", "usage-invocations-v2.jsonl"))
+}
+
 type eventsRotationSettings struct {
 	enabled              bool
 	maxSizeBytes         int64

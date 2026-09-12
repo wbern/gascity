@@ -270,6 +270,9 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if err := h.bindInvocation(ctx, id, req.Binding); err != nil {
+		return MessageResult{}, err
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err
@@ -312,6 +315,9 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	id, err := h.ensureSessionID()
 	if err != nil {
+		return NudgeResult{}, err
+	}
+	if err := h.bindInvocation(ctx, id, req.Binding); err != nil {
 		return NudgeResult{}, err
 	}
 	resumeCommand, err := h.startCommand(id)
