@@ -406,6 +406,32 @@ export const zConvoyGetResponse = z.object({
     progress: zConvoyProgress.optional()
 });
 
+export const zDiscoverySummary = z.object({
+    assignee: z.string().optional(),
+    created_at: z.iso.datetime().optional(),
+    details_omitted: z.array(z.string()).nullable(),
+    fields_omitted: z.array(z.string()).nullish(),
+    id: z.string(),
+    labels: z.array(z.string()).nullish(),
+    parent: z.string().optional(),
+    priority: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    routing_metadata: z.record(z.string(), z.string()).optional(),
+    source_serialized_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    status: z.string(),
+    title: z.string().optional(),
+    type: z.string().optional()
+});
+
+export const zDiscoverySummaryEnvelope = z.object({
+    beads: z.array(zDiscoverySummary).nullable(),
+    budget_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    kind: z.string(),
+    omitted: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    schema_version: z.string(),
+    total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    verb: z.string()
+});
+
 export const zErrorDetail = z.object({
     location: z.string().optional(),
     message: z.string().optional(),
@@ -7187,6 +7213,26 @@ export const zGetV0CityByCityNameBeadsReadyQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameBeadsReadyResponse = zListBodyBead;
+
+export const zGetV0CityByCityNameBeadsReadySummaryPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameBeadsReadySummaryQuery = z.object({
+    rig: z.string().optional(),
+    assignee: z.string().optional(),
+    unassigned: z.boolean().optional(),
+    metadata_key: z.string().optional(),
+    metadata_value: z.string().optional(),
+    exclude_type: z.array(z.string()).nullish(),
+    exclude_label: z.array(z.string()).nullish(),
+    limit: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(5000)).optional().default(BigInt(100))
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameBeadsReadySummaryResponse = zDiscoverySummaryEnvelope;
 
 export const zGetV0CityByCityNameConfigPath = z.object({
     cityName: z.string().min(1).regex(/\S/)

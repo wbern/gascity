@@ -133,9 +133,9 @@ func TestDispatchViaAPIReadySummaryJSONUsesBoundedProjection(t *testing.T) {
 	giantNotes := strings.Repeat("evidence ", 100_000)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []beads.Bead{{
+		_ = json.NewEncoder(w).Encode(NewBeadSummaryEnvelope("ready", []beads.Bead{{
 			ID: "gcw-giant", Title: "Preserve evidence", Status: "open", Notes: giantNotes,
-		}}}) //nolint:errcheck
+		}}, DefaultBeadSummaryBudget)) //nolint:errcheck
 	}))
 	defer ts.Close()
 
@@ -891,6 +891,63 @@ func TestDispatchViaAPIList(t *testing.T) {
 	for _, want := range []string{"status=in_progress", "assignee=worker", "limit=25"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("list query %q missing %q", gotQuery, want)
+		}
+	}
+}
+
+// A control-ready summary must be bounded before it crosses the controller
+// boundary. Fetching /beads/ready and compacting it locally only replaces one
+// oversized response with several oversized responses when the caller scopes
+// discovery by assignee or route.
+func TestDispatchViaAPIReadySummaryRequestsServerBoundedProjection(t *testing.T) {
+	var gotPath string
+	var gotQuery map[string][]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		if gotPath != "/v0/city/alpha/beads/ready/summary" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []beads.Bead{}, "total": 0}) //nolint:errcheck // test response
+			return
+		}
+		_ = json.NewEncoder(w).Encode(BeadSummaryEnvelope{ //nolint:errcheck // test response
+			SchemaVersion: "1",
+			Kind:          BeadSummaryKind,
+			Verb:          "ready",
+			BudgetBytes:   DefaultBeadSummaryBudget,
+			Beads:         []BeadSummary{},
+		})
+	}))
+	defer ts.Close()
+
+	client := beadclient.NewCityScopedClient(ts.URL, "alpha")
+	var out, errb bytes.Buffer
+	args := []string{
+		"--assignee=worker-a",
+		"--metadata-field=gc.routed_to=gas-city-wbern/codex",
+		"--exclude-type=message",
+		"--exclude-label=hold:mayor",
+		"--exclude-label=hold:external",
+		"--limit=42",
+		"--json",
+		"--summary-json",
+	}
+	if code := DispatchViaAPI(client, "ready", args, &out, &errb); code != 0 {
+		t.Fatalf("ready summary via API: code=%d err=%s", code, errb.String())
+	}
+	if gotPath != "/v0/city/alpha/beads/ready/summary" {
+		t.Fatalf("ready summary path = %q, want server bounded projection", gotPath)
+	}
+	for key, want := range map[string]string{
+		"assignee":       "worker-a",
+		"metadata_key":   "gc.routed_to",
+		"metadata_value": "gas-city-wbern/codex",
+		"exclude_type":   "message",
+		"exclude_label":  "hold:external,hold:mayor",
+		"limit":          "42",
+	} {
+		if got := gotQuery[key]; len(got) != 1 || got[0] != want {
+			t.Errorf("summary query %q = %v, want [%q]", key, got, want)
 		}
 	}
 }
