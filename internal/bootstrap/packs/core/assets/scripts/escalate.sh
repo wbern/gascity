@@ -47,11 +47,4 @@ if [ -n "$SEVERITY" ] && ! printf '%s' "$SUBJECT" | grep -Eq '\[[^]]+\]$'; then
 fi
 
 RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
-# The same subject/recipient owns one durable condition receipt. Exact body
-# changes (including a new head, blocker or decision) reset its reminder budget;
-# severity changes are distinct subjects. Defaults send at most five times with
-# 1h/2h/4h/8h repeat gaps. GC_ESCALATE_DEDUP_DISABLE=1 forces explicit delivery.
-# Python supplies process-scoped flock on both Linux and macOS. Failure is loud,
-# leaving caller retries available; no mail is archived or removed here.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SCRIPT_DIR/escalate.py" "$RECIPIENT" "$SUBJECT" "$MESSAGE"
+gc mail send "$RECIPIENT" -s "$SUBJECT" -m "$MESSAGE"
