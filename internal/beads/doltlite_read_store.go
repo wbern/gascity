@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,6 +24,7 @@ import (
 type DoltliteReadStore struct {
 	*BdStore
 	db              *sql.DB
+	dbPath          string
 	orderRunMu      sync.Mutex
 	orderRunLastRun map[string]time.Time
 	orderRunOpen    map[string]bool
@@ -167,7 +169,78 @@ func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, err
 		_ = db.Close()
 		return nil, err
 	}
-	return &DoltliteReadStore{BdStore: backing, db: db}, nil
+	return &DoltliteReadStore{BdStore: backing, db: db, dbPath: dbPath}, nil
+}
+
+// CompareAndSetMetadataPatch atomically updates several metadata keys while
+// their expected values still match. DoltLite's SQLite transaction supplies
+// the atomic boundary without pretending that its schema has the revision
+// token required by ConditionalWriter's broader contract.
+func (s *DoltliteReadStore) CompareAndSetMetadataPatch(id string, expected Bead, patch map[string]string) (bool, error) {
+	if s == nil || s.dbPath == "" {
+		return false, fmt.Errorf("doltlite metadata patch: store unavailable")
+	}
+	db, err := sql.Open("sqlite", "file:"+s.dbPath+"?mode=rw&_busy_timeout=10000&_txlock=immediate")
+	if err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: opening store: %w", err)
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit; preserves the original error
+
+	var table, raw, status, assignee, parentID string
+	for _, candidate := range []string{doltliteIssueTables.issues, doltliteWispTables.issues} {
+		depsTable := doltliteIssueTables.deps
+		if candidate == doltliteWispTables.issues {
+			depsTable = doltliteWispTables.deps
+		}
+		query := "SELECT COALESCE(i.metadata, '{}'), COALESCE(i.status, ''), COALESCE(i.assignee, ''), " + doltliteQualifiedDependsOnExpr("pc") +
+			" FROM " + candidate + " i LEFT JOIN " + depsTable + " pc ON pc.issue_id = i.id AND pc.type = 'parent-child' WHERE i.id = ?"
+		err = tx.QueryRow(query, id).Scan(&raw, &status, &assignee, &parentID)
+		if err == nil {
+			table = candidate
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("doltlite metadata patch: reading %q: %w", id, err)
+		}
+	}
+	if table == "" {
+		return false, fmt.Errorf("doltlite metadata patch on %q: %w", id, ErrNotFound)
+	}
+	metadata := parseMetadata(raw)
+	if mapBdStatus(status) != expected.Status || assignee != expected.Assignee || parentID != expected.ParentID || !maps.Equal(metadata, expected.Metadata) {
+		return false, nil
+	}
+	if metadata == nil {
+		metadata = make(map[string]string, len(patch))
+	}
+	for key, value := range patch {
+		metadata[key] = value
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: encoding metadata: %w", err)
+	}
+	result, err := tx.Exec("UPDATE "+table+" SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", string(encoded), id)
+	if err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: updating %q: %w", id, err)
+	}
+	rows, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return false, fmt.Errorf("doltlite metadata patch: reading affected rows for %q: %w", id, rowsErr)
+	}
+	if rows != 1 {
+		return false, fmt.Errorf("doltlite metadata patch: uncertain update of %q (rows=%d)", id, rows)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: committing %q: %w", id, err)
+	}
+	s.resetOrderRunCache()
+	return true, nil
 }
 
 // ReindexDoltliteStore rebuilds the DoltLite store's SQLite secondary indexes.

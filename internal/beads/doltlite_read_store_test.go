@@ -1955,6 +1955,34 @@ func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreAtomicMetadataPatch(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task", Metadata: map[string]string{"molecule_id": "", "gc.routed_to": "", "keep": "sibling"}},
+	})
+
+	expected, err := store.Get("ga-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped, err := store.CompareAndSetMetadataPatch("ga-1", expected,
+		map[string]string{"molecule_id": "root-1", "gc.routed_to": "reviewer"})
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataPatch = (%v, %v), want (true, nil)", swapped, err)
+	}
+	got, err := store.Get("ga-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["molecule_id"] != "root-1" || got.Metadata["gc.routed_to"] != "reviewer" || got.Metadata["keep"] != "sibling" {
+		t.Fatalf("metadata after atomic patch = %#v", got.Metadata)
+	}
+
+	swapped, err = store.CompareAndSetMetadataPatch("ga-1", expected, map[string]string{"molecule_id": "root-2"})
+	if err != nil || swapped {
+		t.Fatalf("stale CompareAndSetMetadataPatch = (%v, %v), want (false, nil)", swapped, err)
+	}
+}
+
 // TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
 // mechanism must execute a real SQLite REINDEX against the physical
 // .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
