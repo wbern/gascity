@@ -137,6 +137,43 @@ func TestNativeDoltStoreMetadataPatchCASRejectsStalePlainFields(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreMetadataPatchCASInternalCallbackReplayCannotLeakSuccess(t *testing.T) {
+	metadata := json.RawMessage(`{"molecule_id":"","gc.routed_to":""}`)
+	callbackCalls := 0
+	storage := &nativeDoltStorageSpy{}
+	storage.getIssue = func(context.Context, string) (*beadslib.Issue, error) {
+		return &beadslib.Issue{ID: "gc-replay", Status: "open", Metadata: append(json.RawMessage(nil), metadata...)}, nil
+	}
+	storage.updateIssue = func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+		metadata = append(json.RawMessage(nil), updates["metadata"].(json.RawMessage)...)
+		return nil
+	}
+	storage.runInTransaction = func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		tx := nativeDoltTransactionForTest{storage: storage}
+		callbackCalls++
+		if err := fn(tx); err != nil {
+			return err
+		}
+		// Model upstream replay after the first callback's commit conflict: its
+		// write was rolled back, then an independent writer committed first.
+		metadata = json.RawMessage(`{"molecule_id":"root-other","gc.routed_to":"reviewer-other"}`)
+		callbackCalls++
+		return fn(tx)
+	}
+	store := newNativeDoltStoreForTest(storage)
+	expected := Bead{ID: "gc-replay", Status: "open", Metadata: map[string]string{"molecule_id": "", "gc.routed_to": ""}}
+	swapped, err := store.CompareAndSetMetadataPatch("gc-replay", expected, map[string]string{"molecule_id": "root-us", "gc.routed_to": "reviewer-us"})
+	if err != nil || swapped {
+		t.Fatalf("callback replay result = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if callbackCalls != 2 {
+		t.Fatalf("callback calls = %d, want 2", callbackCalls)
+	}
+	if string(metadata) != `{"molecule_id":"root-other","gc.routed_to":"reviewer-other"}` {
+		t.Fatalf("winner metadata changed: %s", metadata)
+	}
+}
+
 // TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade pins the seam
 // behavior the condWritesStamp comment in native_dolt_store.go guarantees:
 // require yields a typed refusal and auto yields a loud degrade — never a

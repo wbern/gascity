@@ -104,6 +104,10 @@ func (s *NativeDoltStore) CompareAndSetMetadataPatch(id string, expected Bead, p
 	swapped := false
 	commitMsg := fmt.Sprintf("gc: compare-and-set metadata patch on bead %s", id)
 	patchInTransaction := func(tx beadslib.Transaction) error {
+		// Upstream RunInTransaction may replay this callback after a retryable
+		// commit conflict. Reset per invocation so a first-attempt write cannot
+		// leak a stale true when the replay observes another writer's winner.
+		swapped = false
 		issue, err := tx.GetIssue(ctx, id)
 		if err != nil {
 			return nativeStoreError(id, err)
