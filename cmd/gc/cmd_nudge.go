@@ -485,6 +485,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if targetID == "" {
 		if inject {
+			injectPrefix += contextInjectLine(contextHookInput)
 			return 0
 		}
 		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
