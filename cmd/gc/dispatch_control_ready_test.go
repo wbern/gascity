@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bddispatch"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -1031,6 +1032,174 @@ func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("summary calls = %d, want 1 during %s backoff", calls, controlReadyCacheFailureBackoff)
 	}
+}
+
+// controlReadySummaryPayload marshals items into the same bounded discovery
+// envelope shape bdshim emits for `bd ready --summary-json`, so fixtures in
+// these tests exercise the real decodeControlReadySummary path rather than a
+// hand-rolled JSON shape that could silently drift from production.
+func controlReadySummaryPayload(t *testing.T, items []beads.Bead) string {
+	t.Helper()
+	envelope := bddispatch.NewBeadSummaryEnvelope("ready", items, bddispatch.DefaultBeadSummaryBudget)
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal summary envelope: %v", err)
+	}
+	return string(data)
+}
+
+// controlReadyEquivalenceFixture returns the real generated query, its parsed
+// form, env, and a ready-bead universe shared by
+// TestControlReadySummaryPathIssuesExactlyOneBdCall and
+// TestControlReadySummaryPathReturnsSameQueueAsScopedFanOut: an assignee hit,
+// a legacy-variant assignee hit (candidateLegacyVariant's plain
+// control-dispatcher -> workflow-control suffix rewrite), a run_target hit, a
+// routed_to hit, a bare-alias routed_to hit, an instantiating bead that must
+// be filtered out entirely, a dispatch-hold-labeled bead that must be
+// excluded from route tiers but NOT from assignee tiers, and an epic that
+// must never be scheduled. Deriving parsed from the real generated query
+// (rather than hand-assembling one) avoids baking in an assumption about
+// which route aliases workflowServeControlReadyQueryForBeads actually emits
+// for a binding-qualified target.
+func controlReadyEquivalenceFixture(t *testing.T) (query string, parsed parsedControlReadyQuery, envList []string, ready []beads.Bead) {
+	t.Helper()
+	agentCfg := config.Agent{Name: "core.control-dispatcher", Dir: "rig"}
+	query = workflowServeControlReadyQuery(agentCfg, "controller-session")
+	parsed, ok := parseControlReadyQuery(query)
+	if !ok {
+		t.Fatalf("parseControlReadyQuery: not recognized: %q", query)
+	}
+	envList = []string{"GC_SESSION_NAME=" + parsed.controlSessionName}
+	ready = []beads.Bead{
+		{ID: "gcw-c1", Assignee: parsed.controlSessionName, Type: "task"},
+		{ID: "gcw-c2-legacy", Assignee: candidateLegacyVariant(parsed.target), Type: "task"},
+		{ID: "gcw-rt1", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: parsed.target}},
+		{ID: "gcw-routed1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: parsed.target}},
+		{ID: "gcw-bare-routed", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: parsed.bareTarget}},
+		{ID: "gcw-instantiating", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: parsed.target, beadmeta.InstantiatingMetadataKey: "true"}},
+		{ID: "gcw-held-route", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: parsed.target}, Labels: []string{beadmeta.HoldMayorLabel}},
+		{ID: "gcw-held-assigned", Assignee: parsed.controlSessionName, Type: "task", Labels: []string{beadmeta.HoldMayorLabel}},
+		{ID: "gcw-epic", Assignee: parsed.controlSessionName, Type: "epic"},
+	}
+	return query, parsed, envList, ready
+}
+
+// TestControlReadySummaryPathIssuesExactlyOneBdCall is gcw-dsi74: the
+// scoped/shimmed summary path must answer a cold-cache control-ready scan
+// with ONE batched `bd ready --summary-json` call, filtered in Go by
+// evaluateControlReady/mergeControlReadyGroups -- exactly like the
+// non-summary fallback already does -- not the per-candidate/per-route
+// fan-out controlReadyScopedSummaryQueue issues.
+func TestControlReadySummaryPathIssuesExactlyOneBdCall(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	query, _, envList, readyFixture := controlReadyEquivalenceFixture(t)
+	var scheduled []beads.Bead
+	for _, b := range readyFixture {
+		if b.Type != controlReadyExcludeType {
+			scheduled = append(scheduled, b)
+		}
+	}
+	batchedPayload := controlReadySummaryPayload(t, scheduled)
+
+	originalRunner := controlReadyCommandRunner
+	t.Cleanup(func() { controlReadyCommandRunner = originalRunner })
+	calls := 0
+	controlReadyCommandRunner = func(_ string, _ []string, _, _ string, _ []string) (string, error) {
+		calls++
+		return batchedPayload, nil
+	}
+
+	env := map[string]string{
+		citylayout.RealBdEnvVar: "/real/bd",
+		"GC_BEADS":              "bd",
+	}
+	for _, kv := range envList {
+		parts := strings.SplitN(kv, "=", 2)
+		env[parts[0]] = parts[1]
+	}
+
+	_, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, env)
+	if err != nil {
+		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+	}
+	if !handled {
+		t.Fatalf("handled = false, want true for a control-ready query")
+	}
+	if calls != 1 {
+		t.Fatalf("controlReadyCommandRunner calls = %d, want exactly 1 (batched summary), not the scoped per-candidate/per-route fan-out", calls)
+	}
+}
+
+// TestControlReadySummaryPathReturnsSameQueueAsScopedFanOut is the
+// correctness net for the fix above: for the same underlying ready-bead
+// universe, the batched-then-Go-filtered result (evaluateControlReady over
+// one unscoped summary) must equal the scoped per-candidate/per-route
+// fan-out (controlReadyScopedSummaryQueue) bead-for-bead and in order. This
+// must stay GREEN before and after the fix -- it is the equivalence
+// guarantee gcw-qap3.31 protects.
+func TestControlReadySummaryPathReturnsSameQueueAsScopedFanOut(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
+	_, parsed, envList, readyFixture := controlReadyEquivalenceFixture(t)
+
+	scopedRunner := func(_ string, args []string, _, _ string, _ []string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "--assignee="):
+			for _, arg := range args {
+				if cand, ok := strings.CutPrefix(arg, "--assignee="); ok {
+					return controlReadySummaryPayload(t, filterReadyByAssignee(readyFixture, cand, workflowServeScanLimit)), nil
+				}
+			}
+		case strings.Contains(joined, "--metadata-field"):
+			for i, arg := range args {
+				if arg == "--metadata-field" && i+1 < len(args) {
+					kv := strings.SplitN(args[i+1], "=", 2)
+					if len(kv) == 2 {
+						return controlReadySummaryPayload(t, filterReadyByRoute(readyFixture, kv[0], kv[1])), nil
+					}
+				}
+			}
+		}
+		return controlReadySummaryPayload(t, nil), nil
+	}
+	originalRunner := controlReadyCommandRunner
+	controlReadyCommandRunner = scopedRunner
+	scopedQueue, err := controlReadyScopedSummaryQueue("/unused", map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, parsed)
+	controlReadyCommandRunner = originalRunner
+	if err != nil {
+		t.Fatalf("controlReadyScopedSummaryQueue: %v", err)
+	}
+
+	batched := evaluateControlReady(readyFixture, parsed, envList)
+
+	scopedIDs, batchedIDs := beadIDsFromHook(scopedQueue), beadIDs(batched)
+	if !stringSlicesEqual(scopedIDs, batchedIDs) {
+		t.Fatalf("scoped fan-out ids = %#v, batched ids = %#v; must match bead-for-bead and in order", scopedIDs, batchedIDs)
+	}
+	for _, want := range []string{"gcw-c1", "gcw-c2-legacy", "gcw-rt1", "gcw-routed1", "gcw-bare-routed", "gcw-held-assigned"} {
+		if !containsString(scopedIDs, want) {
+			t.Fatalf("expected %s in scheduled queue %#v", want, scopedIDs)
+		}
+	}
+	for _, unwanted := range []string{"gcw-instantiating", "gcw-held-route", "gcw-epic"} {
+		if containsString(scopedIDs, unwanted) {
+			t.Fatalf("%s must not be scheduled, got %#v", unwanted, scopedIDs)
+		}
+	}
+}
+
+func beadIDsFromHook(items []hookBead) []string {
+	out := make([]string, len(items))
+	for i, b := range items {
+		out[i] = b.ID
+	}
+	return out
 }
 
 func TestNextWorkflowServeBeadsNonControlQueryUsesOriginalShellPath(t *testing.T) {

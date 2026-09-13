@@ -513,8 +513,6 @@ var controlReadyCacheRegistry = struct {
 type controlReadyCacheEntry struct {
 	cache            *beads.CachingStore
 	ready            []beads.Bead
-	queue            []hookBead
-	queueSet         bool
 	queryKey         string
 	primedAt         time.Time
 	retryAfter       time.Time
@@ -558,13 +556,15 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 	}
 
 	if controlReadyUsesSummary(env) {
-		if len(parsed) > 0 {
-			queue, err := controlReadyScopedSummaryQueue(dir, env, parsed[0])
-			entry = &controlReadyCacheEntry{queue: queue, queueSet: true, queryKey: queryKey, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
-		} else {
-			ready, err := controlReadyFallbackReady(dir, env, includeEphemeral)
-			entry = &controlReadyCacheEntry{ready: ready, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
-		}
+		// Repair for gcw-dsi74: prime the shimmed/summary path with the same
+		// ONE unscoped `bd ready --summary-json` call the non-summary path
+		// below already uses, filtered in Go by evaluateControlReady. Scoping
+		// this to a per-candidate/per-route fan-out (controlReadyScopedSummaryQueue)
+		// re-introduced the exact N-subprocess-per-tick cost ga-ak6rt1 removed
+		// -- it is retained only for its own equivalence-guard tests, not
+		// called from this hot path anymore.
+		ready, err := controlReadyFallbackReady(dir, env, includeEphemeral)
+		entry = &controlReadyCacheEntry{ready: ready, queryKey: queryKey, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
 		if entry.err != nil {
 			entry.retryAfter = now.Add(controlReadyCacheFailureBackoff)
 			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, entry.err, entry.retryAfter.Format(time.RFC3339))
@@ -615,9 +615,6 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 			if entry.err != nil {
 				return nil, true, entry.err
 			}
-			if entry.queueSet {
-				return entry.queue, true, nil
-			}
 			if entry.ready != nil {
 				return beadsToHookBeads(evaluateControlReady(entry.ready, parsed, envList)), true, nil
 			}
@@ -627,13 +624,6 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 		}
 	}
 
-	if controlReadyUsesSummary(env) {
-		queue, err := controlReadyScopedSummaryQueue(dir, env, parsed)
-		if err != nil {
-			return nil, true, err
-		}
-		return queue, true, nil
-	}
 	ready, err := controlReadyFallbackReady(dir, env, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err
