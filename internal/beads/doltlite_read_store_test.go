@@ -1983,6 +1983,51 @@ func TestDoltliteReadStoreAtomicMetadataPatch(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreAtomicMetadataPatchPreservesRawTypesAndRejectsMalformed(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{{ID: "ga-raw", Title: "target", Status: "open", IssueType: "task"}})
+	db, err := sql.Open("sqlite", "file:"+store.dbPath+"?mode=rw&_busy_timeout=10000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	raw := `{"string":"one","number":7,"bool":true,"object":{"nested":1},"array":[1,2],"null":null}`
+	if _, err := db.Exec("UPDATE issues SET metadata = ? WHERE id = ?", raw, "ga-raw"); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := store.Get("ga-raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped, err := store.CompareAndSetMetadataPatch("ga-raw", expected, map[string]string{"published": "yes"})
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataPatch = (%v, %v)", swapped, err)
+	}
+	var encoded string
+	if err := db.QueryRow("SELECT metadata FROM issues WHERE id = ?", "ga-raw").Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"number": "7", "bool": "true", "object": `{"nested":1}`, "array": `[1,2]`, "null": "null", "published": `"yes"`} {
+		if string(got[key]) != want {
+			t.Fatalf("raw metadata[%q] = %s, want %s; all=%s", key, got[key], want, encoded)
+		}
+	}
+
+	const malformed = `{"broken":`
+	if _, err := db.Exec("UPDATE issues SET metadata = ? WHERE id = ?", malformed, "ga-raw"); err != nil {
+		t.Fatal(err)
+	}
+	if swapped, err := store.CompareAndSetMetadataPatch("ga-raw", expected, map[string]string{"published": "no"}); err == nil || swapped {
+		t.Fatalf("malformed metadata write = (%v, %v), want fail closed", swapped, err)
+	}
+	if err := db.QueryRow("SELECT metadata FROM issues WHERE id = ?", "ga-raw").Scan(&encoded); err != nil || encoded != malformed {
+		t.Fatalf("malformed metadata changed: got %q err=%v", encoded, err)
+	}
+}
+
 // TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
 // mechanism must execute a real SQLite REINDEX against the physical
 // .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not

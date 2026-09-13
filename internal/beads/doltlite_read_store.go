@@ -211,17 +211,25 @@ func (s *DoltliteReadStore) CompareAndSetMetadataPatch(id string, expected Bead,
 	if table == "" {
 		return false, fmt.Errorf("doltlite metadata patch on %q: %w", id, ErrNotFound)
 	}
+	var rawMetadata map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rawMetadata); err != nil {
+		return false, fmt.Errorf("doltlite metadata patch: decoding metadata for %q: %w", id, err)
+	}
+	if rawMetadata == nil {
+		return false, fmt.Errorf("doltlite metadata patch: metadata for %q is not a JSON object", id)
+	}
 	metadata := parseMetadata(raw)
 	if mapBdStatus(status) != expected.Status || assignee != expected.Assignee || parentID != expected.ParentID || !maps.Equal(metadata, expected.Metadata) {
 		return false, nil
 	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(patch))
-	}
 	for key, value := range patch {
-		metadata[key] = value
+		encodedValue, err := json.Marshal(value)
+		if err != nil {
+			return false, fmt.Errorf("doltlite metadata patch: encoding metadata value %q: %w", key, err)
+		}
+		rawMetadata[key] = encodedValue
 	}
-	encoded, err := json.Marshal(metadata)
+	encoded, err := json.Marshal(rawMetadata)
 	if err != nil {
 		return false, fmt.Errorf("doltlite metadata patch: encoding metadata: %w", err)
 	}

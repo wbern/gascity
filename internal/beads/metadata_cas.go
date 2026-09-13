@@ -80,6 +80,7 @@ func MetadataPatchCASWriterFor(store Store) (MetadataPatchCASWriter, bool) {
 	if store == nil {
 		return nil, false
 	}
+	store = followConditionalWritesResolveTarget(store)
 	if writer, ok := store.(MetadataPatchCASWriter); ok {
 		return writer, true
 	}
