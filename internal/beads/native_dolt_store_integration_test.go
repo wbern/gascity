@@ -236,7 +236,7 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 // startTestDoltServer launches a throwaway dolt sql-server in a temp data dir
 // and returns a *sql.DB connected to a fresh database on it. Skips the test
 // when the dolt binary is unavailable.
-func startTestDoltServer(t *testing.T) *sql.DB {
+func startTestDoltServer(t *testing.T) (*sql.DB, int) {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -286,7 +286,7 @@ func startTestDoltServer(t *testing.T) *sql.DB {
 		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return db, port
 }
 
 // TestRepairIDDefaultAgainstDoltServer exercises the SHOW COLUMNS-based probe
@@ -295,7 +295,7 @@ func startTestDoltServer(t *testing.T) *sql.DB {
 // is left alone, and an absent table is not an error. This covers the probe
 // rewrite that replaced the per-open INFORMATION_SCHEMA.COLUMNS catalog scan.
 func TestRepairIDDefaultAgainstDoltServer(t *testing.T) {
-	db := startTestDoltServer(t)
+	db, _ := startTestDoltServer(t)
 
 	showIDDefault := func(table string) any {
 		var field, colType, null, key, extra string

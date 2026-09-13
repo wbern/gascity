@@ -1159,7 +1159,9 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
 	defer func() {
-		if err := closeOrderTrackingBead(ctx, store, trackingID, closeReason); err != nil {
+		// Tracking terminalization is controller bookkeeping and must survive a
+		// canceled trigger/request context. CloseRuns remains bounded internally.
+		if err := closeOrderTrackingBead(context.WithoutCancel(ctx), store, trackingID, closeReason); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()

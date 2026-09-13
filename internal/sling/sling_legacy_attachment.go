@@ -21,8 +21,9 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 	if deps.GraphStore != nil && strings.TrimSpace(deps.StoreRef) == "" {
 		return SlingResult{}, fmt.Errorf("legacy source %s requires a source-store identity before shared-store materialization", sourceID)
 	}
-	writer, ok := beads.ConditionalWriterFor(deps.Store)
-	if !ok {
+	writer, hasRevisionWriter := beads.ConditionalWriterFor(deps.Store)
+	patchWriter, hasPatchWriter := beads.MetadataPatchCASWriterFor(deps.Store)
+	if !hasRevisionWriter && !hasPatchWriter {
 		return SlingResult{}, fmt.Errorf("legacy source %s requires conditional publication; refusing unfenced materialization", sourceID)
 	}
 	var result SlingResult
@@ -107,7 +108,15 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			// The route and pointer become visible in the SAME fenced write.
 			// A close/claim/pointer change after the live read invalidates its
 			// revision. No router or shell callback may re-write the route later.
-			err = writer.UpdateIfMatch(sourceID, fresh.Revision, beads.UpdateOpts{Metadata: publication})
+			if hasPatchWriter {
+				var swapped bool
+				swapped, err = patchWriter.CompareAndSetMetadataPatch(sourceID, fresh, publication)
+				if err == nil && !swapped {
+					err = fmt.Errorf("legacy source %s changed during conditional publication", sourceID)
+				}
+			} else {
+				err = writer.UpdateIfMatch(sourceID, fresh.Revision, beads.UpdateOpts{Metadata: publication})
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("publish legacy attachment for %s: %w; family %s retained for reconciliation", sourceID, err, materialized.RootID)

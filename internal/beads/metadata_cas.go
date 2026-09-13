@@ -61,6 +61,35 @@ type MetadataCASWriter interface {
 	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
 }
 
+// MetadataPatchCASWriter atomically applies a metadata patch only when every
+// expected key still has the supplied value. A mismatch is a clean lost race;
+// an uncertain write is always an error.
+type MetadataPatchCASWriter interface {
+	CompareAndSetMetadataPatch(id string, expected Bead, patch map[string]string) (bool, error)
+}
+
+// MetadataPatchCASWriterHandleProvider lets wrappers expose a patch-CAS handle
+// without claiming unrelated conditional-write capabilities.
+type MetadataPatchCASWriterHandleProvider interface {
+	MetadataPatchCASWriterHandle() (MetadataPatchCASWriter, bool)
+}
+
+// MetadataPatchCASWriterFor resolves the narrow atomic metadata-patch
+// capability without consulting the revision-conditional rollout gate.
+func MetadataPatchCASWriterFor(store Store) (MetadataPatchCASWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	store = followConditionalWritesResolveTarget(store)
+	if writer, ok := store.(MetadataPatchCASWriter); ok {
+		return writer, true
+	}
+	if provider, ok := store.(MetadataPatchCASWriterHandleProvider); ok {
+		return provider.MetadataPatchCASWriterHandle()
+	}
+	return nil, false
+}
+
 // MetadataCASWriterHandleProvider exposes a metadata-CAS handle for stores
 // whose capability depends on wrapped runtime state. It mirrors
 // ConditionalWriterHandleProvider: a wrapper can delegate the capability
