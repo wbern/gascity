@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -82,6 +83,42 @@ func TestReview172SingleAndBatchRouteFence(t *testing.T) {
 type review172PublicationFailure struct {
 	*beads.MemStore
 	calls int
+}
+
+type patchOnlyPublicationStore struct {
+	beads.Store
+	writes int
+}
+
+func (s *patchOnlyPublicationStore) CompareAndSetMetadataPatch(id string, expected beads.Bead, patch map[string]string) (bool, error) {
+	s.writes++
+	current, err := s.Get(id)
+	if err != nil {
+		return false, err
+	}
+	if current.Status != expected.Status || current.Assignee != expected.Assignee || current.ParentID != expected.ParentID || !maps.Equal(current.Metadata, expected.Metadata) {
+		return false, nil
+	}
+	return true, s.Update(id, beads.UpdateOpts{Metadata: patch})
+}
+
+func TestLegacyAttachmentPublishesThroughAtomicMetadataPatch(t *testing.T) {
+	mem := seededStore("work")
+	store := &patchOnlyPublicationStore{Store: mem}
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: store, CityPath: t.TempDir()}, "work", "review", nil,
+		func() (*molecule.Result, error) {
+			root, createErr := mem.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
+			return &molecule.Result{RootID: root.ID}, createErr
+		},
+		func(r *molecule.Result) (SlingResult, error) { return SlingResult{WispRootID: r.RootID}, nil },
+		"reviewer")
+	if err != nil {
+		t.Fatalf("withLegacyAttachment: %v", err)
+	}
+	source, _ := mem.Get("work")
+	if store.writes != 1 || source.Metadata[beadmeta.MoleculeIDMetadataKey] == "" || source.Metadata[beadmeta.RoutedToMetadataKey] != "reviewer" {
+		t.Fatalf("atomic patch writes=%d source=%+v", store.writes, source)
+	}
 }
 
 func (s *review172PublicationFailure) UpdateIfMatch(string, int64, beads.UpdateOpts) error {

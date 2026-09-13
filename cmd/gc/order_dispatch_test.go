@@ -4486,6 +4486,30 @@ func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
 	}
 }
 
+func TestDispatchOneTerminalizesTrackingAfterContextCancellation(t *testing.T) {
+	base := beads.NewMemStore()
+	tracking, err := base.Create(beads.Bead{
+		Title: "order:canceled", Labels: []string{"order-run:canceled", labelOrderTracking}, Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
+	mad := buildOrderDispatcherFromListExec([]orders.Order{{Name: "canceled", Trigger: "cooldown", Exec: "true"}}, store, nil, successfulExec, nil).(*memoryOrderDispatcher)
+	mad.addInflight()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mad.dispatchOne(ctx, store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil, nil)
+
+	got, err := base.Get(tracking.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || store.closeCalls != 2 {
+		t.Fatalf("tracking status=%q close calls=%d, want closed after retry", got.Status, store.closeCalls)
+	}
+}
+
 func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

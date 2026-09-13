@@ -30,10 +30,49 @@ import (
 // honest cache action after a fenced write is a miss. The refresh, when it
 // succeeds, feeds the change notification verbatim and nothing else.
 var (
-	_ ConditionalWriter                = (*CachingStore)(nil)
-	_ conditionalWritesModeCarrier     = (*CachingStore)(nil)
-	_ conditionalWriteCapabilityProber = (*CachingStore)(nil)
+	_ ConditionalWriter                    = (*CachingStore)(nil)
+	_ MetadataPatchCASWriterHandleProvider = (*CachingStore)(nil)
+	_ conditionalWritesModeCarrier         = (*CachingStore)(nil)
+	_ conditionalWriteCapabilityProber     = (*CachingStore)(nil)
 )
+
+type cachingMetadataPatchWriter struct{ cache *CachingStore }
+
+// MetadataPatchCASWriterHandle exposes patch CAS only when the actual backing
+// supports it. The cache's revision-CAS forwarding must not falsely advertise
+// an unrelated patch capability.
+func (c *CachingStore) MetadataPatchCASWriterHandle() (MetadataPatchCASWriter, bool) {
+	if _, ok := MetadataPatchCASWriterFor(c.conditionalBacking()); !ok {
+		return nil, false
+	}
+	return cachingMetadataPatchWriter{cache: c}, true
+}
+
+// CompareAndSetMetadataPatch forwards an atomic multi-key metadata transition
+// and evicts the cached row for the same attribution reasons as the single-key
+// CAS path.
+func (w cachingMetadataPatchWriter) CompareAndSetMetadataPatch(id string, expected Bead, patch map[string]string) (bool, error) {
+	c := w.cache
+	writer, ok := MetadataPatchCASWriterFor(c.conditionalBacking())
+	if !ok {
+		return false, ErrConditionalWriteUnsupported
+	}
+	swapped, err := writer.CompareAndSetMetadataPatch(id, expected, patch)
+	if err != nil {
+		c.applyConditionalWriteFailure(id, err)
+		return swapped, err
+	}
+	if !swapped {
+		c.evictForConditionalWrite(id)
+		return false, nil
+	}
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after conditional metadata patch")
+	c.evictForConditionalWrite(id)
+	if refreshed {
+		c.notifyChange("bead.updated", fresh)
+	}
+	return true, nil
+}
 
 // The cache is a wrapper, not a second store, so it carries no
 // conditional-writes stamp of its own (§6.3): the stamp, its read, and the

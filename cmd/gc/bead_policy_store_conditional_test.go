@@ -2,11 +2,41 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
+
+type metadataPatchCapableStore struct{ beads.Store }
+
+func (s *metadataPatchCapableStore) CompareAndSetMetadataPatch(string, beads.Bead, map[string]string) (bool, error) {
+	return true, nil
+}
+
+func TestBeadPolicyStoreExposesMetadataPatchCapability(t *testing.T) {
+	backing := &metadataPatchCapableStore{Store: beads.NewMemStore()}
+	wrapped := wrapStoreWithBeadPolicies(backing, nil)
+	writer, ok := beads.MetadataPatchCASWriterFor(wrapped)
+	if !ok || writer != backing {
+		t.Fatalf("MetadataPatchCASWriterFor(policy wrapper) = (%T, %v), want backing capability", writer, ok)
+	}
+}
+
+func TestCachingStoreDoesNotInventMetadataPatchCapability(t *testing.T) {
+	file, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, backing := range map[string]beads.Store{"mem": beads.NewMemStore(), "file": file} {
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		if writer, ok := beads.MetadataPatchCASWriterFor(cache); ok || writer != nil {
+			t.Fatalf("MetadataPatchCASWriterFor(cache over %s) = (%T, %v), want unavailable", name, writer, ok)
+		}
+	}
+}
 
 // TestBeadPolicyStoreResolvesConditionalWritesThroughWrapper pins the stage-3
 // wiring hazard: every factory store is policy-wrapped, and interface
