@@ -27,5 +27,6 @@ live controller.`,
 		},
 	}
 	cmd.AddCommand(newAnalyzeReliabilityCmd(stdout, stderr))
+	cmd.AddCommand(newAnalyzeContinuityCmd(stdout, stderr))
 	return cmd
 }
