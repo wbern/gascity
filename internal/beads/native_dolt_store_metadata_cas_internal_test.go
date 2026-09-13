@@ -1,9 +1,12 @@
 package beads
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter pins the exact
@@ -25,6 +28,63 @@ func TestNativeDoltStoreDeclaresNarrowCASButNotConditionalWriter(t *testing.T) {
 	if _, ok := MetadataCASWriterFor(store); !ok {
 		t.Fatal("NativeDoltStore does not resolve a MetadataCASWriter; the narrow value-CAS " +
 			"capability is what unblocks target_scope member-declaration and the D3/D5 lease lane")
+	}
+	if _, ok := MetadataPatchCASWriterFor(store); !ok {
+		t.Fatal("NativeDoltStore does not resolve the atomic metadata-patch capability required by legacy publication")
+	}
+}
+
+func TestNativeDoltStoreMetadataPatchCASAppliesCompletePatchAndRejectsStaleSnapshot(t *testing.T) {
+	storage := newNativeDoltMemStorage()
+	store := newNativeDoltStoreForTest(storage)
+	b, err := store.Create(Bead{Title: "native-patch", Metadata: map[string]string{"molecule_id": "", "gc.routed_to": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swapped, err := store.CompareAndSetMetadataPatch(b.ID, expected, map[string]string{"molecule_id": "root", "gc.routed_to": "reviewer"}); err != nil || !swapped {
+		t.Fatalf("patch = (%v, %v), want (true, nil)", swapped, err)
+	}
+	issue, err := storage.GetIssue(context.Background(), b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(issue.Metadata, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"molecule_id": `"root"`, "gc.routed_to": `"reviewer"`} {
+		if string(raw[key]) != want {
+			t.Fatalf("raw metadata[%q] = %s, want %s", key, raw[key], want)
+		}
+	}
+	if swapped, err := store.CompareAndSetMetadataPatch(b.ID, expected, map[string]string{"molecule_id": "stale"}); err != nil || swapped {
+		t.Fatalf("stale patch = (%v, %v), want (false, nil)", swapped, err)
+	}
+}
+
+func TestNativeDoltStoreMetadataPatchCASRejectsMalformedWithoutUpdate(t *testing.T) {
+	const malformed = `{"broken":`
+	updates := 0
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-malformed", Status: "open", Metadata: json.RawMessage(malformed)}, nil
+		},
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			updates++
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+	swapped, err := store.CompareAndSetMetadataPatch("gc-malformed", Bead{ID: "gc-malformed", Status: "open"}, map[string]string{"molecule_id": "unsafe"})
+	if err == nil || swapped {
+		t.Fatalf("malformed patch = (%v, %v), want fail closed", swapped, err)
+	}
+	if updates != 0 {
+		t.Fatalf("malformed patch issued %d updates, want 0", updates)
 	}
 }
 

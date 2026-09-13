@@ -252,3 +252,92 @@ func TestNativeDoltStoreMetadataCASContentionAcrossIndependentHandles(t *testing
 		}
 	}
 }
+
+func TestNativeDoltStoreMetadataPatchCASContentionAcrossIndependentHandles(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), ".beads")
+	openHandle := func(actor string) *NativeDoltStore {
+		t.Helper()
+		storage, err := beadslib.OpenBestAvailable(ctx, dir)
+		if err != nil {
+			t.Skipf("upstream native beads storage unavailable: %v", err)
+		}
+		t.Cleanup(func() { _ = storage.Close() })
+		if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+			t.Fatalf("set issue prefix (%s): %v", actor, err)
+		}
+		return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+	}
+
+	writerA := openHandle("patch-writer-a")
+	writerB := openHandle("patch-writer-b")
+	b, err := writerA.Create(Bead{Title: "cross-handle-patch", Metadata: map[string]string{
+		"molecule_id": "", "gc.routed_to": "", "keep": "sibling",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedA, err := writerA.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedB, err := writerB.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expectedA.Metadata["molecule_id"] != "" || expectedB.Metadata["molecule_id"] != "" {
+		t.Fatalf("writers did not observe the same initial snapshot: A=%#v B=%#v", expectedA.Metadata, expectedB.Metadata)
+	}
+
+	type result struct {
+		won bool
+		err error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for _, racer := range []struct {
+		store *NativeDoltStore
+		want  Bead
+		patch map[string]string
+	}{
+		{writerA, expectedA, map[string]string{"molecule_id": "root-a", "gc.routed_to": "reviewer-a"}},
+		{writerB, expectedB, map[string]string{"molecule_id": "root-b", "gc.routed_to": "reviewer-b"}},
+	} {
+		go func() {
+			<-start
+			won, err := racer.store.CompareAndSetMetadataPatch(b.ID, racer.want, racer.patch)
+			results <- result{won: won, err: err}
+		}()
+	}
+	close(start)
+
+	winners := 0
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("competing patch returned error: %v", r.err)
+		}
+		if r.won {
+			winners++
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if winners != 1 {
+		t.Fatalf("successful competing patches = %d, want exactly 1", winners)
+	}
+	for name, store := range map[string]*NativeDoltStore{"writerA": writerA, "writerB": writerB} {
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("%s Get: %v", name, err)
+		}
+		pair := got.Metadata["molecule_id"] + "/" + got.Metadata["gc.routed_to"]
+		if pair != "root-a/reviewer-a" && pair != "root-b/reviewer-b" {
+			t.Fatalf("%s sees torn pointer/route pair %q: %#v", name, pair, got.Metadata)
+		}
+		if got.Metadata["keep"] != "sibling" {
+			t.Fatalf("%s lost sibling metadata: %#v", name, got.Metadata)
+		}
+	}
+}

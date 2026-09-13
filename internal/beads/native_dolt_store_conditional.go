@@ -2,7 +2,9 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 
 	beadslib "github.com/steveyegge/beads"
 )
@@ -13,7 +15,10 @@ import (
 // this one method would make ResolveConditionalWriter resolve under require
 // mode — converting a loud typed refusal into a silent wrong-fenced write.
 // internal/beads/metadata_cas.go carries the full reasoning.
-var _ MetadataCASWriter = (*NativeDoltStore)(nil)
+var (
+	_ MetadataCASWriter      = (*NativeDoltStore)(nil)
+	_ MetadataPatchCASWriter = (*NativeDoltStore)(nil)
+)
 
 // CompareAndSetMetadataKey atomically sets metadata[key] = next when the key's
 // current value equals expected.
@@ -72,6 +77,75 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 			return err
 		}
 		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
+			return nativeStoreError(id, err)
+		}
+		swapped = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return swapped, nil
+}
+
+// CompareAndSetMetadataPatch atomically updates several metadata keys when the
+// bead still matches the caller's expected snapshot. The comparison and the
+// complete patch execute inside one native Dolt transaction, so independent
+// writers can never publish a mixed pointer/route pair.
+func (s *NativeDoltStore) CompareAndSetMetadataPatch(id string, expected Bead, patch map[string]string) (bool, error) {
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+
+	swapped := false
+	commitMsg := fmt.Sprintf("gc: compare-and-set metadata patch on bead %s", id)
+	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		issue, err := tx.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if issue == nil {
+			return fmt.Errorf("compare-and-set metadata patch on %q: %w", id, ErrNotFound)
+		}
+		dependencies, err := tx.GetDependencyRecords(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		issue.Dependencies = dependencies
+		current, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return fmt.Errorf("parsing bead %q for metadata patch: %w", id, err)
+		}
+		if current.Status != expected.Status || current.Assignee != expected.Assignee ||
+			current.ParentID != expected.ParentID || !maps.Equal(current.Metadata, expected.Metadata) {
+			return nil
+		}
+
+		rawMetadata := make(map[string]json.RawMessage)
+		if len(issue.Metadata) != 0 {
+			if err := json.Unmarshal(issue.Metadata, &rawMetadata); err != nil {
+				return fmt.Errorf("parsing raw metadata for bead %q: %w", id, err)
+			}
+			if rawMetadata == nil {
+				return fmt.Errorf("metadata for bead %q is not a JSON object", id)
+			}
+		}
+		for key, value := range patch {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return fmt.Errorf("encoding metadata value %q: %w", key, err)
+			}
+			rawMetadata[key] = encoded
+		}
+		raw, err := json.Marshal(rawMetadata)
+		if err != nil {
+			return fmt.Errorf("encoding metadata patch for bead %q: %w", id, err)
+		}
+		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": json.RawMessage(raw)}, s.actor); err != nil {
 			return nativeStoreError(id, err)
 		}
 		swapped = true
