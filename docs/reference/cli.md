@@ -222,7 +222,45 @@ gc analyze
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc analyze continuity](#gc-analyze-continuity) | Discover an agent's current or recent participation without a bead ID |
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze continuity
+
+Continuity finds active or recent work for an agent identity, scoped to
+exactly one city and (optionally) one rig, without requiring the caller to
+already know a bead ID.
+
+It matches candidate beads by current assignee, gc.workspace_owner,
+gc.session_name (and any prior aliases recorded on a matching session bead)
+within the --since window, then renders the durable evidence already on those
+beads: status, owner, route, formula/step, campaign, latest transition,
+derivable expected next transition, and any active hold or blocker.
+
+This is a read-only evidence surface. It never dispatches, rescues, re-slings,
+restarts, or lifts holds, and it never changes gc hook semantics: gc hook's
+empty result still means "no current authorized hook," not "no history."
+
+Missing or unreadable evidence is reported as an explicit unavailable source,
+never silently folded into "no history" — see the "complete" field in --json
+output. Exit code 0 means the query completed (whether or not it found
+results); a non-zero exit means at least one evidence source was unavailable
+and the result may be incomplete.
+
+Cross-city use is explicit repetition with a different --city/--rig; this
+command never fans out across cities on its own.
+
+```
+gc analyze continuity --agent <identity> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | agent identity to search for (required) |
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--rig` | string |  | rig name to scope the search (default: auto-detect from cwd, else the city store) |
+| `--since` | string | `30d` | how far back to search — duration (1h, 30d) or RFC3339 timestamp |
 
 ## gc analyze reliability
 
