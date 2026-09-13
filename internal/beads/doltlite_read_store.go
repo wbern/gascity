@@ -185,7 +185,7 @@ func (s *DoltliteReadStore) CompareAndSetMetadataPatch(id string, expected Bead,
 		return false, fmt.Errorf("doltlite metadata patch: opening store: %w", err)
 	}
 	defer db.Close()
-	tx, err := db.BeginTx(context.Background(), nil)
+	tx, err := beginDoltliteImmediateTx(db)
 	if err != nil {
 		return false, fmt.Errorf("doltlite metadata patch: beginning transaction: %w", err)
 	}
@@ -249,6 +249,21 @@ func (s *DoltliteReadStore) CompareAndSetMetadataPatch(id string, expected Bead,
 	}
 	s.resetOrderRunCache()
 	return true, nil
+}
+
+// beginDoltliteImmediateTx gives a competing writer time to finish its short
+// critical section. modernc's _busy_timeout does not cover every BEGIN
+// IMMEDIATE lock race, so retry the unambiguously pre-write SQLITE_BUSY result
+// within the same ten-second bound advertised by the connection string.
+func beginDoltliteImmediateTx(db *sql.DB) (*sql.Tx, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err == nil || !isBdSqliteBusyError(fmt.Sprint(err)) || time.Now().After(deadline) {
+			return tx, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // ReindexDoltliteStore rebuilds the DoltLite store's SQLite secondary indexes.

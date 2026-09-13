@@ -1983,6 +1983,81 @@ func TestDoltliteReadStoreAtomicMetadataPatch(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreAtomicMetadataPatchCompetingIndependentHandles(t *testing.T) {
+	storeA := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-race", Title: "target", Status: "open", IssueType: "task", Metadata: map[string]string{"molecule_id": "", "gc.routed_to": "", "keep": "sibling"}},
+	})
+	backingB := NewBdStore(storeA.dir, func(string, string, ...string) ([]byte, error) {
+		return nil, errors.New("backing bd runner should not be called")
+	})
+	storeB, err := NewDoltliteReadStore(storeA.dir, backingB)
+	if err != nil {
+		t.Fatalf("open independent DoltLite handle: %v", err)
+	}
+	t.Cleanup(func() { _ = storeB.CloseStore() })
+
+	expectedA, err := storeA.Get("ga-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedB, err := storeB.Get("ga-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(expectedA, expectedB) {
+		t.Fatalf("independent handles did not start from the same snapshot:\nA=%#v\nB=%#v", expectedA, expectedB)
+	}
+
+	type result struct {
+		swapped bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	writers := []struct {
+		store *DoltliteReadStore
+		want  Bead
+		patch map[string]string
+	}{
+		{store: storeA, want: expectedA, patch: map[string]string{"molecule_id": "root-a", "gc.routed_to": "reviewer-a"}},
+		{store: storeB, want: expectedB, patch: map[string]string{"molecule_id": "root-b", "gc.routed_to": "reviewer-b"}},
+	}
+	for _, writer := range writers {
+		go func() {
+			<-start
+			swapped, err := writer.store.CompareAndSetMetadataPatch("ga-race", writer.want, writer.patch)
+			results <- result{swapped: swapped, err: err}
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for range writers {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("competing metadata patch: %v", result.err)
+		}
+		if result.swapped {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful competing patches = %d, want exactly 1", successes)
+	}
+
+	got, err := storeA.Get("ga-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := got.Metadata["molecule_id"] + "/" + got.Metadata["gc.routed_to"]
+	if pair != "root-a/reviewer-a" && pair != "root-b/reviewer-b" {
+		t.Fatalf("persisted metadata contains a torn writer pair %q: %#v", pair, got.Metadata)
+	}
+	if got.Metadata["keep"] != "sibling" {
+		t.Fatalf("persisted metadata lost sibling key: %#v", got.Metadata)
+	}
+}
+
 func TestDoltliteReadStoreAtomicMetadataPatchPreservesRawTypesAndRejectsMalformed(t *testing.T) {
 	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{{ID: "ga-raw", Title: "target", Status: "open", IssueType: "task"}})
 	db, err := sql.Open("sqlite", "file:"+store.dbPath+"?mode=rw&_busy_timeout=10000")
