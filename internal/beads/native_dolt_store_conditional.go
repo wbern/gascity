@@ -103,7 +103,7 @@ func (s *NativeDoltStore) CompareAndSetMetadataPatch(id string, expected Bead, p
 
 	swapped := false
 	commitMsg := fmt.Sprintf("gc: compare-and-set metadata patch on bead %s", id)
-	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+	patchInTransaction := func(tx beadslib.Transaction) error {
 		issue, err := tx.GetIssue(ctx, id)
 		if err != nil {
 			return nativeStoreError(id, err)
@@ -150,7 +150,14 @@ func (s *NativeDoltStore) CompareAndSetMetadataPatch(id string, expected Bead, p
 		}
 		swapped = true
 		return nil
-	})
+	}
+	for attempt := 1; attempt <= nativeWriteConflictAttempts; attempt++ {
+		swapped = false
+		err = storage.RunInTransaction(ctx, commitMsg, patchInTransaction)
+		if err == nil || !isNativeDoltSerializationConflict(err) || attempt == nativeWriteConflictAttempts {
+			break
+		}
+	}
 	if err != nil {
 		return false, err
 	}

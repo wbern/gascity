@@ -4,6 +4,8 @@ package beads
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -255,18 +257,39 @@ func TestNativeDoltStoreMetadataCASContentionAcrossIndependentHandles(t *testing
 
 func TestNativeDoltStoreMetadataPatchCASContentionAcrossIndependentHandles(t *testing.T) {
 	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), ".beads")
+	_, port := startTestDoltServer(t)
+	scopeRoot := t.TempDir()
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"repairtest"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT": fmt.Sprintf("%d", port),
+		"BEADS_TEST_MODE":        "1",
+	}
 	openHandle := func(actor string) *NativeDoltStore {
 		t.Helper()
-		storage, err := beadslib.OpenBestAvailable(ctx, dir)
+		store, err := OpenNativeDoltStoreAt(ctx, scopeRoot, env)
 		if err != nil {
-			t.Skipf("upstream native beads storage unavailable: %v", err)
+			t.Fatalf("open independent server-mode native store (%s): %v", actor, err)
 		}
-		t.Cleanup(func() { _ = storage.Close() })
+		store.actor = actor
+		t.Cleanup(func() { _ = store.CloseStore() })
+		storage, release, err := store.acquireStorage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
 		if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
 			t.Fatalf("set issue prefix (%s): %v", actor, err)
 		}
-		return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+		store.idPrefix = "gc"
+		return store
 	}
 
 	writerA := openHandle("patch-writer-a")

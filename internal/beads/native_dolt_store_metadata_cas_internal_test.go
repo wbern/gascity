@@ -88,6 +88,55 @@ func TestNativeDoltStoreMetadataPatchCASRejectsMalformedWithoutUpdate(t *testing
 	}
 }
 
+func TestNativeDoltStoreMetadataPatchCASRejectsStalePlainFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*NativeDoltStore, string) error
+	}{
+		{name: "status", mutate: func(store *NativeDoltStore, id string) error {
+			status := "in_progress"
+			return store.Update(id, UpdateOpts{Status: &status})
+		}},
+		{name: "assignee", mutate: func(store *NativeDoltStore, id string) error {
+			assignee := "other-writer"
+			return store.Update(id, UpdateOpts{Assignee: &assignee})
+		}},
+		{name: "parent", mutate: func(store *NativeDoltStore, id string) error {
+			parent, err := store.Create(Bead{Title: "new parent"})
+			if err != nil {
+				return err
+			}
+			return store.Update(id, UpdateOpts{ParentID: &parent.ID})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+			b, err := store.Create(Bead{Title: "snapshot", Metadata: map[string]string{"molecule_id": ""}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.mutate(store, b.ID); err != nil {
+				t.Fatal(err)
+			}
+			swapped, err := store.CompareAndSetMetadataPatch(b.ID, expected, map[string]string{"molecule_id": "unsafe"})
+			if err != nil || swapped {
+				t.Fatalf("patch after stale %s = (%v, %v), want (false, nil)", tc.name, swapped, err)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata["molecule_id"] != "" {
+				t.Fatalf("stale %s snapshot wrote metadata: %#v", tc.name, got.Metadata)
+			}
+		})
+	}
+}
+
 // TestNativeDoltStoreConditionalWritesStillRefuseOrDegrade pins the seam
 // behavior the condWritesStamp comment in native_dolt_store.go guarantees:
 // require yields a typed refusal and auto yields a loud degrade — never a
