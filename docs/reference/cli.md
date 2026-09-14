@@ -4068,7 +4068,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
+| `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle (defers when the session is busy or at an interactive prompt), or queue |
 | `--json` | bool |  | JSON output |
 
 ## gc session peek
