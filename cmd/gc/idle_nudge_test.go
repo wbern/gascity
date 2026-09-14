@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -131,5 +132,74 @@ func TestNudgeStalledPoolClaims_SkipsNonPool(t *testing.T) {
 	nudgeStalledPoolClaims(sp, cfg, store, sessions, work, base.Add(time.Hour), &out)
 	if out.Len() != 0 {
 		t.Fatalf("must not touch a non-pool session: %q", out.String())
+	}
+}
+
+// pendingInteractionFake is a runtime.Provider whose pane is parked on an
+// interactive prompt awaiting a human answer. Sending keys into such a pane
+// SELECTS AN OPTION — the backstop would answer a question addressed to the
+// human, indistinguishably from a real answer.
+type pendingInteractionFake struct {
+	*runtime.Fake
+	pending *runtime.PendingInteraction
+	err     error
+}
+
+func (p *pendingInteractionFake) Pending(string) (*runtime.PendingInteraction, error) {
+	return p.pending, p.err
+}
+
+func (p *pendingInteractionFake) Respond(string, runtime.InteractionResponse) error { return nil }
+
+// A slot parked on a question card must NOT be nudged: the keystroke would
+// answer on the human's behalf. It must also not burn an attempt, so the
+// backstop still has its budget once the human answers.
+func TestNudgeStalledPoolClaims_RefusesPaneAwaitingInput(t *testing.T) {
+	sp := &pendingInteractionFake{
+		Fake: runningFake(t),
+		pending: &runtime.PendingInteraction{
+			RequestID: "tmux-deadbeef",
+			Kind:      "question",
+			Prompt:    "Which approach should we take?",
+		},
+	}
+	cfg := idleClaimTestCfg()
+	sessions := []beads.Bead{idleClaimPoolSession()}
+	work := []beads.Bead{{ID: "w-1", Status: "open"}}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, sessions, work, base, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, sessions, work, base.Add(idleClaimNudgeGrace+time.Second), &out)
+
+	if bytes.Contains(out.Bytes(), []byte("nudged worker-1")) {
+		t.Fatalf("must not send keys into a pane awaiting interactive input: %q", out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("awaiting interactive input")) {
+		t.Fatalf("refusal must be reported so the seat is visible, got: %q", out.String())
+	}
+	if got := sessions[0].Metadata[idleClaimNudgeCountKey]; got != "" && got != "0" {
+		t.Fatalf("refusal must not burn a nudge attempt, got count %q", got)
+	}
+}
+
+// A Pending() error must not silently suppress the backstop — an unreadable
+// pane is not evidence of a prompt, and failing closed here would strand every
+// stalled claim behind a transient capture failure.
+func TestNudgeStalledPoolClaims_PendingErrorDoesNotSuppressNudge(t *testing.T) {
+	sp := &pendingInteractionFake{Fake: runningFake(t), err: errors.New("capture failed")}
+	cfg := idleClaimTestCfg()
+	sessions := []beads.Bead{idleClaimPoolSession()}
+	work := []beads.Bead{{ID: "w-1", Status: "open"}}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, sessions, work, base, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, sessions, work, base.Add(idleClaimNudgeGrace+time.Second), &out)
+
+	if !bytes.Contains(out.Bytes(), []byte("nudged worker-1 to claim w-1")) {
+		t.Fatalf("a Pending() error must not suppress the nudge, got: %q", out.String())
 	}
 }

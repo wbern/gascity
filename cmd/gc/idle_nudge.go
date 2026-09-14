@@ -116,6 +116,16 @@ func nudgeStalledPoolClaims(
 		if nudge == "" {
 			continue
 		}
+		if prompt, blocked := paneAwaitingInput(sp, sessName); blocked {
+			// The slot is parked on a prompt addressed to a human. Delivering
+			// keys here does not nudge — it ANSWERS, because the keystroke
+			// lands on the selection, and the resulting choice is
+			// indistinguishable afterwards from one the human made. Report and
+			// leave the seat alone; do not burn an attempt, so the backstop
+			// still has its full budget once the prompt is answered.
+			fmt.Fprintf(stdout, "idle-claim-nudge: %s skipped, awaiting interactive input (%s)\n", sessName, prompt) //nolint:errcheck // best-effort
+			continue
+		}
 		if err := sp.Nudge(sessName, runtime.TextContent(nudge)); err != nil {
 			fmt.Fprintf(stdout, "idle-claim-nudge: %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
 			continue
@@ -210,4 +220,37 @@ func parseRFC3339OrZero(s string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// paneAwaitingInput reports whether a session is parked on an interactive
+// prompt awaiting a human answer, returning a short description for the log.
+//
+// This exists because a send-keys nudge is not a neutral poke: if the pane is
+// displaying a selection prompt, the keystroke selects an option. The system
+// then answers a question addressed to the human, the agent proceeds on a
+// choice nobody made, and nothing downstream can tell that answer apart from a
+// real one. A stuck seat is visible and inert; a silently answered prompt
+// produces confident work built on a fabricated decision.
+//
+// Providers that cannot observe prompt state are treated as not-blocked, and a
+// probe error is likewise not evidence of a prompt — failing closed here would
+// strand every stalled claim behind a transient capture failure. Both cases
+// keep the historical behavior of delivering the nudge.
+func paneAwaitingInput(sp runtime.Provider, session string) (string, bool) {
+	ip, ok := sp.(runtime.InteractionProvider)
+	if !ok {
+		return "", false
+	}
+	pending, err := ip.Pending(session)
+	if err != nil || pending == nil {
+		return "", false
+	}
+	desc := strings.TrimSpace(pending.Prompt)
+	if desc == "" {
+		desc = strings.TrimSpace(pending.Kind)
+	}
+	if desc == "" {
+		desc = "pending interaction"
+	}
+	return desc, true
 }
