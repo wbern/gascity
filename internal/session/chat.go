@@ -614,6 +614,14 @@ func normalizeWaitIdleNudgeSource(source string) string {
 }
 
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	// A pane parked on a prompt addressed to a human must never be nudged: the
+	// keystroke lands on the selection and answers for them. Send already
+	// refuses this; the wait-idle path reached the provider directly and did
+	// not, which matters because the reconciler drives it every tick against
+	// exactly the state a question-blocked session is in.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
+	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 			return false, err
@@ -645,6 +653,11 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
 	if !m.sp.IsRunning(sessName) {
 		return false, nil
+	}
+	// Same refusal as tryWaitIdleNudgeLocked: never type into a pane that is
+	// waiting on a human.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {

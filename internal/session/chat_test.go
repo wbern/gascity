@@ -1,8 +1,13 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestSessionMutationLocksArePerSession(t *testing.T) {
@@ -224,5 +229,70 @@ func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 	case <-secondEntered:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("same-session lock did not unblock after release")
+	}
+}
+
+// A pane parked on an interactive prompt must not receive a wait-idle nudge.
+// The keystroke would land on the selection and answer a question addressed to
+// the human — and the resulting choice is indistinguishable afterwards from a
+// real answer. The reconciler drives this path every tick against exactly the
+// state a question-blocked session is in, so it is the highest-frequency way
+// the fleet could silently answer for the human.
+func TestTryWaitIdleNudgeRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "question",
+		Prompt:    "Which approach should we take?",
+	})
+
+	delivered, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "reconcile-idle", "claim your work", "", runtime.Config{})
+	if delivered {
+		t.Fatalf("must not deliver a nudge into a pane awaiting interactive input")
+	}
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudge err = %v, want %v so the held seat is visible", err, ErrPendingInteraction)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName {
+			t.Fatalf("provider Nudge must not be called for a pane awaiting interactive input")
+		}
+	}
+}
+
+// Same guard on the live-only variant, which skips the ensureRunning step.
+func TestTryWaitIdleNudgeLiveOnlyRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-2",
+		Kind:      "question",
+		Prompt:    "Pick one",
+	})
+
+	delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "reconcile-idle", "claim your work")
+	if delivered {
+		t.Fatalf("must not deliver a live-only nudge into a pane awaiting interactive input")
+	}
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly err = %v, want %v", err, ErrPendingInteraction)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == info.SessionName {
+			t.Fatalf("provider Nudge must not be called for a pane awaiting interactive input")
+		}
 	}
 }
