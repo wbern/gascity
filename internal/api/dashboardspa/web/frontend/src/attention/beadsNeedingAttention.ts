@@ -91,6 +91,23 @@ const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([
 const HEARTBEAT_META_KEY = 'gc.last_heartbeat_at';
 const SESSION_ID_META_KEY = 'gc.session_id';
 
+// FORK-LOCAL. Upstream reads ownership off `bead.assignee`. This fork does not
+// stamp `assignee` on in-progress work — the dispatcher pins the worker in bead
+// metadata instead — so every in-progress bead hit upstream's ownerless branch
+// and rendered "stalled Nd — no assignee". Two kinds of pin exist and they are
+// not interchangeable:
+//
+//  - SESSION PINS (`gc.session_id`, `gc.session_name`, mirrored from
+//    internal/beadmeta/keys.go) name a concrete session, so they resolve
+//    against the session listing and carry the full liveness ladder.
+//  - ROUTE PINS (`gc.execution_routed_to`, `gc.routed_to`) name an agent SLOT
+//    ("myrig/codex-polecat"); a live session's alias carries a pool index
+//    ("myrig/codex-polecat-3"), so a route never resolves to a session
+//    identity. A route proves the bead is owned — it is not ownerless — but
+//    yields no liveness evidence, so the stall check must not guess from it.
+const SESSION_NAME_META_KEY = 'gc.session_name';
+const ROUTED_TO_META_KEYS = ['gc.execution_routed_to', 'gc.routed_to'] as const;
+
 /**
  * Why a bead needs the operator. `escalated` is an abnormally-blocked bead that
  * raised the escalation marker (a help-request / escalation); `ready-unclaimed`
@@ -177,11 +194,14 @@ export function inProgressCardNote(
   if (waiting !== null) return waiting.summary;
   const stalled = stalledRow(bead, sessions, nowMs);
   if (stalled !== null) return stalled.summary;
-  const assignee = bead.assignee?.trim() ?? '';
+  // FORK-LOCAL: with no `assignee` stamped this rendered a bare "active 8m ago"
+  // with nobody's name on it, so fall back to the same ownership signals the
+  // stall check reads — the session pin, then the agent route.
+  const owner = bead.assignee?.trim() || sessionPin(bead) || routedTo(bead) || '';
   const activityMs = lastActivityElapsedMs(bead, resolveSession(bead, sessions), nowMs);
-  if (activityMs === null) return assignee.length > 0 ? assignee : null;
+  if (activityMs === null) return owner.length > 0 ? owner : null;
   const phrase = `active ${formatElapsedFine(activityMs)} ago`;
-  return assignee.length > 0 ? `${assignee} · ${phrase}` : phrase;
+  return owner.length > 0 ? `${owner} · ${phrase}` : phrase;
 }
 
 // Escalated / help-requested: an open escalation bead is abnormal blocking —
@@ -242,13 +262,14 @@ function waitingHumanRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
   };
 }
 
-// Stalled: in-progress work whose assignee shows no sign of life — no assignee
-// at all, no session resolving to the assignee, a session in a non-live state,
-// or no activity (session last_active / bead heartbeat) for over an hour. When
-// the session read failed (`sessions` undefined), only the no-assignee check
-// runs: without session data we cannot distinguish "worker gone" from "worker
-// alive but not heartbeating", so we do not guess — a sessions outage must not
-// paint the board stalled.
+// Stalled: in-progress work whose owner shows no sign of life — no owner at
+// all, no session resolving to the owner, a session in a non-live state, or no
+// activity (session last_active / bead heartbeat) for over an hour. The owner
+// is the assignee, or (fork-local) the bead's session pin. When the session
+// read failed (`sessions` undefined), only the ownerless check runs: without
+// session data we cannot distinguish "worker gone" from "worker alive but not
+// heartbeating", so we do not guess — a sessions outage must not paint the
+// board stalled.
 function stalledRow(
   bead: Bead,
   sessions: readonly BeadAttentionSession[] | undefined,
@@ -276,11 +297,19 @@ function stalledDetail(
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): string | null {
-  if (assignee.length === 0) return 'no assignee';
+  // FORK-LOCAL: fall back to the session pin before declaring a bead ownerless.
+  const owner = assignee.length > 0 ? assignee : (sessionPin(bead) ?? '');
+  if (owner.length === 0) {
+    // A route proves ownership without naming a session — owned but
+    // unobservable, so do not guess. Only a bead with no owner at all is the
+    // ownerless case upstream means, and that verdict needs no session data:
+    // it stays correct during a sessions outage, so it is checked first.
+    return routedTo(bead) === undefined ? 'no assignee' : null;
+  }
   if (sessions === undefined) return null;
   const session = resolveSession(bead, sessions);
   if (session === undefined) {
-    return `no live session for ${assignee}`;
+    return `no live session for ${owner}`;
   }
   const state = session.state.trim();
   if (!isLiveSession(state)) {
@@ -297,27 +326,55 @@ function stalledDetail(
 }
 
 // The assignee names a concrete session (session_name), sometimes an alias or
-// a bare session id; `gc.session_id` on the bead pins the exact session when
-// stamped. Among candidates a LIVE one wins — a recycled session name or a
-// stale pinned id must not hide a worker that is genuinely alive under
-// another identity of the same bead.
+// a bare session id; `gc.session_id` / `gc.session_name` on the bead pin the
+// exact session when stamped. Among candidates a LIVE one wins — a recycled
+// session name or a stale pinned id must not hide a worker that is genuinely
+// alive under another identity of the same bead.
 function resolveSession(
   bead: Bead,
   sessions: readonly BeadAttentionSession[] | undefined,
 ): BeadAttentionSession | undefined {
   if (sessions === undefined) return undefined;
-  const assignee = bead.assignee?.trim() ?? '';
   const sessionId = bead.metadata?.[SESSION_ID_META_KEY];
+  // The assignee and the session-name pin are the same kind of value — a
+  // session identity by name — so they match against the same three fields.
+  const named = [bead.assignee?.trim(), sessionPinName(bead)].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  );
   const candidates = sessions.filter(
     (session) =>
       (sessionId !== undefined && session.id === sessionId) ||
-      (assignee.length > 0 &&
-        (session.session_name === assignee ||
-          session.alias === assignee ||
-          session.id === assignee)),
+      named.some(
+        (name) => session.session_name === name || session.alias === name || session.id === name,
+      ),
   );
   if (candidates.length === 0) return undefined;
   return candidates.find((session) => isLiveSession(session.state)) ?? candidates[0];
+}
+
+// FORK-LOCAL: the session this bead is pinned to, preferring the exact id over
+// the name. Undefined when the bead carries no session pin.
+function sessionPin(bead: Bead): string | undefined {
+  return trimmedMeta(bead, SESSION_ID_META_KEY) ?? sessionPinName(bead);
+}
+
+function sessionPinName(bead: Bead): string | undefined {
+  return trimmedMeta(bead, SESSION_NAME_META_KEY);
+}
+
+// FORK-LOCAL: the agent slot this bead was routed to — ownership evidence, not
+// a session identity (see ROUTED_TO_META_KEYS).
+function routedTo(bead: Bead): string | undefined {
+  for (const key of ROUTED_TO_META_KEYS) {
+    const value = trimmedMeta(bead, key);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function trimmedMeta(bead: Bead, key: string): string | undefined {
+  const value = bead.metadata?.[key]?.trim();
+  return value !== undefined && value.length > 0 ? value : undefined;
 }
 
 // Freshest sign of life: session last_active vs the legacy bead heartbeat (see

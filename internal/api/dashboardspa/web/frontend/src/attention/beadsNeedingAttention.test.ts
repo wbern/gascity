@@ -286,6 +286,133 @@ describe('stalled in-progress detection (gp-6xd)', () => {
   });
 });
 
+// FORK-LOCAL. Upstream's stalled rule reads ownership off `bead.assignee`.
+// This fork never stamps `assignee` on in-progress work: the dispatcher pins
+// the worker in bead metadata instead (`gc.session_id` / `gc.session_name`,
+// with `gc.execution_routed_to` / `gc.routed_to` naming the agent route). So
+// every in-progress bead fell into upstream's ownerless branch and rendered
+// "stalled Nd — no assignee".
+describe('stalled detection from the metadata ownership pin (fork-local)', () => {
+  const pinned = (metadata: Record<string, string>, overrides: Partial<Bead> = {}) =>
+    bead({
+      id: 'B-doing',
+      status: 'in_progress',
+      updated_at: '2026-06-07T10:00:00.000Z',
+      metadata,
+      ...overrides,
+    });
+
+  it('does not mark a gc.session_id-pinned bead whose session is live and active', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'ci-9' })],
+      sessions: [session({ id: 'ci-9', session_name: 'gc2-worker' })],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it('does not mark a gc.session_name-pinned bead whose session is live and active', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_name': 'codex-polecat-gc2-e05h6m' })],
+      sessions: [session({ id: 'ci-9', session_name: 'codex-polecat-gc2-e05h6m' })],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it('names the pinned session when it is absent from the session listing', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'gc2-cdwv0s' })],
+      sessions: [session({ id: 'ci-1' })],
+    });
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reason: 'stalled',
+        summary: expect.stringContaining('no live session for gc2-cdwv0s'),
+      }),
+    );
+    expect(rows[0]?.summary).not.toContain('no assignee');
+  });
+
+  it('names an ended pinned session rather than reporting it ownerless', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'ci-9' })],
+      sessions: [session({ id: 'ci-9', state: '' })],
+    });
+    expect(rows[0]?.summary).toContain('session ended');
+  });
+
+  it('names a non-live pinned session state', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'ci-9' })],
+      sessions: [session({ id: 'ci-9', state: 'asleep' })],
+    });
+    expect(rows[0]?.summary).toContain('session asleep');
+  });
+
+  it('reports inactivity for a live pinned session that has gone quiet', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'ci-9' })],
+      sessions: [session({ id: 'ci-9', last_active: '2026-06-07T10:00:00.000Z' })],
+    });
+    expect(rows[0]?.summary).toContain('no activity for');
+  });
+
+  // The routed-to keys name an agent SLOT ("gas-city-infra/codex-polecat"),
+  // not a session: live aliases carry a pool index ("…/codex-polecat-3"), so a
+  // route never resolves to a session identity. It is still proof the bead is
+  // owned, so "no assignee" is wrong — and with no resolvable session there is
+  // no liveness evidence, so upstream's don't-guess rule applies. In practice
+  // these are formula root beads that stay in_progress while their children run.
+  it('does not call a routed-to bead ownerless, and does not guess it stalled', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.execution_routed_to': 'gas-city-infra/codex-polecat' })],
+      sessions: [session({ alias: 'gas-city-infra/codex-polecat-3' })],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it('keeps upstream "no assignee" for a bead with no assignee and no pin at all', () => {
+    const rows = select({
+      beads: [pinned({})],
+      sessions: [session({})],
+    });
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reason: 'stalled',
+        summary: expect.stringContaining('no assignee'),
+      }),
+    );
+  });
+
+  // Honest degrade. A genuinely ownerless bead is ownerless whether or not the
+  // session read succeeded — that verdict needs no session data, so it still
+  // fires (upstream's behaviour, unchanged). A PINNED bead is the opposite: the
+  // only thing that could condemn it is session data we do not have, so it is
+  // skipped rather than guessed. A sessions outage therefore cannot convert the
+  // fork's pinned in-progress work into a board full of false stalls.
+  it('still reports a genuinely ownerless bead when the sessions read failed', () => {
+    const rows = select({ beads: [pinned({})] });
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reason: 'stalled',
+        summary: expect.stringContaining('no assignee'),
+      }),
+    );
+  });
+
+  it('skips a pinned bead entirely when the sessions read failed', () => {
+    const rows = select({ beads: [pinned({ 'gc.session_id': 'gc2-cdwv0s' })] });
+    expect(rows).toEqual([]);
+  });
+
+  it('prefers the assignee over the metadata pin when both are present', () => {
+    const rows = select({
+      beads: [pinned({ 'gc.session_id': 'gc2-gone' }, { assignee: 'worker-ci-1' })],
+      sessions: [session({ session_name: 'someone-else' })],
+    });
+    expect(rows[0]?.summary).toContain('no live session for worker-ci-1');
+  });
+});
+
 describe('waiting-on-human detection (gp-6xd)', () => {
   const held = (overrides: Partial<Bead> = {}) =>
     bead({
@@ -468,5 +595,28 @@ describe('inProgressCardNote (gp-6xd)', () => {
 
   it('returns null for beads that are not in progress', () => {
     expect(inProgressCardNote(bead({ status: 'open' }), [], NOW)).toBeNull();
+  });
+
+  // FORK-LOCAL: with no `assignee` stamped, the liveness line rendered a bare
+  // "active 8m ago" with nobody's name on it for every in-progress bead.
+  it('names the pinned session on the liveness line when there is no assignee', () => {
+    const note = inProgressCardNote(
+      bead({ status: 'in_progress', metadata: { 'gc.session_id': 'ci-1' } }),
+      [session({ last_active: '2026-06-07T11:52:00.000Z' })],
+      NOW,
+    );
+    expect(note).toBe('ci-1 · active 8m ago');
+  });
+
+  it('names the routed-to agent when that is the only ownership signal', () => {
+    const note = inProgressCardNote(
+      bead({
+        status: 'in_progress',
+        metadata: { 'gc.execution_routed_to': 'gas-city-infra/codex-polecat' },
+      }),
+      [],
+      NOW,
+    );
+    expect(note).toBe('gas-city-infra/codex-polecat');
   });
 });
