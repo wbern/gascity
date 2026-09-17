@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -270,16 +272,33 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 			return 0
 		}
-		injection := primeHookContextSuffix("", hookMode, hookContext, stderr)
+		injection := primeHookContextSuffix("", hookMode, hookContext, false, stderr)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 		return 0
 	}
 	hookCityPath = cityPath
-	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
+	// Only a SessionStart hook consults liveness. Keep this lazy: the previous
+	// form short-circuited on hookMode, so evaluating it unconditionally would
+	// add a store open plus a config load to every plain `gc prime` invocation.
+	live, consulted := true, true
+	if hookMode && primeHookSessionStart(hookContext) {
+		live, consulted = primeHookSessionLiveness(cityPath)
+	}
+	if hookMode && primeHookSessionStart(hookContext) && consulted && !live {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "")
 		return 0
 	}
-	if !strictMode && primeHookSessionStart(hookContext) {
+	// Liveness could not be established: deliver the prompt anyway (the rendered
+	// startup prompt comes from templates and city.toml, so it survives a store
+	// outage) and make the degradation visible instead of silent.
+	livenessDegraded := hookMode && primeHookSessionStart(hookContext) && !consulted
+	if livenessDegraded {
+		fmt.Fprintf(stderr, "gc prime --hook: session liveness unverified: bead store unavailable; delivering startup prompt without step/mail context\n") //nolint:errcheck // hook diagnostics are best effort.
+	}
+	// Skip the SessionStart write side effects while liveness is unverified: the
+	// provider session key must not be persisted against a session this run could
+	// not confirm.
+	if !strictMode && primeHookSessionStart(hookContext) && !livenessDegraded {
 		runHookSideEffects()
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
@@ -288,7 +307,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+		injection := primeHookContextSuffix(cityPath, hookMode, hookContext, livenessDegraded, stderr)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 		return 0
 	}
@@ -397,7 +416,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
-				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+				injection := primeHookContextSuffix(cityPath, hookMode, hookContext, livenessDegraded, stderr)
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 				return 0
 			}
@@ -421,7 +440,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(promptFile); fErr == nil {
-					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, livenessDegraded, stderr)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, string(content), hookMode, hookFormat, suppressHookPrompt, injection.text)
 					return 0
 				}
@@ -433,7 +452,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr)
+	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, livenessDegraded, stderr)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text)
 	return 0
 }
@@ -554,18 +573,31 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
 }
 
-func primeHookHasLiveManagedSession(cityPath string) bool {
+// primeHookLivenessDegradedMarker is appended to the hook context when the
+// session store could not be consulted, so the agent (and a human reading the
+// pane) can see that the store-derived context is missing rather than absent.
+const primeHookLivenessDegradedMarker = "[gc] session liveness unverified: bead store unavailable; step/mail context omitted. " +
+	"Re-check with `gc hook` and `gc mail inbox` before concluding you have no work."
+
+// primeHookSessionLiveness reports whether this pane is a live managed session,
+// and whether the session store could be consulted at all. A caller must not
+// treat "not consulted" as "not live": a store outage is not evidence about the
+// session, and folding the two together made a transient store failure deliver
+// an empty SessionStart payload — no role, no identity, no handoff (gcw-kasmq).
+func primeHookSessionLiveness(cityPath string) (live bool, consulted bool) {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
-		return false
+		return false, true
 	}
 	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
 	if sessionName == "" {
-		return false
+		return false, true
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
-		return false
+		// The store could not be opened, so nothing is known about this session.
+		// Reporting "not live" here is what blanked recycled agents on a Dolt blip.
+		return false, false
 	}
 	// Route the session-bead read through the session coordination-class store so
 	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
@@ -578,27 +610,36 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
 	info, err := sessionFrontDoor(sessStore).Get(sessionID)
 	if err != nil {
-		return false
+		// Per the session front door's documented error contract (info_store.go
+		// validatedBead): an ABSENT id wraps beads.ErrNotFound and a present
+		// non-session bead yields ErrSessionNotFound. Both are real answers about
+		// the session. Any OTHER error is the store failing to answer, which must
+		// not be read as "not live". Deliberately NOT keyed on
+		// beads.IsTransientConnError: its marker list covers neither observed
+		// failure ("unexpected EOF", "schema migration lock unavailable"), so
+		// classifying transport errors would silently regress as markers drift.
+		definite := errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound)
+		return false, definite
 	}
 	if info.Closed {
-		return false
+		return false, true
 	}
 	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
 	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
 	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
-		return false
+		return false, true
 	}
 	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
 		strings.TrimSpace(info.Template) != template {
-		return false
+		return false, true
 	}
 	// MetadataState is the RAW state metadata; Info.State is blanked on closed
 	// beads, so the raw mirror preserves the original exact comparison.
 	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
-		return true
+		return true, true
 	default:
-		return false
+		return false, true
 	}
 }
 

@@ -22,9 +22,20 @@ type primeHookContextInjection struct {
 // output while the startup prompt remains drafted and unsubmitted. Therefore it
 // never archives auto-handoff mail. The later UserPromptSubmit mail hook owns
 // archival once a real turn reaches the provider.
-func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, stderr io.Writer) primeHookContextInjection {
+// livenessDegraded marks the run where the session store could not be consulted
+// (gcw-kasmq): the store-derived blocks below would all degrade to "", so the
+// context says so explicitly rather than looking like "nothing was waiting".
+// It returns EARLY rather than attempting them: the store has already failed
+// this run, and each block opens its own store with no deadline, so retrying
+// four more times is how a degraded hook becomes a 40s hook. The marker tells
+// the agent to re-read its hook and mail itself, which the bounded
+// UserPromptSubmit hook also does on the first real turn.
+func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHookContext, livenessDegraded bool, stderr io.Writer) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
+	}
+	if livenessDegraded {
+		return primeHookContextInjection{text: "\n\n" + primeHookLivenessDegradedMarker + "\n"}
 	}
 	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath, true)}
 	if primeHookSessionStart(hookContext) {
