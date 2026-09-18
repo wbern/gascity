@@ -900,6 +900,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			"resume_flag":         resume.ResumeFlag,
 			"resume_style":        resume.ResumeStyle,
 			"resume_command":      resume.ResumeCommand,
+			"session_id_flag":     resume.SessionIDFlag,
 			"generation":          fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch":  fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":      NewInstanceToken(),
@@ -1150,6 +1151,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 			"resume_flag":         resume.ResumeFlag,
 			"resume_style":        resume.ResumeStyle,
 			"resume_command":      resume.ResumeCommand,
+			"session_id_flag":     resume.SessionIDFlag,
 			"generation":          fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch":  fmt.Sprintf("%d", DefaultContinuationEpoch),
 			"instance_token":      NewInstanceToken(),
@@ -2062,6 +2064,13 @@ func BuildResumeCommand(info Info) string {
 
 	if info.ResumeFlag == "" || info.SessionKey == "" {
 		// Provider doesn't support resume or no key — use stored command.
+		if info.ResumeFlag != "" {
+			// The provider CAN resume but we never captured a session key, so
+			// this "resume" silently starts a fresh conversation. Usually means
+			// the provider spec has no session_id_flag and nothing persisted a
+			// key from the provider side.
+			log.Printf("session %s: resume requested but no session key; starting fresh session (provider=%s resume_flag=%s)", info.ID, info.Provider, info.ResumeFlag)
+		}
 		cmd := info.Command
 		if cmd == "" {
 			cmd = info.Provider
