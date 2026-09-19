@@ -24,6 +24,8 @@ const (
 	MCPProviderCodex = "codex"
 	// MCPProviderGemini projects to Gemini CLI's project-native settings file.
 	MCPProviderGemini = "gemini"
+	// MCPProviderAntigravity projects to Antigravity CLI's project-native settings file.
+	MCPProviderAntigravity = "antigravity"
 	// MCPProviderOpenCode projects to OpenCode's project-native JSON config.
 	MCPProviderOpenCode = "opencode"
 	// MCPProviderMimoCode projects to MiMo Code's project-native JSON config.
@@ -51,7 +53,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	switch providerKind {
 	case MCPProviderClaude:
 	case MCPProviderCodex:
-	case MCPProviderGemini:
+	case MCPProviderGemini, MCPProviderAntigravity:
 	case MCPProviderOpenCode:
 	case MCPProviderMimoCode:
 	case MCPProviderCursor:
@@ -71,7 +73,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, ".mcp.json")
 	case MCPProviderCodex:
 		out.Target = filepath.Join(workdir, ".codex", "config.toml")
-	case MCPProviderGemini:
+	case MCPProviderGemini, MCPProviderAntigravity:
 		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
 	case MCPProviderOpenCode:
 		out.Target = filepath.Join(workdir, "opencode.json")
@@ -153,7 +155,7 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			return p.applyClaude(fs)
 		case MCPProviderCodex:
 			return p.applyCodex(fs)
-		case MCPProviderGemini:
+		case MCPProviderGemini, MCPProviderAntigravity:
 			return p.applyGemini(fs)
 		case MCPProviderOpenCode:
 			return p.applyOpenCode(fs)
