@@ -904,6 +904,14 @@ type AdapterEventPayload struct {
 	Provider  string `json:"provider"`
 }
 
+// AdmissionConfig defines model for AdmissionConfig.
+type AdmissionConfig struct {
+	Check    *string `json:"check,omitempty"`
+	Interval *string `json:"interval,omitempty"`
+	OnError  *string `json:"on_error,omitempty"`
+	Timeout  *string `json:"timeout,omitempty"`
+}
+
 // AgentCreateInputBody defines model for AgentCreateInputBody.
 type AgentCreateInputBody struct {
 	// Dir Working directory (rig name).
@@ -944,6 +952,7 @@ type AgentOutputResponse struct {
 
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
+	Admission                AdmissionConfig   `json:"Admission"`
 	AppendFragments          *[]string         `json:"AppendFragments"`
 	Args                     *[]string         `json:"Args"`
 	AssignedWorkDeferLimit   *int64            `json:"AssignedWorkDeferLimit"`

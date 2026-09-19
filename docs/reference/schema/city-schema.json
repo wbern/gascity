@@ -64,6 +64,33 @@
       "type": "object",
       "description": "APIConfig configures the HTTP API server."
     },
+    "AdmissionConfig": {
+      "properties": {
+        "check": {
+          "type": "string",
+          "description": "Check is the shell command run to evaluate admission.\nExit 0 = allow, Exit 1 = deny, other/timeout = error.\nWhen empty or \"off\", the admission gate is disabled (always allow)."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Timeout bounds how long the admission check may run.\nDuration string (e.g. \"10s\"). Default is 10s."
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval defines the TTL / cache duration for a verdict before re-running.\nDuration string (e.g. \"30s\"). Default is 30s."
+        },
+        "on_error": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "description": "OnError determines the verdict when the check returns an error, times out,\nor exits with code \u003e 1. \"allow\" (default) or \"deny\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "AdmissionConfig defines boolean admission gate settings for host pressure control."
+    },
     "Agent": {
       "properties": {
         "name": {
@@ -217,6 +244,10 @@
         "grant_ttl": {
           "type": "string",
           "description": "GrantTTL is how long a scale_check grant or just-started seat is\nretained before being considered orphaned when scale_check returns 0.\nDuration string (e.g., \"30s\", \"90s\"). Empty uses the default store-probe\ndemand floor."
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionConfig",
+          "description": "Admission configures boolean admission gate settings for this agent."
         },
         "drain_timeout": {
           "type": "string",
@@ -757,6 +788,10 @@
           "type": "string",
           "description": "GrantTTL overrides the grant retention TTL. Duration string (e.g., \"30s\", \"90s\")."
         },
+        "admission": {
+          "$ref": "#/$defs/AdmissionConfig",
+          "description": "Admission overrides admission gate settings for this agent."
+        },
         "option_defaults": {
           "additionalProperties": {
             "type": "string"
@@ -1070,6 +1105,10 @@
           "type": "string",
           "description": "GrantTTL overrides the grant retention TTL. Duration string (e.g., \"30s\", \"90s\")."
         },
+        "admission": {
+          "$ref": "#/$defs/AdmissionConfig",
+          "description": "Admission overrides admission gate settings for this agent."
+        },
         "option_defaults": {
           "additionalProperties": {
             "type": "string"
@@ -1295,6 +1334,10 @@
         "daemon": {
           "$ref": "#/$defs/DaemonConfig",
           "description": "Daemon configures controller daemon settings."
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionConfig",
+          "description": "Admission configures boolean admission gate settings for host pressure control."
         },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",

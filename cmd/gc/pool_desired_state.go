@@ -154,7 +154,18 @@ func ComputePoolDesiredStates(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, nil)
+}
+
+// ComputePoolDesiredStatesWithAdmission is ComputePoolDesiredStates with explicit admission verdicts.
+func ComputePoolDesiredStatesWithAdmission(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	admissionVerdicts map[string]AdmissionVerdict,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), admissionVerdicts, nil)
 }
 
 // ComputePoolDesiredStatesWithSeed is ComputePoolDesiredStates for a caller
@@ -168,7 +179,7 @@ func ComputePoolDesiredStatesWithSeed(
 	seed uint64,
 	loadVeto poolNewDemandLoadVeto,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, nil, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -178,7 +189,7 @@ func ComputePoolDesiredStatesTraced(
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, trace)
 }
 
 // ComputePoolDesiredStatesTracedWithSeed is ComputePoolDesiredStatesTraced
@@ -192,9 +203,10 @@ func ComputePoolDesiredStatesTracedWithSeed(
 	scaleCheckCounts map[string]int,
 	seed uint64,
 	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, admissionVerdicts, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -206,7 +218,7 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, trace)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedWithSeed is
@@ -226,9 +238,10 @@ func ComputePoolDesiredStatesWithDemandTracedWithSeed(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	seed uint64,
 	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, loadVeto, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, loadVeto, admissionVerdicts, trace)
 }
 
 // nextPoolNewDemandInterleaveSeed draws the next rotation seed for a
@@ -251,6 +264,7 @@ func computePoolDesiredStates(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	newDemandInterleaveSeed uint64,
 	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
@@ -497,12 +511,23 @@ func computePoolDesiredStates(
 				continue
 			}
 			templateInFlight := inFlightNewRequests[template]
-			if newDemandVetoed {
-				// Anonymous new demand is declined under load pressure, but
+			templateAdmissionVetoed := false
+			if av, ok := admissionVerdicts[template]; ok && !av.Allowed {
+				templateAdmissionVetoed = true
+			}
+			if newDemandVetoed || templateAdmissionVetoed {
+				// Anonymous new demand is declined under load pressure or admission veto, but
 				// in-flight requests represent sessions already created and
 				// mid-start — already-spent capacity, not new load — so they
 				// remain admissible up to their own count.
 				scaleCount = minInt(scaleCount, len(templateInFlight))
+			}
+			if templateAdmissionVetoed && trace != nil {
+				trace.RecordDecision(TraceSiteAdmissionCheckExec, TraceReasonAdmissionGate, TraceOutcomeDeny, template, "", traceRecordPayload{
+					"reason":             admissionVerdicts[template].Reason,
+					"demand_vetoed":      scaleCheckCounts[template],
+					"in_flight_retained": len(templateInFlight),
+				})
 			}
 			if _, ok := aliasHeldTemplates[template]; ok {
 				continue

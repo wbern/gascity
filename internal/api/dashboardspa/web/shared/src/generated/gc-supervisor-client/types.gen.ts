@@ -15,6 +15,13 @@ export type AdapterEventPayload = {
     provider: string;
 };
 
+export type AdmissionConfig = {
+    check?: string;
+    interval?: string;
+    on_error?: string;
+    timeout?: string;
+};
+
 export type AgentCreateInputBody = {
     /**
      * Working directory (rig name).
@@ -58,6 +65,7 @@ export type AgentOutputResponse = {
 };
 
 export type AgentPatch = {
+    Admission: AdmissionConfig;
     AppendFragments: Array<string> | null;
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;

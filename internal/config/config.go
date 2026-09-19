@@ -278,6 +278,8 @@ type City struct {
 	Formulas FormulasConfig `toml:"formulas,omitempty"`
 	// Daemon configures controller daemon settings.
 	Daemon DaemonConfig `toml:"daemon,omitempty"`
+	// Admission configures boolean admission gate settings for host pressure control.
+	Admission AdmissionConfig `toml:"admission,omitempty"`
 	// Orders configures order settings: skip list, max_timeout cap, and
 	// per-order overrides.
 	Orders OrdersConfig `toml:"orders,omitempty"`
@@ -820,6 +822,8 @@ type AgentOverride struct {
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// GrantTTL overrides the grant retention TTL. Duration string (e.g., "30s", "90s").
 	GrantTTL *string `toml:"grant_ttl,omitempty"`
+	// Admission overrides admission gate settings for this agent.
+	Admission *AdmissionConfig `toml:"admission,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3535,6 +3539,8 @@ type Agent struct {
 	// Duration string (e.g., "30s", "90s"). Empty uses the default store-probe
 	// demand floor.
 	GrantTTL string `toml:"grant_ttl,omitempty"`
+	// Admission configures boolean admission gate settings for this agent.
+	Admission *AdmissionConfig `toml:"admission,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
@@ -3831,6 +3837,7 @@ func (a Agent) Clone() Agent {
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.OutputFirewallByteBudget = copyIntPtr(a.OutputFirewallByteBudget)
 	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
+	out.Admission = cloneAdmissionConfig(a.Admission)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -4425,6 +4432,11 @@ func ValidateAgents(agents []Agent) error {
 		}
 		if a.OutputFirewallByteBudget != nil && *a.OutputFirewallByteBudget < 512 {
 			return fmt.Errorf("agent %q: output_firewall_byte_budget must be at least 512", a.Name)
+		}
+		if a.Admission != nil {
+			if err := a.Admission.Validate(fmt.Sprintf("agent %q", a.QualifiedName())); err != nil {
+				return err
+			}
 		}
 	}
 

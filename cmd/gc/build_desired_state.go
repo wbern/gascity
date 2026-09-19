@@ -172,6 +172,8 @@ type DesiredStateResult struct {
 	// rather than probing the host again, or the two calls can reach
 	// opposite verdicts on one tick (PR #131 review cycle 2).
 	PoolNewDemandLoadVeto poolNewDemandLoadVeto
+	// AdmissionVerdicts maps agent template -> AdmissionVerdict for this tick.
+	AdmissionVerdicts map[string]AdmissionVerdict
 }
 
 func (r DesiredStateResult) snapshotQueryPartial() bool {
@@ -435,6 +437,7 @@ func buildDesiredStateWithSessionBeads(
 
 	var poolNewDemandInterleaveSeed uint64
 	var poolNewDemandLoadVetoDecision poolNewDemandLoadVeto
+	var admissionVerdicts map[string]AdmissionVerdict
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 
@@ -932,7 +935,12 @@ func buildDesiredStateWithSessionBeads(
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolNewDemandInterleaveSeed = nextPoolNewDemandInterleaveSeed()
 		poolNewDemandLoadVetoDecision = resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, poolNewDemandInterleaveSeed, poolNewDemandLoadVetoDecision, trace)
+		admissionAnchorTime := beaconTime
+		if admissionAnchorTime.IsZero() {
+			admissionAnchorTime = time.Now().UTC()
+		}
+		admissionVerdicts = resolveAdmissionVerdicts(cfg, cityPath, scaleCheckCounts, admissionAnchorTime, shellAdmissionCheck, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, poolNewDemandInterleaveSeed, poolNewDemandLoadVetoDecision, admissionVerdicts, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1163,6 +1171,7 @@ func buildDesiredStateWithSessionBeads(
 		BeaconTime:                         beaconTime,
 		PoolNewDemandInterleaveSeed:        poolNewDemandInterleaveSeed,
 		PoolNewDemandLoadVeto:              poolNewDemandLoadVetoDecision,
+		AdmissionVerdicts:                  admissionVerdicts,
 	}
 }
 

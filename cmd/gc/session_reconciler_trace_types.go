@@ -133,6 +133,7 @@ const (
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
 	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
+	TraceSiteAdmissionCheckExec                  TraceSiteCode = "admission_check_exec"
 )
 
 type TraceReasonCode string
@@ -201,6 +202,7 @@ const (
 	TraceReasonUserHold              TraceReasonCode = "user_hold"
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	TraceReasonAdmissionGate         TraceReasonCode = "admission_gate"
 )
 
 type TraceOutcomeCode string
@@ -213,6 +215,9 @@ const (
 	TraceOutcomeNoChange                TraceOutcomeCode = "no_change"
 	TraceOutcomeFailed                  TraceOutcomeCode = "failed"
 	TraceOutcomeSuccess                 TraceOutcomeCode = "success"
+	TraceOutcomeAllow                   TraceOutcomeCode = "allow"
+	TraceOutcomeDeny                    TraceOutcomeCode = "deny"
+	TraceOutcomeError                   TraceOutcomeCode = "error"
 	TraceOutcomeDeferredByWakeBudget    TraceOutcomeCode = "deferred_by_wake_budget"
 	TraceOutcomeSessionExists           TraceOutcomeCode = "session_exists"
 	TraceOutcomeSessionExistsConverged  TraceOutcomeCode = "session_exists_converged"

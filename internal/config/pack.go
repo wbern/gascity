@@ -2844,6 +2844,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		MinActiveSessions:        ov.MinActiveSessions,
 		ScaleCheck:               ov.ScaleCheck,
 		GrantTTL:                 ov.GrantTTL,
+		Admission:                ov.Admission,
 		OptionDefaults:           ov.OptionDefaults,
 	}
 }

@@ -223,6 +223,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MinActiveSessions:        intVal(1),
 		ScaleCheck:               strVal("echo 3"),
 		GrantTTL:                 strVal("90s"),
+		Admission:                &AdmissionConfig{Check: "echo 1", OnError: "deny"},
 		OptionDefaults:           map[string]string{"model": "sonnet"},
 	}
 
@@ -385,6 +386,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MinActiveSessions:        intVal(1),
 		ScaleCheck:               strVal("echo 3"),
 		GrantTTL:                 strVal("90s"),
+		Admission:                &AdmissionConfig{Check: "echo 1", OnError: "deny"},
 		OptionDefaults:           map[string]string{"model": "sonnet"},
 	}
 
