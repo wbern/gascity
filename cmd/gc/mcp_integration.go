@@ -46,6 +46,7 @@ func supportsMCPProviderKind(kind string) bool {
 	case materialize.MCPProviderClaude,
 		materialize.MCPProviderCodex,
 		materialize.MCPProviderGemini,
+		materialize.MCPProviderAntigravity,
 		materialize.MCPProviderOpenCode,
 		materialize.MCPProviderMimoCode,
 		materialize.MCPProviderCursor:
