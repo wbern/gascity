@@ -223,6 +223,12 @@
               "null"
             ]
           },
+          "GrantTTL": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "HooksInstalled": {
             "type": [
               "boolean",
@@ -595,6 +601,7 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "GrantTTL",
           "OptionDefaults"
         ],
         "type": "object"

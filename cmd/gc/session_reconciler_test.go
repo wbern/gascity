@@ -9484,7 +9484,7 @@ func TestReconcileSessionBeads_IdleTimeoutRespectsUserHold(t *testing.T) {
 func TestReconcileSessionBeads_SuspendedUserHoldStopsRuntimeImmediately(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", true)
+	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
@@ -9527,7 +9527,7 @@ func TestReconcileSessionBeads_SuspendedUserHoldStopsRuntimeImmediately(t *testi
 func TestReconcileSessionBeads_SuspendedUserHoldDoesNotStopWokenReplacement(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesired("worker", "worker", true)
+	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
@@ -12187,3 +12187,229 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+func TestReconcileSessionBeads_CustomScaleCheck_WarmPoolDoesNotOrphanDrainJustStartedSeat(t *testing.T) {
+	// gcw-tuwx8.16: a pool with a custom scale_check that grants once then returns 0
+	// must NOT have its just-started seat orphan-drained on the following warm tick
+	// while routed work remains in the store or during its retention window.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "reviewer",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "printf 0", // Scale check grant spent, returns 0 on warm tick
+			GrantTTL:          "90s",
+		}},
+	}
+
+	sessionName := "test-city--reviewer-1"
+	_ = sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"})
+
+	// Session was just started (now), in state "running", but has not yet claimed work.
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:reviewer-1"},
+		Metadata: map[string]string{
+			"session_name":         sessionName,
+			"agent_name":           "reviewer-1",
+			"template":             "reviewer",
+			"state":                string(sessionpkg.StateActive),
+			"last_woke_at":         now.Format(time.RFC3339),
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	// Routed work exists in the store for reviewer.
+	workBead, err := store.Create(beads.Bead{
+		Title:  "queued review job",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "reviewer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed work bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
+
+	dt := newDrainTracker()
+	reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, cfgNames,
+		cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, dt, poolDesired,
+		dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	t.Logf("TICK 1:\nstdout:\n%s\nstderr:\n%s\nScaleCheckCounts:\n%#v\npoolDesired:\n%#v\ndsResult.State:\n%#v\ndt.get:\n%#v",
+		stdout.String(), stderr.String(), dsResult.ScaleCheckCounts, poolDesired, dsResult.State, dt.get(sessionBead.ID))
+	// The just-started seat must NOT be drained as orphaned on this warm tick!
+	if ds := dt.get(sessionBead.ID); ds != nil && ds.reason == "orphaned" {
+		t.Fatalf("just-started seat %q was drained as orphaned on warm tick; stdout:\n%s\nstderr:\n%s", sessionName, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Draining session '"+sessionName+"': orphaned") {
+		t.Fatalf("just-started seat %q was drained in stdout: %s", sessionName, stdout.String())
+	}
+
+	// Verify the non-leak acceptance criterion: when work is gone AND retention expires, it IS drained.
+	if err := store.Close(workBead.ID); err != nil {
+		t.Fatalf("close work bead: %v", err)
+	}
+	// Advance clock past the retention window (e.g. 10 minutes later)
+	clk.Time = now.Add(10 * time.Minute)
+
+	stdout.Reset()
+	stderr.Reset()
+	dsResult2 := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	sessions2, _ := loadSessionBeads(store)
+	poolDesired2 := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult2.AssignedWorkBeads, sessionInfosFromBeads(sessions2), dsResult2.ScaleCheckCounts))
+	if poolDesired2 == nil {
+		poolDesired2 = make(map[string]int)
+	}
+
+	reconcileSessionBeads(
+		context.Background(), sessions2, dsResult2.State, cfgNames,
+		cfg, sp, store, nil, dsResult2.AssignedWorkBeads, nil, dt, poolDesired2,
+		dsResult2.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	t.Logf("TICK 2:\nstdout:\n%s\nstderr:\n%s\nScaleCheckCounts:\n%#v\npoolDesired:\n%#v\ndsResult.State:\n%#v\ndt.get:\n%#v",
+		stdout.String(), stderr.String(), dsResult2.ScaleCheckCounts, poolDesired2, dsResult2.State, dt.get(sessionBead.ID))
+
+	// Now that work is gone and retention expired, the seat MUST drain.
+	if ds := dt.get(sessionBead.ID); ds == nil || ds.reason != "orphaned" {
+		t.Fatalf("idle seat with no work and expired retention was NOT drained; ds=%+v stdout=%s", ds, stdout.String())
+	}
+}
+
+func TestReconcileSessionBeads_CustomScaleCheck_GrantTTL_RetainsSeatWithoutRoutedWork(t *testing.T) {
+	// gcw-tuwx8.16: an agent with grant_ttl retains its granted seats even when
+	// scale_check returns 0 and there are no unassigned routed beads in the store,
+	// until the grant_ttl expires.
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "reviewer",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "printf 0", // Scale check grant spent
+			GrantTTL:          "90s",      // Configured grant TTL
+		}},
+	}
+
+	sessionName := "test-city--reviewer-1"
+	_ = sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"})
+
+	// Session was started 10s ago (within 90s GrantTTL), in state "active", no assigned work.
+	startedAt := now.Add(-10 * time.Second)
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:reviewer-1"},
+		Metadata: map[string]string{
+			"session_name":         sessionName,
+			"agent_name":           "reviewer-1",
+			"template":             "reviewer",
+			"state":                string(sessionpkg.StateActive),
+			"last_woke_at":         startedAt.Format(time.RFC3339),
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	// NOTE: NO routed beads created in the store. Demand comes entirely from GrantTTL floor.
+	var stdout, stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+
+	dt := newDrainTracker()
+	reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, cfgNames,
+		cfg, sp, store, nil, dsResult.AssignedWorkBeads, nil, dt, poolDesired,
+		dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	// Within 90s TTL (at 10s): session must be retained in desired and NOT drained.
+	if dsResult.ScaleCheckCounts["reviewer"] != 1 {
+		t.Fatalf("expected ScaleCheckCounts[reviewer] = 1 from GrantTTL floor, got %d", dsResult.ScaleCheckCounts["reviewer"])
+	}
+	if poolDesired["reviewer"] != 1 {
+		t.Fatalf("expected poolDesired[reviewer] = 1, got %d", poolDesired["reviewer"])
+	}
+	if ds := dt.get(sessionBead.ID); ds != nil && ds.reason == "orphaned" {
+		t.Fatalf("seat within GrantTTL was drained as orphaned; stdout:\n%s", stdout.String())
+	}
+
+	// Advance clock past GrantTTL (e.g. 100s after start, which is now + 90s).
+	clk.Time = now.Add(95 * time.Second)
+
+	stdout.Reset()
+	stderr.Reset()
+	dsResult2 := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
+	sessions2, _ := loadSessionBeads(store)
+	poolDesired2 := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult2.AssignedWorkBeads, sessionInfosFromBeads(sessions2), dsResult2.ScaleCheckCounts))
+	if poolDesired2 == nil {
+		poolDesired2 = make(map[string]int)
+	}
+
+	reconcileSessionBeads(
+		context.Background(), sessions2, dsResult2.State, cfgNames,
+		cfg, sp, store, nil, dsResult2.AssignedWorkBeads, nil, dt, poolDesired2,
+		dsResult2.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	// Past GrantTTL (at 105s): GrantTTL expired, desired drops to 0, session MUST be drained.
+	if dsResult2.ScaleCheckCounts["reviewer"] != 0 {
+		t.Fatalf("expected ScaleCheckCounts[reviewer] = 0 after GrantTTL expired, got %d", dsResult2.ScaleCheckCounts["reviewer"])
+	}
+	if ds := dt.get(sessionBead.ID); ds == nil || ds.reason != "orphaned" {
+		t.Fatalf("seat with expired GrantTTL was NOT drained; ds=%+v stdout=%s", ds, stdout.String())
+	}
+}

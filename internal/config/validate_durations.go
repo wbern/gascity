@@ -160,6 +160,7 @@ func ValidateDurations(cfg *City, source string) []string {
 		check(ctx, "claim_holder_stall_timeout", a.ClaimHolderStallTimeout)
 		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
 		check(ctx, "drain_timeout", a.DrainTimeout)
+		check(ctx, "grant_ttl", a.GrantTTL)
 	}
 
 	return warnings
@@ -219,6 +220,12 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 	}
 	if err := checkNonNegative("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout); err != nil {
 		return err
+	}
+	for _, a := range cfg.Agents {
+		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
+		if err := checkNonNegative(ctx, "grant_ttl", a.GrantTTL); err != nil {
+			return err
+		}
 	}
 	for name, policy := range cfg.Beads.Policies {
 		if err := checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose); err != nil {

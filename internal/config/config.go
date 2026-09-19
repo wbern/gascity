@@ -818,6 +818,8 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// GrantTTL overrides the grant retention TTL. Duration string (e.g., "30s", "90s").
+	GrantTTL *string `toml:"grant_ttl,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3528,6 +3530,11 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
 	// before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// GrantTTL is how long a scale_check grant or just-started seat is
+	// retained before being considered orphaned when scale_check returns 0.
+	// Duration string (e.g., "30s", "90s"). Empty uses the default store-probe
+	// demand floor.
+	GrantTTL string `toml:"grant_ttl,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".

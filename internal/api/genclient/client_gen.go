@@ -955,6 +955,7 @@ type AgentPatch struct {
 	Dir                      string            `json:"Dir"`
 	Env                      map[string]string `json:"Env"`
 	EnvRemove                *[]string         `json:"EnvRemove"`
+	GrantTTL                 *string           `json:"GrantTTL"`
 	HooksInstalled           *bool             `json:"HooksInstalled"`
 	IdleTimeout              *string           `json:"IdleTimeout"`
 	InjectAssignedSkills     *bool             `json:"InjectAssignedSkills"`

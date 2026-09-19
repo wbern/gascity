@@ -18,6 +18,19 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
+// GrantTTLDuration returns the grant retention TTL as a time.Duration.
+// Returns 0 if empty or unparseable.
+func (a *Agent) GrantTTLDuration() time.Duration {
+	if a == nil || a.GrantTTL == "" {
+		return 0
+	}
+	dur, err := time.ParseDuration(a.GrantTTL)
+	if err != nil || dur < 0 {
+		return 0
+	}
+	return dur
+}
+
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
 // Priority: agent.MaxActiveSessions > pool.Max > nil (unlimited).
 func (a *Agent) EffectiveMaxActiveSessions() *int {

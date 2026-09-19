@@ -165,6 +165,8 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// GrantTTL overrides the grant retention TTL. Duration string (e.g., "30s", "90s").
+	GrantTTL *string `toml:"grant_ttl,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
@@ -519,6 +521,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.GrantTTL != nil {
+		a.GrantTTL = *p.GrantTTL
 	}
 	if p.ClaimHolderStallTimeout != nil {
 		a.ClaimHolderStallTimeout = *p.ClaimHolderStallTimeout
