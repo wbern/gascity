@@ -195,7 +195,8 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
 		if emitFacts {
-			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now))
+			fact := modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now)
+			h.recordModelUsageFact(h.withCompletedInvocationAttribution(ctx, id, fact))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -205,6 +206,36 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
+}
+
+// withCompletedInvocationAttribution enriches a delayed transcript fact only
+// when the provider adapter already persisted an exact terminal observation.
+// A missing or unreadable binding remains explicitly unbound; the collector
+// never substitutes current session assignment, name, work directory, or time.
+func (h *SessionHandle) withCompletedInvocationAttribution(ctx context.Context, sessionID string, fact usage.Fact) usage.Fact {
+	if h.invocationLedger == nil || strings.TrimSpace(fact.UpstreamReqID) == "" {
+		return fact
+	}
+	record, found, err := h.invocationLedger.CompletedForUpstreamRequestID(ctx, sessionID, fact.UpstreamReqID)
+	if err != nil {
+		slog.Debug("invocation telemetry: completed binding lookup failed; recording unbound fact",
+			slog.String("session_id", sessionID),
+			slog.String("upstream_request_id", fact.UpstreamReqID),
+			slog.Any("error", err))
+		return fact
+	}
+	if !found {
+		return fact
+	}
+	bound, err := usage.FactForCompletedInvocation(fact, record)
+	if err != nil {
+		slog.Debug("invocation telemetry: completed binding did not match fact; recording unbound fact",
+			slog.String("session_id", sessionID),
+			slog.String("upstream_request_id", fact.UpstreamReqID),
+			slog.Any("error", err))
+		return fact
+	}
+	return bound
 }
 
 // modelUsageFact builds a model usage Fact from one transcript invocation. The
@@ -237,6 +268,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	if !priced {
 		cost = 0
 	}
+	attribution := usage.UnboundInvocationAttribution()
 	return usage.Fact{
 		RunID:     runID,
 		SessionID: strings.TrimSpace(sessionID),
@@ -251,6 +283,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		CacheCreationTokens: u.CacheCreationTokens,
 		CostUSDEstimate:     cost,
 		Unpriced:            !priced,
+		AttributionV2:       &attribution,
 		UpstreamReqID:       reqID,
 		At:                  now.UnixMilli(),
 		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
