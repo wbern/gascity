@@ -161,7 +161,14 @@ func ValidateDurations(cfg *City, source string) []string {
 		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
 		check(ctx, "drain_timeout", a.DrainTimeout)
 		check(ctx, "grant_ttl", a.GrantTTL)
+		if a.Admission != nil {
+			check(ctx, "admission.timeout", a.Admission.Timeout)
+			check(ctx, "admission.interval", a.Admission.Interval)
+		}
 	}
+
+	check("[admission]", "timeout", cfg.Admission.Timeout)
+	check("[admission]", "interval", cfg.Admission.Interval)
 
 	return warnings
 }
@@ -226,6 +233,20 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 		if err := checkNonNegative(ctx, "grant_ttl", a.GrantTTL); err != nil {
 			return err
 		}
+		if a.Admission != nil {
+			if err := checkNonNegative(ctx, "admission.timeout", a.Admission.Timeout); err != nil {
+				return err
+			}
+			if err := checkNonNegative(ctx, "admission.interval", a.Admission.Interval); err != nil {
+				return err
+			}
+		}
+	}
+	if err := checkNonNegative("[admission]", "timeout", cfg.Admission.Timeout); err != nil {
+		return err
+	}
+	if err := checkNonNegative("[admission]", "interval", cfg.Admission.Interval); err != nil {
+		return err
 	}
 	for name, policy := range cfg.Beads.Policies {
 		if err := checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose); err != nil {

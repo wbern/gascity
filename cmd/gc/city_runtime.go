@@ -2264,7 +2264,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(
-				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, trace)),
+				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, result.AdmissionVerdicts, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3309,7 +3309,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, trace)),
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, result.PoolNewDemandInterleaveSeed, result.PoolNewDemandLoadVeto, result.AdmissionVerdicts, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)

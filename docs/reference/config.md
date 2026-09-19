@@ -35,6 +35,7 @@ City is the top-level configuration for a Gas City instance.
 | `dolt` | DoltConfig |  |  | Dolt configures optional dolt server connection overrides. |
 | `formulas` | FormulasConfig |  |  | Formulas is the legacy [formulas] table; authored [formulas].dir is rejected at config load. Formulas live in the well-known formulas/ directory. |
 | `daemon` | DaemonConfig |  |  | Daemon configures controller daemon settings. |
+| `admission` | AdmissionConfig |  |  | Admission configures boolean admission gate settings for host pressure control. |
 | `orders` | OrdersConfig |  |  | Orders configures order settings: skip list, max_timeout cap, and per-order overrides. |
 | `api` | APIConfig |  |  | API configures the optional HTTP API server. |
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
@@ -75,6 +76,17 @@ APIConfig configures the HTTP API server.
 | `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey, when set, requires every read (GET/HEAD) of an already-registered city on the typed per-city API — the routes under /v0/city/&#123;cityName&#125; — to carry a signed read grant from a configured trusted authority. It is the read-side twin of WriteAuthVerifyKey, adding in-process, grant-based admission control to the typed city read surface (beads, mail, sessions, agent transcripts) instead of trusting network position.  Scope boundary: this gate covers ONLY the typed /v0/city/&#123;cityName&#125; read routes. It does NOT cover other surfaces on the same listener that can also expose per-city data: the supervisor-scope aggregate event feed (/v0/events and /v0/events/stream, which multiplex every running city's events), the default-on dashboard host plane (/api/*, including its /api/city/&#123;cityName&#125;/* samplers, run detail, run diff, and config reads), and the supervisor-scope routes /v0/cities, /health, /v0/readiness, /v0/provider-readiness, the OpenAPI document, and the dashboard SPA shell. On a non-localhost bind, the only complete mitigation is to front the whole listener with the grant-minting authority/edge (the intended deployment), which protects every surface above. Disabling the dashboard host plane with GC_SUPERVISOR_DASHBOARD=0 is additive, not a substitute: it closes /api/* only, while the supervisor-scope event feed /v0/events and /v0/events/stream stays readable by network position until the follow-up supervisor-scope grant lands. Gating those feeds is tracked as that follow-up work.  Built-in callers (the bundled gc API client and dashboard SPA) mint no grant, so enabling this gate turns their direct /v0/city reads away with a clear 401; such deployments front reads through the authority that mints grants. The value is one or more "kid:base64-ed25519-pubkey" entries, comma separated. The GC_CITY_READ_PUBKEY env var overrides this. Grant revocation via an epoch floor is an ops-plane control set only through the GC_CITY_READ_EPOCH_FLOOR env var; it has no config field. |
 | `read_auth_required` | boolean |  |  | ReadAuthRequired makes a missing or empty ReadAuthVerifyKey a startup error instead of silently disabling the gate, so a config that intends to gate reads fails closed if the key is ever dropped. The GC_CITY_READ_REQUIRED=1 env var has the same effect. |
 
+## AdmissionConfig
+
+AdmissionConfig defines boolean admission gate settings for host pressure control.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `check` | string |  |  | Check is the shell command run to evaluate admission. Exit 0 = allow, Exit 1 = deny, other/timeout = error. When empty or "off", the admission gate is disabled (always allow). |
+| `timeout` | string |  |  | Timeout bounds how long the admission check may run. Duration string (e.g. "10s"). Default is 10s. |
+| `interval` | string |  |  | Interval defines the TTL / cache duration for a verdict before re-running. Duration string (e.g. "30s"). Default is 30s. |
+| `on_error` | string |  |  | OnError determines the verdict when the check returns an error, times out, or exits with code &gt; 1. "allow" (default) or "deny". Enum: `allow`, `deny` |
+
 ## Agent
 
 Agent defines a configured agent in the city.
@@ -111,6 +123,7 @@ Agent defines a configured agent in the city.
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. This controls pool sessions independently of [[named_session]] mode="always"; both produce sessions, and gc doctor reports accidental combinations. |
 | `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `grant_ttl` | string |  |  | GrantTTL is how long a scale_check grant or just-started seat is retained before being considered orphaned when scale_check returns 0. Duration string (e.g., "30s", "90s"). Empty uses the default store-probe demand floor. |
+| `admission` | AdmissionConfig |  |  | Admission configures boolean admission gate settings for this agent. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
 | `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
@@ -223,6 +236,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output reports new unassigned session demand for bead-backed reconciliation. |
 | `grant_ttl` | string |  |  | GrantTTL overrides the grant retention TTL. Duration string (e.g., "30s", "90s"). |
+| `admission` | AdmissionConfig |  |  | Admission overrides admission gate settings for this agent. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## AgentPatch
@@ -287,6 +301,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `grant_ttl` | string |  |  | GrantTTL overrides the grant retention TTL. Duration string (e.g., "30s", "90s"). |
+| `admission` | AdmissionConfig |  |  | Admission overrides admission gate settings for this agent. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## BdGuardConfig

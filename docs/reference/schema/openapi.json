@@ -47,6 +47,24 @@
         ],
         "type": "object"
       },
+      "AdmissionConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "type": "string"
+          },
+          "interval": {
+            "type": "string"
+          },
+          "on_error": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AgentCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -150,6 +168,9 @@
       "AgentPatch": {
         "additionalProperties": false,
         "properties": {
+          "Admission": {
+            "$ref": "#/components/schemas/AdmissionConfig"
+          },
           "AppendFragments": {
             "items": {
               "type": "string"
@@ -602,6 +623,7 @@
           "MinActiveSessions",
           "ScaleCheck",
           "GrantTTL",
+          "Admission",
           "OptionDefaults"
         ],
         "type": "object"

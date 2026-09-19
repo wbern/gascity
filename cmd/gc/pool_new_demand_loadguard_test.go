@@ -55,7 +55,7 @@ func TestPoolNewDemandLoadGuard_RecordsTraceDecision(t *testing.T) {
 	scaleCheck := map[string]int{"rig/claude": 3}
 	loadVeto := resolvePoolNewDemandLoadVeto(cfg, scaleCheck)
 
-	result := computePoolDesiredStates(cfg, nil, nil, nil, scaleCheck, nil, 0, loadVeto, trace)
+	result := computePoolDesiredStates(cfg, nil, nil, nil, scaleCheck, nil, 0, loadVeto, nil, trace)
 
 	if len(result) != 0 {
 		t.Fatalf("result = %#v, want none: new demand should be vetoed under a breached load ceiling", result)
@@ -192,8 +192,8 @@ func TestPoolNewDemandLoadGuard_PairedCallsAgreeDespiteChangingLoad(t *testing.T
 	stubPoolNewDemandLoad(t, float64(runtime.NumCPU())*10, nil)
 
 	seed := nextPoolNewDemandInterleaveSeed()
-	buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, loadVeto, nil))
-	wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, loadVeto, nil))
+	buildPlan := PoolDesiredCounts(ComputePoolDesiredStatesWithDemandTracedWithSeed(cfg, nil, nil, nil, scaleCheck, nil, seed, loadVeto, nil, nil))
+	wakePlan := PoolDesiredCounts(ComputePoolDesiredStatesTracedWithSeed(cfg, nil, nil, scaleCheck, seed, loadVeto, nil, nil))
 
 	if buildPlan["claude"] != wakePlan["claude"] {
 		t.Fatalf("create plan %#v disagrees with wake plan %#v on the same tick's threaded load-veto decision", buildPlan, wakePlan)

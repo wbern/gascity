@@ -151,5 +151,16 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	if cfg.Admission.OnError != "" {
+		switch strings.ToLower(strings.TrimSpace(cfg.Admission.OnError)) {
+		case AdmissionOnErrorAllow, AdmissionOnErrorDeny:
+			// valid
+		default:
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [admission] on_error must be \"allow\", \"deny\", or empty, got %q",
+				source, cfg.Admission.OnError))
+		}
+	}
+
 	return warnings
 }
