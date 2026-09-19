@@ -153,6 +153,9 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
 			continue
 		}
+		if agent.Implicit && len(view.Catalog.Servers) == 0 {
+			continue
+		}
 		key := view.Projection.Provider + "|" + view.Projection.Target
 		existing, ok := byKey[key]
 		if ok {
