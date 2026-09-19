@@ -153,6 +153,10 @@
           "type": "string",
           "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
         },
+        "grant_ttl": {
+          "type": "string",
+          "description": "GrantTTL is how long a scale_check grant or just-started seat is\nretained before being considered orphaned when scale_check returns 0.\nDuration string (e.g., \"30s\", \"90s\"). Empty uses the default store-probe\ndemand floor."
+        },
         "drain_timeout": {
           "type": "string",
           "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
@@ -686,6 +690,10 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "grant_ttl": {
+          "type": "string",
+          "description": "GrantTTL overrides the grant retention TTL. Duration string (e.g., \"30s\", \"90s\")."
         },
         "option_defaults": {
           "additionalProperties": {
