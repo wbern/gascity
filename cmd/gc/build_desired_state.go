@@ -696,6 +696,8 @@ func buildDesiredStateWithSessionBeads(
 		// only wake a sleeping pool, never override the custom count. A custom
 		// scale_check that should scale on cross-store routed demand must count
 		// it itself, or the pool will churn at the warm/cold boundary.
+		// Seats granted by custom scale_check are protected against orphan-drain
+		// by GrantTTL retention below (gcw-tuwx8.16).
 		if store != nil && isCold && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
@@ -835,6 +837,47 @@ func buildDesiredStateWithSessionBeads(
 					scaleCheckCounts[template] = count
 				}
 				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
+			}
+		}
+		// Grant TTL retention floor: if an agent has grant_ttl configured,
+		// any live session that was started/woken within that TTL and has not
+		// yet claimed work provides a retention floor so that rate-limiting or
+		// single-grant scale_checks do not cause orphan-drain churn (gcw-tuwx8.16).
+		nowAnchor := beaconTime
+		if nowAnchor.IsZero() {
+			nowAnchor = time.Now().UTC()
+		}
+		for i := range cfg.Agents {
+			agent := &cfg.Agents[i]
+			grantTTL := agent.GrantTTLDuration()
+			if grantTTL <= 0 {
+				continue
+			}
+			template := agent.QualifiedName()
+			var retainedSeats int
+			for _, info := range sessionBeads.OpenInfos() {
+				if info.Closed || sessionHasProviderTerminalErrorInfo(info) {
+					continue
+				}
+				if normalizedSessionTemplateInfo(info, cfg) != template {
+					continue
+				}
+				if sessionInfoHasAssignedWorkInSnapshot(info, assignedWorkBeads, cfg) {
+					continue
+				}
+				anchor, ok := sessionAwakeAnchorTime(info)
+				if !ok {
+					continue
+				}
+				if nowAnchor.Sub(anchor) < grantTTL && !nowAnchor.Before(anchor) {
+					retainedSeats++
+				}
+			}
+			if retainedSeats > scaleCheckCounts[template] {
+				if scaleCheckCounts == nil {
+					scaleCheckCounts = make(map[string]int)
+				}
+				scaleCheckCounts[template] = retainedSeats
 			}
 		}
 		poolPartialRetentionTemplates = mergeScaleCheckPartialTemplates(poolPartialRetentionTemplates, poolScaleCheckPartialTemplates)
@@ -5496,4 +5539,38 @@ func formatMaxSessions(a *config.Agent) string {
 		return "unlimited"
 	}
 	return strconv.Itoa(*m)
+}
+
+func sessionAwakeAnchorTime(info session.Info) (time.Time, bool) {
+	if t, ok := parseRFC3339Metadata(info.LastWokeAt); ok && !t.IsZero() {
+		return t, true
+	}
+	if t, ok := parseRFC3339Metadata(info.CreationCompleteAt); ok && !t.IsZero() {
+		return t, true
+	}
+	if t, ok := parseRFC3339Metadata(info.AwakeStartedAt); ok && !t.IsZero() {
+		return t, true
+	}
+	if !info.CreatedAt.IsZero() {
+		return info.CreatedAt, true
+	}
+	return time.Time{}, false
+}
+
+func sessionInfoHasAssignedWorkInSnapshot(info session.Info, assignedWork []beads.Bead, cfg *config.City) bool {
+	ids := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	for _, wb := range assignedWork {
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if idSet[assignee] {
+			return true
+		}
+	}
+	return false
 }

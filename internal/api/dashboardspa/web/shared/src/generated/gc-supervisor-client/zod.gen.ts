@@ -1085,6 +1085,7 @@ export const zAgentPatch = z.object({
     Dir: z.string(),
     Env: z.record(z.string(), z.string()),
     EnvRemove: z.array(z.string()).nullable(),
+    GrantTTL: z.string().nullable(),
     HooksInstalled: z.boolean().nullable(),
     IdleTimeout: z.string().nullable(),
     InjectAssignedSkills: z.boolean().nullable(),
