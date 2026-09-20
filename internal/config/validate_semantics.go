@@ -85,6 +85,21 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 	}
 
+	// Check scale_check and work_query correspondence.
+	// Overriding only one side of a symmetric pair is a smell: reconciler demand
+	// and worker claims observe the bead store through different predicates.
+	for _, a := range cfg.Agents {
+		if a.ScaleCheck != "" && a.WorkQuery == "" {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: agent %q: custom scale_check is set without a corresponding custom work_query; reconciler demand and worker claims may diverge",
+				source, a.QualifiedName()))
+		} else if (a.SupportsMultipleSessions() || a.PoolName != "") && a.WorkQuery != "" && a.ScaleCheck == "" {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: agent %q: custom work_query is set without a corresponding custom scale_check; worker claims and reconciler demand may diverge",
+				source, a.QualifiedName()))
+		}
+	}
+
 	// Custom provider names must not contain the reserved ":" character
 	// (used by the base = "builtin:..." / "provider:..." namespace prefixes).
 	for name := range cfg.Providers {

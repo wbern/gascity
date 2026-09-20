@@ -64,6 +64,7 @@ census-owner-liveness
 run-target-routed-to-backfill
 hold-label-routed-to
 pool-idle-routed-work
+scale-check-work-query-correspondence
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

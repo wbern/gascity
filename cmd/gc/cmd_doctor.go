@@ -320,6 +320,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 		register(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 		register(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
+		register(newScaleCheckWorkQueryCorrespondenceCheck(cfg, cityPath))
 		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
 		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
