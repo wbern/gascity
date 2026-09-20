@@ -485,81 +485,79 @@ func computePoolDesiredStates(
 	// from that count. Pool-created sessions that have not claimed work yet
 	// represent already-spent new demand, so they occupy the first new-demand
 	// slots explicitly before anonymous creates are materialized.
-	if len(scaleCheckCounts) > 0 {
-		type templateDemand struct {
-			agent      *config.Agent
-			template   string
-			scaleCount int
-			ownCap     int
-			inFlight   []SessionRequest
+	type templateDemand struct {
+		agent      *config.Agent
+		template   string
+		scaleCount int
+		ownCap     int
+		inFlight   []SessionRequest
+	}
+	var demands []templateDemand
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended {
+			continue
 		}
-		var demands []templateDemand
-		for i := range cfg.Agents {
-			agent := &cfg.Agents[i]
-			if agent.Suspended {
-				continue
-			}
-			template := agent.QualifiedName()
-			scaleCount, ok := scaleCheckCounts[template]
-			if !ok || scaleCount <= 0 {
-				// Preserved from the pre-veto behavior: a template absent
-				// from this tick's scale_check demand does not participate
-				// here regardless of veto state, so enabling the guard can
-				// only ever REDUCE admissions for a template, never admit
-				// one that would not have been admitted anyway (PR #131
-				// review cycle 2, advisory finding 3).
-				continue
-			}
-			templateInFlight := inFlightNewRequests[template]
-			templateAdmissionVetoed := false
-			if av, ok := admissionVerdicts[template]; ok && !av.Allowed {
-				templateAdmissionVetoed = true
-			}
-			if newDemandVetoed || templateAdmissionVetoed {
-				// Anonymous new demand is declined under load pressure or admission veto, but
-				// in-flight requests represent sessions already created and
-				// mid-start — already-spent capacity, not new load — so they
-				// remain admissible up to their own count.
-				scaleCount = minInt(scaleCount, len(templateInFlight))
-			}
-			if templateAdmissionVetoed && trace != nil {
-				trace.RecordDecision(TraceSiteAdmissionCheckExec, TraceReasonAdmissionGate, TraceOutcomeDeny, template, "", traceRecordPayload{
-					"reason":             admissionVerdicts[template].Reason,
-					"demand_vetoed":      scaleCheckCounts[template],
-					"in_flight_retained": len(templateInFlight),
+		template := agent.QualifiedName()
+		scaleCount, hasScaleCount := scaleCheckCounts[template]
+		if !hasScaleCount || scaleCount <= 0 {
+			// A template with no demand never becomes a key in
+			// scaleCheckCounts, so without this record the skip is silent and
+			// a pool that correctly wants zero sessions reads exactly like a
+			// pool the controller never evaluated. That ambiguity has already
+			// cost days of misdiagnosis; the decision below is the evidence
+			// that the template was reached and found idle on purpose.
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolDemandCompute, TraceReasonNoDemand, TraceOutcomeSkipped, template, "", traceRecordPayload{
+					"scale_check": scaleCount,
+					"protected":   0,
+					"in_flight":   len(inFlightNewRequests[template]),
 				})
 			}
-			if _, ok := aliasHeldTemplates[template]; ok {
-				continue
-			}
-			// ownCap bounds candidate generation by what this template could
-			// use if it alone had the full remaining headroom (evaluated
-			// against the static resume-only baseline, not accumulated
-			// across templates below). It keeps a single oversubscribed
-			// template from materializing hundreds of doomed candidates
-			// when nothing else is contending for the same cap, while still
-			// letting the real, authoritative admission below decide who
-			// wins when two templates truly do share a binding cap.
-			demands = append(demands, templateDemand{
-				agent:      agent,
-				template:   template,
-				scaleCount: scaleCount,
-				ownCap:     capNewDemandCount(limits, resumeUsage, agent, scaleCount),
-				inFlight:   templateInFlight,
+			continue
+		}
+		templateInFlight := inFlightNewRequests[template]
+		templateAdmissionVetoed := false
+		if av, ok := admissionVerdicts[template]; ok && !av.Allowed {
+			templateAdmissionVetoed = true
+		}
+		if newDemandVetoed || templateAdmissionVetoed {
+			// Anonymous new demand is declined under load pressure or admission veto, but
+			// in-flight requests represent sessions already created and
+			// mid-start — already-spent capacity, not new load — so they
+			// remain admissible up to their own count.
+			scaleCount = minInt(scaleCount, len(templateInFlight))
+		}
+		if templateAdmissionVetoed && trace != nil {
+			trace.RecordDecision(TraceSiteAdmissionCheckExec, TraceReasonAdmissionGate, TraceOutcomeDeny, template, "", traceRecordPayload{
+				"reason":             admissionVerdicts[template].Reason,
+				"demand_vetoed":      scaleCheckCounts[template],
+				"in_flight_retained": len(templateInFlight),
 			})
 		}
-
-		// Rotating the start of the interleave below (reusing the pattern at
-		// build_desired_state.go:218) keeps the same template from always
-		// winning an odd remainder; a hash of the (stable, often-identical)
-		// per-tick demand would not rotate at all under steady-state load,
-		// so the seed comes from newDemandInterleaveSeed, drawn once per
-		// tick by the caller (see the doc comment on ComputePoolDesiredStates)
-		// rather than inside this otherwise-pure function.
-		if n := len(demands); n > 0 {
-			start := int(newDemandInterleaveSeed % uint64(n))
-			demands = append(append([]templateDemand(nil), demands[start:]...), demands[:start]...)
+		if _, ok := aliasHeldTemplates[template]; ok {
+			continue
 		}
+		// ownCap bounds candidate generation by what this template could
+		// use if it alone had the full remaining headroom (evaluated
+		// against the static resume-only baseline, not accumulated
+		// across templates below). It keeps a single oversubscribed
+		// template from materializing hundreds of doomed candidates
+		// when nothing else is contending for the same cap, while still
+		// letting the real, authoritative admission below decide who
+		// wins when two templates truly do share a binding cap.
+		demands = append(demands, templateDemand{
+			agent:      agent,
+			template:   template,
+			scaleCount: scaleCount,
+			ownCap:     capNewDemandCount(limits, resumeUsage, agent, scaleCount),
+			inFlight:   templateInFlight,
+		})
+	}
+
+	if len(demands) > 0 {
+		start := int(newDemandInterleaveSeed % uint64(len(demands)))
+		demands = append(append([]templateDemand(nil), demands[start:]...), demands[:start]...)
 
 		// Emit every contending template's in-flight requests before any
 		// template's anonymous ones. An in-flight request carries
