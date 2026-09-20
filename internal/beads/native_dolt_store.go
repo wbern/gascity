@@ -1997,6 +1997,9 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 	if opts.Assignee != nil {
 		updates["assignee"] = *opts.Assignee
 	}
+	if opts.DeferUntil != nil {
+		updates["defer_until"] = *opts.DeferUntil
+	}
 	if len(opts.Metadata) > 0 {
 		issue, err := storage.GetIssue(ctx, id)
 		if err != nil {

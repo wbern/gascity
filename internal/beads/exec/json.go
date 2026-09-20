@@ -43,6 +43,7 @@ type updateRequest struct {
 	Labels       []string          `json:"labels,omitempty"`
 	RemoveLabels []string          `json:"remove_labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 }
 
 // beadWire is the JSON wire format returned by the script for bead data.
@@ -110,6 +111,7 @@ func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 		Labels:       opts.Labels,
 		RemoveLabels: opts.RemoveLabels,
 		Metadata:     opts.Metadata,
+		DeferUntil:   opts.DeferUntil,
 	}
 	return json.Marshal(r)
 }

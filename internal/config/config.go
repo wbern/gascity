@@ -312,6 +312,8 @@ type City struct {
 	// ExtMsg configures the external-messaging fabric (default routes
 	// for inbound conversations with no binding).
 	ExtMsg ExtMsgConfig `toml:"extmsg,omitempty"`
+	// WorkKinds defines declarative workability predicates per work kind.
+	WorkKinds map[string]WorkKind `toml:"work_kinds,omitempty"`
 	// AgentDefaults provides root city defaults for agents that don't override
 	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
 	// same table shape in pack.toml. The runtime currently applies provider,

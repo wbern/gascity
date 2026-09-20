@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/workable"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -768,6 +769,36 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
 	}
+
+	if b, err := r.deps.Store.Get(req.BeadID); err == nil {
+		candidate := b
+		if candidate.Metadata == nil {
+			candidate.Metadata = make(map[string]string)
+		} else {
+			candidate.Metadata = maps.Clone(b.Metadata)
+		}
+		candidate.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
+		var workKinds map[string]config.WorkKind
+		if r.deps.Cfg != nil {
+			workKinds = r.deps.Cfg.WorkKinds
+		}
+		checkCtx := &workable.Context{
+			AgentExists: func(target string) bool {
+				if r.deps.Cfg == nil {
+					return false
+				}
+				_, ok := agentutil.ResolveAgent(r.deps.Cfg, target, agentutil.ResolveOpts{AllowPoolMembers: true})
+				return ok
+			},
+			WorkKinds: workKinds,
+		}
+		if res := workable.Check(candidate, checkCtx); !res.Workable {
+			if !req.Force {
+				return fmt.Errorf("unworkable routed work: %s", res.Reason)
+			}
+		}
+	}
+
 	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}

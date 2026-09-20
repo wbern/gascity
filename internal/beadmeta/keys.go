@@ -201,6 +201,9 @@ const (
 	TriggerBeadIDMetadataKey       = "gc.trigger_bead_id"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
+	UnworkableReasonMetadataKey    = "gc.unworkable_reason"
+	UnworkableAtMetadataKey        = "gc.unworkable_at"
+	WorkabilityExemptMetadataKey   = "gc.workability_exempt"
 	WorkBranchMetadataKey          = "gc.work_branch"
 	WorkCommitMetadataKey          = "gc.work_commit"
 	WorkDirMetadataKey             = "gc.work_dir"
@@ -444,6 +447,9 @@ var KnownMetadataKeys = []string{
 	TriggerBeadIDMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
+	UnworkableReasonMetadataKey,
+	UnworkableAtMetadataKey,
+	WorkabilityExemptMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

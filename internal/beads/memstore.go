@@ -286,6 +286,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 		}
 		m.beads[i].Labels = filtered
 	}
+	if opts.DeferUntil != nil {
+		m.beads[i].DeferUntil = cloneTimePtr(opts.DeferUntil)
+	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	if isOwnershipTransition(oldStatus, oldAssignee, opts) {

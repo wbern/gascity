@@ -48,6 +48,7 @@ City is the top-level configuration for a Gas City instance.
 | `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
 | `extmsg` | ExtMsgConfig |  |  | ExtMsg configures the external-messaging fabric (default routes for inbound conversations with no binding). |
+| `work_kinds` | map[string]WorkKind |  |  | WorkKinds defines declarative workability predicates per work kind. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides root city defaults for agents that don't override them (canonical TOML key: agent_defaults). Pack-local defaults use the same table shape in pack.toml. The runtime currently applies provider, default_sling_formula, and append_fragments; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -1056,6 +1057,18 @@ WebhookVerify declares how an inbound delivery is authenticated.
 | `audience` | string |  |  |  |
 | `bearer_env` | string |  |  | BearerEnv optionally names an env var holding an additional per-source bearer token checked alongside the signature. |
 | `allowed_cidrs` | []string |  |  | AllowedCIDRs optionally restricts accepted source addresses (e.g. the GitHub webhook CIDR allowlist). |
+
+## WorkKind
+
+WorkKind defines declarative workability rules for a kind of work.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string |  |  |  |
+| `require_metadata` | []string |  |  |  |
+| `require_route_target` | string |  |  |  |
+| `freshness_binding` | string |  |  |  |
+| `match_metadata` | []string |  |  |  |
 
 ## Workspace
 

@@ -830,6 +830,11 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 			}
 		}
 	}
+	if opts.DeferUntil != nil {
+		if b.DeferUntil == nil || !b.DeferUntil.Equal(*opts.DeferUntil) {
+			return false
+		}
+	}
 	return true
 }
 

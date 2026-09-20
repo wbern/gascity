@@ -1185,6 +1185,9 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	for _, l := range opts.RemoveLabels {
 		args = append(args, "--remove-label", l)
 	}
+	if opts.DeferUntil != nil {
+		args = append(args, "--defer", opts.DeferUntil.Format(time.RFC3339))
+	}
 	return args
 }
 

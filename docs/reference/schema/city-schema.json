@@ -1393,6 +1393,13 @@
           "$ref": "#/$defs/ExtMsgConfig",
           "description": "ExtMsg configures the external-messaging fabric (default routes\nfor inbound conversations with no binding)."
         },
+        "work_kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkKind"
+          },
+          "type": "object",
+          "description": "WorkKinds defines declarative workability predicates per work kind."
+        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
@@ -3502,6 +3509,34 @@
       "additionalProperties": false,
       "type": "object",
       "description": "WebhookVerify declares how an inbound delivery is authenticated."
+    },
+    "WorkKind": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "require_metadata": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "require_route_target": {
+          "type": "string"
+        },
+        "freshness_binding": {
+          "type": "string"
+        },
+        "match_metadata": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "WorkKind defines declarative workability rules for a kind of work."
     },
     "Workspace": {
       "properties": {
