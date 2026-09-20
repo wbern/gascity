@@ -1263,6 +1263,20 @@ type BeadGraphResponse struct {
 	Root  Bead                   `json:"root"`
 }
 
+// BeadParkedPayload defines model for BeadParkedPayload.
+type BeadParkedPayload struct {
+	BeadId     string  `json:"bead_id"`
+	DeferUntil *string `json:"defer_until,omitempty"`
+	Reason     string  `json:"reason"`
+}
+
+// BeadUnworkablePayload defines model for BeadUnworkablePayload.
+type BeadUnworkablePayload struct {
+	BeadId string  `json:"bead_id"`
+	Reason string  `json:"reason"`
+	Target *string `json:"target,omitempty"`
+}
+
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {
 	// Assignee Assigned agent.
@@ -5443,6 +5457,38 @@ type TypedEventStreamEnvelopeBeadDeleted struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBeadParked defines model for TypedEventStreamEnvelopeBeadParked.
+type TypedEventStreamEnvelopeBeadParked struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadParkedPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadUnworkable defines model for TypedEventStreamEnvelopeBeadUnworkable.
+type TypedEventStreamEnvelopeBeadUnworkable struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadUnworkablePayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadUpdated defines model for TypedEventStreamEnvelopeBeadUpdated.
 type TypedEventStreamEnvelopeBeadUpdated struct {
 	Actor            string                   `json:"actor"`
@@ -6788,6 +6834,40 @@ type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadParked defines model for TypedTaggedEventStreamEnvelopeBeadParked.
+type TypedTaggedEventStreamEnvelopeBeadParked struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadParkedPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadUnworkable defines model for TypedTaggedEventStreamEnvelopeBeadUnworkable.
+type TypedTaggedEventStreamEnvelopeBeadUnworkable struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadUnworkablePayload    `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -9904,6 +9984,58 @@ func (t *EventPayload) MergeBeadEventPayload(v BeadEventPayload) error {
 	return err
 }
 
+// AsBeadParkedPayload returns the union data inside the EventPayload as a BeadParkedPayload
+func (t EventPayload) AsBeadParkedPayload() (BeadParkedPayload, error) {
+	var body BeadParkedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadParkedPayload overwrites any union data inside the EventPayload as the provided BeadParkedPayload
+func (t *EventPayload) FromBeadParkedPayload(v BeadParkedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadParkedPayload performs a merge with any union data inside the EventPayload, using the provided BeadParkedPayload
+func (t *EventPayload) MergeBeadParkedPayload(v BeadParkedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBeadUnworkablePayload returns the union data inside the EventPayload as a BeadUnworkablePayload
+func (t EventPayload) AsBeadUnworkablePayload() (BeadUnworkablePayload, error) {
+	var body BeadUnworkablePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadUnworkablePayload overwrites any union data inside the EventPayload as the provided BeadUnworkablePayload
+func (t *EventPayload) FromBeadUnworkablePayload(v BeadUnworkablePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadUnworkablePayload performs a merge with any union data inside the EventPayload, using the provided BeadUnworkablePayload
+func (t *EventPayload) MergeBeadUnworkablePayload(v BeadUnworkablePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadWorktreeReapSkippedPayload returns the union data inside the EventPayload as a BeadWorktreeReapSkippedPayload
 func (t EventPayload) AsBeadWorktreeReapSkippedPayload() (BeadWorktreeReapSkippedPayload, error) {
 	var body BeadWorktreeReapSkippedPayload
@@ -12865,6 +12997,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadParked returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadParked
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadParked() (TypedEventStreamEnvelopeBeadParked, error) {
+	var body TypedEventStreamEnvelopeBeadParked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadParked overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadParked
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadParked(v TypedEventStreamEnvelopeBeadParked) error {
+	v.Type = "bead.parked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadParked performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadParked
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadParked(v TypedEventStreamEnvelopeBeadParked) error {
+	v.Type = "bead.parked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadUnworkable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUnworkable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUnworkable() (TypedEventStreamEnvelopeBeadUnworkable, error) {
+	var body TypedEventStreamEnvelopeBeadUnworkable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadUnworkable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadUnworkable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadUnworkable(v TypedEventStreamEnvelopeBeadUnworkable) error {
+	v.Type = "bead.unworkable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadUnworkable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadUnworkable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadUnworkable(v TypedEventStreamEnvelopeBeadUnworkable) error {
+	v.Type = "bead.unworkable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUpdated() (TypedEventStreamEnvelopeBeadUpdated, error) {
 	var body TypedEventStreamEnvelopeBeadUpdated
@@ -15077,6 +15265,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedEventStreamEnvelopeBeadDeleted()
+	case "bead.parked":
+		return t.AsTypedEventStreamEnvelopeBeadParked()
+	case "bead.unworkable":
+		return t.AsTypedEventStreamEnvelopeBeadUnworkable()
 	case "bead.updated":
 		return t.AsTypedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":
@@ -15404,6 +15596,62 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadD
 // MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
 	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadParked returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadParked
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadParked() (TypedTaggedEventStreamEnvelopeBeadParked, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadParked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadParked overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadParked
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadParked(v TypedTaggedEventStreamEnvelopeBeadParked) error {
+	v.Type = "bead.parked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadParked performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadParked
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadParked(v TypedTaggedEventStreamEnvelopeBeadParked) error {
+	v.Type = "bead.parked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadUnworkable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadUnworkable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadUnworkable() (TypedTaggedEventStreamEnvelopeBeadUnworkable, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadUnworkable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadUnworkable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadUnworkable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadUnworkable(v TypedTaggedEventStreamEnvelopeBeadUnworkable) error {
+	v.Type = "bead.unworkable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadUnworkable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadUnworkable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadUnworkable(v TypedTaggedEventStreamEnvelopeBeadUnworkable) error {
+	v.Type = "bead.unworkable"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17626,6 +17874,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
+	case "bead.parked":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadParked()
+	case "bead.unworkable":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadUnworkable()
 	case "bead.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":

@@ -77,10 +77,36 @@ type BeadClaimRejectedPayload struct {
 // IsEventPayload marks BeadClaimRejectedPayload as an events.Payload variant.
 func (BeadClaimRejectedPayload) IsEventPayload() {}
 
+// BeadUnworkablePayload is the typed payload for bead.unworkable events.
+// Emitted when routed work is found to be unworkable (unresolvable target,
+// missing metadata, stale freshness anchor, or open custody circuit).
+type BeadUnworkablePayload struct {
+	BeadID string `json:"bead_id"`
+	Reason string `json:"reason"`
+	Target string `json:"target,omitempty"`
+}
+
+// IsEventPayload marks BeadUnworkablePayload as an events.Payload variant.
+func (BeadUnworkablePayload) IsEventPayload() {}
+
+// BeadParkedPayload is the typed payload for bead.parked events.
+// Emitted when an unworkable routed bead is contained (de-routed, stamped
+// with reason and timestamp, and deferred without closing or deleting).
+type BeadParkedPayload struct {
+	BeadID     string `json:"bead_id"`
+	Reason     string `json:"reason"`
+	DeferUntil string `json:"defer_until,omitempty"`
+}
+
+// IsEventPayload marks BeadParkedPayload as an events.Payload variant.
+func (BeadParkedPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+	RegisterPayload(BeadUnworkable, BeadUnworkablePayload{})
+	RegisterPayload(BeadParked, BeadParkedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

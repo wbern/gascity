@@ -162,6 +162,7 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	DeferUntil   *time.Time // set defer_until (nil = no change)
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an

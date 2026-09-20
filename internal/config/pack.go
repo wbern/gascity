@@ -60,6 +60,7 @@ type PackConfig struct {
 	Commands      []PackCommandEntry          `toml:"commands,omitempty"`
 	Global        PackGlobal                  `toml:"global,omitempty"`
 	Pricing       []pricing.ModelPricing      `toml:"pricing,omitempty"`
+	WorkKinds     map[string]WorkKind         `toml:"work_kinds,omitempty"`
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City
@@ -255,6 +256,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					}
 				}
 			}
+
+			// Merge pack work kinds into city (additive, no overwrite).
+			mergeCityWorkKinds(cfg, cachedPackWorkKinds(cache, topoDir))
 		}
 
 		// Process rig-level [imports.X] entries (V2).
@@ -463,6 +467,12 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 						}
 					}
 				}
+
+				wks := cachedPackWorkKinds(cache, impDir)
+				if !imp.ImportIsTransitive() {
+					wks = cachedPackLocalWorkKinds(cache, impDir)
+				}
+				mergeCityWorkKinds(cfg, wks)
 			}
 		}
 
@@ -694,6 +704,9 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				}
 			}
 		}
+
+		// Merge pack work kinds (additive, first wins).
+		mergeCityWorkKinds(cfg, cachedPackWorkKinds(cache, topoDir))
 	}
 
 	// Process city-level [imports.X] entries (V2). These produce agents
@@ -913,6 +926,12 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 					}
 				}
 			}
+
+			wks := cachedPackWorkKinds(cache, impDir)
+			if !imp.ImportIsTransitive() {
+				wks = cachedPackLocalWorkKinds(cache, impDir)
+			}
+			mergeCityWorkKinds(cfg, wks)
 		}
 	}
 
@@ -1121,6 +1140,8 @@ type packLoadResult struct {
 	doctors        []DiscoveredDoctor
 	runtimes       []DiscoveredRuntime
 	skills         []DiscoveredSkillCatalog
+	workKinds      map[string]WorkKind
+	localWorkKinds map[string]WorkKind
 	localWarnings  []string
 	warnings       []string
 }
@@ -1294,6 +1315,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var inheritedWarnings []string
 	includedProviders := make(map[string]ProviderSpec)
 	includedUpstreams := make(map[string]UpstreamSpec)
+	includedWorkKinds := make(map[string]WorkKind)
 
 	for _, inc := range tc.Pack.Includes {
 		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot)
@@ -1331,6 +1353,12 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		for name, spec := range incUpstreams {
 			if _, exists := includedUpstreams[name]; !exists {
 				includedUpstreams[name] = spec
+			}
+		}
+		// Merge work kinds: included first, no overwrite.
+		for name, wk := range cachedPackWorkKinds(cache, incTopoDir) {
+			if _, exists := includedWorkKinds[name]; !exists {
+				includedWorkKinds[name] = wk
 			}
 		}
 	}
@@ -1485,6 +1513,15 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		for name, spec := range impUpstreams {
 			if _, exists := includedUpstreams[name]; !exists {
 				includedUpstreams[name] = spec
+			}
+		}
+		impWorkKinds := cachedPackWorkKinds(cache, impDir)
+		if !imp.ImportIsTransitive() {
+			impWorkKinds = cachedPackLocalWorkKinds(cache, impDir)
+		}
+		for name, wk := range impWorkKinds {
+			if _, exists := includedWorkKinds[name]; !exists {
+				includedWorkKinds[name] = wk
 			}
 		}
 	}
@@ -1675,6 +1712,14 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	allGlobals = append(allGlobals, includedGlobals...)
 	allGlobals = append(allGlobals, localGlobals...)
 
+	mergedWorkKinds := make(map[string]WorkKind)
+	for k, v := range includedWorkKinds {
+		mergedWorkKinds[k] = v
+	}
+	for k, v := range tc.WorkKinds {
+		mergedWorkKinds[k] = v
+	}
+
 	// Cache result for diamond-DAG dedup.
 	cache.results[absTopoDir] = clonePackLoadResult(&packLoadResult{
 		agents:         includedAgents,
@@ -1695,6 +1740,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		doctors:        includedDoctors,
 		runtimes:       includedRuntimes,
 		skills:         includedSkills,
+		workKinds:      mergedWorkKinds,
+		localWorkKinds: DeepCopyWorkKinds(tc.WorkKinds),
 		localWarnings:  append([]string(nil), packWarnings...),
 		warnings:       appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
 	})
@@ -1725,6 +1772,8 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		doctors:        deepCopyDoctors(in.doctors),
 		runtimes:       append([]DiscoveredRuntime(nil), in.runtimes...),
 		skills:         deepCopySkills(in.skills),
+		workKinds:      DeepCopyWorkKinds(in.workKinds),
+		localWorkKinds: DeepCopyWorkKinds(in.localWorkKinds),
 		localWarnings:  append([]string(nil), in.localWarnings...),
 		warnings:       append([]string(nil), in.warnings...),
 	}
@@ -2031,6 +2080,32 @@ func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCat
 	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredSkillCatalog {
 		return deepCopySkills(r.skills)
 	})
+}
+
+func cachedPackWorkKinds(cache *packLoadCache, topoDir string) map[string]WorkKind {
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]WorkKind {
+		return DeepCopyWorkKinds(r.workKinds)
+	})
+}
+
+func cachedPackLocalWorkKinds(cache *packLoadCache, topoDir string) map[string]WorkKind {
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]WorkKind {
+		return DeepCopyWorkKinds(r.localWorkKinds)
+	})
+}
+
+func mergeCityWorkKinds(cfg *City, wks map[string]WorkKind) {
+	if len(wks) == 0 {
+		return
+	}
+	if cfg.WorkKinds == nil {
+		cfg.WorkKinds = make(map[string]WorkKind)
+	}
+	for name, wk := range wks {
+		if _, exists := cfg.WorkKinds[name]; !exists {
+			cfg.WorkKinds[name] = wk
+		}
+	}
 }
 
 func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []DiscoveredCommand {

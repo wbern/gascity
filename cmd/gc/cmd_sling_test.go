@@ -770,6 +770,67 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	}
 }
 
+func TestCliBeadRouterRejectsUnworkableRouteUnlessForced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "HQ-2", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed HQ-2: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "city:test-city",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	// Route to non-existent agent should fail when unforced
+	err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "HQ-2",
+		Target: "ghost-agent",
+	})
+	if err == nil {
+		t.Fatalf("expected unworkable route error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unworkable routed work") {
+		t.Errorf("error %q does not contain 'unworkable routed work'", err.Error())
+	}
+
+	// Verify metadata was not set
+	bead, err := store.Get("HQ-2")
+	if err != nil {
+		t.Fatalf("store.Get(HQ-2): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "" {
+		t.Errorf("expected gc.routed_to empty, got %q", bead.Metadata["gc.routed_to"])
+	}
+
+	// Force route should succeed
+	err = router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "HQ-2",
+		Target: "ghost-agent",
+		Force:  true,
+	})
+	if err != nil {
+		t.Fatalf("expected force route to succeed, got %v", err)
+	}
+	bead, err = store.Get("HQ-2")
+	if err != nil {
+		t.Fatalf("store.Get(HQ-2): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "ghost-agent" {
+		t.Errorf("expected gc.routed_to 'ghost-agent', got %q", bead.Metadata["gc.routed_to"])
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

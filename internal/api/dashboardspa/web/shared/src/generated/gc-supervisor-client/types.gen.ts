@@ -418,6 +418,18 @@ export type BeadGraphResponse = {
     root: Bead;
 };
 
+export type BeadParkedPayload = {
+    bead_id: string;
+    defer_until?: string;
+    reason: string;
+};
+
+export type BeadUnworkablePayload = {
+    bead_id: string;
+    reason: string;
+    target?: string;
+};
+
 export type BeadUpdateBody = {
     /**
      * Assigned agent.
@@ -930,7 +942,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5300,6 +5312,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedEventStreamEnvelopeBeadDeleted) | ({
+    type: 'bead.parked';
+} & TypedEventStreamEnvelopeBeadParked) | ({
+    type: 'bead.unworkable';
+} & TypedEventStreamEnvelopeBeadUnworkable) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'bead.worktree.reap_skipped';
@@ -5562,6 +5578,42 @@ export type TypedEventStreamEnvelopeBeadDeleted = {
     subject?: string;
     ts: string;
     type: 'bead.deleted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.parked
+ */
+export type TypedEventStreamEnvelopeBeadParked = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadParkedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.parked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.unworkable
+ */
+export type TypedEventStreamEnvelopeBeadUnworkable = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadUnworkablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.unworkable';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6987,6 +7039,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
+    type: 'bead.parked';
+} & TypedTaggedEventStreamEnvelopeBeadParked) | ({
+    type: 'bead.unworkable';
+} & TypedTaggedEventStreamEnvelopeBeadUnworkable) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'bead.worktree.reap_skipped';
@@ -7255,6 +7311,44 @@ export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
     subject?: string;
     ts: string;
     type: 'bead.deleted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.parked
+ */
+export type TypedTaggedEventStreamEnvelopeBeadParked = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadParkedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.parked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.unworkable
+ */
+export type TypedTaggedEventStreamEnvelopeBeadUnworkable = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadUnworkablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.unworkable';
     workflow?: WorkflowEventProjection;
 };
 

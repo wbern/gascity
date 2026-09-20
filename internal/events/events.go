@@ -49,6 +49,8 @@ const (
 	// otherwise-silent repair into an observable signal (mirrors the
 	// bead.claim_rejected shape).
 	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
+	BeadUnworkable           = "bead.unworkable"
+	BeadParked               = "bead.parked"
 	MailSent                 = "mail.sent"
 	MailRead                 = "mail.read"
 	MailArchived             = "mail.archived"
@@ -330,6 +332,8 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
+	BeadUnworkable,
+	BeadParked,
 	ExecutionWorkAssociated, ExecutionStepDefined,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
