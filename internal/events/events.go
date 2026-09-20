@@ -305,6 +305,9 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// AdmissionVeto fires when an admission check or host pressure gate vetoes new session demand.
+	AdmissionVeto = "admission.veto"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -353,6 +356,7 @@ var KnownEventTypes = []string{
 	PostgresCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded,
+	AdmissionVeto,
 	// ProviderHealthGateAlert, SessionStartStalled, and PoolRespawnBackoffArmed
 	// are intentionally omitted from KnownEventTypes. They are emitted by the
 	// reconciler but their typed SSE payloads are not yet registered in

@@ -65,6 +65,33 @@
         },
         "type": "object"
       },
+      "AdmissionVetoPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "pool": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "signal",
+          "value",
+          "threshold",
+          "pool"
+        ],
+        "type": "object"
+      },
       "AgentCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2642,6 +2669,9 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/AdapterEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/AdmissionVetoPayload"
           },
           {
             "$ref": "#/components/schemas/BeadClaimRejectedPayload"
@@ -12319,6 +12349,7 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
+            "admission.veto": "#/components/schemas/TypedEventStreamEnvelopeAdmissionVeto",
             "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
@@ -12405,6 +12436,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeAdmissionVeto"
+          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
           },
@@ -12656,6 +12690,63 @@
           }
         ],
         "title": "Typed city event stream envelope"
+      },
+      "TypedEventStreamEnvelopeAdmissionVeto": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AdmissionVetoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "admission.veto",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope admission.veto",
+        "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClaimRejected": {
         "additionalProperties": false,
@@ -13747,7 +13838,8 @@
                 "pg.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
-                "beads.conditional_writes.degraded"
+                "beads.conditional_writes.degraded",
+                "admission.veto"
               ]
             },
             "type": "string"
@@ -17475,6 +17567,7 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
+            "admission.veto": "#/components/schemas/TypedTaggedEventStreamEnvelopeAdmissionVeto",
             "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
@@ -17561,6 +17654,9 @@
           "propertyName": "type"
         },
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeAdmissionVeto"
+          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
           },
@@ -17812,6 +17908,67 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
+      },
+      "TypedTaggedEventStreamEnvelopeAdmissionVeto": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AdmissionVetoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "admission.veto",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope admission.veto",
+        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClaimRejected": {
         "additionalProperties": false,
@@ -18974,7 +19131,8 @@
                 "pg.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
-                "beads.conditional_writes.degraded"
+                "beads.conditional_writes.degraded",
+                "admission.veto"
               ]
             },
             "type": "string"

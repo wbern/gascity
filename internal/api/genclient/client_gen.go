@@ -912,6 +912,15 @@ type AdmissionConfig struct {
 	Timeout  *string `json:"timeout,omitempty"`
 }
 
+// AdmissionVetoPayload defines model for AdmissionVetoPayload.
+type AdmissionVetoPayload struct {
+	Pool      string  `json:"pool"`
+	Reason    *string `json:"reason,omitempty"`
+	Signal    string  `json:"signal"`
+	Threshold string  `json:"threshold"`
+	Value     string  `json:"value"`
+}
+
 // AgentCreateInputBody defines model for AgentCreateInputBody.
 type AgentCreateInputBody struct {
 	// Dir Working directory (rig name).
@@ -5338,6 +5347,22 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeAdmissionVeto defines model for TypedEventStreamEnvelopeAdmissionVeto.
+type TypedEventStreamEnvelopeAdmissionVeto struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdmissionVetoPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadClaimRejected defines model for TypedEventStreamEnvelopeBeadClaimRejected.
 type TypedEventStreamEnvelopeBeadClaimRejected struct {
 	Actor            string                   `json:"actor"`
@@ -6669,6 +6694,23 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeAdmissionVeto defines model for TypedTaggedEventStreamEnvelopeAdmissionVeto.
+type TypedTaggedEventStreamEnvelopeAdmissionVeto struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdmissionVetoPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadClaimRejected defines model for TypedTaggedEventStreamEnvelopeBeadClaimRejected.
@@ -9758,6 +9800,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsAdmissionVetoPayload returns the union data inside the EventPayload as a AdmissionVetoPayload
+func (t EventPayload) AsAdmissionVetoPayload() (AdmissionVetoPayload, error) {
+	var body AdmissionVetoPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromAdmissionVetoPayload overwrites any union data inside the EventPayload as the provided AdmissionVetoPayload
+func (t *EventPayload) FromAdmissionVetoPayload(v AdmissionVetoPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeAdmissionVetoPayload performs a merge with any union data inside the EventPayload, using the provided AdmissionVetoPayload
+func (t *EventPayload) MergeAdmissionVetoPayload(v AdmissionVetoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadClaimRejectedPayload returns the union data inside the EventPayload as a BeadClaimRejectedPayload
 func (t EventPayload) AsBeadClaimRejectedPayload() (BeadClaimRejectedPayload, error) {
 	var body BeadClaimRejectedPayload
@@ -12629,6 +12697,34 @@ func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedEventStreamEnvelopeAdmissionVeto returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAdmissionVeto
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAdmissionVeto() (TypedEventStreamEnvelopeAdmissionVeto, error) {
+	var body TypedEventStreamEnvelopeAdmissionVeto
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAdmissionVeto overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAdmissionVeto
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAdmissionVeto(v TypedEventStreamEnvelopeAdmissionVeto) error {
+	v.Type = "admission.veto"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAdmissionVeto performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAdmissionVeto
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAdmissionVeto(v TypedEventStreamEnvelopeAdmissionVeto) error {
+	v.Type = "admission.veto"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClaimRejected
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClaimRejected() (TypedEventStreamEnvelopeBeadClaimRejected, error) {
 	var body TypedEventStreamEnvelopeBeadClaimRejected
@@ -14969,6 +15065,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "admission.veto":
+		return t.AsTypedEventStreamEnvelopeAdmissionVeto()
 	case "bead.claim_rejected":
 		return t.AsTypedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
@@ -15145,6 +15243,34 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAdmissionVeto returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAdmissionVeto
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAdmissionVeto() (TypedTaggedEventStreamEnvelopeAdmissionVeto, error) {
+	var body TypedTaggedEventStreamEnvelopeAdmissionVeto
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAdmissionVeto overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAdmissionVeto
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAdmissionVeto(v TypedTaggedEventStreamEnvelopeAdmissionVeto) error {
+	v.Type = "admission.veto"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAdmissionVeto performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAdmissionVeto
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAdmissionVeto(v TypedTaggedEventStreamEnvelopeAdmissionVeto) error {
+	v.Type = "admission.veto"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -17488,6 +17614,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "admission.veto":
+		return t.AsTypedTaggedEventStreamEnvelopeAdmissionVeto()
 	case "bead.claim_rejected":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
