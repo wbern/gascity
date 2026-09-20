@@ -47,6 +47,12 @@ type Fact struct {
 	Worker    string `json:"worker,omitempty"`     // session name
 	City      string `json:"city,omitempty"`
 
+	// AttributionV2 is the additive immutable work binding for a provider
+	// invocation. Nil keeps legacy v1 facts byte-compatible; new producers
+	// write either an explicit bound or unbound value rather than inferring a
+	// work bead from mutable session metadata during collection.
+	AttributionV2 *InvocationAttribution `json:"attribution_v2,omitempty"`
+
 	Kind Kind `json:"kind"`
 
 	// Model facts (Kind == KindModel).

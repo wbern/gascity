@@ -83,6 +83,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		CityPath:                cityPath,
 		SearchPaths:             searchPaths,
 		UsageSink:               usageSinkForCity(cfg, cityPath),
+		InvocationLedger:        invocationLedgerForCity(cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
