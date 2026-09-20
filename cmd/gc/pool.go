@@ -41,6 +41,9 @@ type poolSessionRef struct {
 // protect it explicitly.
 type ScaleCheckRunner func(command, dir string, env map[string]string) (string, error)
 
+// ScaleCheckRunnerWithStderr runs a scale_check command and returns stdout and stderr.
+type ScaleCheckRunnerWithStderr func(command, dir string, env map[string]string) (stdout, stderr string, err error)
+
 // Default bd probe concurrency is config.DefaultProbeConcurrency (8).
 // Override via [daemon] probe_concurrency in city.toml. Both
 // evaluatePendingPools and computeWorkSet create independent
@@ -62,11 +65,11 @@ const bdProbeTimeoutFloor = 5 * time.Second
 // synchronously in the reconciler loop and should not stall a tick.
 const hookTimeout = 30 * time.Second
 
-// shellCommand runs a command via sh -c with the given timeout and
-// returns stdout. dir sets the command's working directory. When env is
+// shellCommandWithStderr runs a command via sh -c with the given timeout and
+// returns stdout and stderr. dir sets the command's working directory. When env is
 // non-nil, it is merged into the subprocess environment after sanitizing
 // inherited GC_DOLT_* and BEADS_* keys.
-func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
+func shellCommandWithStderr(command, dir string, timeout time.Duration, env map[string]string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -75,11 +78,23 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
-	out, err := cmd.Output()
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("running command %q: %w", command, err)
+		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("running command %q: %w", command, err)
 	}
-	return string(out), nil
+	return stdoutBuf.String(), stderrBuf.String(), nil
+}
+
+// shellCommand runs a command via sh -c with the given timeout and
+// returns stdout. dir sets the command's working directory. When env is
+// non-nil, it is merged into the subprocess environment after sanitizing
+// inherited GC_DOLT_* and BEADS_* keys.
+func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
+	stdout, _, err := shellCommandWithStderr(command, dir, timeout, env)
+	return stdout, err
 }
 
 // parseBDProbeTimeout reads GC_BD_PROBE_TIMEOUT and returns the parsed duration.
@@ -107,6 +122,13 @@ func parseBDProbeTimeout(stderr io.Writer) time.Duration {
 // unless GC_BD_PROBE_TIMEOUT overrides it.
 func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
 	return shellCommand(command, dir, parseBDProbeTimeout(os.Stderr), env)
+}
+
+// shellScaleCheckWithStderr runs a scale_check command via sh -c and returns stdout and stderr.
+// dir sets the command's working directory. Uses bdProbeTimeoutDefault (180s)
+// unless GC_BD_PROBE_TIMEOUT overrides it.
+func shellScaleCheckWithStderr(command, dir string, env map[string]string) (string, string, error) {
+	return shellCommandWithStderr(command, dir, parseBDProbeTimeout(os.Stderr), env)
 }
 
 // shellRunHook runs a lifecycle hook command (on_death, on_boot) via
@@ -148,20 +170,21 @@ func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scalePara
 	return sp
 }
 
-// evaluatePool runs check, parses the output as an integer, and clamps
-// the result to [min, max]. Returns min on error (honors configured minimum).
-func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
+// evaluatePoolWithStderr runs check, parses the output as an integer, clamps
+// the result to [min, max], and returns the desired count, stderr, and any error.
+// Returns min on error (honors configured minimum).
+func evaluatePoolWithStderr(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunnerWithStderr) (int, string, error) {
 	start := time.Now()
-	out, err := runner(sp.Check, dir, env)
+	out, stderr, err := runner(sp.Check, dir, env)
 	durationMs := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
-		return sp.Min, fmt.Errorf("agent %q: %w", agentName, err)
+		return sp.Min, stderr, fmt.Errorf("agent %q: %w", agentName, err)
 	}
 	n, err := parseScaleCheckCount(agentName, sp.Check, out)
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
-		return sp.Min, err
+		return sp.Min, stderr, err
 	}
 	desired := n
 	if desired < sp.Min {
@@ -171,24 +194,43 @@ func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]s
 		desired = sp.Max
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, desired, nil)
-	return desired, nil
+	return desired, stderr, nil
 }
 
-func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
+// evaluatePoolNewDemandWithStderr runs check and returns raw parsed new demand count, stderr, and any error.
+func evaluatePoolNewDemandWithStderr(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunnerWithStderr) (int, string, error) {
 	start := time.Now()
-	out, err := runner(sp.Check, dir, env)
+	out, stderr, err := runner(sp.Check, dir, env)
 	durationMs := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
-		return 0, fmt.Errorf("agent %q: %w", agentName, err)
+		return 0, stderr, fmt.Errorf("agent %q: %w", agentName, err)
 	}
 	n, err := parseScaleCheckCount(agentName, sp.Check, out)
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
-		return 0, err
+		return 0, stderr, err
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
-	return n, nil
+	return n, stderr, nil
+}
+
+// evaluatePool runs check, parses the output as an integer, and clamps
+// the result to [min, max]. Returns min on error (honors configured minimum).
+func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) { //nolint:unparam // test callers and backward-compat callers vary agentName
+	desired, _, err := evaluatePoolWithStderr(agentName, sp, dir, env, func(cmd, d string, e map[string]string) (string, string, error) {
+		out, err := runner(cmd, d, e)
+		return out, "", err
+	})
+	return desired, err
+}
+
+func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) { //nolint:unparam // test callers and backward-compat callers vary agentName
+	desired, _, err := evaluatePoolNewDemandWithStderr(agentName, sp, dir, env, func(cmd, d string, e map[string]string) (string, string, error) {
+		out, err := runner(cmd, d, e)
+		return out, "", err
+	})
+	return desired, err
 }
 
 func parseScaleCheckCount(agentName, check, out string) (int, error) {

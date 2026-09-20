@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // AdmissionVerdictState represents the categorical state of an admission check verdict.
@@ -190,9 +192,16 @@ func resolveAdmissionVerdicts(
 	now time.Time,
 	runner admissionRunnerFn,
 	trace *sessionReconcilerTraceCycle,
+	recorders ...events.Recorder,
 ) map[string]AdmissionVerdict {
 	if cfg == nil {
 		return nil
+	}
+	var rec events.Recorder
+	if len(recorders) > 0 && recorders[0] != nil {
+		rec = recorders[0]
+	} else if cityPath != "" {
+		rec = openCityRecorderAt(cityPath, io.Discard)
 	}
 	verdicts := make(map[string]AdmissionVerdict)
 	for i := range cfg.Agents {
@@ -221,6 +230,17 @@ func resolveAdmissionVerdicts(
 
 		verdict := evaluateAdmission(adm, dir, agent.Env, now, globalAdmissionCache, runner)
 		verdicts[template] = verdict
+
+		if !verdict.Allowed && !verdict.Cached && rec != nil {
+			payload := events.NewAdmissionVetoPayload(template, verdict.Reason)
+			rec.Record(events.Event{
+				Type:    events.AdmissionVeto,
+				Actor:   "gc",
+				Subject: template,
+				Message: verdict.Reason,
+				Payload: events.AdmissionVetoPayloadJSON(payload),
+			})
+		}
 
 		if trace != nil {
 			var outcome TraceOutcomeCode

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestAdmissionRunner_Exit0IsAllow(t *testing.T) {
@@ -252,5 +253,64 @@ func TestResolveAdmissionVerdicts_CityGateSharedAcrossPools(t *testing.T) {
 	// The city gate was evaluated once, and the other 2 pools hit the cache!
 	if count := atomic.LoadInt32(&callCount); count != 1 {
 		t.Errorf("city gate was executed %d times across 3 pools, want 1", count)
+	}
+}
+
+func TestResolveAdmissionVerdicts_EmitsAdmissionVetoEvent(t *testing.T) {
+	ClearAdmissionCache()
+	mockRunner := func(_, _ string, _ time.Duration, _ map[string]string) (string, int, error) {
+		return "memory_psi_avg10=1.50_exceeds_1.00", 1, nil
+	}
+
+	cfg := &config.City{
+		Admission: config.AdmissionConfig{
+			Check: "/shared/city-admission.sh",
+		},
+		Agents: []config.Agent{
+			{Name: "worker"},
+		},
+	}
+	demandByTemplate := map[string]int{
+		"worker": 2,
+	}
+
+	rec := &capturingRecorder{}
+	verdicts := resolveAdmissionVerdicts(cfg, "/city", demandByTemplate, time.Now(), mockRunner, nil, rec)
+	if len(verdicts) != 1 {
+		t.Fatalf("len(verdicts) = %d, want 1", len(verdicts))
+	}
+	if verdicts["worker"].Allowed {
+		t.Fatal("expected verdict for worker to be not allowed")
+	}
+
+	if len(rec.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(rec.events))
+	}
+	ev := rec.events[0]
+	if ev.Type != events.AdmissionVeto {
+		t.Errorf("event type = %q, want %q", ev.Type, events.AdmissionVeto)
+	}
+	decoded, reg, err := events.DecodePayload(ev.Type, ev.Payload)
+	if err != nil {
+		t.Fatalf("DecodePayload failed: %v", err)
+	}
+	if !reg {
+		t.Fatal("expected payload to be registered")
+	}
+	payload, ok := decoded.(events.AdmissionVetoPayload)
+	if !ok {
+		t.Fatalf("event payload is %T, want AdmissionVetoPayload", decoded)
+	}
+	if payload.Pool != "worker" {
+		t.Errorf("payload.Pool = %q, want worker", payload.Pool)
+	}
+	if payload.Signal != "memory_psi_avg10" {
+		t.Errorf("payload.Signal = %q, want memory_psi_avg10", payload.Signal)
+	}
+	if payload.Value != "1.50" {
+		t.Errorf("payload.Value = %q, want 1.50", payload.Value)
+	}
+	if payload.Threshold != "1.00" {
+		t.Errorf("payload.Threshold = %q, want 1.00", payload.Threshold)
 	}
 }

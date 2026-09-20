@@ -81,6 +81,7 @@ bd-backup-freshness
 worktree-disk-size
 nested-worktree-prune
 bd-shim
+admission-state
 custom-types:city
 hold-label-conventions:city
 worktrees

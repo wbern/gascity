@@ -294,11 +294,12 @@ func evaluatePendingPools(
 			defer func() { <-sem }()
 			started := time.Now()
 			var d int
+			var stderrOut string
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, stderrOut, err = evaluatePoolNewDemandWithStderr(agentName, sp, dir, probeEnv, shellScaleCheckWithStderr)
 			} else {
-				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, stderrOut, err = evaluatePoolWithStderr(agentName, sp, dir, probeEnv, shellScaleCheckWithStderr)
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
@@ -310,6 +311,7 @@ func evaluatePendingPools(
 					"pool_dir":       dir,
 					"command":        sp.Check,
 					"desired":        d,
+					"stderr":         stderrOut,
 					"error":          fmt.Sprint(err),
 					"duration_ms":    time.Since(started).Milliseconds(),
 					"agent_template": template,
