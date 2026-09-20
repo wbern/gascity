@@ -216,3 +216,53 @@ func TestStatusAPIClientsRouteAliveNoAPICityToSupervisor(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionAPIClientsRouteAliveNoAPICityToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+
+	t.Run("session-list-and-peek-use-the-warm-supervisor-view", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForSession := range map[string]func(string) (*api.Client, string){
+			"list": sessionListAPIClient,
+			"peek": sessionPeekAPIClient,
+		} {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForSession(dir)
+				if got != sentinel || reason != "" {
+					t.Fatalf("session client = (%p, %q), want supervisor client (%p, \"\")", got, reason, sentinel)
+				}
+			})
+		}
+	})
+
+	t.Run("GC_NO_API-remains-an-escape-hatch-for-session", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "1")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client {
+			t.Fatal("supervisor client must not bypass GC_NO_API")
+			return nil
+		}
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForSession := range map[string]func(string) (*api.Client, string){
+			"list": sessionListAPIClient,
+			"peek": sessionPeekAPIClient,
+		} {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForSession(dir)
+				if got != nil || reason != "escape-hatch" {
+					t.Fatalf("session client = (%p, %q), want (nil, escape-hatch)", got, reason)
+				}
+			})
+		}
+	})
+}

@@ -756,12 +756,7 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+var sessionListAPIClient = statusReadAPIClient
 
 // routeSessionList dispatches `session list` to the supervisor API when a
 // controller is up; otherwise falls back to the local iterator. Emits
@@ -2161,12 +2156,7 @@ type sessionPeekJSONResult struct {
 // sessionPeekAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests can inject one.
-var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+var sessionPeekAPIClient = statusReadAPIClient
 
 // routeSessionPeek dispatches `session peek` to the supervisor API when a
 // controller is up; otherwise falls back to the local runtime provider.
