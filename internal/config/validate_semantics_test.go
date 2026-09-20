@@ -211,6 +211,58 @@ func TestValidateSemanticsIncludesSource(t *testing.T) {
 	}
 }
 
+func TestValidateSemantics_ScaleCheckWorkQueryAsymmetricPair(t *testing.T) {
+	// 1. Agent with custom scale_check but default work_query
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", ScaleCheck: "printf 1"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "custom scale_check is set without a corresponding custom work_query") {
+		t.Errorf("warning should mention asymmetric scale_check, got: %s", warnings[0])
+	}
+
+	// 2. Multi-session agent with custom work_query but default scale_check
+	cfg = &City{
+		Agents: []Agent{
+			{Name: "worker", WorkQuery: "custom-query.sh", MaxActiveSessions: ptrInt(3)},
+		},
+	}
+	warnings = ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "custom work_query is set without a corresponding custom scale_check") {
+		t.Errorf("warning should mention asymmetric work_query, got: %s", warnings[0])
+	}
+
+	// 3. Fixed single-session agent with only work_query -> OK
+	cfg = &City{
+		Agents: []Agent{
+			{Name: "mayor", WorkQuery: "custom-query.sh", MaxActiveSessions: ptrInt(1)},
+		},
+	}
+	warnings = ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected 0 warnings for fixed agent with custom work_query, got: %v", warnings)
+	}
+
+	// 4. Both custom -> OK (handled by doctor check, not config check)
+	cfg = &City{
+		Agents: []Agent{
+			{Name: "worker", ScaleCheck: "printf 1", WorkQuery: "custom-query.sh"},
+		},
+	}
+	warnings = ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Errorf("expected 0 warnings when both are custom, got: %v", warnings)
+	}
+}
+
 func TestValidateAgentsScopeBadEnum(t *testing.T) {
 	agents := []Agent{
 		{Name: "bad", Scope: "global"},

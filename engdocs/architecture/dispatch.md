@@ -202,7 +202,13 @@ workflow-root-only fallback. The fallback intentionally does not prefer
 `gc.run_target` on child beads: current stampers write `gc.routed_to` for
 routable children, and the migration audit found no open non-root bead with a
 divergent `gc.routed_to` / `gc.run_target` pair. Custom `scale_check`
-overrides are unchanged. Future predicate changes should be single-helper
+and `work_query` overrides bypass the shared helpers. To prevent custom
+predicates from diverging silently into spawn/drain thrashing, `gc doctor`
+provides the `scale-check-work-query-correspondence` check which executes
+dual-custom scripts and warns when reconciler demand counts rows claim logic
+refuses (or vice versa), while `gc config check` / `config-semantics` issues an
+advisory warning when only one half of the symmetric pair is overridden.
+Future predicate changes should be single-helper
 changes; tests `TestPoolDemandPredicateSharedWithWorkQuery` (structural) and
 `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` (behavioral) guard against
 regressions.
@@ -270,7 +276,11 @@ regressions.
     lives outside the shared primary pool-demand predicate. Enforced by
     `TestPoolDemandPredicateSharedWithWorkQuery` and
     `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` in
-    `internal/config/config_test.go`. Historical context: PR #1516
+    `internal/config/config_test.go` for built-in predicates. For custom
+    predicates, `gc doctor` provides `scale-check-work-query-correspondence`
+    to detect demand/claim divergence across live stores, and `gc config check`
+    warns on asymmetric overrides where only one half of the pair is defined.
+    Historical context: PR #1516
     removed the old molecule-counting tier from the count form; a later
     gc-udx change added `--exclude-type=epic` to the worker path; this
     refactor adds that filter to the default count form and makes the
