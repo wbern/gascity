@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -2293,5 +2294,87 @@ func TestComputePoolDesiredStates_ResumeBeatsNewAtNonDefaultPriority(t *testing.
 	}
 	if result[0].Requests[0].Tier != "resume" {
 		t.Errorf("admitted tier = %q, want resume (real P3 in-progress work must beat anonymous new demand)", result[0].Requests[0].Tier)
+	}
+}
+
+// A template with nothing to do never appears in scaleCheckCounts, so the
+// demand-merge loop skips it. The skip has to leave a decision behind or the
+// trace cannot tell "correctly idle" from "never evaluated" — and the desired
+// state it produces has to stay byte-identical to the untraced run.
+func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
+	tests := []struct {
+		name             string
+		suspended        bool
+		sessions         []beads.Bead
+		scaleCheckCounts map[string]int
+		wantNoDemand     bool
+		wantInFlight     int
+		wantRequests     int
+	}{
+		{name: "absent from scale check", scaleCheckCounts: map[string]int{}, wantNoDemand: true},
+		{name: "nil scale check", wantNoDemand: true},
+		{name: "other template has demand", scaleCheckCounts: map[string]int{"other": 3}, wantNoDemand: true},
+		// scale_check and protected are 0 by the branch condition itself, so
+		// in_flight is the only payload field that can ever carry information
+		// here — and pool sessions still in flight while nothing demands them
+		// is the diagnostic this record exists to surface.
+		{
+			name:         "in-flight sessions with no demand",
+			sessions:     []beads.Bead{pendingPoolSessionBead("sess-1"), pendingPoolSessionBead("sess-2")},
+			wantNoDemand: true,
+			wantInFlight: 2,
+		},
+		{name: "demand present", scaleCheckCounts: map[string]int{"claude": 1}, wantRequests: 1},
+		{name: "suspended template", suspended: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := poolAgent("claude", "", intPtr(10), 0)
+			agent.Suspended = tt.suspended
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			trace := newPoolDesiredStateTestTrace("claude")
+			sessions := sessionInfosFromBeads(tt.sessions)
+
+			result := computePoolDesiredStates(cfg, nil, nil, sessions, tt.scaleCheckCounts, nil, 0, poolNewDemandLoadVeto{}, nil, trace)
+
+			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
+				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
+			}
+			requests := 0
+			for _, state := range result {
+				requests += len(state.Requests)
+			}
+			if requests != tt.wantRequests {
+				t.Fatalf("requests = %d, want %d; result=%#v", requests, tt.wantRequests, result)
+			}
+
+			decisions := trace.decisionCounts[string(TraceSitePoolDemandCompute)]
+			if !tt.wantNoDemand {
+				if decisions != 0 {
+					t.Fatalf("%s decisions = %d, want 0; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+				}
+				return
+			}
+			if decisions != 1 {
+				t.Fatalf("%s decisions = %d, want 1; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+			}
+			rec := poolTraceDecision(t, trace, TraceSitePoolDemandCompute)
+			if rec.Template != "claude" {
+				t.Fatalf("record template = %q, want claude", rec.Template)
+			}
+			if rec.ReasonCode != TraceReasonNoDemand || rec.OutcomeCode != TraceOutcomeSkipped {
+				t.Fatalf("record reason/outcome = %q/%q, want %q/%q",
+					rec.ReasonCode, rec.OutcomeCode, TraceReasonNoDemand, TraceOutcomeSkipped)
+			}
+			for key, want := range map[string]int{
+				"scale_check": 0,
+				"protected":   0,
+				"in_flight":   tt.wantInFlight,
+			} {
+				if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+					t.Fatalf("%s = %d, want %d", key, got, want)
+				}
+			}
+		})
 	}
 }
