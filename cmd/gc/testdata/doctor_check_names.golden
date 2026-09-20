@@ -63,6 +63,7 @@ v2-routed-to-namespace
 census-owner-liveness
 run-target-routed-to-backfill
 hold-label-routed-to
+pool-idle-routed-work
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
