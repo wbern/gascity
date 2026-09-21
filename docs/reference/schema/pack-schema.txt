@@ -1018,6 +1018,12 @@
             "$ref": "#/$defs/ModelPricing"
           },
           "type": "array"
+        },
+        "work_kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkKind"
+          },
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -1754,6 +1760,34 @@
       "additionalProperties": false,
       "type": "object",
       "description": "WebhookVerify declares how an inbound delivery is authenticated."
+    },
+    "WorkKind": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "require_metadata": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "require_route_target": {
+          "type": "string"
+        },
+        "freshness_binding": {
+          "type": "string"
+        },
+        "match_metadata": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "WorkKind defines declarative workability rules for a kind of work."
     }
   },
   "title": "Gas City Pack Manifest",
