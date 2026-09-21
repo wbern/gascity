@@ -129,6 +129,7 @@ type SlingDeps struct {
 	// materialization. Nil leaves sling event-silent.
 	Events   events.Recorder
 	StoreRef string
+	Force    bool
 	// ValidationQuerier overrides Store for existence checks when a caller has
 	// already resolved the bead through a narrower view.
 	ValidationQuerier BeadQuerier

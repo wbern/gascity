@@ -346,3 +346,143 @@ func TestLegacyConcurrentAttachmentConverges(t *testing.T) {
 		t.Fatalf("concurrent delivery created roots %v; want one", ids)
 	}
 }
+
+func TestLegacyClosedHistoricalRootWithoutStoreRefDoesNotBlockSling(t *testing.T) {
+	source := seededStore("work")
+	graph := beads.NewMemStore()
+	// Historical closed root has NO SourceStoreRefMetadataKey.
+	histRoot, err := graph.Create(beads.Bead{
+		Type: "molecule",
+		Metadata: map[string]string{
+			"gc.var.issue": "work",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.Close(histRoot.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, histRoot.ID)
+	deps := SlingDeps{
+		Store:      source,
+		GraphStore: graph,
+		StoreRef:   "rig:crm",
+		CityPath:   t.TempDir(),
+	}
+	poured := false
+	_, err = withLegacyAttachment(context.Background(), deps, "work", "review", nil, func() (*molecule.Result, error) {
+		poured = true
+		newRoot, e := graph.Create(beads.Bead{Type: "molecule", Status: "open"})
+		return &molecule.Result{RootID: newRoot.ID}, e
+	}, func(r *molecule.Result) (SlingResult, error) {
+		return SlingResult{WispRootID: r.RootID}, nil
+	})
+	if err != nil {
+		t.Fatalf("closed historical root without store ref blocked sling: %v", err)
+	}
+	if !poured {
+		t.Fatal("expected new molecule to be poured")
+	}
+}
+
+func TestLegacyMissingStoreRefFallsBackToDepsStoreRef(t *testing.T) {
+	source := seededStore("work")
+	graph := beads.NewMemStore()
+	// Open legacy root has NO SourceStoreRefMetadataKey, but is in the same store.
+	openRoot, _ := graph.Create(beads.Bead{
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.SourceBeadIDMetadataKey: "work",
+			beadmeta.FormulaNameMetadataKey:  "review",
+			legacyAttachmentStateKey:         "ready",
+			"gc.var.issue":                   "work",
+		},
+	})
+	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, openRoot.ID)
+	deps := SlingDeps{
+		Store:      source,
+		GraphStore: graph,
+		StoreRef:   "rig:crm",
+		CityPath:   t.TempDir(),
+	}
+	// Should adopt the openRoot rather than failing with "no source-store identity"
+	res, err := withLegacyAttachment(context.Background(), deps, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) {
+		t.Fatal("unexpectedly poured fresh instead of adopting matching legacy root")
+		return nil, nil
+	}, func(r *molecule.Result) (SlingResult, error) {
+		return SlingResult{WispRootID: r.RootID}, nil
+	})
+	if err != nil {
+		t.Fatalf("missing store ref failed instead of falling back: %v", err)
+	}
+	if res.WispRootID != openRoot.ID {
+		t.Fatalf("adopted root = %s, want %s", res.WispRootID, openRoot.ID)
+	}
+}
+
+func TestLegacyReworkRetiresFailedMoleculeAndPoursFresh(t *testing.T) {
+	source := seededStore("work")
+	graph := beads.NewMemStore()
+	// Molecule that failed on previous run:
+	failedRoot, _ := graph.Create(beads.Bead{
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.SourceBeadIDMetadataKey:   "work",
+			beadmeta.SourceStoreRefMetadataKey: "rig:crm",
+			beadmeta.FormulaNameMetadataKey:    "review",
+			beadmeta.MoleculeFailedMetadataKey: "lint failure: 1001 lines exceeds 1000",
+			legacyAttachmentStateKey:           "ready",
+			"gc.var.issue":                     "work",
+		},
+	})
+	failedChild, _ := graph.Create(beads.Bead{
+		Type:     "step",
+		Status:   "open",
+		ParentID: failedRoot.ID,
+	})
+	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, failedRoot.ID)
+	deps := SlingDeps{
+		Store:      source,
+		GraphStore: graph,
+		StoreRef:   "rig:crm",
+		CityPath:   t.TempDir(),
+	}
+	poured := false
+	var newRootID string
+	res, err := withLegacyAttachment(context.Background(), deps, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) {
+		poured = true
+		newRoot, e := graph.Create(beads.Bead{
+			Type:   "molecule",
+			Status: "open",
+			Metadata: map[string]string{
+				beadmeta.SourceBeadIDMetadataKey:   "work",
+				beadmeta.SourceStoreRefMetadataKey: "rig:crm",
+			},
+		})
+		newRootID = newRoot.ID
+		return &molecule.Result{RootID: newRoot.ID}, e
+	}, func(r *molecule.Result) (SlingResult, error) {
+		return SlingResult{WispRootID: r.RootID}, nil
+	})
+	if err != nil {
+		t.Fatalf("failed molecule blocked rework sling: %v", err)
+	}
+	if !poured {
+		t.Fatal("expected fresh molecule to be poured for rework")
+	}
+	if res.WispRootID != newRootID {
+		t.Fatalf("returned root = %s, want %s", res.WispRootID, newRootID)
+	}
+	// Verify failed root and its child were retired (closed):
+	retiredRoot, _ := graph.Get(failedRoot.ID)
+	if retiredRoot.Status != "closed" {
+		t.Fatalf("failed root status = %s, want closed", retiredRoot.Status)
+	}
+	retiredChild, _ := graph.Get(failedChild.ID)
+	if retiredChild.Status != "closed" {
+		t.Fatalf("failed child status = %s, want closed", retiredChild.Status)
+	}
+}

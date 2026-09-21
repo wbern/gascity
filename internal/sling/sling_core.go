@@ -547,6 +547,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // routing instead. Any other error (a live graph.v2 workflow conflict, or a
 // metadata-clear failure) keeps hard-failing regardless of this flag.
 func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, fallbackToPlainOnMoleculeConflict bool, result SlingResult) (SlingResult, error) {
+	deps.Force = opts.Force
 	a := opts.Target
 	formulaVars := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
@@ -1372,6 +1373,7 @@ func sourceWorkflowRootByIDInStore(store beads.Store, sourceBeadID, workflowID, 
 // DoSlingBatch so that compiling N times for N children becomes a single
 // compile per batch.
 func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, child beads.Bead, a config.Agent, formulaName, formulaLabel, method string, isGraph bool) (SlingResult, error) {
+	deps.Force = opts.Force
 	childVars := BuildSlingFormulaVars(formulaName, child.ID, opts.Vars, a, deps)
 	if !isGraph {
 		if IsCustomSlingQuery(a) {

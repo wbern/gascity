@@ -43,6 +43,11 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 		var live []beads.Bead
 		for _, root := range roots {
 			rootSourceRef := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey])
+			// If root has no source-store identity recorded, and we are in a shared graph store,
+			// fallback to deps.StoreRef for roots residing in the same store.
+			if rootSourceRef == "" && deps.StoreRef != "" {
+				rootSourceRef = strings.TrimSpace(deps.StoreRef)
+			}
 			rootScope := deps
 			rootScope.StoreRef = rootSourceRef
 			if rootSourceRef != "" && sourceWorkflowLockScope(rootScope) != sourceWorkflowLockScope(deps) {
@@ -51,22 +56,24 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 				}
 				continue
 			}
+			if root.Status == "closed" {
+				if IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) {
+					family, err := molecule.ListSubtree(rootStore, root.ID)
+					if err != nil {
+						return fmt.Errorf("inspect closed legacy family %s: %w", root.ID, err)
+					}
+					for _, child := range family {
+						if child.Status != "closed" {
+							return fmt.Errorf("closed legacy root %s has live descendant %s; reconciliation required", root.ID, child.ID)
+						}
+					}
+				}
+				continue
+			}
 			if deps.GraphStore != nil && rootSourceRef == "" {
 				return fmt.Errorf("legacy family %s has no source-store identity; reconciliation required", root.ID)
 			}
-			if root.Status != "closed" {
-				live = append(live, root)
-			} else if IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) {
-				family, err := molecule.ListSubtree(rootStore, root.ID)
-				if err != nil {
-					return fmt.Errorf("inspect closed legacy family %s: %w", root.ID, err)
-				}
-				for _, child := range family {
-					if child.Status != "closed" {
-						return fmt.Errorf("closed legacy root %s has live descendant %s; reconciliation required", root.ID, child.ID)
-					}
-				}
-			}
+			live = append(live, root)
 		}
 		var materialized *molecule.Result
 		if len(live) > 0 {
@@ -78,13 +85,36 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			for key, value := range vars {
 				matches = matches && root.Metadata["gc.var."+key] == value
 			}
-			if !matches || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "" || root.Metadata[legacyAttachmentStateKey] != "ready" {
+			isFailed := root.Metadata[beadmeta.MoleculeFailedMetadataKey] != ""
+			isReady := root.Metadata[legacyAttachmentStateKey] == "ready"
+
+			switch {
+			case matches && !isFailed && isReady && !deps.Force:
+				materialized = &molecule.Result{RootID: root.ID}
+			case isFailed || deps.Force:
+				for _, r := range live {
+					if _, err := molecule.CloseSubtreeWithMetadata(rootStore, r.ID, map[string]string{
+						"close_reason": "retired: superseded by rework",
+					}); err != nil {
+						return fmt.Errorf("retire superseded legacy family %s: %w", r.ID, err)
+					}
+				}
+				materialized, err = create()
+				if err != nil {
+					return err
+				}
+				if err = rootStore.SetMetadata(materialized.RootID, legacyAttachmentStateKey, "ready"); err != nil {
+					return fmt.Errorf("finish legacy family %s: %w; family retained for reconciliation", materialized.RootID, err)
+				}
+				if deps.StoreRef != "" {
+					_ = rootStore.SetMetadata(materialized.RootID, beadmeta.SourceStoreRefMetadataKey, deps.StoreRef)
+				}
+			default:
 				if len(live) == 1 && root.Metadata[beadmeta.SourceBeadIDMetadataKey] == "" && root.Metadata["gc.var.issue"] == "" {
 					return &MoleculeAttachedError{BeadID: sourceID, Label: "molecule", AttachmentID: root.ID}
 				}
 				return fmt.Errorf("legacy source %s has conflicting families (%s); reconciliation required", sourceID, root.ID)
 			}
-			materialized = &molecule.Result{RootID: root.ID}
 		} else {
 			materialized, err = create()
 			if err != nil {
@@ -92,6 +122,9 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			}
 			if err = rootStore.SetMetadata(materialized.RootID, legacyAttachmentStateKey, "ready"); err != nil {
 				return fmt.Errorf("finish legacy family %s: %w; family retained for reconciliation", materialized.RootID, err)
+			}
+			if deps.StoreRef != "" {
+				_ = rootStore.SetMetadata(materialized.RootID, beadmeta.SourceStoreRefMetadataKey, deps.StoreRef)
 			}
 		}
 		// Re-read after materialization: external claim/close operations do not
