@@ -72,8 +72,17 @@ const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed 
 // Queries that only match one label miss graph.v2-only roots and allow
 // --force to spawn duplicates.
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
+	kind := strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])
+	if strings.EqualFold(kind, beadmeta.KindWorkflowFinalize) {
+		return false
+	}
+	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && (b.ID == "" || rootID != b.ID) {
+		return false
+	}
+	if strings.EqualFold(kind, beadmeta.KindWorkflow) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
 }
 
 func (e *ConflictError) Error() string {
