@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -952,6 +953,89 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 	}
 	if got := childAfter.Metadata["unrelated_metadata"]; got != "keep" {
 		t.Fatalf("child unrelated metadata = %q, want keep", got)
+	}
+}
+
+func TestIsWorkflowRootRejectsStepsAndAcceptsRoots(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{
+			name: "root with kind=workflow and formula_contract=graph.v2",
+			bead: beads.Bead{
+				ID: "root-1",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "root with kind=workflow legacy",
+			bead: beads.Bead{
+				ID: "root-2",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "root with formula_contract=graph.v2 and self root_bead_id",
+			bead: beads.Bead{
+				ID: "root-3",
+				Metadata: map[string]string{
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+					beadmeta.RootBeadIDMetadataKey:      "root-3",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "child step with formula_contract=graph.v2 pointing to root",
+			bead: beads.Bead{
+				ID: "step-1",
+				Metadata: map[string]string{
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+					beadmeta.RootBeadIDMetadataKey:      "root-1",
+				},
+			},
+			want: false,
+		},
+		{
+			name: "finalize step with formula_contract=graph.v2 and kind=workflow-finalize",
+			bead: beads.Bead{
+				ID: "fin-1",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflowFinalize,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+					beadmeta.RootBeadIDMetadataKey:      "root-1",
+				},
+			},
+			want: false,
+		},
+		{
+			name: "plain task",
+			bead: beads.Bead{
+				ID: "task-1",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: beadmeta.KindTask,
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsWorkflowRoot(tc.bead)
+			if got != tc.want {
+				t.Errorf("IsWorkflowRoot() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
