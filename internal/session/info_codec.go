@@ -170,6 +170,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"claim_holder_recycle_at", func(i *Info, v string) { i.ClaimHolderRecycleAt = v }},
 	{"claim_holder_recycle_claims", func(i *Info, v string) { i.ClaimHolderRecycleClaims = v }},
 	{"wake_mode", func(i *Info, v string) { i.WakeMode = v }},
+	{"drain_at", func(i *Info, v string) { i.DrainAt = v }},
 	{"sleep_intent", func(i *Info, v string) { i.SleepIntent = v }},
 	{"instance_token", func(i *Info, v string) { i.InstanceToken = v }},
 	{"detached_at", func(i *Info, v string) { i.DetachedAt = v }},
