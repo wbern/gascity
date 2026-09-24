@@ -501,20 +501,20 @@ func (s legacyReadyStampFailureStore) SetMetadata(id, key, value string) error {
 	return s.MemStore.SetMetadata(id, key, value)
 }
 
-func legacyTestCreate(t *testing.T, store beads.Store, sourceID, storeRef string, vars map[string]string, calls *int) func() (*molecule.Result, error) {
+func legacyTestCreate(t *testing.T, store beads.Store, vars map[string]string, calls *int) func() (*molecule.Result, error) {
 	t.Helper()
 	return func() (*molecule.Result, error) {
 		*calls++
 		meta := map[string]string{
-			beadmeta.SourceBeadIDMetadataKey:   sourceID,
-			beadmeta.SourceStoreRefMetadataKey: storeRef,
+			beadmeta.SourceBeadIDMetadataKey:   "work",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
 			beadmeta.FormulaNameMetadataKey:    "review",
 			legacyAttachmentStateKey:           "preparing",
 		}
 		for k, v := range vars {
 			meta["gc.var."+k] = v
 		}
-		root, err := store.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: sourceID, Metadata: meta})
+		root, err := store.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work", Metadata: meta})
 		return &molecule.Result{RootID: root.ID}, err
 	}
 }
@@ -540,7 +540,7 @@ func TestLegacyAbandonedPreparingRootIsRetiredAndReplaced(t *testing.T) {
 			}
 			calls := 0
 			// First attempt dies between create() and the ready stamp.
-			if _, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", tc.rootVars, &calls), legacyTestFinish, "worker"); err == nil {
+			if _, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, tc.rootVars, &calls), legacyTestFinish, "worker"); err == nil {
 				t.Fatal("first attempt should fail before ready")
 			}
 			stuck, _ := mem.List(beads.ListQuery{Type: "molecule"})
@@ -551,7 +551,7 @@ func TestLegacyAbandonedPreparingRootIsRetiredAndReplaced(t *testing.T) {
 
 			// Retry under the source lock must heal instead of reporting conflicting families.
 			deps.Store = mem
-			result, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", vars, &calls), legacyTestFinish, "worker")
+			result, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish, "worker")
 			if err != nil {
 				t.Fatalf("retry after abandoned preparing root: %v", err)
 			}
@@ -596,7 +596,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, nil)
 		calls := 0
-		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", vars, &calls), legacyTestFinish)
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err != nil || calls != 0 || result.WispRootID != root.ID {
 			t.Fatalf("ready root not reused: err=%v calls=%d result=%+v", err, calls, result)
 		}
@@ -605,7 +605,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, map[string]string{"gc.var.issue": "other"})
 		calls := 0
-		_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", vars, &calls), legacyTestFinish)
+		_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err == nil || !strings.Contains(err.Error(), "conflicting families") || calls != 0 {
 			t.Fatalf("err=%v calls=%d; want conflicting families", err, calls)
 		}
@@ -617,7 +617,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"})
 		calls := 0
-		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", vars, &calls), legacyTestFinish)
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err != nil || calls != 1 || result.WispRootID == root.ID {
 			t.Fatalf("failed root not replaced: err=%v calls=%d result=%+v", err, calls, result)
 		}
@@ -639,7 +639,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 			mem := seededStore("work")
 			root := newRoot(mem, tc.extra)
 			calls := 0
-			_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, "work", "city:test", vars, &calls), legacyTestFinish)
+			_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 			if err == nil || calls != 0 {
 				t.Fatalf("err=%v calls=%d; want refusal without materialization", err, calls)
 			}
