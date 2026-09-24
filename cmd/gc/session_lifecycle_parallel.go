@@ -1854,12 +1854,35 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 		return
 	}
 	name := result.prepared.candidate.name()
-	if !runningSessionMatchesPendingCreateInfo(result.prepared.candidate.info, name, sp) {
+	info := result.prepared.candidate.info
+	if !runningSessionMatchesPendingCreateInfo(info, name, sp) &&
+		!beadScopedPoolRuntimeNotPositivelyForeign(info, name, sp) {
 		return
 	}
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping stale async start runtime %s: %v\n", name, err) //nolint:errcheck
 	}
+}
+
+// beadScopedPoolRuntimeNotPositivelyForeign permits stale-start cleanup by
+// bead-scoped name when provider metadata is unavailable. A runtime that
+// positively reports a different session or instance token remains untouched.
+func beadScopedPoolRuntimeNotPositivelyForeign(info sessionpkg.Info, name string, sp runtime.Provider) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) ||
+		strings.TrimSpace(info.SessionNameMetadata) != strings.TrimSpace(name) {
+		return false
+	}
+	if value, err := sp.GetMeta(name, "GC_SESSION_ID"); err == nil {
+		if live := strings.TrimSpace(value); live != "" && live != info.ID {
+			return false
+		}
+	}
+	if value, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil {
+		if live := strings.TrimSpace(value); live != "" && live != strings.TrimSpace(info.InstanceToken) {
+			return false
+		}
+	}
+	return true
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should

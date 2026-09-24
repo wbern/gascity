@@ -138,6 +138,50 @@ func TestCanceledPoolStartHoldsRowWhenRuntimeTeardownFails(t *testing.T) {
 	}
 }
 
+func TestStalePoolAsyncStartStopsUnattributedRuntime(t *testing.T) {
+	for _, newerToken := range []bool{false, true} {
+		name := "unattributed"
+		if newerToken {
+			name = "newer-token"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			provider := runtime.NewFake()
+			now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+			const template = "example/worker"
+			info, err := createPoolSessionBeadWithAlias(store, template, nil, nil, now,
+				poolSessionCreateIdentity{AgentName: "example/worker-1", Slot: 1}, "")
+			if err != nil {
+				t.Fatalf("create pool row: %v", err)
+			}
+			runtimeName := info.SessionNameMetadata
+			rollbackPendingCreate(info, sessionFrontDoor(store), now, io.Discard)
+			if row, err := store.Get(info.ID); err != nil || row.Status != "closed" {
+				t.Fatalf("fixture rollback: row=%+v err=%v", row, err)
+			}
+			if err := provider.Start(context.Background(), runtimeName, runtime.Config{}); err != nil {
+				t.Fatalf("late runtime start: %v", err)
+			}
+			if newerToken {
+				if err := provider.SetMeta(runtimeName, "GC_INSTANCE_TOKEN", "newer-generation-token"); err != nil {
+					t.Fatalf("set newer token: %v", err)
+				}
+			}
+			result := startResult{
+				prepared: preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{SessionName: runtimeName, TemplateName: template, Command: "true"}}},
+				outcome:  TraceOutcomeSessionExistsConverged, started: now, finished: now, provider: provider,
+			}
+			if commitAsyncStartResultWithContext(context.Background(), result, provider, store,
+				&clock.Fake{Time: now}, events.Discard, 0, io.Discard, io.Discard, nil) {
+				t.Fatal("stale async result reported committed")
+			}
+			if got := provider.IsRunning(runtimeName); got != newerToken {
+				t.Fatalf("runtime running = %t, want %t for newer token = %t", got, newerToken, newerToken)
+			}
+		})
+	}
+}
+
 func TestPoolFailedStartStopFailureHoldsIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	provider := runtime.NewFake()
