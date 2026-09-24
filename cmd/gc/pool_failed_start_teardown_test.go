@@ -98,6 +98,46 @@ func TestReconcilePoolUnconfirmedCloseWaitsForRuntimeTeardown(t *testing.T) {
 	}
 }
 
+func TestCanceledPoolStartHoldsRowWhenRuntimeTeardownFails(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := runtime.NewFake()
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	const template = "example/worker"
+	info, err := createPoolSessionBeadWithAlias(store, template, nil, nil, now,
+		poolSessionCreateIdentity{AgentName: "example/worker-1", Slot: 1}, "")
+	if err != nil {
+		t.Fatalf("create pool row: %v", err)
+	}
+	name := info.SessionNameMetadata
+	if err := provider.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start simulated runtime: %v", err)
+	}
+	provider.StopErrors = map[string]error{name: errors.New("provider unavailable")}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := startResult{
+		prepared: preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{SessionName: name, TemplateName: template, Command: "true"}}},
+		outcome:  TraceOutcomeSessionExistsConverged, started: now, finished: now, provider: provider,
+	}
+	commitAsyncStartResultWithContext(ctx, result, provider, store, &clock.Fake{Time: now}, events.Discard, 0, io.Discard, io.Discard, nil)
+	row, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("get row: %v", err)
+	}
+	if row.Status == "closed" || row.Metadata["pending_create_claim"] != boolMetadata(true) {
+		t.Fatalf("canceled start lost unconfirmed row despite stop failure: status=%q claim=%q", row.Status, row.Metadata["pending_create_claim"])
+	}
+	delete(provider.StopErrors, name)
+	commitAsyncStartResultWithContext(ctx, result, provider, store, &clock.Fake{Time: now}, events.Discard, 0, io.Discard, io.Discard, nil)
+	row, err = store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("get recovered row: %v", err)
+	}
+	if row.Status != "closed" || provider.IsRunning(name) {
+		t.Fatalf("confirmed teardown did not close row and stop runtime: status=%q running=%t", row.Status, provider.IsRunning(name))
+	}
+}
+
 func TestPoolFailedStartStopFailureHoldsIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	provider := runtime.NewFake()

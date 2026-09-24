@@ -1770,7 +1770,8 @@ func commitAsyncStartResultWithContext(
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
-		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) {
+		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
+			releaseBeadScopedPoolRuntime(refreshed.prepared.candidate.info, sp, stderr) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
