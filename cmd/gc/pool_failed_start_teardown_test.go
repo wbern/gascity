@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,56 @@ func TestStalePoolAsyncStartStopsUnattributedRuntime(t *testing.T) {
 				t.Fatalf("runtime running = %t, want %t for newer token = %t", got, newerToken, newerToken)
 			}
 		})
+	}
+}
+
+func TestSyncPoolMintRespectsUnconfirmedIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)}
+	provider := runtime.NewFake()
+	const template = "pack/worker"
+	const instance = "pack/worker-1"
+	held, err := store.Create(beads.Bead{
+		Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:" + instance},
+		Metadata: map[string]string{
+			"template": template, "session_name": "worker-held", "agent_name": instance,
+			"pool_slot": "1", "state": string(sessionpkg.StateFailedCreate),
+			"pending_create_claim": boolMetadata(true), poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create held row: %v", err)
+	}
+	desired := map[string]TemplateParams{
+		"legacy-worker-1": {TemplateName: template, InstanceName: instance, PoolSlot: 1, Command: "codex"},
+	}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, provider, allConfiguredDS(desired), nil, clk, &stderr, true)
+	for _, row := range allSessionBeads(t, store) {
+		if row.ID != held.ID && row.Status != "closed" {
+			t.Fatalf("sync minted row %s beside unconfirmed holder %s; stderr=%s", row.ID, held.ID, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "not creating pool session for "+instance) {
+		t.Fatalf("missing held-identity diagnostic: %s", stderr.String())
+	}
+	if err := store.Close(held.ID); err != nil {
+		t.Fatalf("close held row: %v", err)
+	}
+	stderr.Reset()
+	syncSessionBeads("", store, desired, provider, allConfiguredDS(desired), nil, clk, &stderr, true)
+	minted := 0
+	for _, row := range allSessionBeads(t, store) {
+		if row.ID == held.ID || row.Status == "closed" {
+			continue
+		}
+		minted++
+		if want := PoolSessionName(template, row.ID); row.Metadata["session_name"] != want {
+			t.Fatalf("runtime name = %q, want %q", row.Metadata["session_name"], want)
+		}
+	}
+	if minted != 1 {
+		t.Fatalf("minted %d rows after holder closed, want 1; stderr=%s", minted, stderr.String())
 	}
 }
 
