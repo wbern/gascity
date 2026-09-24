@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -581,17 +582,22 @@ func containsPostUpdateStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+const maxTrustDialogMoveAttempts = 3
+
+var errWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
+
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// "Trust project folder?". List-style dialogs may select an exit option, so
+// locate the selected and affirmative rows before confirming.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	moves := 0
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -603,12 +609,25 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			budget.observe()
-			if err := sendKeys("Enter"); err != nil {
-				return err
+			if keys, ok := workspaceTrustConfirmKeys(content); ok {
+				budget.observe()
+				if len(keys) > 1 {
+					moves++
+					if moves > maxTrustDialogMoveAttempts {
+						return fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+					}
+					if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+						return err
+					}
+					sleep(ctx, startupDialogAcceptDelay)
+					continue
+				}
+				if err := sendKeys(keys...); err != nil {
+					return err
+				}
+				sleep(ctx, startupDialogAcceptDelay)
+				return nil
 			}
-			sleep(ctx, startupDialogAcceptDelay)
-			return nil
 		}
 
 		if containsPromptIndicator(content) {
@@ -638,20 +657,129 @@ func acceptWorkspaceTrustDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsWorkspaceTrustDialog,
-		matchKeys:   []string{"Enter"},
-		matchDelay:  startupDialogAcceptDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostTrustStartupDialog,
+		match:                        containsWorkspaceTrustDialog,
+		matchKeysFor:                 workspaceTrustConfirmKeys,
+		matchDelay:                   startupDialogAcceptDelay,
+		ready:                        containsPromptIndicator,
+		readyOrNext:                  containsPostTrustStartupDialog,
+		confirmOnlyFromSelectedFrame: true,
 	})
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
-	return strings.Contains(content, "trust this folder") ||
+	return strings.Contains(strings.ToLower(content), "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "Trust project folder?")
+}
+
+type trustDialogLayout struct {
+	markers    []string
+	isTrustRow func(label string) bool
+}
+
+var claudeTrustDialogLayout = trustDialogLayout{
+	markers: []string{"❯"},
+	isTrustRow: func(label string) bool {
+		label = strings.ToLower(label)
+		return strings.Contains(label, "trust this folder") && !strings.HasPrefix(label, "no") && !strings.HasSuffix(label, "?")
+	},
+}
+
+var geminiTrustDialogLayout = trustDialogLayout{
+	markers: []string{"●"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(strings.ToLower(label), "trust folder")
+	},
+}
+
+var piTrustDialogLayout = trustDialogLayout{
+	markers: []string{"→"},
+	isTrustRow: func(label string) bool {
+		return strings.EqualFold(strings.TrimSpace(label), "Trust")
+	},
+}
+
+// workspaceTrustConfirmKeys chooses the affirmative row in list-style trust
+// dialogs. Codex's directory prompt has no option list and accepts Enter.
+func workspaceTrustConfirmKeys(content string) ([]string, bool) {
+	switch {
+	case strings.Contains(strings.ToLower(content), "trust this folder") || strings.Contains(content, "Quick safety check"):
+		question := "Quick safety check"
+		if !strings.Contains(content, question) {
+			question = "trust this folder?"
+			if !strings.Contains(strings.ToLower(content), question) {
+				question = "trust this folder"
+			}
+		}
+		return deriveTrustDialogKeys(content, question, claudeTrustDialogLayout)
+	case strings.Contains(content, "Do you trust the files in this folder?"):
+		return deriveTrustDialogKeys(content, "Do you trust the files in this folder?", geminiTrustDialogLayout)
+	case strings.Contains(content, "Trust project folder?"):
+		return deriveTrustDialogKeys(content, "Trust project folder?", piTrustDialogLayout)
+	case strings.Contains(content, "Do you trust the contents of this directory?"):
+		return []string{"Enter"}, true
+	default:
+		return nil, false
+	}
+}
+
+func deriveTrustDialogKeys(content, question string, layout trustDialogLayout) ([]string, bool) {
+	content = trustDialogWindow(content, question)
+	lines := strings.Split(content, "\n")
+	cutset := strings.Join(layout.markers, "") + " "
+	cursorIdx, trustIdx := -1, -1
+	for i, line := range lines {
+		trimmed := stripLeadingBoxBorder(strings.TrimSpace(line))
+		if trimmed == "" {
+			continue
+		}
+		if cursorIdx == -1 {
+			for _, marker := range layout.markers {
+				if strings.HasPrefix(trimmed, marker) {
+					cursorIdx = i
+					break
+				}
+			}
+		}
+		if trustIdx == -1 {
+			label := strings.TrimSpace(strings.TrimLeft(trimmed, cutset))
+			if layout.isTrustRow(label) {
+				trustIdx = i
+			}
+		}
+	}
+	if cursorIdx == -1 || trustIdx == -1 {
+		return nil, false
+	}
+	switch delta := trustIdx - cursorIdx; {
+	case delta > 0:
+		keys := make([]string, 0, delta+1)
+		for i := 0; i < delta; i++ {
+			keys = append(keys, "Down")
+		}
+		return append(keys, "Enter"), true
+	case delta < 0:
+		keys := make([]string, 0, -delta+1)
+		for i := 0; i < -delta; i++ {
+			keys = append(keys, "Up")
+		}
+		return append(keys, "Enter"), true
+	default:
+		return []string{"Enter"}, true
+	}
+}
+
+func trustDialogWindow(content, question string) string {
+	i := strings.LastIndex(strings.ToLower(content), strings.ToLower(question))
+	if i < 0 {
+		return content
+	}
+	if start := strings.LastIndexByte(content[:i], '\n'); start >= 0 {
+		return content[start+1:]
+	}
+	return content
 }
 
 func containsPostTrustStartupDialog(content string) bool {
@@ -1184,11 +1312,13 @@ func dismissRateLimitDialogFromStream(
 }
 
 type streamDialogSpec struct {
-	match       func(string) bool
-	ready       func(string) bool
-	readyOrNext func(string) bool
-	matchKeys   []string
-	matchDelay  time.Duration
+	match                        func(string) bool
+	ready                        func(string) bool
+	readyOrNext                  func(string) bool
+	matchKeys                    []string
+	matchKeysFor                 func(string) ([]string, bool)
+	matchDelay                   time.Duration
+	confirmOnlyFromSelectedFrame bool
 }
 
 type replayableSnapshotStream struct {
@@ -1268,6 +1398,24 @@ func (c *replayableSnapshotCursor) nextBatch() ([]string, bool, <-chan struct{})
 	return batch, closed, updated
 }
 
+func (c *replayableSnapshotCursor) rereadAfterSend(ctx context.Context, prev string, settle time.Duration) string {
+	batch, closed, updated := c.nextBatch()
+	if len(batch) == 0 && !closed && settle > 0 {
+		timer := time.NewTimer(settle)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		case <-updated:
+		}
+		timer.Stop()
+		batch, _, _ = c.nextBatch()
+	}
+	if len(batch) == 0 {
+		return prev
+	}
+	return batch[len(batch)-1]
+}
+
 func (c *replayableSnapshotCursor) replay(history []string) {
 	if len(history) == 0 {
 		return
@@ -1320,13 +1468,36 @@ func acceptDialogFromStream(
 	defer stopTimer(readyTimer)
 	defer stopTimer(idleTimer)
 
+	moves := 0
+scan:
 	for {
 		history, closed, updated := snapshots.nextBatch()
 		if len(history) > 0 {
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
-					snapshots.replay(history[idx+1:])
-					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+					keys, ok := spec.matchKeys, true
+					if spec.matchKeysFor != nil {
+						keys, ok = spec.matchKeysFor(content)
+					}
+					if ok && spec.confirmOnlyFromSelectedFrame && len(keys) > 1 {
+						moves++
+						if moves > maxTrustDialogMoveAttempts {
+							return true, fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+						}
+						if err := ctx.Err(); err != nil {
+							return true, err
+						}
+						if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+							return true, err
+						}
+						sleep(ctx, spec.matchDelay)
+						snapshots.replay([]string{snapshots.rereadAfterSend(ctx, content, spec.matchDelay)})
+						continue scan
+					}
+					if ok {
+						snapshots.replay(history[idx+1:])
+						return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
+					}
 				}
 				if spec.readyOrNext != nil && spec.readyOrNext(content) {
 					snapshots.replay(history[idx:])

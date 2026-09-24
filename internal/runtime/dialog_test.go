@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -46,6 +47,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "claude uppercase trust this folder",
+			content: "Trust this folder?",
+			want:    true,
+		},
+		{
 			name:    "codex trust dialog",
 			content: "> Do you trust the contents of this directory?",
 			want:    true,
@@ -73,6 +79,145 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			t.Parallel()
 			if got := containsWorkspaceTrustDialog(tt.content); got != tt.want {
 				t.Fatalf("containsWorkspaceTrustDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceTrustDialogDoesNotConfirmExit(t *testing.T) {
+	withZeroDialogTimings(t)
+	content := "Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm"
+	var sent []string
+	err := acceptWorkspaceTrustDialog(
+		context.Background(),
+		newStartupDialogBudget(time.Second),
+		func(int) (string, error) { return content, nil },
+		func(keys ...string) error { sent = append(sent, keys...); return nil },
+	)
+	if !errors.Is(err, errWorkspaceTrustUnconfirmed) {
+		t.Fatalf("error = %v, want unconfirmed trust dialog", err)
+	}
+	if len(sent) > 0 && sent[0] == "Enter" {
+		t.Fatalf("confirmed exit row without moving to trust: %v", sent)
+	}
+}
+
+func TestWorkspaceTrustDialogRetriesDroppedSelection(t *testing.T) {
+	withZeroDialogTimings(t)
+	frame := "Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm"
+	var sent []string
+	err := acceptWorkspaceTrustDialog(
+		context.Background(),
+		newStartupDialogBudget(time.Second),
+		func(int) (string, error) { return frame, nil },
+		func(keys ...string) error {
+			for _, key := range keys {
+				sent = append(sent, key)
+				if key == "Down" && len(sent) == 2 {
+					frame = "Quick safety check\n  No, exit\n❯ Yes, I trust this folder\nEnter to confirm"
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Down", "Down", "Enter"}; !reflect.DeepEqual(sent, want) {
+		t.Fatalf("sent = %v, want %v", sent, want)
+	}
+}
+
+func TestWorkspaceTrustStreamRetriesDroppedSelection(t *testing.T) {
+	withZeroDialogTimings(t)
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	stream.publish("Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm")
+	cursor := newReplayableSnapshotCursorFromStream(stream)
+	var sent []string
+	seen, err := acceptWorkspaceTrustDialogFromStream(context.Background(), time.Second, cursor, func(keys ...string) error {
+		for _, key := range keys {
+			sent = append(sent, key)
+			if key == "Down" && len(sent) == 2 {
+				stream.publish("Quick safety check\n  No, exit\n❯ Yes, I trust this folder\nEnter to confirm")
+			}
+		}
+		return nil
+	})
+	if err != nil || !seen {
+		t.Fatalf("seen=%t err=%v", seen, err)
+	}
+	if want := []string{"Down", "Down", "Enter"}; !reflect.DeepEqual(sent, want) {
+		t.Fatalf("sent = %v, want %v", sent, want)
+	}
+}
+
+func TestWorkspaceTrustStreamLeavesUnmovedExitUnconfirmed(t *testing.T) {
+	withZeroDialogTimings(t)
+	stream := &replayableSnapshotStream{update: make(chan struct{})}
+	stream.publish("Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm")
+	cursor := newReplayableSnapshotCursorFromStream(stream)
+	var sent []string
+	seen, err := acceptWorkspaceTrustDialogFromStream(context.Background(), time.Second, cursor, func(keys ...string) error {
+		sent = append(sent, keys...)
+		return nil
+	})
+	if !seen || !errors.Is(err, errWorkspaceTrustUnconfirmed) {
+		t.Fatalf("seen=%t err=%v, want unconfirmed dialog", seen, err)
+	}
+	if len(sent) != maxTrustDialogMoveAttempts {
+		t.Fatalf("sent = %v, want exactly %d movement attempts", sent, maxTrustDialogMoveAttempts)
+	}
+	for _, key := range sent {
+		if key != "Down" {
+			t.Fatalf("sent unsafe key %q while exit remained selected", key)
+		}
+	}
+}
+
+func TestWorkspaceTrustUppercaseQuestionSelectsTrust(t *testing.T) {
+	content := "Trust this folder?\n❯ No, exit\n  Yes, I Trust this folder\nEnter to confirm"
+	keys, ok := workspaceTrustConfirmKeys(content)
+	if !ok {
+		t.Fatal("uppercase trust question and row were not recognized")
+	}
+	if want := []string{"Down", "Enter"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("keys = %v, want %v", keys, want)
+	}
+}
+
+func TestWorkspaceTrustUnknownLayoutSendsNothing(t *testing.T) {
+	withZeroDialogTimings(t)
+	content := "Quick safety check\n❯ An unfamiliar option\n  Continue\nEnter to confirm"
+	var sent []string
+	err := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(10*time.Millisecond),
+		func(int) (string, error) { return content, nil },
+		func(keys ...string) error { sent = append(sent, keys...); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys into an unknown trust layout: %v", sent)
+	}
+}
+
+func TestWorkspaceTrustConfirmKeysLayouts(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"claude selected trust", "Quick safety check\n❯ Yes, I trust this folder\n  No, exit", []string{"Enter"}},
+		{"claude scrollback cursor", "❯ stale scrollback\nQuick safety check\n❯ No, exit\n  Yes, I trust this folder", []string{"Down", "Enter"}},
+		{"claude bordered", "│ Quick safety check\n│ ❯ No, exit\n│   Yes, I trust this folder", []string{"Down", "Enter"}},
+		{"gemini", "Do you trust the files in this folder?\n● Do not trust\n  Trust folder", []string{"Down", "Enter"}},
+		{"pi upward", "Trust project folder?\n  Trust\n→ Do not trust", []string{"Up", "Enter"}},
+		{"codex", "Do you trust the contents of this directory?", []string{"Enter"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := workspaceTrustConfirmKeys(tt.content)
+			if !ok || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("keys = %v, ok = %t, want %v", got, ok, tt.want)
 			}
 		})
 	}
@@ -1602,7 +1747,7 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 				if time.Since(start) < renderDelay {
 					return "", nil // agent still booting: nothing on screen yet
 				}
-				return "Quick safety check", nil
+				return "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel", nil
 			}
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
