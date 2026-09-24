@@ -16,6 +16,8 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+var errPoolSessionNameUnavailable = errors.New("pool session identity unavailable")
+
 type explicitBeadIDStore interface {
 	IDPrefix() string
 }
@@ -238,6 +240,9 @@ func createPoolSessionBeadWithAlias(
 	} else {
 		title = agentName
 	}
+	if err := ensurePoolCreateIdentityAvailable(store, cfg, sessionBeads, template, agentName); err != nil {
+		return sessionpkg.Info{}, err
+	}
 	explicitID := poolSessionExplicitBeadID(store, instanceToken)
 	sessionName := pendingPoolSessionName(template, instanceToken)
 	if explicitID != "" {
@@ -312,6 +317,42 @@ func createPoolSessionBeadWithAlias(
 		sessionBeads.addInfo(info)
 	}
 	return info, nil
+}
+
+// ensurePoolCreateIdentityAvailable keeps an unconfirmed pool create in its
+// slot while runtime teardown is pending. Bead-scoped runtime names alone do
+// not prevent the next generation from starting beside a failed one.
+func ensurePoolCreateIdentityAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, template, agentName string) error {
+	want := agent.SanitizeQualifiedNameForSession(strings.TrimSpace(agentName))
+	holds := func(info sessionpkg.Info) bool {
+		if info.Closed || !isPoolManagedSessionInfo(info) || agent.SanitizeQualifiedNameForSession(strings.TrimSpace(info.AgentName)) != want {
+			return false
+		}
+		switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+		case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
+		default:
+			return false
+		}
+		stored := strings.TrimSpace(info.Template)
+		return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
+	}
+	for _, info := range snapshot.OpenInfos() {
+		if holds(info) {
+			return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
+		}
+	}
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+		map[string]string{"agent_name": agentName},
+		map[string]string{"agent_name": want})
+	if err != nil {
+		return fmt.Errorf("checking pool identity %q for template %q: %w", agentName, template, err)
+	}
+	for _, info := range infos {
+		if holds(info) {
+			return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
+		}
+	}
+	return nil
 }
 
 // derivePoolSessionName picks the session_name for a fresh pool bead. When

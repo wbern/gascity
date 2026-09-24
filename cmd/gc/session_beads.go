@@ -1607,6 +1607,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 		}
+		if !exists && isPoolInstance {
+			leaseTemplate := tp.TemplateName
+			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
+				leaseTemplate = tp.RigName + "/" + leaseTemplate
+			}
+			if err := ensurePoolCreateIdentityAvailable(store, cfg, nil, leaseTemplate, agentName); err != nil {
+				fmt.Fprintf(stderr, "session beads: not creating pool session for %s: %v\n", agentName, err) //nolint:errcheck
+				continue
+			}
+		}
 		if !exists {
 			// Create a new session bead.
 			createState := state

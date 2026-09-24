@@ -1644,6 +1644,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			return nil
 		}
+		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+			return nil
+		}
 		rollbacksThisTick++
 		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
 		if trace != nil {
@@ -1916,13 +1919,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
-					}
 					if storeQueryPartial || reconcileOpts.deferSessionClosesOnBoot {
 						continue
 					}
+					if !releaseBeadScopedPoolRuntime(infoByID[id], sp, stderr) {
+						continue
+					}
 					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr) {
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerCloseFailedCreate, TraceReasonCode(sessionpkg.StateFailedCreate), TraceOutcomeClosed, template, name, nil)
+						}
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
 						// session closed this tick must not still count as open in its

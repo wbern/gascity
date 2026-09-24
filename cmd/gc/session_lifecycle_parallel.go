@@ -232,6 +232,7 @@ type preparedStart struct {
 
 type startResult struct {
 	prepared        preparedStart
+	provider        runtime.Provider
 	err             error
 	outcome         TraceOutcomeCode
 	started         time.Time
@@ -1466,6 +1467,7 @@ func runPreparedStartCandidate(
 	started := time.Now()
 	result = startResult{
 		prepared: item,
+		provider: sp,
 		started:  started,
 		finished: started,
 	}
@@ -1474,6 +1476,7 @@ func runPreparedStartCandidate(
 			stack := debug.Stack()
 			result = startResult{
 				prepared: item,
+				provider: sp,
 				err:      fmt.Errorf("panic during start: %v\n%s", recovered, stack),
 				outcome:  TraceOutcomePanicRecovered,
 				started:  started,
@@ -1536,6 +1539,7 @@ func runPreparedStartCandidate(
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
+			provider:        sp,
 			err:             nil,
 			outcome:         TraceOutcomeStartErrorConverged,
 			started:         started,
@@ -1584,6 +1588,7 @@ func runPreparedStartCandidate(
 	}
 	return startResult{
 		prepared:        item,
+		provider:        sp,
 		err:             err,
 		outcome:         outcome,
 		started:         started,
@@ -1765,7 +1770,8 @@ func commitAsyncStartResultWithContext(
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
-		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) {
+		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
+			releaseBeadScopedPoolRuntime(refreshed.prepared.candidate.info, sp, stderr) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
@@ -1848,12 +1854,35 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 		return
 	}
 	name := result.prepared.candidate.name()
-	if !runningSessionMatchesPendingCreateInfo(result.prepared.candidate.info, name, sp) {
+	info := result.prepared.candidate.info
+	if !runningSessionMatchesPendingCreateInfo(info, name, sp) &&
+		!beadScopedPoolRuntimeNotPositivelyForeign(info, name, sp) {
 		return
 	}
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping stale async start runtime %s: %v\n", name, err) //nolint:errcheck
 	}
+}
+
+// beadScopedPoolRuntimeNotPositivelyForeign permits stale-start cleanup by
+// bead-scoped name when provider metadata is unavailable. A runtime that
+// positively reports a different session or instance token remains untouched.
+func beadScopedPoolRuntimeNotPositivelyForeign(info sessionpkg.Info, name string, sp runtime.Provider) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) ||
+		strings.TrimSpace(info.SessionNameMetadata) != strings.TrimSpace(name) {
+		return false
+	}
+	if value, err := sp.GetMeta(name, "GC_SESSION_ID"); err == nil {
+		if live := strings.TrimSpace(value); live != "" && live != info.ID {
+			return false
+		}
+	}
+	if value, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil {
+		if live := strings.TrimSpace(value); live != "" && live != strings.TrimSpace(info.InstanceToken) {
+			return false
+		}
+	}
+	return true
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should
@@ -2308,6 +2337,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
+		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+			return
+		}
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still
@@ -2368,7 +2401,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
@@ -2393,6 +2428,21 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+}
+
+// releaseBeadScopedPoolRuntime confirms teardown before a failed pool create
+// can close its row. The bead ID in the runtime name makes a name-only stop
+// safe for this row; aliases and other shared names retain their existing path.
+func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		return true
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: tearing down runtime %q before rollback: %v\n", info.ID, name, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // recoverRunningPendingCreate heals an already-active bead whose
