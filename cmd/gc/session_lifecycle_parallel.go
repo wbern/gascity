@@ -232,6 +232,7 @@ type preparedStart struct {
 
 type startResult struct {
 	prepared        preparedStart
+	provider        runtime.Provider
 	err             error
 	outcome         TraceOutcomeCode
 	started         time.Time
@@ -1466,6 +1467,7 @@ func runPreparedStartCandidate(
 	started := time.Now()
 	result = startResult{
 		prepared: item,
+		provider: sp,
 		started:  started,
 		finished: started,
 	}
@@ -1474,6 +1476,7 @@ func runPreparedStartCandidate(
 			stack := debug.Stack()
 			result = startResult{
 				prepared: item,
+				provider: sp,
 				err:      fmt.Errorf("panic during start: %v\n%s", recovered, stack),
 				outcome:  TraceOutcomePanicRecovered,
 				started:  started,
@@ -1536,6 +1539,7 @@ func runPreparedStartCandidate(
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
+			provider:        sp,
 			err:             nil,
 			outcome:         TraceOutcomeStartErrorConverged,
 			started:         started,
@@ -1584,6 +1588,7 @@ func runPreparedStartCandidate(
 	}
 	return startResult{
 		prepared:        item,
+		provider:        sp,
 		err:             err,
 		outcome:         outcome,
 		started:         started,
@@ -2307,6 +2312,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+		return
+	}
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
@@ -2393,6 +2401,21 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+}
+
+// releaseBeadScopedPoolRuntime confirms teardown before a failed pool create
+// can close its row. The bead ID in the runtime name makes a name-only stop
+// safe for this row; aliases and other shared names retain their existing path.
+func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		return true
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: tearing down runtime %q before rollback: %v\n", info.ID, name, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // recoverRunningPendingCreate heals an already-active bead whose
