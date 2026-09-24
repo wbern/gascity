@@ -124,6 +124,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ClaimHolderRecycleAt:           b.Metadata["claim_holder_recycle_at"],
 		ClaimHolderRecycleClaims:       b.Metadata["claim_holder_recycle_claims"],
 		WakeMode:                       b.Metadata["wake_mode"],
+		DrainAt:                        b.Metadata["drain_at"],
 		SleepIntent:                    b.Metadata["sleep_intent"],
 		InstanceToken:                  b.Metadata["instance_token"],
 		DetachedAt:                     b.Metadata["detached_at"],
