@@ -281,3 +281,38 @@ func TestPoolFailedStartStopFailureHoldsIdentity(t *testing.T) {
 		t.Fatalf("successor create error = %v, want identity held by unconfirmed row", err)
 	}
 }
+
+func TestPoolTerminalStartErrorPreservesRetryWhenTeardownFails(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := runtime.NewFake()
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	const template = "example/worker"
+	info, err := createPoolSessionBeadWithAlias(store, template, nil, nil, now,
+		poolSessionCreateIdentity{AgentName: "example/worker-1", Slot: 1}, "")
+	if err != nil {
+		t.Fatalf("create pool row: %v", err)
+	}
+	name := info.SessionNameMetadata
+	if err := provider.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start simulated runtime: %v", err)
+	}
+	provider.StopErrors = map[string]error{name: errors.New("provider unavailable")}
+	startErr := errors.New("model_not_found: unavailable model")
+	if reason := runtime.ProviderTerminalErrorReason(startErr.Error()); reason == "" {
+		t.Fatal("fixture error must enter the terminal provider-error path")
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{SessionName: name, TemplateName: template, Command: "true"}}},
+		err:      startErr, outcome: TraceOutcomeProviderError,
+		started: now, finished: now, rollbackPending: true, provider: provider,
+	}
+	commitStartFailure(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.Discard, 0, io.Discard, nil)
+	row, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("get failed row: %v", err)
+	}
+	if row.Status == "closed" || row.Metadata["pending_create_claim"] != boolMetadata(true) ||
+		row.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("terminal path parked unconfirmed row: status=%q claim=%q state=%q", row.Status, row.Metadata["pending_create_claim"], row.Metadata["state"])
+	}
+}
