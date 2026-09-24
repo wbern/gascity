@@ -2336,10 +2336,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-	if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
-		return
-	}
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
+		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+			return
+		}
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still
@@ -2400,7 +2401,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}

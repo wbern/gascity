@@ -5490,27 +5490,30 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		close(store.releaseFirstCreate)
 		close(store.releaseSecondCreate)
 		t.Fatal("second pool create reached the store before first create finished; alias lock did not serialize create")
+	case result := <-results:
+		close(store.releaseFirstCreate)
+		t.Fatalf("create returned before first released its identity lock: %+v", result)
 	case <-time.After(150 * time.Millisecond):
 		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
 	}
 
+	winners, losers := 0, 0
 	for i := 0; i < 2; i++ {
 		result := <-results
-		if result.err != nil {
+		switch {
+		case result.err == nil:
+			winners++
+			if result.info.ID == "" || result.slot != 1 {
+				t.Fatalf("winning create = %+v, want nonempty session in slot 1", result)
+			}
+		case errors.Is(result.err, errPoolSessionNameUnavailable):
+			losers++
+		default:
 			t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
 		}
-		if result.info.ID == "" {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty session", i+1)
-		}
-		if result.slot != 1 {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
-		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("winners=%d losers=%d, want one of each", winners, losers)
 	}
 
 	sessionBeads, err := loadSessionBeads(store)
@@ -8658,7 +8661,7 @@ func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testin
 	}
 }
 
-func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T) {
+func TestBuildDesiredState_DefersPoolCreateWhenIdentityLookupFails(t *testing.T) {
 	cityPath := t.TempDir()
 	memStore := beads.NewMemStore()
 	store := listFailStore{Store: memStore}
@@ -8672,23 +8675,14 @@ func TestBuildDesiredState_FallsBackToLegacyPoolDemandWhenListFails(t *testing.T
 		},
 	}
 
-	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
 	desired := dsResult.State
-	// With min=1, max=1: both the singleton path and the pool-floor path
-	// may contribute a session, yielding 1 or 2 desired entries depending
-	// on timing. Accept either.
-	if len(desired) < 1 || len(desired) > 2 {
-		t.Fatalf("desired sessions = %d, want 1 or 2", len(desired))
+	if len(desired) != 0 {
+		t.Fatalf("desired sessions = %d, want no mint while identity lookup fails", len(desired))
 	}
-	// At least one session should have a worker-prefixed name.
-	found := false
-	for sn := range desired {
-		if strings.HasPrefix(sn, "worker") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("no worker-prefixed session in desired: %v", desired)
+	if !strings.Contains(stderr.String(), "checking pool identity") {
+		t.Fatalf("missing identity-lookup diagnostic: %s", stderr.String())
 	}
 }
 

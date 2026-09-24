@@ -79,21 +79,33 @@ func TestReconcilePoolUnconfirmedCloseWaitsForRuntimeTeardown(t *testing.T) {
 				t.Fatalf("set runtime name: %v", err)
 			}
 			provider.StopErrors = map[string]error{name: errors.New("provider unavailable")}
-			row, err = store.Get(row.ID)
-			if err != nil {
-				t.Fatalf("get row: %v", err)
+			runTick := func() (beads.Bead, string) {
+				t.Helper()
+				current, err := store.Get(row.ID)
+				if err != nil {
+					t.Fatalf("get current row: %v", err)
+				}
+				var stdout, stderr bytes.Buffer
+				reconcileSessionBeads(context.Background(), []beads.Bead{current}, map[string]TemplateParams{},
+					configuredSessionNames(cfg, "", store), cfg, provider, store, nil, nil, nil,
+					newDrainTracker(), map[string]int{"worker": 1}, false, nil, "", nil, clk,
+					events.Discard, 0, 0, &stdout, &stderr)
+				got, err := store.Get(row.ID)
+				if err != nil {
+					t.Fatalf("get reconciled row: %v", err)
+				}
+				return got, stderr.String()
 			}
-			var stdout, stderr bytes.Buffer
-			reconcileSessionBeads(context.Background(), []beads.Bead{row}, map[string]TemplateParams{},
-				configuredSessionNames(cfg, "", store), cfg, provider, store, nil, nil, nil,
-				newDrainTracker(), map[string]int{"worker": 1}, false, nil, "", nil, clk,
-				events.Discard, 0, 0, &stdout, &stderr)
-			got, err := store.Get(row.ID)
-			if err != nil {
-				t.Fatalf("get reconciled row: %v", err)
+			for tick := 1; tick <= 3; tick++ {
+				got, stderr := runTick()
+				if got.Status == "closed" || got.Metadata["session_name"] != name || got.Metadata["state"] != string(state) {
+					t.Fatalf("tick %d: unconfirmed row changed while stop failed: status=%q name=%q state=%q stderr=%s", tick, got.Status, got.Metadata["session_name"], got.Metadata["state"], stderr)
+				}
 			}
-			if got.Status == "closed" || got.Metadata["session_name"] != name {
-				t.Fatalf("unconfirmed row closed or lost name while stop failed: status=%q name=%q stderr=%s", got.Status, got.Metadata["session_name"], stderr.String())
+			delete(provider.StopErrors, name)
+			got, stderr := runTick()
+			if got.Status != "closed" {
+				t.Fatalf("recovered teardown left row %s open; stderr=%s", got.ID, stderr)
 			}
 		})
 	}

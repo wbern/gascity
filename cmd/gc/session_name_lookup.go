@@ -16,6 +16,8 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+var errPoolSessionNameUnavailable = errors.New("pool session identity unavailable")
+
 type explicitBeadIDStore interface {
 	IDPrefix() string
 }
@@ -336,7 +338,7 @@ func ensurePoolCreateIdentityAvailable(store beads.Store, cfg *config.City, snap
 	}
 	for _, info := range snapshot.OpenInfos() {
 		if holds(info) {
-			return fmt.Errorf("pool template %q identity %q held by open session %s", template, agentName, info.ID)
+			return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
 		}
 	}
 	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
@@ -347,7 +349,7 @@ func ensurePoolCreateIdentityAvailable(store beads.Store, cfg *config.City, snap
 	}
 	for _, info := range infos {
 		if holds(info) {
-			return fmt.Errorf("pool template %q identity %q held by open session %s", template, agentName, info.ID)
+			return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
 		}
 	}
 	return nil
