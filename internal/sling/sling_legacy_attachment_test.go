@@ -3,6 +3,7 @@ package sling
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -484,5 +485,167 @@ func TestLegacyReworkRetiresFailedMoleculeAndPoursFresh(t *testing.T) {
 	retiredChild, _ := graph.Get(failedChild.ID)
 	if retiredChild.Status != "closed" {
 		t.Fatalf("failed child status = %s, want closed", retiredChild.Status)
+	}
+}
+
+// legacyReadyStampFailureStore fails the post-create "ready" stamp, leaving the
+// freshly created root in gc.legacy_attachment_state=preparing. It stands in
+// for a sling process that died (e.g. order timeout) between create() and the
+// ready stamp (gci-142rk9).
+type legacyReadyStampFailureStore struct{ *beads.MemStore }
+
+func (s legacyReadyStampFailureStore) SetMetadata(id, key, value string) error {
+	if key == legacyAttachmentStateKey && value == "ready" {
+		return errors.New("process died before ready")
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func legacyTestCreate(t *testing.T, store beads.Store, vars map[string]string, calls *int) func() (*molecule.Result, error) {
+	t.Helper()
+	return func() (*molecule.Result, error) {
+		*calls++
+		meta := map[string]string{
+			beadmeta.SourceBeadIDMetadataKey:   "work",
+			beadmeta.SourceStoreRefMetadataKey: "city:test",
+			beadmeta.FormulaNameMetadataKey:    "review",
+			legacyAttachmentStateKey:           "preparing",
+		}
+		for k, v := range vars {
+			meta["gc.var."+k] = v
+		}
+		root, err := store.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work", Metadata: meta})
+		return &molecule.Result{RootID: root.ID}, err
+	}
+}
+
+func legacyTestFinish(r *molecule.Result) (SlingResult, error) {
+	return SlingResult{WispRootID: r.RootID}, nil
+}
+
+func TestLegacyAbandonedPreparingRootIsRetiredAndReplaced(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rootVars map[string]string
+	}{
+		{"matching vars", map[string]string{"issue": "work"}},
+		{"differing vars", map[string]string{"issue": "work", "pr": "old"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := seededStore("work")
+			deps := SlingDeps{Store: legacyReadyStampFailureStore{MemStore: mem}, StoreRef: "city:test", CityPath: t.TempDir()}
+			vars := map[string]string{"issue": "work", "pr": "new"}
+			if tc.name == "matching vars" {
+				vars = map[string]string{"issue": "work"}
+			}
+			calls := 0
+			// First attempt dies between create() and the ready stamp.
+			if _, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, tc.rootVars, &calls), legacyTestFinish, "worker"); err == nil {
+				t.Fatal("first attempt should fail before ready")
+			}
+			stuck, _ := mem.List(beads.ListQuery{Type: "molecule"})
+			if len(stuck) != 1 || stuck[0].Metadata[legacyAttachmentStateKey] != "preparing" {
+				t.Fatalf("setup: want one preparing root, got %+v", stuck)
+			}
+			abandonedID := stuck[0].ID
+
+			// Retry under the source lock must heal instead of reporting conflicting families.
+			deps.Store = mem
+			result, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish, "worker")
+			if err != nil {
+				t.Fatalf("retry after abandoned preparing root: %v", err)
+			}
+			if calls != 2 || result.WispRootID == "" || result.WispRootID == abandonedID {
+				t.Fatalf("retry did not materialize a fresh family: calls=%d result=%+v", calls, result)
+			}
+			old, _ := mem.Get(abandonedID)
+			if old.Status != "closed" || !strings.Contains(old.Metadata["close_reason"], "abandoned preparing") {
+				t.Fatalf("abandoned root not retired: %+v", old)
+			}
+			fresh, _ := mem.Get(result.WispRootID)
+			if fresh.Status != "open" || fresh.Metadata[legacyAttachmentStateKey] != "ready" || fresh.Metadata[beadmeta.SourceStoreRefMetadataKey] != "city:test" {
+				t.Fatalf("fresh family not ready: %+v", fresh)
+			}
+			source, _ := mem.Get("work")
+			if source.Metadata[beadmeta.MoleculeIDMetadataKey] != result.WispRootID {
+				t.Fatalf("source molecule_id = %q, want new root %q", source.Metadata[beadmeta.MoleculeIDMetadataKey], result.WispRootID)
+			}
+		})
+	}
+}
+
+func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
+	newRoot := func(store *beads.MemStore, extra map[string]string) beads.Bead {
+		meta := map[string]string{
+			beadmeta.SourceBeadIDMetadataKey: "work", beadmeta.SourceStoreRefMetadataKey: "city:test",
+			beadmeta.FormulaNameMetadataKey: "review", legacyAttachmentStateKey: "ready", "gc.var.issue": "work",
+		}
+		for k, v := range extra {
+			if v == "" {
+				delete(meta, k)
+				continue
+			}
+			meta[k] = v
+		}
+		root, _ := store.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work", Metadata: meta})
+		return root
+	}
+	vars := map[string]string{"issue": "work"}
+
+	t.Run("ready matching root is reused", func(t *testing.T) {
+		mem := seededStore("work")
+		root := newRoot(mem, nil)
+		calls := 0
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		if err != nil || calls != 0 || result.WispRootID != root.ID {
+			t.Fatalf("ready root not reused: err=%v calls=%d result=%+v", err, calls, result)
+		}
+	})
+	t.Run("ready non-matching root still conflicts", func(t *testing.T) {
+		mem := seededStore("work")
+		root := newRoot(mem, map[string]string{"gc.var.issue": "other"})
+		calls := 0
+		_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		if err == nil || !strings.Contains(err.Error(), "conflicting families") || calls != 0 {
+			t.Fatalf("err=%v calls=%d; want conflicting families", err, calls)
+		}
+		if after, _ := mem.Get(root.ID); after.Status != "open" {
+			t.Fatal("ready non-matching root was mutated")
+		}
+	})
+	t.Run("failed root is still retired", func(t *testing.T) {
+		mem := seededStore("work")
+		root := newRoot(mem, map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"})
+		calls := 0
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		if err != nil || calls != 1 || result.WispRootID == root.ID {
+			t.Fatalf("failed root not replaced: err=%v calls=%d result=%+v", err, calls, result)
+		}
+		if after, _ := mem.Get(root.ID); after.Status != "closed" || after.Metadata["close_reason"] != "retired: superseded by rework" {
+			t.Fatalf("failed root not retired: %+v", after)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		extra map[string]string
+		deps  func(*beads.MemStore, string) SlingDeps
+	}{
+		{"preparing root for another formula", map[string]string{legacyAttachmentStateKey: "preparing", beadmeta.FormulaNameMetadataKey: "other"}, nil},
+		{"preparing root without source identity", map[string]string{legacyAttachmentStateKey: "preparing", beadmeta.SourceBeadIDMetadataKey: ""}, nil},
+		// No recorded store ref: the creator may have held a different lock scope.
+		{"preparing root without recorded store ref", map[string]string{legacyAttachmentStateKey: "preparing", beadmeta.SourceStoreRefMetadataKey: ""}, nil},
+	} {
+		t.Run(tc.name+" is not retired", func(t *testing.T) {
+			mem := seededStore("work")
+			root := newRoot(mem, tc.extra)
+			calls := 0
+			_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+			if err == nil || calls != 0 {
+				t.Fatalf("err=%v calls=%d; want refusal without materialization", err, calls)
+			}
+			if after, _ := mem.Get(root.ID); after.Status != "open" {
+				t.Fatal("unproven preparing root was retired")
+			}
+		})
 	}
 }

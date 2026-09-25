@@ -87,14 +87,19 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			}
 			isFailed := root.Metadata[beadmeta.MoleculeFailedMetadataKey] != ""
 			isReady := root.Metadata[legacyAttachmentStateKey] == "ready"
+			abandoned := isAbandonedPreparingRoot(root, live, source, deps, sourceID, formulaName)
 
 			switch {
 			case matches && !isFailed && isReady && !deps.Force:
 				materialized = &molecule.Result{RootID: root.ID}
-			case isFailed || deps.Force:
+			case isFailed || deps.Force || abandoned:
+				closeReason := "retired: superseded by rework"
+				if abandoned && !isFailed && !deps.Force {
+					closeReason = "retired: abandoned preparing attempt (sling died before ready)"
+				}
 				for _, r := range live {
 					if _, err := molecule.CloseSubtreeWithMetadata(rootStore, r.ID, map[string]string{
-						"close_reason": "retired: superseded by rework",
+						"close_reason": closeReason,
 					}); err != nil {
 						return fmt.Errorf("retire superseded legacy family %s: %w", r.ID, err)
 					}
@@ -160,4 +165,39 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 		return err
 	})
 	return result, err
+}
+
+// isAbandonedPreparingRoot reports whether the single live root is a legacy
+// family left in gc.legacy_attachment_state=preparing by a sling that died
+// between create() and the ready stamp (gci-142rk9).
+//
+// Only InstantiateCompiledSlingFormula stamps "preparing", and only from the
+// create() callback that withLegacyAttachment runs while holding
+// sourceworkflow.WithLock for this source (an in-process mutex plus a
+// cross-process flock that the kernel releases when the holder dies). The
+// ready stamp happens before that lock is released. So when the caller
+// observes such a root while holding the same lock, no in-flight sling can
+// own it: it is provably a dead prior attempt and is safe to retire.
+//
+// The root's recorded source-store ref must be present (or both refs empty) so
+// the creator is known to have used this same lock scope. Vars are
+// deliberately NOT compared: whatever vars the dead attempt used, it was an
+// attempt for this source under this lock and never published a pointer.
+// Formula and source identity must still match, and the source must not
+// already point at the root, to stay conservative.
+func isAbandonedPreparingRoot(root beads.Bead, live []beads.Bead, source beads.Bead, deps SlingDeps, sourceID, formulaName string) bool {
+	if len(live) != 1 || !IsMoleculeAttachment(root) || IsWorkflowAttachment(root) || root.Status == "closed" {
+		return false
+	}
+	if root.Metadata[legacyAttachmentStateKey] != "preparing" {
+		return false
+	}
+	if root.Metadata[beadmeta.FormulaNameMetadataKey] != formulaName || root.Metadata[beadmeta.SourceBeadIDMetadataKey] != sourceID {
+		return false
+	}
+	recordedRef := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey])
+	if recordedRef == "" && strings.TrimSpace(deps.StoreRef) != "" {
+		return false
+	}
+	return source.Metadata[beadmeta.MoleculeIDMetadataKey] != root.ID
 }
