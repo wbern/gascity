@@ -2890,7 +2890,11 @@ func sweepUndesiredPoolSessionBeads(
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)
-		if running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames); err == nil && running {
+		running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames)
+		if err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			continue
+		}
+		if err == nil && running {
 			continue
 		}
 		// The candidate is a session-class close op; GCSweepSessionBeads takes the
@@ -2912,7 +2916,8 @@ func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, process
 	// The sweep only needs provider-runtime/process presence, not attachment or
 	// activity details. Process-name hints preserve the same false-negative
 	// recovery used by worker observation without the heavier handle path.
-	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
+	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
+	return obs.Running, err
 }
 
 // poolSessionBeadRuntimeRunningInfo is the session.Info sibling of
@@ -2927,7 +2932,8 @@ func poolSessionBeadRuntimeRunningInfo(info sessionpkg.Info, sp runtime.Provider
 	if name == "" {
 		return false, fmt.Errorf("pool session runtime check missing session name: %w", runtime.ErrSessionNotFound)
 	}
-	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
+	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
+	return obs.Running, err
 }
 
 // pendingCreateClaimStillLeasedForSweepInfo keeps pending_create_claim
