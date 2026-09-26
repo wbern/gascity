@@ -34,6 +34,10 @@ func (*mcpSharedTargetDoctorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (*mcpRejectedServersDoctorCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *sessionModelDoctorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
