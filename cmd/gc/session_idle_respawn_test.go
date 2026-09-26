@@ -476,3 +476,62 @@ func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
 		t.Fatal("a non-interactive assigned-work session must not be idle-respawn-drained")
 	}
 }
+
+// idleRespawnTestSessionInfo projects the reconciler test session bead onto the
+// Info fields drain bookkeeping keys on.
+func idleRespawnTestSessionInfo(session beads.Bead) sessionpkg.Info {
+	return sessionpkg.Info{
+		ID:                  session.ID,
+		SessionNameMetadata: session.Metadata["session_name"],
+		Generation:          session.Metadata["generation"],
+	}
+}
+
+// An assigned-work-only session that is not (yet) idle-respawn eligible is
+// correctly awake: a pre-existing cancelable drain begun before the work was
+// assigned must still be canceled, exactly as for any other awake session.
+// Only an idle-respawn drain already in flight is exempt.
+func TestReconcileSessionBeads_AssignedWorkOnlyCancelsStaleCancelableDrain(t *testing.T) {
+	for _, reason := range []string{"idle", "pool-scale-down", "no-wake-reason", "undesired"} {
+		t.Run(reason, func(t *testing.T) {
+			env, session, work := newIdleRespawnReconcilerTest(t, "open", 30*time.Second)
+			if !beginSessionDrainInfo(idleRespawnTestSessionInfo(session), env.sp, env.dt, reason, env.clk, defaultDrainTimeout) {
+				t.Fatalf("begin %s drain", reason)
+			}
+
+			reconcileIdleRespawnTestTick(t, env, session, work, true)
+
+			if ds := env.dt.get(session.ID); ds != nil {
+				t.Fatalf("assigned-work-only session kept a stale cancelable %q drain: %+v", reason, ds)
+			}
+		})
+	}
+}
+
+func TestReconcileSessionBeads_AssignedWorkOnlyKeepsInFlightIdleRespawnDrain(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 2*time.Minute)
+	if !beginSessionDrainInfo(idleRespawnTestSessionInfo(session), env.sp, env.dt, idleRespawnDrainReason, env.clk, defaultDrainTimeout) {
+		t.Fatal("begin idle-respawn drain")
+	}
+
+	reconcileIdleRespawnTestTick(t, env, session, work, true)
+
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != idleRespawnDrainReason {
+		t.Fatalf("in-flight idle-respawn drain was canceled on the wake path: %+v", ds)
+	}
+}
+
+// A completed idle probe that the idle-respawn gate did not consume (the
+// session is not eligible) is stale and must be cleared, or it blocks every
+// future probe for this session.
+func TestReconcileSessionBeads_AssignedWorkOnlyClearsStaleCompletedIdleProbe(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 30*time.Second)
+	probe := env.dt.startIdleProbe(session.ID)
+	env.dt.finishIdleProbe(session.ID, probe, true, env.clk.Now())
+
+	reconcileIdleRespawnTestTick(t, env, session, work, true)
+
+	if _, ok := env.dt.idleProbe(session.ID); ok {
+		t.Fatal("stale completed idle probe survived the wake path")
+	}
+}

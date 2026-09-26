@@ -3960,11 +3960,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, nil)
 				}
-			} else if !idleAssignedWorkOnly(eval) {
+			} else if !idleRespawnDrainInFlight(dt, target.info.ID) {
 				// Session is correctly awake. Cancel any non-drift drain
-				// (handles scale-back-up: agent returns to desired set while draining).
-				// Assigned-work-only sessions are intentionally skipped here so
-				// their idle probe can run to completion (sleep-and-respawn).
+				// (handles scale-back-up: agent returns to desired set while draining)
+				// and drop a completed idle probe the idle-respawn gate above did
+				// not consume — a stale one would block every future probe.
+				// Only an idle-respawn drain already in flight is left to run to
+				// completion (sleep-and-respawn); cancelSessionDrainInfo would
+				// no-op for it anyway because the reason is non-cancelable.
 				cancelSessionDrainInfo(info, sp, dt)
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
@@ -5782,6 +5785,16 @@ const (
 	idleRespawnAttemptsMetadataKey = "idle_respawn_attempts"
 	idleRespawnBeadIDMetadataKey   = "idle_respawn_bead_id"
 )
+
+// idleRespawnDrainInFlight reports whether the session already has an
+// idle-respawn drain in progress, the one drain the wake path must leave alone.
+func idleRespawnDrainInFlight(dt *drainTracker, beadID string) bool {
+	if dt == nil {
+		return false
+	}
+	ds := dt.get(beadID)
+	return ds != nil && ds.reason == idleRespawnDrainReason
+}
 
 // idleAssignedWorkOnly reports whether a session's sole reason to be awake is
 // owning assigned work — the case eligible to sleep-and-respawn rather than
