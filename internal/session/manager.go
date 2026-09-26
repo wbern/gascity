@@ -365,6 +365,11 @@ type Info struct {
 	ClaimHolderRecycleCount  string // claim_holder_recycle_count (raw)
 	ClaimHolderRecycleAt     string // claim_holder_recycle_at (raw)
 	ClaimHolderRecycleClaims string // claim_holder_recycle_claims (raw)
+	// IdleRespawnAttempts is the RAW idle_respawn_attempts metadata. The
+	// reconciler bounds idle-respawn retries for one assigned bead with it.
+	IdleRespawnAttempts string // idle_respawn_attempts (raw)
+	// IdleRespawnBeadID identifies the assigned bead the retry count belongs to.
+	IdleRespawnBeadID string // idle_respawn_bead_id (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)

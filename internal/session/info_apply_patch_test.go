@@ -38,7 +38,7 @@ var allProjectedMetadataKeys = []string{
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
 	ResetCommittedAtKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
-	"churn_count",
+	"churn_count", "idle_respawn_attempts", "idle_respawn_bead_id",
 	"claim_holder_recycle_count", "claim_holder_recycle_at", "claim_holder_recycle_claims",
 	"wake_mode", "drain_at", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
