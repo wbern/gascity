@@ -21,11 +21,22 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	}
 }
 
-// rootCommandSkipsPackDiscovery identifies built-in helpers that must remain
-// independent of pack config loading while the Beads provider is reloading.
+// rootCommandSkipsPackDiscovery identifies built-in commands that cannot
+// resolve to a pack binding. Pack discovery only adds city-config and pack
+// loading work; each command still performs its normal scope and config
+// resolution when it runs.
+//
+// hook, nudge, mail, and prime are the managed provider-hook surface: every
+// session start runs `gc prime --hook`, and every agent turn runs `gc hook run
+// -- nudge drain --inject` and `gc hook run -- mail check --inject`, where
+// `hook run` re-execs gc for its child. Discovery would otherwise load the city
+// config and pack tree once per gc process before the built-in command even
+// starts. Packs mount only as root-level bindings and a binding that names a
+// core command is skipped (addDiscoveredCommandsToRoot), so no pack can
+// contribute to any of these trees.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
-	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge", "hook", "nudge", "mail", "prime":
 		return true
 	default:
 		return false
