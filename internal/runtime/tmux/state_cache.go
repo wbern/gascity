@@ -95,6 +95,10 @@ type StateCache struct {
 	// state. A fetch that started earlier than that is older than what readers
 	// already see and is discarded rather than published over it.
 	publishedGeneration uint64
+	// refreshID orders fetches that start at the same generation. Dirty
+	// readers can each forget singleflight and start overlapping fetches.
+	refreshID          uint64
+	publishedRefreshID uint64
 	// evictedAt records, per evicted session, the generation its eviction
 	// produced. A superseded fetch that started before that generation may
 	// still list the killed session, so it is filtered out before publishing.
@@ -212,9 +216,11 @@ func (c *StateCache) refresh() {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
 
-		c.mu.RLock()
+		c.mu.Lock()
 		startGeneration := c.generation
-		c.mu.RUnlock()
+		c.refreshID++
+		startRefreshID := c.refreshID
+		c.mu.Unlock()
 
 		start := time.Now()
 		state, err := c.fetcher.FetchState(ctx)
@@ -241,10 +247,12 @@ func (c *StateCache) refresh() {
 			//   that was up then briefly vanished (supervisor restart, socket
 			//   stall) must not wipe a good snapshot and drain healthy pool slots
 			//   — that is #4082's intent.
-			if c.fetchedAt.IsZero() && isNoServerError(err) {
+			if c.fetchedAt.IsZero() && isNoServerError(err) &&
+				(startGeneration > c.publishedGeneration || startRefreshID >= c.publishedRefreshID) {
 				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
 				c.fetchedAt = time.Now()
 				c.publishedGeneration = startGeneration
+				c.publishedRefreshID = startRefreshID
 				// Stay dirty if an invalidation (e.g. the Start that brings
 				// the server up) landed mid-fetch, as a successful refresh does.
 				c.dirty = c.generation != startGeneration
@@ -256,7 +264,8 @@ func (c *StateCache) refresh() {
 		verbose := os.Getenv("GC_LOG_TMUX_CACHE") == "true"
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if startGeneration < c.publishedGeneration {
+		if startGeneration < c.publishedGeneration ||
+			(startGeneration == c.publishedGeneration && startRefreshID < c.publishedRefreshID) {
 			// A dirty read forgot this flight and a newer fetch has already
 			// published; this observation is older than what readers see.
 			if verbose {
@@ -288,6 +297,7 @@ func (c *StateCache) refresh() {
 		c.lastError = nil
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
+		c.publishedRefreshID = startRefreshID
 		for name, generation := range c.evictedAt {
 			if generation <= startGeneration {
 				delete(c.evictedAt, name)

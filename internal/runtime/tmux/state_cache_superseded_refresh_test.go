@@ -236,6 +236,66 @@ func TestStateCache_SupersededRefreshDoesNotOverwriteNewerPublish(t *testing.T) 
 	}
 }
 
+// TestStateCache_SameGenerationRefreshDoesNotOverwriteNewerPublish covers
+// concurrent dirty readers that each forget the current singleflight call.
+// Both fetches begin at the same invalidation generation, but the older
+// observation must not replace a newer one when it completes last.
+func TestStateCache_SameGenerationRefreshDoesNotOverwriteNewerPublish(t *testing.T) {
+	olderEntered := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	f := &scriptedFetcher{fn: func(ctx context.Context, call int64) (runtimeStateSnapshot, error) {
+		switch call {
+		case 1:
+			return runningSnapshot("agent-1"), nil
+		case 2:
+			close(olderEntered)
+			select {
+			case <-releaseOlder:
+			case <-ctx.Done():
+				return runtimeStateSnapshot{}, ctx.Err()
+			}
+			return runningSnapshot("agent-1"), nil
+		default:
+			return runningSnapshot("agent-2"), nil
+		}
+	}}
+	cache := NewStateCache(f, time.Hour)
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("prime did not find agent-1")
+	}
+	cache.Invalidate()
+	olderDone := make(chan struct{})
+	go func() {
+		defer close(olderDone)
+		_ = cache.IsRunning("agent-1")
+	}()
+	select {
+	case <-olderEntered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for older refresh")
+	}
+	// No second invalidation: the two fetches share a generation.
+	if cache.IsRunning("agent-1") {
+		t.Fatal("newer refresh did not observe agent-1 exit")
+	}
+	close(releaseOlder)
+	select {
+	case <-olderDone:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("timed out waiting for older refresh completion")
+	}
+	cache.mu.RLock()
+	_, stale := cache.state.Sessions["agent-1"]
+	newer := cache.state.Sessions["agent-2"].Running
+	cache.mu.RUnlock()
+	if stale || !newer {
+		t.Fatal("older same-generation refresh replaced the newer snapshot")
+	}
+	if got := f.calls.Load(); got != 3 {
+		t.Fatalf("fetch calls = %d, want 3", got)
+	}
+}
+
 // TestStateCache_UnprimedNoServerStaysDirtyWhenSupersededMidFetch covers the
 // other publish path. An unprimed cache that finds no tmux server primes an
 // empty snapshot. If a Start brought the server up and invalidated while that
