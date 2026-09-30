@@ -435,7 +435,54 @@ func controlReadyFallbackQuery(args []string, dir string, runtimeEnv []string, r
 // deliberately uses the bounded summary contract instead.
 func controlReadyShimmed(env map[string]string) bool {
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
-	return strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar)) != ""
+	realBd := strings.TrimSpace(envListValue(runtimeEnv, citylayout.RealBdEnvVar))
+	if realBd == "" {
+		return false
+	}
+	realInfo, err := os.Stat(realBd)
+	if err != nil || realInfo.IsDir() {
+		return false
+	}
+
+	// Positively identify the expected city shim binary from GC_BIN if present.
+	var expectedShimInfo os.FileInfo
+	gcBin := strings.TrimSpace(envListValue(runtimeEnv, "GC_BIN"))
+	shimDir := filepath.Dir(gcBin)
+	if filepath.IsAbs(gcBin) && filepath.Base(shimDir) == "shimbin" {
+		shimCandidate := filepath.Join(shimDir, "bd")
+		if info, err := os.Stat(shimCandidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			expectedShimInfo = info
+		}
+	}
+
+	pathValue := envListValue(runtimeEnv, "PATH")
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			// Match os/exec's Unix PATH semantics: an empty component means
+			// the current directory, so "bd" resolves as "./bd" here.
+			dir = "."
+		}
+		candidate := filepath.Join(dir, "bd")
+		candidateInfo, err := os.Stat(candidate)
+		if err != nil || candidateInfo.IsDir() || candidateInfo.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		// Candidate must not be the raw bd binary pointed to by GC_BD_REAL.
+		if os.SameFile(candidateInfo, realInfo) {
+			return false
+		}
+		// Positively select the shim: candidate must match the expected shim
+		// from GC_BIN or route to bdshim via symlink. A distinct raw bd on PATH
+		// must not be treated as a shim.
+		if expectedShimInfo != nil && os.SameFile(candidateInfo, expectedShimInfo) {
+			return true
+		}
+		if shimRoutesToThinClient(candidate) {
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // controlReadyUsesSummary reports whether the worker environment is fronted
