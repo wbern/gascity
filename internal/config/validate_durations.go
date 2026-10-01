@@ -101,6 +101,11 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
+	if v := cfg.Orders.MaxDispatchesPerTick; v != nil && *v < 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: [orders] max_dispatches_per_tick = %d is negative; the default cap applies",
+			source, *v))
+	}
 	for i := range cfg.Orders.Overrides {
 		ov := cfg.Orders.Overrides[i]
 		if ov.CheckTimeout != nil {

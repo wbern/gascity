@@ -88,8 +88,13 @@ const (
 	// peak cadence; an order whose last run is older than the window misses
 	// the index and pays one LIMIT-1 LastRun fallback (itself limit-pushed
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
-	orderTrackingHistoryIndexLimit   = 256
-	defaultMaxOrderDispatchesPerTick = 4
+	orderTrackingHistoryIndexLimit = 256
+	// defaultMaxOrderDispatchesPerTick is FORK-LOCAL 32; upstream (#2801) is 4.
+	// With 4, GC3's ~65 always-due orders each ran about every 20 minutes
+	// whatever their interval (2026-10-01). 32 covers steady-state demand of
+	// ~15-25 due orders per ~65s tick while still bounding a burst (e.g. the
+	// first tick after a restart). [orders] max_dispatches_per_tick overrides.
+	defaultMaxOrderDispatchesPerTick = 32
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -412,10 +417,6 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	return newMemoryOrderDispatcher(auto, cityPath, cfg, rec, stderr)
 }
 
-// newMemoryOrderDispatcher builds a memoryOrderDispatcher over a resolved order
-// set. aa is the tick loop's auto-dispatchable set; it may be nil for callers
-// that only fire pre-resolved orders through the orderdispatch.Dispatcher seam
-// (the webhook receiver), where the tick dispatch() path is never invoked.
 // orderDispatchesPerTick resolves the per-tick automatic dispatch cap from
 // [orders] max_dispatches_per_tick: unset or negative keeps the default, 0
 // removes the cap.
@@ -426,6 +427,10 @@ func orderDispatchesPerTick(cfg *config.City) int {
 	return defaultMaxOrderDispatchesPerTick
 }
 
+// newMemoryOrderDispatcher builds a memoryOrderDispatcher over a resolved order
+// set. aa is the tick loop's auto-dispatchable set; it may be nil for callers
+// that only fire pre-resolved orders through the orderdispatch.Dispatcher seam
+// (the webhook receiver), where the tick dispatch() path is never invoked.
 func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) *memoryOrderDispatcher {
 	if cfg == nil {
 		cfg = &config.City{}
