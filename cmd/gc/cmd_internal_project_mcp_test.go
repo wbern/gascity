@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/materialize"
 )
 
 func TestInternalProjectMCPProjectsGeminiConfigWithIdentityExpansion(t *testing.T) {
@@ -209,5 +211,86 @@ func TestInternalProjectMCPMissingFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--workdir is required") {
 		t.Fatalf("stderr missing --workdir error: %q", stderr.String())
+	}
+}
+
+func TestInternalProjectMCPProjectsAntigravityConfig(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	homeDir := t.TempDir()
+	restoreHome := materialize.SetUserHomeDirForTest(func() (string, error) { return homeDir, nil })
+	defer restoreHome()
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "agents", "mayor"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(agents/mayor): %v", err)
+	}
+
+	cityToml := `[workspace]
+provider = "antigravity"
+
+[beads]
+provider = "file"
+
+[providers.antigravity]
+command = "echo"
+prompt_mode = "none"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(site.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "agents", "mayor", "agent.toml"), []byte("provider = \"antigravity\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
+	}
+	writeMCPSource(t, filepath.Join(cityDir, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+args = ["notes-mcp"]
+`)
+
+	workdir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"internal", "project-mcp",
+		"--agent", "mayor",
+		"--identity", "mayor",
+		"--workdir", workdir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	target := filepath.Join(homeDir, ".gemini", "config", "mcp_config.json")
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(mcp_config.json): %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal mcp_config.json: %v", err)
+	}
+	mcpServers, ok := doc["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers missing: %+v", doc)
+	}
+	notes, ok := mcpServers["notes"].(map[string]any)
+	if !ok {
+		t.Fatalf("notes server missing: %+v", mcpServers)
+	}
+	if got := notes["command"]; got != "uvx" {
+		t.Fatalf("command = %v, want uvx", got)
+	}
+	if !strings.Contains(stdout.String(), "projected 1 MCP server") {
+		t.Fatalf("stdout missing projection summary: %q", stdout.String())
 	}
 }
