@@ -2206,6 +2206,91 @@ func TestAttachRefusesControllerManagedFreshStart(t *testing.T) {
 	}
 }
 
+func TestAttachToLiveRuntimeAllowedWhileFreshStartPending(t *testing.T) {
+	// Regression: a runtime that came up outside the controller (an attach
+	// racing a gc handoff --target kill) left continuation_reset_pending=true
+	// next to a live runtime. The controller never runs the pending start
+	// because the runtime is alive, so refusing attach deadlocked the session.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper",
+		Title:    "live runtime, stale reset marker",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("precondition: runtime should be running")
+	}
+	if err := store.SetMetadata(info.ID, "continuation_reset_pending", "true"); err != nil {
+		t.Fatalf("SetMetadata(continuation_reset_pending): %v", err)
+	}
+	startsBefore := 0
+	for _, call := range sp.Calls {
+		if call.Method == "Start" {
+			startsBefore++
+		}
+	}
+
+	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); err != nil {
+		t.Fatalf("Attach to live runtime with pending reset: %v", err)
+	}
+	startsAfter := 0
+	attached := false
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "Start":
+			startsAfter++
+		case "Attach":
+			attached = true
+		}
+	}
+	if startsAfter != startsBefore {
+		t.Fatalf("Attach started a runtime (Start calls %d -> %d); it must only attach", startsBefore, startsAfter)
+	}
+	if !attached {
+		t.Fatalf("runtime calls = %#v, want an Attach to the live runtime", sp.Calls)
+	}
+}
+
+func TestAttachRefusesStartWhileControllerRestartPending(t *testing.T) {
+	// gc handoff --target persists restart_requested and kills the runtime;
+	// the controller owns the replacement start. An attach landing in that
+	// window must not start the runtime itself.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly: true,
+		Template: "helper",
+		Title:    "controller restart pending",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "restart_requested", "true"); err != nil {
+		t.Fatalf("SetMetadata(restart_requested): %v", err)
+	}
+
+	err = mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	if !errors.Is(err, ErrFreshStartPending) {
+		t.Fatalf("Attach error = %v, want %v", err, ErrFreshStartPending)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatal("Attach started a runtime while a controller restart was pending")
+	}
+}
+
 func TestStartRefusesControllerManagedFreshStart(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

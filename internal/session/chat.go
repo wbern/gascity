@@ -371,12 +371,15 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if b.Metadata["continuation_reset_pending"] == "true" {
-		return fmt.Errorf("%w: %s; wait for the controller to complete the configured start", ErrFreshStartPending, id)
-	}
-	transport, transportVerified := m.transportForBead(b, sessName)
-	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
+	// Attaching to (or delivering into) a runtime that is already alive never
+	// materializes a start, so it is allowed even while a controller-owned
+	// fresh start is pending. Refusing it deadlocks the session: when a runtime
+	// came up outside the controller (an attach racing a handoff kill), the
+	// controller never performs the pending start because the runtime is
+	// alive, the reset marker is never cleared, and every attach is refused.
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+		transport, transportVerified := m.transportForBead(b, sessName)
+		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
@@ -385,6 +388,18 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 		return nil
 	}
+	if b.Metadata["continuation_reset_pending"] == "true" {
+		return fmt.Errorf("%w: %s; wait for the controller to complete the configured start", ErrFreshStartPending, id)
+	}
+	// A controller-owned restart (gc handoff --target, gc session reset) is
+	// pending: the controller kills the runtime and starts the replacement with
+	// the resolved configuration and commits it. Starting a runtime here would
+	// race that restart and leave a runtime the controller never committed.
+	if strings.TrimSpace(b.Metadata["restart_requested"]) == "true" {
+		return fmt.Errorf("%w: %s; a controller restart is pending, retry once the controller has started the session", ErrFreshStartPending, id)
+	}
+	transport, transportVerified := m.transportForBead(b, sessName)
+	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
