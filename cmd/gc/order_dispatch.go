@@ -416,6 +416,16 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 // set. aa is the tick loop's auto-dispatchable set; it may be nil for callers
 // that only fire pre-resolved orders through the orderdispatch.Dispatcher seam
 // (the webhook receiver), where the tick dispatch() path is never invoked.
+// orderDispatchesPerTick resolves the per-tick automatic dispatch cap from
+// [orders] max_dispatches_per_tick: unset or negative keeps the default, 0
+// removes the cap.
+func orderDispatchesPerTick(cfg *config.City) int {
+	if cfg != nil && cfg.Orders.MaxDispatchesPerTick != nil && *cfg.Orders.MaxDispatchesPerTick >= 0 {
+		return *cfg.Orders.MaxDispatchesPerTick
+	}
+	return defaultMaxOrderDispatchesPerTick
+}
+
 func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) *memoryOrderDispatcher {
 	if cfg == nil {
 		cfg = &config.City{}
@@ -438,7 +448,7 @@ func newMemoryOrderDispatcher(aa []orders.Order, cityPath string, cfg *config.Ci
 		rec:                  rec,
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
-		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		maxDispatchesPerTick: orderDispatchesPerTick(cfg),
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
