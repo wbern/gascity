@@ -2264,8 +2264,9 @@ type OrdersConfig struct {
 	MaxTimeout string `toml:"max_timeout,omitempty"`
 	// MaxDispatchesPerTick caps how many orders the controller dispatches
 	// automatically per tick; due orders beyond the cap wait for later ticks in
-	// round-robin order. Unset keeps the default of 4. 0 removes the cap. A
-	// negative value is ignored (the default applies). A city whose always-due
+	// round-robin order. Unset keeps the build's default (upstream 4; this
+	// fork 32). 0 removes the cap. A negative value is ignored with a load
+	// warning (the default applies). A city whose always-due
 	// order count is many times the cap runs each order roughly every
 	// due/cap ticks, far slower than its interval, so raise it there.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
