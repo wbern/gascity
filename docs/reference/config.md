@@ -667,6 +667,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the controller dispatches automatically per tick; due orders beyond the cap wait for later ticks in round-robin order. Unset keeps the default of 4. 0 removes the cap. A negative value is ignored (the default applies). A city whose always-due order count is many times the cap runs each order roughly every due/cap ticks, far slower than its interval, so raise it there. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## OutputFirewallConfig
