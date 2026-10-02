@@ -3795,6 +3795,7 @@ func TestDoHookTriggerClaimRecoversOwnHeldAssignment(t *testing.T) {
 	} {
 		for _, hold := range beadmeta.DispatchHoldLabels {
 			t.Run(tc.status+"/"+hold, func(t *testing.T) {
+				claims := 0
 				ops := hookClaimOps{
 					ResolveBead: func(context.Context, string, []string, string) (beads.Bead, bool, error) {
 						return beads.Bead{
@@ -3802,9 +3803,15 @@ func TestDoHookTriggerClaimRecoversOwnHeldAssignment(t *testing.T) {
 							Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
 						}, true, nil
 					},
-					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
-						t.Fatal("claim must not run for an existing assignment")
-						return beads.Bead{}, false, nil
+					Claim: func(_ context.Context, _ string, _ []string, id, actor string) (beads.Bead, bool, error) {
+						if tc.status == "in_progress" {
+							t.Fatal("claim must not run for an in-progress assignment")
+						}
+						claims++
+						return beads.Bead{
+							ID: id, Status: "in_progress", Assignee: actor, Labels: []string{hold},
+							Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
+						}, true, nil
 					},
 					ResolveWorkBranch: func(string) string { return "" },
 				}
@@ -3821,6 +3828,11 @@ func TestDoHookTriggerClaimRecoversOwnHeldAssignment(t *testing.T) {
 				}
 				if got.Action != "work" || got.Reason != tc.reason || got.BeadID != "held-owned-trigger" {
 					t.Fatalf("result = %+v, want %s for held trigger", got, tc.reason)
+				}
+				// An open preassignment is promoted through the idempotent claim
+				// (upstream #4835); an in-progress one is resumed as is.
+				if wantClaims := map[string]int{"open": 1, "in_progress": 0}[tc.status]; claims != wantClaims {
+					t.Fatalf("claims = %d, want %d for %s trigger", claims, wantClaims, tc.status)
 				}
 			})
 		}

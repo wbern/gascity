@@ -548,25 +548,31 @@ func doHookTriggerClaim(triggerID, dir string, opts hookClaimOptions, ops hookCl
 	}
 	status := strings.ToLower(strings.TrimSpace(bead.Status))
 	if hookClaimHasIdentity(bead.Assignee, opts.IdentityCandidates) {
-		reason := ""
 		switch status {
 		case "in_progress":
-			reason = "existing_assignment"
-		case "open":
-			reason = "ready_assignment"
-		}
-		if reason != "" {
 			result := hookClaimJSONResult{
 				SchemaVersion: "1",
 				OK:            true,
 				Command:       hookClaimCommandName,
 				Action:        "work",
-				Reason:        reason,
+				Reason:        "existing_assignment",
 				BeadID:        bead.ID,
 				Assignee:      bead.Assignee,
 				Route:         hookClaimRoute(bead),
 			}
 			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, opts, ops, triggerDir, stdout, stderr)}
+		case "open":
+			// Continuation preassignment leaves later steps open but assigned to
+			// this session, and the reconciler may point the trigger at any of
+			// them. A blocked one is not work; the route-scoped pool query below
+			// claims the step that is actually ready. A ready one is promoted
+			// through the same idempotent claim as the work-query path.
+			if reason := hookBeadBlockedReason(bead); reason != "" {
+				fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but not ready (%s); falling through to the pool\n", //nolint:errcheck
+					triggerID, reason)
+				return hookClaimResult{}
+			}
+			return claimFirstReadyHookAssignment([]beads.Bead{bead}, opts, ops, triggerDir, stdout, stderr)
 		}
 		fmt.Fprintf(stderr, "gc hook --claim: trigger bead %s already mine but status=%q; falling through to the pool\n", triggerID, status) //nolint:errcheck
 		return hookClaimResult{}
