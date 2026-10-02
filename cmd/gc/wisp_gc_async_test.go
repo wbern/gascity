@@ -165,29 +165,56 @@ type onceWispGC struct {
 
 func (o onceWispGC) shouldRun(time.Time) bool { return !o.ran.Swap(true) }
 
-// Shutdown waits a bounded time for an in-flight sweep, reports its outcome,
-// and refuses to start new sweeps afterwards.
-func TestCityRuntimeDrainWispGC_ReportsInFlightSweepAndStopsLaunching(t *testing.T) {
+// Shutdown reports a sweep that finishes within the bounded drain.
+func TestCityRuntimeDrainWispGC_ReportsSweepFinishingWithinDrain(t *testing.T) {
 	gc := newBlockingWispGC(0, fmt.Errorf("delete failed"))
 	var stdout, stderr bytes.Buffer
 	cr := newWispGCTestRuntime(t, gc, &stdout, &stderr)
 
 	runTestTick(cr)
 	waitForSweepStart(t, gc)
+	close(gc.release)
+	if !cr.drainWispGC(5 * time.Second) {
+		t.Fatal("drainWispGC did not drain a sweep that finished")
+	}
+	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
+		t.Fatalf("stderr = %q, want in-flight sweep error reported at drain", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "abandoning sweep") {
+		t.Fatalf("stderr = %q, a drained sweep must not be reported abandoned", stderr.String())
+	}
+}
+
+// A sweep still running at the drain deadline is abandoned: its context is
+// canceled so it stops issuing store calls, its late result is not reported,
+// and no new sweeps start.
+func TestCityRuntimeDrainWispGC_AbandonsSweepStillRunningAtDeadline(t *testing.T) {
+	gc := newContextBlockingWispGC()
+	var stdout, stderr bytes.Buffer
+	cr := newWispGCTestRuntime(t, gc, &stdout, &stderr)
+
+	runTestTick(cr)
+	waitForSweepStart(t, &gc.blockingWispGC)
 
 	if cr.drainWispGC(50 * time.Millisecond) {
 		t.Fatal("drainWispGC reported drained while the sweep is still blocked")
 	}
-	if !strings.Contains(stderr.String(), "test-city: wisp gc: sweep still running after 50ms; continuing shutdown") {
-		t.Fatalf("stderr = %q, want bounded-drain warning", stderr.String())
+	if !strings.Contains(stderr.String(), "test-city: wisp gc: abandoning sweep still running after 50ms drain") {
+		t.Fatalf("stderr = %q, want abandonment warning", stderr.String())
 	}
-
-	close(gc.release)
-	if !cr.drainWispGC(5 * time.Second) {
-		t.Fatal("drainWispGC did not drain after the sweep was released")
+	select {
+	case <-gc.canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned sweep never observed its context cancellation")
 	}
-	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
-		t.Fatalf("stderr = %q, want in-flight sweep error reported at drain", stderr.String())
+	if !cr.wispSweeps.waitIdle(5 * time.Second) {
+		t.Fatal("abandoned sweep did not stop after cancellation")
+	}
+	if _, ok := cr.wispSweeps.harvest(); ok {
+		t.Fatal("abandoned sweep's result was kept for reporting")
+	}
+	if _, busy := wispGCSweepsByCity.Load(cr.cityPath); busy {
+		t.Fatal("abandoned sweep kept the per-city claim after stopping")
 	}
 
 	runTestTick(cr)
@@ -196,12 +223,138 @@ func TestCityRuntimeDrainWispGC_ReportsInFlightSweepAndStopsLaunching(t *testing
 	}
 }
 
+// contextBlockingWispGC blocks like blockingWispGC but returns as soon as its
+// sweep context is canceled.
+type contextBlockingWispGC struct {
+	blockingWispGC
+	canceled chan struct{}
+}
+
+func newContextBlockingWispGC() *contextBlockingWispGC {
+	c := &contextBlockingWispGC{canceled: make(chan struct{})}
+	c.release = make(chan struct{})
+	c.started = make(chan struct{}, 16)
+	return c
+}
+
+func (c *contextBlockingWispGC) runGCContext(ctx context.Context, _ beads.GraphStore, _ beads.MailStore, _ time.Time) (int, error) {
+	c.runs.Add(1)
+	c.started <- struct{}{}
+	select {
+	case <-c.release:
+		return c.purged, nil
+	case <-ctx.Done():
+		close(c.canceled)
+		return c.purged, ctx.Err()
+	}
+}
+
+// A panicking sweep must not crash the process (it ran under safeTick's
+// recover when inline): the panic is reported as the sweep's error, the
+// per-city claim and in-flight state are released, and the next interval
+// sweeps again.
+func TestCityRuntimeTick_PanickingWispGCSweepIsRecoveredAndReleased(t *testing.T) {
+	gc := &panickingWispGC{}
+	var stdout, stderr bytes.Buffer
+	cr := newWispGCTestRuntime(t, gc, &stdout, &stderr)
+	t.Cleanup(func() { cr.drainWispGC(5 * time.Second) })
+
+	runTestTick(cr)
+	if !cr.wispSweeps.waitIdle(5 * time.Second) {
+		t.Fatal("panicking sweep left the runner in flight")
+	}
+	if _, busy := wispGCSweepsByCity.Load(cr.cityPath); busy {
+		t.Fatal("panicking sweep kept the per-city claim")
+	}
+
+	runTestTick(cr)
+	if !strings.Contains(stderr.String(), "test-city: wisp gc: sweep panicked: store exploded (type=string)") {
+		t.Fatalf("stderr = %q, want recovered panic reported", stderr.String())
+	}
+	if !cr.wispSweeps.waitIdle(5 * time.Second) {
+		t.Fatal("second sweep left the runner in flight")
+	}
+	if got := gc.runs.Load(); got != 2 {
+		t.Fatalf("sweeps after a panic = %d, want 2 (next interval sweeps again)", got)
+	}
+}
+
+type panickingWispGC struct{ runs atomic.Int32 }
+
+func (p *panickingWispGC) shouldRun(time.Time) bool { return true }
+
+func (p *panickingWispGC) runGC(beads.GraphStore, beads.MailStore, time.Time) (int, error) {
+	p.runs.Add(1)
+	panic("store exploded")
+}
+
+// A hung sweep pauses GC for the city; the tick says so, at most once per
+// limit, instead of skipping silently.
+func TestCityRuntimeTick_WarnsWhenWispGCSweepIsOverdue(t *testing.T) {
+	gc := newBlockingWispGC(0, nil)
+	var stdout, stderr bytes.Buffer
+	cr := newWispGCTestRuntime(t, gc, &stdout, &stderr)
+	cr.cfg.Daemon.WispGCInterval = "1ms"
+	t.Cleanup(func() {
+		close(gc.release)
+		cr.drainWispGC(5 * time.Second)
+	})
+
+	runTestTick(cr)
+	waitForSweepStart(t, gc)
+	time.Sleep(20 * time.Millisecond)
+	runTestTick(cr)
+	if !strings.Contains(stderr.String(), "test-city: wisp gc: sweep still running after ") ||
+		!strings.Contains(stderr.String(), "new sweeps are paused until it finishes") {
+		t.Fatalf("stderr = %q, want overdue sweep warning", stderr.String())
+	}
+}
+
+func TestWispGCRunner_OverdueIsRateLimited(t *testing.T) {
+	var r wispGCRunner
+	release := make(chan struct{})
+	t0 := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	r.start(t0, func(context.Context) (int, error) { <-release; return 0, nil })
+	t.Cleanup(func() { close(release); r.waitIdle(5 * time.Second) })
+
+	limit := 30 * time.Minute
+	if _, ok := r.overdue(t0.Add(29*time.Minute), limit); ok {
+		t.Fatal("overdue before the limit")
+	}
+	age, ok := r.overdue(t0.Add(31*time.Minute), limit)
+	if !ok || age != 31*time.Minute {
+		t.Fatalf("overdue at 31m = (%s, %v), want (31m, true)", age, ok)
+	}
+	if _, ok := r.overdue(t0.Add(40*time.Minute), limit); ok {
+		t.Fatal("overdue warned again within one limit of the last warning")
+	}
+	if _, ok := r.overdue(t0.Add(62*time.Minute), limit); !ok {
+		t.Fatal("overdue did not warn again once a full limit had passed")
+	}
+	if _, ok := r.overdue(t0.Add(200*time.Minute), 0); ok {
+		t.Fatal("overdue with a zero limit warned")
+	}
+}
+
+// The production tracker stops before its first arm when its context is
+// already canceled.
+func TestMemoryWispGCRunGCContextStopsWhenCancelled(t *testing.T) {
+	store := beads.NewMemStore()
+	wg := newWispGC(time.Minute, time.Hour, time.Hour).(*memoryWispGC)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	purged, err := wg.runGCContext(ctx, beads.GraphStore{Store: store}, beads.MailStore{Store: store}, time.Now())
+	if purged != 0 || err == nil || !strings.Contains(err.Error(), "sweep abandoned before spec_sidecars") {
+		t.Fatalf("runGCContext(canceled) = (%d, %v), want (0, sweep abandoned before spec_sidecars)", purged, err)
+	}
+}
+
 func TestWispGCRunner_SingleFlight(t *testing.T) {
 	var r wispGCRunner
 	release := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
-	if !r.start(time.Now(), func() (int, error) {
+	if !r.start(time.Now(), func(context.Context) (int, error) {
 		defer wg.Done()
 		<-release
 		return 2, nil
@@ -211,7 +364,7 @@ func TestWispGCRunner_SingleFlight(t *testing.T) {
 	if !r.running() {
 		t.Fatal("running() = false while a sweep is in flight")
 	}
-	if r.start(time.Now(), func() (int, error) { t.Error("second concurrent sweep ran"); return 0, nil }) {
+	if r.start(time.Now(), func(context.Context) (int, error) { t.Error("second concurrent sweep ran"); return 0, nil }) {
 		t.Fatal("start while a sweep is in flight = true, want false")
 	}
 	if _, ok := r.harvest(); ok {
@@ -244,7 +397,7 @@ func TestWispGCRunner_SingleFlight(t *testing.T) {
 func TestWispGCRunner_RefusesStartOnceStopping(t *testing.T) {
 	var r wispGCRunner
 	r.stop()
-	if r.start(time.Now(), func() (int, error) { t.Error("sweep ran after stop"); return 0, nil }) {
+	if r.start(time.Now(), func(context.Context) (int, error) { t.Error("sweep ran after stop"); return 0, nil }) {
 		t.Fatal("start after stop = true, want false")
 	}
 	if !r.waitIdle(0) {

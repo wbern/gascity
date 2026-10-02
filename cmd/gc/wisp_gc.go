@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -178,6 +179,12 @@ func (m *memoryWispGC) shouldRun(now time.Time) bool {
 }
 
 func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+	return m.runGCContext(context.Background(), graphStore, mailStore, now)
+}
+
+// runGCContext is runGC that stops before its next arm once ctx is done, so
+// a sweep abandoned at shutdown stops issuing store calls.
+func (m *memoryWispGC) runGCContext(ctx context.Context, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	m.lastRun = now
 	// The molecule/wisp/workflow purge arm operates on the graph-class store; the
 	// read-message retention arm on the messaging-class store. Pass the unwrapped
@@ -191,7 +198,16 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	var deleteErr error
 	var arms wispGCArmTimings
 	defer func() { log.Printf("wisp gc: sweep arm timings: %s", arms) }()
+	abandoned := func(next string) error {
+		if ctx.Err() == nil {
+			return nil
+		}
+		return fmt.Errorf("sweep abandoned before %s: %w", next, ctx.Err())
+	}
 	if m.ttl > 0 {
+		if err := abandoned("spec_sidecars"); err != nil {
+			return purged, err
+		}
 		armStart := time.Now()
 		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(store, sourceworkflow.WorkflowSpecSidecarClosedReason)
 		arms.since("spec_sidecars", armStart)
@@ -201,6 +217,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
 		}
 
+		if err := abandoned("generated_members"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart = time.Now()
 		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store)
 		arms.since("generated_members", armStart)
@@ -215,12 +234,18 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// same tick when it has already aged past m.ttl (the purge gates on
 		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
 		// never fails the GC tick.
+		if err := abandoned("abandoned_roots"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart = time.Now()
 		if abandonedErr := closeAbandonedRoots(store, now); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
 		arms.since("abandoned_roots", armStart)
 
+		if err := abandoned("closed_roots_list"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart = time.Now()
 		entries, err := closedWispGCEntries(store)
 		arms.since("closed_roots_list", armStart)
@@ -229,6 +254,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		}
 
 		cutoff := now.Add(-m.ttl)
+		if err := abandoned("closure_purge"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart = time.Now()
 		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff, wispGCClosurePurgeBatchCap)
 		arms.since("closure_purge", armStart)
@@ -241,6 +269,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// — that path closes OPEN roots, this path reaps CLOSED descendants of
 		// already-collectible roots. Best-effort: its error is joined so a failure
 		// never aborts the tick.
+		if err := abandoned("orphan_reap"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart = time.Now()
 		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
 		arms.since("orphan_reap", armStart)
@@ -252,6 +283,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// The read-message retention arm is messaging-class: its candidate query
 		// and wisp-tier delete loop live inside the messaging edge (beadmail),
 		// against the messaging store — disjoint from the graph-class purge above.
+		if err := abandoned("mail_retention"); err != nil {
+			return purged, errors.Join(deleteErr, err)
+		}
 		armStart := time.Now()
 		mailPurged, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL))
 		arms.since("mail_retention", armStart)

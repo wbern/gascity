@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // wispGCResult is the outcome of one background wisp GC sweep.
@@ -19,39 +24,81 @@ type wispGCResult struct {
 // across every CityRuntime in the process.
 var wispGCSweepsByCity sync.Map
 
+// wispGCContextRunner is implemented by wisp GC trackers whose sweep stops
+// before its next arm once ctx is done.
+type wispGCContextRunner interface {
+	runGCContext(ctx context.Context, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error)
+}
+
+// runWispGCWithContext runs one sweep, honoring ctx when the tracker supports
+// it.
+func runWispGCWithContext(ctx context.Context, wg wispGC, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+	if cr, ok := wg.(wispGCContextRunner); ok {
+		return cr.runGCContext(ctx, graphStore, mailStore, now)
+	}
+	return wg.runGC(graphStore, mailStore, now)
+}
+
 // wispGCRunner runs wisp GC sweeps off the controller tick goroutine, at most
 // one at a time. A sweep can take minutes on a large store; running it inline
 // froze every order, patrol, and reconcile step for its duration. The tick
 // launches a sweep and later harvests its result, so all logging and tracing
 // stay on the tick goroutine. The zero value is ready to use.
 type wispGCRunner struct {
-	mu       sync.Mutex
-	inFlight bool
-	stopping bool
-	done     chan struct{}
-	result   *wispGCResult
+	mu            sync.Mutex
+	inFlight      bool
+	stopping      bool
+	abandoned     bool
+	startedAt     time.Time
+	lastStallWarn time.Time
+	cancel        context.CancelFunc
+	done          chan struct{}
+	result        *wispGCResult
 }
 
 // start launches sweep in a background goroutine unless a sweep is already in
 // flight or the runner is stopping. It reports whether a sweep was launched.
-func (r *wispGCRunner) start(now time.Time, sweep func() (int, error)) bool {
+// A panicking sweep is recovered into the sweep's error, as safeTick recovered
+// it when the sweep ran inline, so a store failure cannot crash the process.
+func (r *wispGCRunner) start(now time.Time, sweep func(context.Context) (int, error)) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.inFlight || r.stopping {
 		return false
 	}
-	r.inFlight = true
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	r.inFlight = true
+	r.startedAt = now
+	r.lastStallWarn = time.Time{}
+	r.cancel = cancel
 	r.done = done
 	go func() {
 		defer close(done)
-		purged, err := sweep()
+		defer cancel()
+		purged, err := runWispGCSweepRecovering(ctx, sweep)
+		res := &wispGCResult{purged: purged, err: err, started: now, duration: time.Since(now)}
 		r.mu.Lock()
-		r.result = &wispGCResult{purged: purged, err: err, started: now, duration: time.Since(now)}
 		r.inFlight = false
+		abandoned := r.abandoned
+		if !abandoned {
+			r.result = res
+		}
 		r.mu.Unlock()
+		if abandoned {
+			log.Printf("wisp gc: sweep abandoned at shutdown finished after %s (purged %d, err: %v); result not reported", res.duration.Round(time.Millisecond), res.purged, res.err)
+		}
 	}()
 	return true
+}
+
+func runWispGCSweepRecovering(ctx context.Context, sweep func(context.Context) (int, error)) (purged int, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("sweep panicked: %v (type=%T)\n%s", p, p, debug.Stack())
+		}
+	}()
+	return sweep(ctx)
 }
 
 // running reports whether a sweep is in flight.
@@ -59,6 +106,26 @@ func (r *wispGCRunner) running() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.inFlight
+}
+
+// overdue reports how long the in-flight sweep has run once that exceeds
+// limit, at most once per limit, so a hung sweep is visible instead of
+// silently pausing GC.
+func (r *wispGCRunner) overdue(now time.Time, limit time.Duration) (time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.inFlight || limit <= 0 {
+		return 0, false
+	}
+	age := now.Sub(r.startedAt)
+	if age < limit {
+		return 0, false
+	}
+	if !r.lastStallWarn.IsZero() && now.Sub(r.lastStallWarn) < limit {
+		return 0, false
+	}
+	r.lastStallWarn = now
+	return age, true
 }
 
 // harvest returns the result of the most recently finished sweep, at most once.
@@ -78,6 +145,20 @@ func (r *wispGCRunner) stop() {
 	r.mu.Lock()
 	r.stopping = true
 	r.mu.Unlock()
+}
+
+// abandon cancels the in-flight sweep, which then stops before its next arm,
+// and drops its result. It reports how long the sweep had run and whether one
+// was in flight.
+func (r *wispGCRunner) abandon(now time.Time) (time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.inFlight {
+		return 0, false
+	}
+	r.abandoned = true
+	r.cancel()
+	return now.Sub(r.startedAt), true
 }
 
 // waitIdle blocks until no sweep is in flight or timeout elapses, reporting
@@ -108,7 +189,14 @@ func (r *wispGCRunner) waitIdle(timeout time.Duration) bool {
 // messaging-class store. Both collapse to the city store today.
 func (cr *CityRuntime) launchWispGC(now time.Time) {
 	graphStore := cr.graphBeadStore()
-	if cr.wg == nil || graphStore.Store == nil || cr.wispSweeps.running() || !cr.wg.shouldRun(now) {
+	if cr.wg == nil || graphStore.Store == nil {
+		return
+	}
+	if cr.wispSweeps.running() {
+		cr.warnOverdueWispGC(now)
+		return
+	}
+	if !cr.wg.shouldRun(now) {
 		return
 	}
 	// A runtime replaced in-process (supervisor city restart) may leave its
@@ -120,12 +208,25 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	// Capture the tracker and stores on the tick goroutine: a config reload
 	// may replace cr.wg while the sweep runs.
 	wg, mailStore := cr.wg, cr.mailBeadStore()
-	if !cr.wispSweeps.start(now, func() (int, error) {
+	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
-		return wg.runGC(graphStore, mailStore, now)
+		return runWispGCWithContext(ctx, wg, graphStore, mailStore, now)
 	}) {
 		wispGCSweepsByCity.Delete(cityKey)
 	}
+}
+
+// warnOverdueWispGC warns, rate-limited, when the in-flight sweep has run
+// longer than twice the GC interval: new sweeps stay paused until it ends.
+func (cr *CityRuntime) warnOverdueWispGC(now time.Time) {
+	if cr.cfg == nil {
+		return
+	}
+	age, ok := cr.wispSweeps.overdue(now, 2*cr.cfg.Daemon.WispGCIntervalDuration())
+	if !ok {
+		return
+	}
+	fmt.Fprintf(cr.stderr, "%s: wisp gc: sweep still running after %s; new sweeps are paused until it finishes\n", cr.logPrefix, age.Round(time.Second)) //nolint:errcheck // best-effort stderr
 }
 
 // reportWispGC logs and traces the outcome of a finished background sweep, if
@@ -154,13 +255,18 @@ func (cr *CityRuntime) reportWispGC(trace *sessionReconcilerTraceCycle) {
 	}
 }
 
-// drainWispGC stops launching sweeps, waits up to timeout for an in-flight
-// sweep, and reports its outcome. It reports whether the runner drained.
+// drainWispGC stops launching sweeps and waits up to timeout for an in-flight
+// sweep, reporting its outcome. A sweep still running at the deadline is
+// abandoned: it stops before its next arm, so it does not keep issuing store
+// calls while the bead store shuts down. It reports whether the runner
+// drained.
 func (cr *CityRuntime) drainWispGC(timeout time.Duration) bool {
 	cr.wispSweeps.stop()
 	drained := cr.wispSweeps.waitIdle(timeout)
 	if !drained {
-		fmt.Fprintf(cr.stderr, "%s: wisp gc: sweep still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+		if age, ok := cr.wispSweeps.abandon(time.Now()); ok {
+			fmt.Fprintf(cr.stderr, "%s: wisp gc: abandoning sweep still running after %s drain (running for %s); it stops before its next arm and its result is not reported\n", cr.logPrefix, timeout, age.Round(time.Millisecond)) //nolint:errcheck // best-effort stderr
+		}
 	}
 	cr.reportWispGC(nil)
 	return drained
