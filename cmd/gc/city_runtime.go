@@ -78,6 +78,7 @@ type CityRuntime struct {
 	mat                     maxSessionAgeTracker
 	adt                     assignedWorkDeferTracker
 	wg                      wispGC
+	wispSweeps              wispGCRunner
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -1283,26 +1284,11 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
 
-	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
-	// arm routes through the typed graph-class store; the read-message retention
-	// arm through the typed messaging-class store. Both collapse to the city store
-	// today, so the GC is byte-identical.
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
-		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
-		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
-		if gcErr != nil {
-			for _, line := range strings.Split(gcErr.Error(), "\n") {
-				if line == "" {
-					continue
-				}
-				fmt.Fprintf(cr.stderr, "%s: wisp gc: %s\n", cr.logPrefix, line) //nolint:errcheck // best-effort stderr
-			}
-		}
-		if purged > 0 {
-			fmt.Fprintf(cr.stdout, "Bead GC: purged %d expired bead(s)\n", purged) //nolint:errcheck // best-effort stdout
-		}
-	}
+	// Wisp GC: purge expired closed molecules in the background so a slow
+	// sweep never holds the tick. Report the previous sweep, then launch the
+	// next one if due.
+	cr.reportWispGC(trace)
+	cr.launchWispGC(time.Now())
 
 	if cr.svc != nil {
 		phaseStart = time.Now()
@@ -3651,6 +3637,7 @@ func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
+		cr.drainWispGCForShutdown()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
 		if preserveSessions {
 			cr.recordPreservedShutdownTrace()

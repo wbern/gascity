@@ -3698,6 +3698,9 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
 	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	if !cr.drainWispGC(5 * time.Second) {
+		t.Fatal("wisp gc sweep did not finish")
+	}
 
 	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
 		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
@@ -3734,6 +3737,9 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
 	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	if !cr.drainWispGC(5 * time.Second) {
+		t.Fatal("wisp gc sweep did not finish")
+	}
 
 	got := stderr.String()
 	for _, want := range []string{

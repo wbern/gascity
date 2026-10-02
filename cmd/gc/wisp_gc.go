@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -83,8 +84,13 @@ var wispGCReapOrphanBatchCap = 500
 // deleteExpiredBeadClosure) after the stamp was written, with nothing to
 // invalidate it — turning the row permanently unreapable, the exact leak this
 // function exists to fix (PR #129 review, round 6, BLOCKING 1). Package var
-// so tests can reset it.
-var wispGCReapCursor string
+// so tests can reset it. wispGCReapCursorMu guards it: sweeps run off the
+// controller tick and a supervisor hosts several cities, so two sweeps can
+// overlap.
+var (
+	wispGCReapCursor   string
+	wispGCReapCursorMu sync.Mutex
+)
 
 // wispGCClosurePurgeBatchCap bounds how many closed-root ownership closures a
 // single sweep will purge. Like wispGCReapOrphanBatchCap it caps DELETE
@@ -183,15 +189,21 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 
 	purged := 0
 	var deleteErr error
+	var arms wispGCArmTimings
+	defer func() { log.Printf("wisp gc: sweep arm timings: %s", arms) }()
 	if m.ttl > 0 {
+		armStart := time.Now()
 		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(store, sourceworkflow.WorkflowSpecSidecarClosedReason)
+		arms.since("spec_sidecars", armStart)
 		if specErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated spec sidecars for closed workflow roots: %w", specErr))
 		} else if closedSpecs > 0 {
 			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
 		}
 
+		armStart = time.Now()
 		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store)
+		arms.since("generated_members", armStart)
 		if memberErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated members for terminal workflow roots: %w", memberErr))
 		} else if closedMembers > 0 {
@@ -203,17 +215,23 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// same tick when it has already aged past m.ttl (the purge gates on
 		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
 		// never fails the GC tick.
+		armStart = time.Now()
 		if abandonedErr := closeAbandonedRoots(store, now); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
+		arms.since("abandoned_roots", armStart)
 
+		armStart = time.Now()
 		entries, err := closedWispGCEntries(store)
+		arms.since("closed_roots_list", armStart)
 		if err != nil {
 			return 0, err
 		}
 
 		cutoff := now.Add(-m.ttl)
+		armStart = time.Now()
 		closurePurged, closureDeleteErr := purgeExpiredBeadClosures(store, entries, cutoff, wispGCClosurePurgeBatchCap)
+		arms.since("closure_purge", armStart)
 		purged += closurePurged
 		deleteErr = errors.Join(deleteErr, closureDeleteErr)
 
@@ -223,7 +241,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// — that path closes OPEN roots, this path reaps CLOSED descendants of
 		// already-collectible roots. Best-effort: its error is joined so a failure
 		// never aborts the tick.
+		armStart = time.Now()
 		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
+		arms.since("orphan_reap", armStart)
 		purged += orphanReaped
 		deleteErr = errors.Join(deleteErr, orphanErr)
 	}
@@ -232,7 +252,9 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		// The read-message retention arm is messaging-class: its candidate query
 		// and wisp-tier delete loop live inside the messaging edge (beadmail),
 		// against the messaging store — disjoint from the graph-class purge above.
+		armStart := time.Now()
 		mailPurged, mailErr := beadmail.PurgeReadMessageWisps(mailStore, now.Add(-m.mailRetentionTTL))
+		arms.since("mail_retention", armStart)
 		purged += mailPurged
 		if mailErr != nil {
 			deleteErr = errors.Join(deleteErr, mailErr)
@@ -532,6 +554,7 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	// Rootless pass: bounded proof, resuming from wispGCReapCursor.
+	wispGCReapCursorMu.Lock()
 	proved := 0
 	n := len(rootlessQueue)
 	startIdx := 0
@@ -569,6 +592,7 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		}
 		reaped++
 	}
+	wispGCReapCursorMu.Unlock()
 
 	// Logged unconditionally, including reaped == 0: a stalled or empty sweep
 	// must be distinguishable from one that simply had nothing to prove this
