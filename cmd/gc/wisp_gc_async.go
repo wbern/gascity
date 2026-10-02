@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -207,10 +208,11 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	}
 	// Capture the tracker and stores on the tick goroutine: a config reload
 	// may replace cr.wg while the sweep runs.
-	wg, mailStore := cr.wg, cr.mailBeadStore()
+	wg, mailStore, rigStores := cr.wg, cr.mailBeadStore(), cr.rigBeadStores()
 	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
-		return runWispGCWithContext(ctx, wg, graphStore, mailStore, now)
+		purged, err := runWispGCWithContext(ctx, wg, graphStore, mailStore, now)
+		return purged, errors.Join(err, sweepLeakedRigSteps(ctx, rigStores))
 	}) {
 		wispGCSweepsByCity.Delete(cityKey)
 	}
