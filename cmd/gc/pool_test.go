@@ -12,12 +12,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type partialListPoolProvider struct {
@@ -111,9 +115,11 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -155,9 +161,11 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -191,6 +199,60 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if got != 0 {
 		t.Fatalf("evaluatePool with routed in-progress work = %d, want 0", got)
 	}
+}
+
+// TestCmdGCRealBDTestsUseTestOwnedDoltContext is a regression test for
+// ga-us7c35: cmd/gc's real-bd tests only override BEADS_DIR per bd
+// invocation (see runExternalOutput), but that alone does not stop a
+// machine-level dolt.shared-server config or ambient BEADS_DOLT_*/GC_DOLT_*
+// env vars from routing the subprocess to a shared server instead of an
+// embedded per-test store. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml -- pinning a test-owned HOME via
+// pinTestOwnedBDHome removes that fallback entirely. Same root cause as
+// ga-8pkpor/ga-zxpfic (internal/doctor package). The isolation check below
+// runs before any real bd subprocess call, so a not-yet-isolating helper can
+// never itself reach a real shared server.
+func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd to prove test-owned HOME isolation; run make test-cmd-gc-process for full coverage")
+
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+
+	ambientHome := os.Getenv("HOME")
+	home := pinTestOwnedBDHome(t)
+	if home == ambientHome {
+		t.Fatalf("pinTestOwnedBDHome did not isolate HOME (still ambient %q); a machine-level dolt.shared-server config there can route real-bd subprocess calls to the fleet server instead of an embedded per-test store", home)
+	}
+
+	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, dir)
+	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+
+	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
+	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no config.yaml under test-owned HOME %s, but Stat returned err=%v", homeConfigPath, err)
+	}
+
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMetadataState(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	if meta.DoltMode != "embedded" {
+		t.Fatalf("metadata.json dolt_mode = %q, want %q", meta.DoltMode, "embedded")
+	}
+}
+
+// pinTestOwnedBDHome delegates to the shared gascity test helper (ga-zq8iwb)
+// that deterministically retries a TempDir removal so it never races a
+// lingering real-bd/eventkit writer. It keeps its original name so this
+// package's existing call sites need no changes.
+func pinTestOwnedBDHome(t *testing.T) string {
+	t.Helper()
+	return beadstest.TestOwnedHome(t)
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {
@@ -830,6 +892,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Nudge:                        "nudge text",
 		Session:                      "acp",
 		Provider:                     "claude",
+		ContextAdvisory:              &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: strPtr("advisory {{.Pct}}"), Enabled: &trueVal}}},
 		Upstream:                     "anthropic",
 		InheritedProvider:            "codex",
 		StartCommand:                 "claude --dangerously",
@@ -853,6 +916,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		MaxSessionAgeJitter:          "15m",
 		SleepAfterIdle:               "30s",
 		SleepAfterIdleSource:         "agent",
+		AutoReclaimStaleClaims:       true,
 		InstallAgentHooks:            []string{"claude"},
 		SkillsDir:                    "/skills",
 		MCPDir:                       "/mcp",
@@ -886,6 +950,10 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		PackName:                     "gastown",
 		AssignedWorkDeferLimit:       intPtr(3),
 		OutputFirewallByteBudget:     intPtr(65536),
+		GrantTTL:                     "90s",
+		Admission:                    &config.AdmissionConfig{Check: "exit 0", Timeout: "10s", Interval: "30s", OnError: "deny"},
+		SkillInclude:                 []string{"include-skill"},
+		SkillExclude:                 []string{"exclude-skill"},
 	}
 
 	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
@@ -956,6 +1024,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.AppendFragments[0] = "MUTATED"
 	src.InheritedAppendFragments[0] = "MUTATED"
 	src.InstallAgentHooks[0] = "MUTATED"
+	src.SkillInclude[0] = "MUTATED"
+	src.SkillExclude[0] = "MUTATED"
+	src.Admission.Check = "MUTATED"
 	newMin := 999
 	src.MinActiveSessions = &newMin
 
@@ -986,6 +1057,15 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	if dst.InstallAgentHooks[0] == "MUTATED" {
 		t.Error("InstallAgentHooks is not a deep copy")
 	}
+	if dst.SkillInclude[0] == "MUTATED" {
+		t.Error("SkillInclude is not a deep copy")
+	}
+	if dst.SkillExclude[0] == "MUTATED" {
+		t.Error("SkillExclude is not a deep copy")
+	}
+	if dst.Admission.Check == "MUTATED" {
+		t.Error("Admission is not a deep copy")
+	}
 	if dst.MinActiveSessions != nil && *dst.MinActiveSessions == 999 {
 		t.Error("MinActiveSessions is not a deep copy")
 	}
@@ -1004,8 +1084,13 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 }
 
 func TestRunPoolOnBoot(t *testing.T) {
+	// on_boot hooks run concurrently, so this double protects its own state as
+	// the ScaleCheckRunner contract requires.
+	var mu sync.Mutex
 	var ran []string
 	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		ran = append(ran, cmd)
 		return "", nil
 	}
@@ -1511,5 +1596,83 @@ func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "invalid") || !strings.Contains(buf.String(), "GC_BD_PROBE_TIMEOUT") {
 		t.Errorf("expected parse error warning, got: %q", buf.String())
+	}
+}
+
+// TestSessionSetupContextMirrorsPathContext guards the manual mirroring
+// between workdir.PathContext (work_dir expansion) and SessionSetupContext
+// (session_setup / pre_start / session_live expansion). Every PathContext
+// field must have a same-named counterpart here, or a pack template that
+// works in work_dir silently expands to nothing in pre_start.
+func TestSessionSetupContextMirrorsPathContext(t *testing.T) {
+	// WorktreesRoot is a work_dir-only path input: setup commands receive the
+	// already-resolved WorkDir instead, so it has no session_setup counterpart.
+	pathOnly := map[string]bool{"WorktreesRoot": true}
+
+	setup := reflect.TypeOf(SessionSetupContext{})
+	have := make(map[string]bool, setup.NumField())
+	for i := range setup.NumField() {
+		have[setup.Field(i).Name] = true
+	}
+
+	pathCtx := reflect.TypeOf(workdirutil.PathContext{})
+	for i := range pathCtx.NumField() {
+		name := pathCtx.Field(i).Name
+		if pathOnly[name] {
+			continue
+		}
+		if !have[name] {
+			t.Errorf("workdir.PathContext field %q has no SessionSetupContext counterpart; add it and populate every construction site", name)
+		}
+	}
+}
+
+func TestExpandSessionSetup_DefaultBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "configured", branch: "develop", want: "setup.sh 'develop'"},
+		{name: "unset", branch: "", want: "setup.sh ''"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expandSessionSetup(
+				[]string{"setup.sh '{{.DefaultBranch}}'"},
+				SessionSetupContext{Session: "s", DefaultBranch: tc.branch},
+			)
+			if got[0] != tc.want {
+				t.Errorf("got %q, want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch proves the
+// pre_start expansion context is actually populated from the resolved rig —
+// the plumbing that lets a pack hand GC_DEFAULT_BRANCH to a setup script.
+func TestSessionSetupContextForAgentCarriesConfiguredDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{
+		{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva"), DefaultBranch: "develop"},
+		{Name: "bare", Path: filepath.Join(cityPath, "rigs", "bare")},
+	}
+
+	configured := sessionSetupContextForAgent(cityPath, "city", "thriva/polecat",
+		&config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}, rigs)
+	if configured.DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", configured.DefaultBranch, "develop")
+	}
+
+	unset := sessionSetupContextForAgent(cityPath, "city", "bare/polecat",
+		&config.Agent{Name: "polecat", Dir: "bare", Scope: "rig"}, rigs)
+	if unset.DefaultBranch != "" {
+		t.Errorf("rig without default_branch: DefaultBranch = %q, want empty", unset.DefaultBranch)
+	}
+
+	cityScoped := sessionSetupContextForAgent(cityPath, "city", "mayor",
+		&config.Agent{Name: "mayor", Scope: "city"}, rigs)
+	if cityScoped.DefaultBranch != "" {
+		t.Errorf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
 	}
 }

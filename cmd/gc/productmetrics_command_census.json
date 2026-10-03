@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 202,
+  "next_id": 214,
   "permanent_ids": [
     {
       "name": "help",
@@ -159,6 +159,21 @@
       "id": 1
     },
     {
+      "path": "gc analyze continuity",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "analyze-continuity",
+      "owner": "immediate",
+      "id": 213
+    },
+    {
       "path": "gc analyze reliability",
       "aliases": [],
       "conditional_modes": [],
@@ -240,6 +255,21 @@
       "id": 3
     },
     {
+      "path": "gc beads city migrate-proxied",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-city-migrate-proxied",
+      "owner": "immediate",
+      "id": 208
+    },
+    {
       "path": "gc beads city use-external",
       "aliases": [],
       "conditional_modes": [],
@@ -300,6 +330,23 @@
       "classification": "beads-list",
       "owner": "immediate",
       "id": 15
+    },
+    {
+      "path": "gc beads metadata-cas",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-metadata-cas",
+      "owner": "immediate",
+      "id": 202
     },
     {
       "path": "gc beads show",
@@ -1480,7 +1527,7 @@
       "notice_policy": "ineligible",
       "classification": "events-reemit-execution",
       "owner": "immediate",
-      "id": 200
+      "id": 197
     },
     {
       "path": "gc events rotate",
@@ -1790,6 +1837,21 @@
       "exclusion": "hook-protocol"
     },
     {
+      "path": "gc hook current",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hook-protocol",
+      "exclusion": "hook-protocol"
+    },
+    {
       "path": "gc hook run",
       "aliases": [],
       "conditional_modes": [],
@@ -2054,6 +2116,21 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc internal beads-credential",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
       "classification": "excluded",
       "notice_policy": "ineligible",
       "recording_policy": "excluded",
@@ -2428,7 +2505,7 @@
       "notice_policy": "eligible",
       "classification": "mcp-validate",
       "owner": "immediate",
-      "id": 198
+      "id": 210
     },
     {
       "path": "gc metrics",
@@ -2565,6 +2642,21 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc nudge drop",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "nudge-drop",
+      "owner": "immediate",
+      "id": 207
     },
     {
       "path": "gc nudge poll",
@@ -3107,6 +3199,21 @@
       "id": 117
     },
     {
+      "path": "gc ready",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "ready",
+      "owner": "immediate",
+      "id": 200
+    },
+    {
       "path": "gc register",
       "aliases": [],
       "conditional_modes": [],
@@ -3335,7 +3442,7 @@
       "notice_policy": "eligible",
       "classification": "run-cancel",
       "owner": "immediate",
-      "id": 201
+      "id": 212
     },
     {
       "path": "gc runtime",
@@ -3966,6 +4073,82 @@
       "id": 164
     },
     {
+      "path": "gc storage",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc storage migrate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-migrate",
+      "owner": "immediate",
+      "id": 198
+    },
+    {
+      "path": "gc storage preflight",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-preflight",
+      "owner": "immediate",
+      "id": 206
+    },
+    {
+      "path": "gc storage recover-stranded",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-recover-stranded",
+      "owner": "immediate",
+      "id": 201
+    },
+    {
+      "path": "gc storage status",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-status",
+      "owner": "immediate",
+      "id": 199
+    },
+    {
       "path": "gc supervisor",
       "aliases": [],
       "conditional_modes": [],
@@ -4506,6 +4689,36 @@
       "id": 1
     },
     {
+      "path": "gc worktree cleanup",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-cleanup",
+      "owner": "immediate",
+      "id": 203
+    },
+    {
+      "path": "gc worktree ensure",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-ensure",
+      "owner": "immediate",
+      "id": 204
+    },
+    {
       "path": "gc worktree reap",
       "aliases": [],
       "conditional_modes": [],
@@ -4518,7 +4731,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-reap",
       "owner": "immediate",
-      "id": 199
+      "id": 211
     },
     {
       "path": "gc worktree scan",
@@ -4533,7 +4746,22 @@
       "notice_policy": "eligible",
       "classification": "worktree-scan",
       "owner": "immediate",
-      "id": 197
+      "id": 209
+    },
+    {
+      "path": "gc worktree verify",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-verify",
+      "owner": "immediate",
+      "id": 205
     }
   ],
   "synthetic": [

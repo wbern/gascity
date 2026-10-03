@@ -54,7 +54,7 @@ func TestControlReadyFallbackInvokesAbsoluteCurrentGCWithBDArgv(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if _, err := controlReadyFallbackReady(dir, map[string]string{
+	if _, err := controlReadyFallbackReady(dir, dir, map[string]string{
 		citylayout.RealBdEnvVar: "/usr/local/bin/bd",
 		"GC_STORE_SCOPE":        "rig",
 	}, false); err != nil {
@@ -795,7 +795,7 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 	defer restore()
 
 	dir := t.TempDir()
-	result, err := controlReadyFallbackReady(dir, nil, false)
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -828,7 +828,8 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	restore := captureLogOutput(&logBuf)
 	defer restore()
 
-	result, err := controlReadyFallbackReady(t.TempDir(), nil, false)
+	dir := t.TempDir()
+	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -856,7 +857,8 @@ printf '%%s' "$*" > %q
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), shimmedBdEnvForTest(t, tmp), false)
+	scopeDir := t.TempDir()
+	result, err := controlReadyFallbackReady(scopeDir, scopeDir, shimmedBdEnvForTest(t, tmp), false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -896,7 +898,8 @@ func TestControlReadyFallbackReadyUsesBoundedSummaryForPinnedRigScope(t *testing
 
 	env := shimmedBdEnvForTest(t, tmp)
 	env["GC_STORE_SCOPE"] = "rig"
-	result, err := controlReadyFallbackReady(t.TempDir(), env, false)
+	scopeDir := t.TempDir()
+	result, err := controlReadyFallbackReady(scopeDir, scopeDir, env, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
@@ -952,7 +955,8 @@ printf '[{"id":"gcw-plain"}]'
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
 
-	result, err := controlReadyFallbackReady(t.TempDir(), map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
+	scopeDir := t.TempDir()
+	result, err := controlReadyFallbackReady(scopeDir, scopeDir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"}, false)
 	if err == nil || result != nil {
 		t.Fatalf("controlReadyFallbackReady = %#v, %v; want fail-closed summary error", result, err)
 	}
@@ -996,7 +1000,7 @@ func TestControlReadyFallbackRequiresSummaryOnlyInShimMode(t *testing.T) {
 				if shimmed {
 					env[citylayout.RealBdEnvVar] = "/real/bd"
 				}
-				got, err := controlReadyFallbackReady("/unused", env, false)
+				got, err := controlReadyFallbackReady("/unused", "/unused", env, false)
 				if shimmed && (err == nil || got != nil) {
 					t.Fatalf("summary result = %#v, %v; want malformed-summary error", got, err)
 				}

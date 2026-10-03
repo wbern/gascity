@@ -216,8 +216,8 @@ const (
 
 var builtinProviderOrder = []string{
 	"claude", "codex", "gemini", "grok", "kimi", "kiro", "cursor", "copilot",
-	"amp", "opencode", "mimocode", "groq", "cerebras", "auggie", "pi", "omp",
-	"antigravity",
+	"amp", "opencode", "mimocode", "zcode", "groq", "cerebras", "auggie", "pi",
+	"omp", "antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -534,7 +534,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// Cursor: CURSOR_API_KEY for headless (login is the default). Serving is
 		// Cursor's own backend — no base-URL override env.
 		UpstreamAPIKeyEnv: "CURSOR_API_KEY",
-		Args:              []string{"-f"},
+		Args:              []string{"-f", "--trust"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,
@@ -682,6 +682,37 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelChoice("xiaomi-token-plan-sgp/mimo-v2.5", "MiMo V2.5 (Token Plan SGP)"),
 			),
 		},
+	},
+	"zcode": {
+		// ZCode is Z.ai's GLM coding harness. It ships no public TUI — the
+		// interactive terminal lives only in Z.ai's standalone SEA binary,
+		// which has no public release — so the pane runs the engine's own
+		// adapter (internal/worker/adapters/zcode), a persistent REPL that
+		// turns each send-keys prompt into a headless `--json --prompt=` call.
+		// Install it onto PATH with `gc`'s worker-inference setup script or
+		// zcode.Install(binDir); the adapter needs ZCODE_CJS (the CLI bundle)
+		// and ZCODE_API_KEY, and reads ZCODE_MODEL / ZCODE_BASE_URL.
+		//
+		// PromptMode "none": the adapter is a REPL, so the prompt arrives via
+		// send-keys after the ready marker, never on argv.
+		//
+		// No resume_flag / resume_style / session_id_flag: restart continuity
+		// is adapter-internal. ZCode's session ids are minted by the CLI and
+		// its sessions live in a sqlite database gc cannot key, so the adapter
+		// persists the provider session id under XDG_STATE_HOME and replays it
+		// with --resume on the next process's first turn. Handing gc a resume
+		// flag here would compose a launch flag the adapter does not take.
+		DisplayName:          "ZCode (Z.ai GLM harness)",
+		Command:              "zcode-repl",
+		PromptMode:           "none",
+		ReadyPromptPrefix:    "zcode-repl ready",
+		ReadyDelayMs:         3000,
+		ProcessNames:         []string{"bash", "node"},
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsHooks:        false,
+		InstructionsFile:     "AGENTS.md",
+		UpstreamBaseURLEnv:   "ZCODE_BASE_URL",
+		UpstreamAPIKeyEnv:    "ZCODE_API_KEY",
 	},
 	"cerebras": {
 		DisplayName: "Cerebras (OpenCode)",
@@ -886,6 +917,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
 		return newProfileIdentity(profile, "codex"), true
+	case "cursor/tmux-cli":
+		return newProfileIdentity(profile, "cursor"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
 	case "kimi/tmux-cli":
@@ -894,6 +927,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "opencode"), true
 	case "mimocode/tmux-cli":
 		return newProfileIdentity(profile, "mimocode"), true
+	case "zcode/tmux-cli":
+		return newProfileIdentity(profile, "zcode"), true
 	case "pi/tmux-cli":
 		return newProfileIdentity(profile, "pi"), true
 	case "antigravity/tmux-cli":

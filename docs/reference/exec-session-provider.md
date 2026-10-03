@@ -47,12 +47,16 @@ Rules:
   errors — no silent shadowing. Identical re-declarations of the same
   pack reached through a diamond import graph dedupe.
 - The `pack-runtimes` doctor check verifies each declared executable is
-  installed and answers the `protocol` handshake.
+  installed and that its RPP handshake works. An executable with no
+  `protocol` op is the version-0 floor and passes; a present-but-broken
+  handshake fails.
 - Config reload enforces the same registration rules, and rebuilds the
   session provider when the declaration behind the selected name changes
   (the executable binding is fixed at provider construction).
-- `gc runtime check <name>` resolves the declared name and runs the
-  full conformance suite against the pack's executable.
+- `gc runtime check <name>` and `gc runtime conformance <name>` both
+  resolve the declared name and run against the pack's executable:
+  `check` is the smoke test, `conformance` the full requirement-coded
+  suite.
 
 ## Calling Convention
 
@@ -71,6 +75,7 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible) |
+| 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats

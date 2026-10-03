@@ -384,6 +384,9 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 			return nil, err
 		}
 		r.Steps = orderedSteps
+		if err := ValidateNoSelfClosingControlEdges(f.Formula, r.Steps, r.Deps); err != nil {
+			return nil, err
+		}
 	}
 
 	return r, nil

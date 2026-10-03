@@ -160,8 +160,14 @@ func TestBuildDesiredState_RespawnBackoffGatesDependencyFloorCreate(t *testing.T
 // path the second review flagged: the post-build overlay refresh
 // (refreshDesiredStateWithSessionBeads) builds its OWN agentBuildParams. The
 // backoff set must ride through on DesiredStateResult and be re-applied there, or
-// the dependency-floor create in the refresh escapes the gate. Control creates
-// the floor via refresh; backed-off blocks it.
+// the dependency-floor create in the refresh escapes the gate.
+//
+// Upstream's refresh no longer creates FRESH pool or dependency rows at all
+// (sessionOccupancyInfosForRefresh: a refresh reloads only the primary sessions
+// store, so fresh creation is deferred to the next full build, where
+// TestBuildDesiredState_RespawnBackoffGatesDependencyFloorCreate pins the gate).
+// So neither arm creates the floor here; what the refresh must still do is
+// carry the backoff set through on its result.
 func TestRefreshDesiredState_RespawnBackoffGatesDependencyFloor(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -205,14 +211,19 @@ func TestRefreshDesiredState_RespawnBackoffGatesDependencyFloor(t *testing.T) {
 		return refreshDesiredStateWithSessionBeads(result, "test-city", cityPath, cfg, runtime.NewFake(), store, snap, io.Discard)
 	}
 
-	t.Run("control creates the floor via refresh", func(t *testing.T) {
-		if got := dbSlots(refresh(t, nil)); got != 1 {
-			t.Fatalf("control: db floor slots via refresh = %d, want 1", got)
+	t.Run("control defers the fresh floor to the next full build", func(t *testing.T) {
+		if got := dbSlots(refresh(t, nil)); got != 0 {
+			t.Fatalf("control: db floor slots via refresh = %d, want 0 (a refresh never creates fresh dependency rows)", got)
 		}
 	})
 	t.Run("backoff blocks the floor via refresh", func(t *testing.T) {
-		if got := dbSlots(refresh(t, map[string]bool{"db": true})); got != 0 {
+		backedOff := map[string]bool{"db": true}
+		res := refresh(t, backedOff)
+		if got := dbSlots(res); got != 0 {
 			t.Fatalf("backoff: db floor slots via refresh = %d, want 0 (backoff set must ride the result into the refresh bp)", got)
+		}
+		if !res.PoolRespawnBackoffTemplates["db"] {
+			t.Fatalf("refresh result dropped the respawn-backoff set: %v", res.PoolRespawnBackoffTemplates)
 		}
 	})
 }

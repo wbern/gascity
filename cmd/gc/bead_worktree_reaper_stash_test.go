@@ -49,7 +49,7 @@ func TestReapClosedBeadWorktrees_ReapsWhenRepoHasUnrelatedStash(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-stsh01" {
 		t.Fatalf("Reaped = %+v, want exactly ga-stsh01 despite the repo-wide stash\nstderr:\n%s", report.Reaped, stderr.String())
@@ -73,7 +73,7 @@ func TestReapClosedBeadWorktrees_ReapRecordsRepoWideStashWarning(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want 1\nstderr:\n%s", report.Reaped, stderr.String())
@@ -103,7 +103,7 @@ func TestReapClosedBeadWorktrees_ProtectsUncommittedWorkDespiteStashDowngrade(t 
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a worktree with uncommitted work", report.Reaped)
@@ -142,7 +142,7 @@ func TestReapClosedBeadWorktrees_ProtectsUnpushedCommitsDespiteStashDowngrade(t 
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a worktree whose commits no ref carries", report.Reaped)
@@ -181,7 +181,7 @@ func TestReapClosedBeadWorktrees_ReapsUnlandedWorkPreservedByItsBranch(t *testin
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Protected) != 0 {
 		t.Fatalf("Protected = %+v, want 0: the branch preserves this work", report.Protected)
@@ -240,7 +240,7 @@ func TestReapClosedBeadWorktrees_ProtectsWhenUnpushedProbeFails(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when the unlanded probe fails (fail closed)", report.Reaped)
@@ -268,7 +268,7 @@ func TestReapClosedBeadWorktrees_ReapsWhenStashProbeFails(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want 1 when only the stash probe failed\nstderr:\n%s", report.Reaped, stderr.String())

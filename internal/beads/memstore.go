@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -37,19 +38,22 @@ type MemStore struct {
 	IDPrefix string
 
 	// HonorExplicitIDs keeps a caller-supplied bead ID on Create instead of
-	// clobbering it with the sequence id, matching bd's `--id` (an explicit id
-	// is honored verbatim). It is the companion of IDPrefix: IDPrefix decides
-	// what this store MINTS, HonorExplicitIDs decides whether it also ACCEPTS.
-	// Without it no MemStore can model a store that round-trips a pinned id —
-	// production wisps carry pinned <prefix>-wisp-<suffix> ids, so a double
-	// that clobbers them cannot express the wisp tier at all.
+	// clobbering it with the sequence id, matching SQLiteStore.Create (an
+	// explicit id is honored verbatim) and bd's `--id`. It is the companion of
+	// IDPrefix: IDPrefix decides what this store MINTS, HonorExplicitIDs
+	// decides whether it also ACCEPTS. Without it no MemStore can model a
+	// store that round-trips a pinned id — production wisps carry pinned
+	// <prefix>-wisp-<suffix> ids, so a double that clobbers them cannot
+	// express the wisp tier at all.
 	//
 	// Off by default, so every existing caller keeps minting over the id it
 	// passed. A duplicate id is a hard error rather than a silent fallback to
-	// the sequence id: the backing store rejects it, and a double that quietly
+	// the sequence id: SQLiteStore rejects it, and a double that quietly
 	// renamed the bead would hide exactly the id collision the caller asked
 	// about. A pinned "<prefix>-<n>" also consumes that suffix so a later mint
-	// cannot re-issue it. Pinned by TestMemStoreHonorExplicitIDs.
+	// cannot re-issue it — the second half of SQLiteStore's contract, pinned
+	// against SQLiteStore itself by
+	// TestMemStoreHonorExplicitIDsMatchesSQLiteStore.
 	HonorExplicitIDs bool
 
 	// localStrings holds clone-local key-value data set via SetLocalString,
@@ -125,8 +129,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		if m.beadExistsLocked(explicit) {
 			return Bead{}, fmt.Errorf("creating bead %q: duplicate id", explicit)
 		}
-		// Honoring a pinned "<prefix>-<n>" consumes that suffix: without it the
-		// very next store-minted id re-issues the pinned one.
+		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
+		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
+		// the very next store-minted id re-issues the pinned one.
 		if n := numericIDSuffix(explicit); n > m.seq {
 			m.seq = n
 		}
@@ -134,6 +139,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	} else {
 		b.ID = m.mintIDLocked()
 	}
+	// Set directly rather than through setBeadStatus: create is not a status
+	// transition over an existing bead, so a caller-supplied
+	// IndefinitelyDeferred must survive into the store instead of being cleared.
 	b.Status = "open"
 	if b.Type == "" {
 		b.Type = "task"
@@ -165,11 +173,12 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 }
 
 // mintIDLocked returns a store-generated ID that is free in this store,
-// advancing past any suffix already taken. The re-check runs on every
-// auto-minted id because a sequence that lags the rows actually present — a
-// store seeded by NewMemStoreFrom, or one that honored a pinned id — would
-// otherwise re-issue an id that is already there, and MemStore is slice-backed,
-// so a duplicate aliases rather than conflicts. The caller must hold m.mu.
+// advancing past any suffix already taken. SQLiteStore's mintUniqueIDTx does the
+// same re-check on every auto-minted id, because a sequence that lags the rows
+// actually present — a store seeded by NewMemStoreFrom, or one that honored a
+// pinned id — would otherwise re-issue an id that is already there, and MemStore
+// is slice-backed, so a duplicate aliases rather than conflicts. The caller must
+// hold m.mu.
 func (m *MemStore) mintIDLocked() string {
 	prefix := m.IDPrefix
 	if prefix == "" {
@@ -182,22 +191,6 @@ func (m *MemStore) mintIDLocked() string {
 			return candidate
 		}
 	}
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix.
-func numericIDSuffix(id string) int {
-	for i := len(id) - 1; i >= 0; i-- {
-		if id[i] < '0' || id[i] > '9' {
-			if i == len(id)-1 {
-				return 0
-			}
-			n, _ := strconv.Atoi(id[i+1:])
-			return n
-		}
-	}
-	n, _ := strconv.Atoi(id)
-	return n
 }
 
 // indexOfLocked returns the slice index of the bead with the given ID, or -1 if
@@ -245,7 +238,7 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 		m.beads[i].Title = *opts.Title
 	}
 	if opts.Status != nil {
-		m.beads[i].Status = *opts.Status
+		setBeadStatus(&m.beads[i], *opts.Status)
 	}
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
@@ -321,7 +314,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != expectedAssignee {
 			return false, nil
 		}
-		m.beads[i].Status = "open"
+		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
@@ -349,7 +342,7 @@ func (m *MemStore) ClaimAs(id, actor string) (Bead, bool, error) {
 		// the revision when something actually changes, so a repeated self-claim
 		// is a true no-op.
 		if m.beads[i].Status != "in_progress" || m.beads[i].Assignee != actor {
-			m.beads[i].Status = "in_progress"
+			setBeadStatus(&m.beads[i], "in_progress")
 			m.beads[i].Assignee = actor
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
@@ -369,7 +362,7 @@ func (m *MemStore) Close(id string) error {
 			if m.beads[i].Status == "closed" {
 				return nil
 			}
-			m.beads[i].Status = "closed"
+			setBeadStatus(&m.beads[i], "closed")
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			return nil
@@ -385,11 +378,11 @@ func (m *MemStore) Reopen(id string) error {
 	defer m.mu.Unlock()
 	for i := range m.beads {
 		if m.beads[i].ID == id {
-			if m.beads[i].Status == "open" {
+			if m.beads[i].Status == "open" && !m.beads[i].IndefinitelyDeferred {
 				return nil
 			}
 			wasClosed := m.beads[i].Status == "closed"
-			m.beads[i].Status = "open"
+			setBeadStatus(&m.beads[i], "open")
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
@@ -417,7 +410,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
 			continue
 		}
-		m.beads[i].Status = "closed"
+		setBeadStatus(&m.beads[i], "closed")
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
 		if m.beads[i].Metadata == nil {
@@ -505,11 +498,13 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 	}
 
 	statusByID := make(map[string]string, len(m.beads))
+	workOutcomeByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
+		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
 	}
 
 	var result []Bead
@@ -537,7 +532,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if statusByID[dep.DependsOnID] != "closed" {
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
 				blocked = true
 				break
 			}
@@ -776,6 +771,21 @@ func (m *MemStore) DepList(id, direction string) ([]Dep, error) {
 		}
 	}
 	return result, nil
+}
+
+// DepMetadata reports that no edge of this store carries a payload.
+//
+// That is a fact about MemStore, not a stub: its only edge-writing paths are
+// DepAdd and the Needs field, both of which carry the pair and the type alone,
+// and it implements no GraphApply. So there is no way to put a payload in and
+// nothing to lose by saying so.
+//
+// It is implemented rather than omitted because a reader that CANNOT be asked
+// and one that answers "nothing here" mean different things to a caller that
+// refuses on uncertainty — the infra-class migration is one. Anything that
+// teaches MemStore to store an edge payload has to teach this to read it.
+func (m *MemStore) DepMetadata(_, _ string) (string, bool, error) {
+	return "", false, nil
 }
 
 // DepListBatch returns "down" dependencies for multiple beads from memory.

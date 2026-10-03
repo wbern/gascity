@@ -59,7 +59,7 @@ const (
 // (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed, matching the
 // raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and route every
 // classifier through its Info twin, while keeping the runtime probes
-// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+// (sessionAttachedForWakeReason, pendingInteractionProbe) raw (§7 live edge).
 func wakeReasonsInfo(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -133,7 +133,7 @@ func evaluateWakeReasonsInfo(
 		reasons = append(reasons, WakeAttached)
 	}
 
-	if pendingInteractionReady(sp, name) {
+	if answer, _ := pendingInteractionProbe(sp, name); answer == pendingInteractionYes {
 		reasons = append(reasons, WakePending)
 	}
 
@@ -358,10 +358,11 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 // findAgentByTemplate looks up a config agent by template name. Exact
 // identity matches (canonical qualified name or V1 dir+name form, via
 // config.AgentMatchesIdentity) win over all fallbacks; when nothing matches
-// exactly, a legacy bound form ("dir/binding.name") resolves to the unbound
-// agent "dir/name" so sessions and work persisted before a bound→unbound
-// migration stay attributed. Callers that need strict exact-match lookup
-// (e.g. uniqueness validation) must not use this resolver.
+// exactly, migration fallbacks resolve legacy bound forms ("dir/binding.name")
+// to the current unbound agent "dir/name", and legacy unbound forms ("dir/name")
+// to the current imported binding agent "dir/binding.name". This keeps sessions
+// and work persisted across binding changes attributed. Callers that need strict
+// exact-match lookup (e.g. uniqueness validation) must not use this resolver.
 // Returns nil if not found.
 func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	template = strings.TrimSpace(template)
@@ -378,7 +379,16 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
-	return nil
+	var legacyUnboundMatch *config.Agent
+	for i := range cfg.Agents {
+		if legacyUnboundTemplateMatchesBoundAgent(&cfg.Agents[i], template) {
+			if legacyUnboundMatch != nil {
+				return nil
+			}
+			legacyUnboundMatch = &cfg.Agents[i]
+		}
+	}
+	return legacyUnboundMatch
 }
 
 func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
@@ -396,10 +406,21 @@ func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string
 	return strings.TrimSpace(unbound) == strings.TrimSpace(agent.Name)
 }
 
+func legacyUnboundTemplateMatchesBoundAgent(agent *config.Agent, template string) bool {
+	if agent == nil || strings.TrimSpace(agent.BindingName) == "" {
+		return false
+	}
+	dir, local := config.ParseQualifiedName(strings.TrimSpace(template))
+	if strings.TrimSpace(dir) != strings.TrimSpace(agent.Dir) {
+		return false
+	}
+	return strings.TrimSpace(local) == strings.TrimSpace(agent.Name)
+}
+
 // normalizeAgentTemplateIdentity maps a persisted template identity to the
 // matching agent's current canonical qualified name. It resolves through
-// findAgentByTemplate, so a legacy bound form ("dir/binding.name") left by a
-// bound→unbound migration normalizes to the unbound agent's canonical name.
+// findAgentByTemplate, so migration-era bound/unbound identity forms normalize
+// to the matching agent's current canonical name.
 // Identities that resolve to no configured agent pass through unchanged.
 func normalizeAgentTemplateIdentity(cfg *config.City, template string) string {
 	template = strings.TrimSpace(template)
@@ -586,6 +607,26 @@ func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store
 	return next, nil
 }
 
+// providerTerminalErrorPatch is the terminal-provider-error health/sleep
+// metadata batch. markProviderTerminalError applies it directly; the fenced
+// pending-create rollback (rollbackPendingCreateMarkingTerminal) instead folds
+// this same batch into its rollback Tx, so the terminal mark rides the same
+// fence as the failed-create close rather than preceding it (ga-z8yi2j).
+func providerTerminalErrorPatch(reason string, now time.Time) map[string]string {
+	return map[string]string{
+		"state":                                 string(sessionpkg.StateAsleep),
+		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          reason,
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: reason,
+		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
+}
+
 // markProviderTerminalError records the terminal-provider-error health/sleep
 // metadata on a zombie session bead. It returns the snapshot Info with that write
 // folded in (write-returns-Info, front-door migration Step 6d) and any persist
@@ -605,19 +646,7 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
-	batch := map[string]string{
-		"state":                                 string(sessionpkg.StateAsleep),
-		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
-		"last_woke_at":                          "",
-		"pending_create_claim":                  "",
-		"pending_create_started_at":             "",
-		sessionHealthStateMetadataKey:           "unhealthy",
-		sessionHealthReasonMetadataKey:          reason,
-		sessionDrainableMetadataKey:             boolMetadata(true),
-		sessionProviderTerminalErrorMetadataKey: reason,
-		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
-	}
-	return sessFront.ApplyPatchInfo(info, batch)
+	return sessFront.ApplyPatchInfo(info, providerTerminalErrorPatch(reason, now))
 }
 
 // sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error
@@ -957,8 +986,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 	// re-projecting start-pending forever — pendingCreateLeaseExpiredForRollbackInfo
 	// already understands start-pending via pendingCreateRollbackState, so widen
 	// the gate to match instead of restricting it to "creating".
-	if rollbackAvailable && !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) {
-		if pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) {
+	if !alive && pendingCreateQueuedOrCreatingState(info.MetadataState) && info.PendingCreateClaim {
+		leaseExpired := pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout)
+		switch {
+		case !leaseExpired || !rollbackAvailable:
+			// ProjectLifecycle uses the generic one-minute creating timeout.
+			// An active configured provider Start lease is authoritative here:
+			// preserve both state and claim until the one rollback decision says
+			// they may move together. rollbackAvailable=false likewise defers
+			// the complete transition rather than applying half of it. Preserve
+			// a legitimate start-pending projection for a never-started queued
+			// create; only suppress the premature terminal asleep projection.
+			if target == string(sessionpkg.StateAsleep) {
+				target = info.MetadataState
+			}
+		default:
 			target = string(sessionpkg.StateAsleep)
 			stalePendingCreateRollback = true
 			clearPendingCreateLeaseInfo(info.PendingCreateClaim, batch)
@@ -995,7 +1037,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
-// their current projection authoritative for the rest of the pass.
+// their current projection authoritative for the rest of the pass. A nil patch
+// with a nil error means nothing was written: the heal was already converged,
+// or the row changed under it (below).
+//
+// The heal is decided from info, the reconciler's tick snapshot, which can be
+// older than the durable row. Writing it unconditionally was a lost update: a
+// `gc session suspend` (state=suspended, sleep_intent=user-hold, held_until)
+// that landed after the snapshot was read got its state reverted by a heal that
+// never saw it, and a close that landed meanwhile got live-looking state stamped
+// onto the closed row. The write therefore goes through
+// ApplyPatchIfLifecycleUnchanged: it re-reads the row, refuses when its
+// lifecycle facts no longer match the snapshot, and fences the write on the
+// re-read revision where the store has conditional writes. A refused heal is
+// skipped rather than retried. The heal is level-triggered, so the next tick
+// recomputes it from a snapshot that includes the concurrent write.
 func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
@@ -1007,14 +1063,13 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if len(batch) == 0 {
 		return nil, nil
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	applied, err := sessFront.ApplyPatchIfLifecycleUnchanged(info, batch)
+	if err != nil {
 		return nil, err
 	}
-	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
-	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
-	// inspection never records a write that never happened.
-	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
+	if !applied {
+		return nil, nil
+	}
 	return batch, nil
 }
 

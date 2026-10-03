@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -74,7 +75,7 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 		if err != nil || !ok {
 			return false
 		}
-		return target.External
+		return target.External || target.DoltMode == "proxied-server"
 	}
 }
 
@@ -92,11 +93,21 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 				// "unconfirmed" outcome and is cached as ("", false).
 				return preflightProjectIDValue{}, err
 			}
-			db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+			if target.DoltMode == "proxied-server" {
+				// Identity is verified by the provider-owned proxied connection;
+				// there is no direct SQL endpoint to probe here.
+				return preflightProjectIDValue{}, nil
+			}
+			// Pooled handle owned by internal/doltpool; do not Close.
+			var db *sql.DB
+			if target.Socket != "" {
+				db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, target.Database)
+			} else {
+				db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+			}
 			if err != nil {
 				return preflightProjectIDValue{}, err
 			}
-			defer db.Close() //nolint:errcheck // read-only best-effort close
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

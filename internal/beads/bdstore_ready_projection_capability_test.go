@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -173,9 +174,12 @@ func TestReadyProjectionCapabilityIsScopedPerDir(t *testing.T) {
 	oldStore := NewBdStore("/city/gcw-clnxz/old-bd",
 		countingReadyProjectionRunner("1.0.4", &oldVersionCalls, &oldSQLCalls),
 		WithBdStoreReadyProjectionCapability(cache))
+	// A bd below the minimum names its degrade (ErrReadyProjectionUnsupported)
+	// so caches over the scope decline their readiness reads (#3218); it still
+	// hands the items back unenriched.
 	outOld, err := oldStore.enrichReadyProjectionForCache(readyProjectionTestItems())
-	if err != nil {
-		t.Fatalf("old-bd enrich: %v", err)
+	if !errors.Is(err, ErrReadyProjectionUnsupported) {
+		t.Fatalf("old-bd enrich err = %v, want ErrReadyProjectionUnsupported", err)
 	}
 	if outOld[0].IsBlocked != nil {
 		t.Errorf("old-bd IsBlocked = %v, want nil — bd below %s does not support the projection", outOld[0].IsBlocked, bdReadyProjectionMinVersion)

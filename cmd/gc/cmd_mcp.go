@@ -55,7 +55,7 @@ func newMcpValidateCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc mcp validate: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if _, err := buildStage1MCPTargets(cityPath, cfg, exec.LookPath); err != nil {
+			if _, err := buildStage1MCPTargets(cityPath, cfg, exec.LookPath, stderr); err != nil {
 				fmt.Fprintf(stderr, "gc mcp validate: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}

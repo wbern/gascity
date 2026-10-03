@@ -25,14 +25,16 @@ func TestOrderDispatcherCapComesFromCityConfig(t *testing.T) {
 	}{
 		{"unset keeps the build default", nil, defaultMaxOrderDispatchesPerTick},
 		{"explicit cap", intPtr(32), 32},
-		{"zero removes the cap", intPtr(0), 0},
+		// Upstream semantics (b4ef85b8f): inside the dispatch loop a cap <= 0
+		// means uncapped, so an explicit 0 must not silently disable the cap.
+		{"zero falls back to the default", intPtr(0), defaultMaxOrderDispatchesPerTick},
 		{"negative falls back to the default", intPtr(-1), defaultMaxOrderDispatchesPerTick},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.City{}
 			cfg.Orders.MaxDispatchesPerTick = tc.cfg
-			m := newMemoryOrderDispatcher(nil, t.TempDir(), cfg, events.Discard, nil)
+			m := newMemoryOrderDispatcher(nil, nil, t.TempDir(), cfg, events.Discard, nil)
 			defer m.dispatchCancel()
 			if m.maxDispatchesPerTick != tc.want {
 				t.Fatalf("maxDispatchesPerTick = %d, want %d", m.maxDispatchesPerTick, tc.want)
@@ -56,12 +58,16 @@ func TestOrdersConfigParsesMaxDispatchesPerTick(t *testing.T) {
 func TestConfiguredCapFiresThatManyDueOrdersInOneTick(t *testing.T) {
 	for _, tc := range []struct {
 		cap, orders, want int
-	}{{32, 32, 32}, {4, 32, 4}, {0, 40, 40}} {
+	}{{32, 32, 32}, {4, 32, 4}, {0, 40, defaultMaxOrderDispatchesPerTick}} {
 		t.Run(fmt.Sprintf("cap%d_orders%d", tc.cap, tc.orders), func(t *testing.T) {
 			store := beads.NewMemStore()
 			var aa []orders.Order
 			for i := 0; i < tc.orders; i++ {
-				aa = append(aa, orders.Order{Name: fmt.Sprintf("due-%d", i), Trigger: "condition", Check: "true", Exec: "true"})
+				// Cooldown, not condition: upstream dispatches a condition order
+				// whose check passed outside the per-tick budget, so only
+				// clock-driven orders exercise the cap. Never run before, each
+				// is due on the first tick.
+				aa = append(aa, orders.Order{Name: fmt.Sprintf("due-%d", i), Trigger: "cooldown", Interval: "1h", Exec: "true"})
 			}
 			ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
 				return []byte("ok\n"), nil

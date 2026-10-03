@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -60,7 +61,7 @@ func TestHookClaimIdentityGap_gci310k(t *testing.T) {
 	); got.terminal {
 		t.Fatalf("ready-assignment path unexpectedly claimed a dead-sibling-pinned bead: %+v", got)
 	}
-	if hookCandidateClaimable(pinnedOpen, routeTargets) {
+	if hookCandidateClaimable(pinnedOpen, routeTargets, time.Now()) {
 		t.Fatalf("fresh-claim path unexpectedly eligible for an already-assigned bead")
 	}
 	// => neither path claims it: this is the no_work → respawn spawn-loop (gci-310k).
@@ -69,7 +70,7 @@ func TestHookClaimIdentityGap_gci310k(t *testing.T) {
 	// Proves route + readiness are fine; identity pinning is the sole blocker.
 	unassigned := pinnedOpen
 	unassigned.Assignee = ""
-	if !hookCandidateClaimable(unassigned, routeTargets) {
+	if !hookCandidateClaimable(unassigned, routeTargets, time.Now()) {
 		t.Fatalf("unassigned routed bead should be freshly claimable; route is not the blocker")
 	}
 
@@ -105,9 +106,11 @@ func TestHookClaimIdentityGap_gci310k(t *testing.T) {
 		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
 			return nil, nil
 		},
-		// Stubbed so the claim-time identity patch is empty and the work-result
-		// write stays a pure in-memory path: no git shell-out, no store write.
-		ResolveWorkBranch: func(string) string { return "" },
+		// Stubbed so the work-result write stays a pure in-memory path: no git
+		// shell-out, and the write-once gc.claimed_at stamp (OBS-001) lands in a
+		// no-op seam instead of a real store.
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
 	}
 	got := claimFirstReadyHookAssignment(
 		[]beads.Bead{pinnedOpen},

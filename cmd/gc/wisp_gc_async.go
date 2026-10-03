@@ -28,16 +28,16 @@ var wispGCSweepsByCity sync.Map
 // wispGCContextRunner is implemented by wisp GC trackers whose sweep stops
 // before its next arm once ctx is done.
 type wispGCContextRunner interface {
-	runGCContext(ctx context.Context, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error)
+	runGCContext(ctx context.Context, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // runWispGCWithContext runs one sweep, honoring ctx when the tracker supports
 // it.
-func runWispGCWithContext(ctx context.Context, wg wispGC, graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+func runWispGCWithContext(ctx context.Context, wg wispGC, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	if cr, ok := wg.(wispGCContextRunner); ok {
-		return cr.runGCContext(ctx, graphStore, mailStore, now)
+		return cr.runGCContext(ctx, graphStore, sessionLedger, mailStore, now)
 	}
-	return wg.runGC(graphStore, mailStore, now)
+	return wg.runGC(graphStore, sessionLedger, mailStore, now)
 }
 
 // wispGCRunner runs wisp GC sweeps off the controller tick goroutine, at most
@@ -208,10 +208,10 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	}
 	// Capture the tracker and stores on the tick goroutine: a config reload
 	// may replace cr.wg while the sweep runs.
-	wg, mailStore, rigStores := cr.wg, cr.mailBeadStore(), cr.rigBeadStores()
+	wg, sessionLedger, mailStore, rigStores := cr.wg, cr.infraSessionLedger(), cr.mailBeadStore(), cr.rigBeadStores()
 	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
-		purged, err := runWispGCWithContext(ctx, wg, graphStore, mailStore, now)
+		purged, err := runWispGCWithContext(ctx, wg, graphStore, sessionLedger, mailStore, now)
 		return purged, errors.Join(err, sweepLeakedRigSteps(ctx, rigStores))
 	}) {
 		wispGCSweepsByCity.Delete(cityKey)

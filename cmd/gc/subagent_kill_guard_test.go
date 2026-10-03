@@ -110,3 +110,44 @@ func TestObserveAutonomousKillLogsLiveSubagents(t *testing.T) {
 		}
 	}
 }
+
+// A refusal must not leave handoff mail behind. If the mail is created before
+// the guard runs, the operator's --force retry delivers a second copy.
+func TestHandoffRemoteRefusalSendsNoMailAndForceSendsExactlyOne(t *testing.T) {
+	old := liveSubagentsForKill
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		return []worker.InFlightSubagent{{AgentID: "agent-42", Description: "Long audit", StartedAt: time.Now().Add(-time.Minute)}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = old })
+
+	store, rec, sp := beads.NewMemStore(), events.NewFake(), runtime.NewFake()
+	if err := sp.Start(context.Background(), "target", runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	countMail := func() int {
+		// Message beads land in the wisp tier; the default TierIssues read
+		// would report a false zero regardless of what was sent.
+		mail, err := store.List(beads.ListQuery{Type: "message", TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		return len(mail)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHandoffRemote(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code = %d, want refusal", code)
+	}
+	if got := countMail(); got != 0 {
+		t.Fatalf("mail after refusal = %d, want 0: a refused handoff must not send", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doHandoffRemoteWithForce(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("force code=%d stderr=%s", code, stderr.String())
+	}
+	if got := countMail(); got != 1 {
+		t.Fatalf("mail after forced retry = %d, want exactly 1", got)
+	}
+}

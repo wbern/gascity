@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 17 built-in providers.
-	if len(providers) != 17 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 17", len(providers))
+	// Must have exactly 18 built-in providers.
+	if len(providers) != 18 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 18", len(providers))
 	}
-	if len(order) != 17 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 17", len(order))
+	if len(order) != 18 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 18", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -216,8 +216,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
-		t.Errorf("Args = %v, want [-f]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"-f", "--trust"}) {
+		t.Errorf("Args = %v, want [-f --trust]", p.Args)
 	}
 	rp := &ResolvedProvider{
 		Command:           p.Command,
@@ -225,8 +225,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 		OptionsSchema:     p.OptionsSchema,
 		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
 	}
-	if got := rp.CommandString(); got != "cursor-agent -f" {
-		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	if got := rp.CommandString(); got != "cursor-agent -f --trust" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f --trust")
 	}
 	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
 		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)

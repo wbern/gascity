@@ -8,23 +8,6 @@ import (
 	"testing"
 )
 
-func TestSelectBindingLine(t *testing.T) {
-	const table = "bind-key -T prefix C-g display-popup\nbind-key -T prefix n next-window\nbind-key -r -T prefix Up resize-pane -U\nbind-key malformed"
-	for _, tt := range []struct{ name, key, want string }{
-		{"exact", "n", "bind-key -T prefix n next-window"},
-		{"near", "g", ""},
-		{"repeat", "Up", "bind-key -r -T prefix Up resize-pane -U"},
-		{"absent", "z", ""},
-		{"malformed", "malformed", ""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := selectBindingLine(table, tt.key); got != tt.want {
-				t.Fatalf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTeardownNeverUsesDirectPIDSignalsAfterReplacement(t *testing.T) {
 	// A same-token replacement (lstart has only second precision) and a
 	// replacement after verification are both indistinguishable from the old
@@ -45,7 +28,7 @@ func TestTeardownNeverUsesDirectPIDSignalsAfterReplacement(t *testing.T) {
 			if err := tm.KillSessionWithProcessesExcluding("managed", []string{"101"}); err != nil {
 				t.Fatalf("KillSessionWithProcessesExcluding: %v", err)
 			}
-			if want := [][]string{{"-u", "show-environment", "-t", "managed", ownedScopeEnv}, {"-u", "kill-session", "-t", "managed"}}; !slices.EqualFunc(fe.calls, want, slices.Equal) {
+			if want := [][]string{{"-u", "show-environment", "-t", "=managed", ownedScopeEnv}, {"-u", "kill-session", "-t", "=managed"}}; !slices.EqualFunc(fe.calls, want, slices.Equal) {
 				t.Fatalf("tmux calls = %v, want scope-record lookup then named session teardown %v", fe.calls, want)
 			}
 		})
@@ -77,8 +60,8 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"-u", "display-message", "-p", "-t", "managed", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}"},
-		{"-u", "show-environment", "-t", "managed", ownedScopeEnv},
+		{"-u", "display-message", "-p", "-t", "=managed:", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}"},
+		{"-u", "show-environment", "-t", "=managed", ownedScopeEnv},
 		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("managed", "agent --resume")}), "run-shell 'exit 77'"},
 	}
 	if !slices.EqualFunc(fe.calls, want, slices.Equal) {
@@ -114,7 +97,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	if len(fe.calls) < 6 || !slices.Contains(fe.calls[5], "if-shell") {
 		t.Fatalf("tmux calls = %v, want old scope verification before replacement", fe.calls)
 	}
-	if got := fe.calls[6]; !slices.Contains(got, "managed:^.0") {
+	if got := fe.calls[6]; !slices.Contains(got, "=managed:^.0") {
 		t.Fatalf("replacement identity lookup = %v, want stable session identity", got)
 	}
 	for _, call := range fe.calls[7:] {
@@ -302,5 +285,99 @@ func TestProviderEnvSkipsEscapeForPiAlias(t *testing.T) {
 func TestProviderEnvSkipsEscapeForCopilot(t *testing.T) {
 	if !providerEnvSkipsEscape("copilot") {
 		t.Fatal("copilot provider should skip pre-enter Escape")
+	}
+}
+
+// TestSelectBindingLine covers the row selection that both getKeyBinding and
+// isGTBinding depend on. These fixtures are real `tmux list-keys -T <table>`
+// output shapes, so the tests are version-independent and need no live tmux —
+// unlike the gated tests in tmux_test.go, which never run without one.
+func TestSelectBindingLine(t *testing.T) {
+	const prefixTable = `bind-key    -T prefix       C-g               display-popup -E "gt agents menu"
+bind-key    -T prefix       n                 next-window
+bind-key -r -T prefix       Up                resize-pane -U
+bind-key    -T prefix       p                 previous-window`
+
+	tests := []struct {
+		name   string
+		output string
+		key    string
+		want   string
+	}{
+		{
+			name:   "exact match",
+			output: `bind-key    -T prefix n     next-window`,
+			key:    "n",
+			want:   `bind-key    -T prefix n     next-window`,
+		},
+		{
+			name:   "near miss does not match C-g prefix",
+			output: `bind-key    -T prefix C-g   display-popup -E "gt agents menu"`,
+			key:    "g",
+			want:   "",
+		},
+		{
+			name:   "repeat flag present",
+			output: `bind-key -r -T prefix Up  resize-pane -U`,
+			key:    "Up",
+			want:   `bind-key -r -T prefix Up  resize-pane -U`,
+		},
+		{
+			name:   "column padding preserved in returned line",
+			output: prefixTable,
+			key:    "n",
+			want:   `bind-key    -T prefix       n                 next-window`,
+		},
+		{
+			name:   "key absent from table",
+			output: prefixTable,
+			key:    "z",
+			want:   "",
+		},
+		{
+			name:   "target row is not first",
+			output: prefixTable,
+			key:    "p",
+			want:   `bind-key    -T prefix       p                 previous-window`,
+		},
+		{
+			name:   "repeat row selected from full table",
+			output: prefixTable,
+			key:    "Up",
+			want:   `bind-key -r -T prefix       Up                resize-pane -U`,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			key:    "n",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectBindingLine(tt.output, tt.key); got != tt.want {
+				t.Errorf("selectBindingLine(_, %q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectBindingLineScopesGTDetection locks in why isGTBinding must test the
+// selected line rather than the whole table: against the full output, the
+// "if-shell"+"gt " check reports a Gas Town binding for every key as soon as any
+// Gas Town binding exists in that table.
+func TestSelectBindingLineScopesGTDetection(t *testing.T) {
+	const table = `bind-key    -T prefix g  if-shell -F -t = "#{==:#{session_name},x}" "run-shell 'gt agents menu'" ":"
+bind-key    -T prefix n  next-window`
+
+	gtLine := selectBindingLine(table, "g")
+	if !strings.Contains(gtLine, "if-shell") || !strings.Contains(gtLine, "gt ") {
+		t.Fatalf("expected the g row to look like a Gas Town binding, got %q", gtLine)
+	}
+
+	userLine := selectBindingLine(table, "n")
+	if strings.Contains(userLine, "if-shell") || strings.Contains(userLine, "gt ") {
+		t.Errorf("the n row must not inherit the g row's Gas Town markers, got %q", userLine)
 	}
 }

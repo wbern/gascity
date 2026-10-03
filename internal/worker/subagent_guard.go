@@ -16,12 +16,17 @@ type InFlightSubagent struct {
 
 type subagentGuardTranscript interface {
 	AgentMappings(context.Context) ([]AgentMapping, error)
-	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
+	TranscriptRecords(context.Context) ([]json.RawMessage, error)
 }
 
 // InFlightBackgroundSubagents returns background subagents without a terminal
 // task notification in the parent transcript. Transcript parse errors are
 // returned so callers can deliberately fail open before a destructive action.
+//
+// Completion is read from raw transcript records rather than a session read:
+// a subagent's terminal notification can be recorded as a queue-operation,
+// which carries no uuid and is pruned by the active-branch walk. Reading the
+// pruned view reports a finished subagent as live and refuses a safe kill.
 func InFlightBackgroundSubagents(ctx context.Context, transcript subagentGuardTranscript) ([]InFlightSubagent, error) {
 	mappings, err := transcript.AgentMappings(ctx)
 	if err != nil {
@@ -30,11 +35,11 @@ func InFlightBackgroundSubagents(ctx context.Context, transcript subagentGuardTr
 	if len(mappings) == 0 {
 		return nil, nil
 	}
-	result, err := transcript.Transcript(ctx, TranscriptRequest{Raw: true})
+	records, err := transcript.TranscriptRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
-	spawns, terminal := parseSubagentGuardTranscript(result.RawMessages)
+	spawns, terminal := parseSubagentGuardTranscript(records)
 	live := make([]InFlightSubagent, 0, len(mappings))
 	for _, mapping := range mappings {
 		spawn, ok := spawns[strings.TrimSpace(mapping.ParentToolUseID)]

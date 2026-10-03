@@ -38,7 +38,7 @@ func newBlockingWispGC(purged int, err error) *blockingWispGC {
 
 func (b *blockingWispGC) shouldRun(time.Time) bool { return true }
 
-func (b *blockingWispGC) runGC(beads.GraphStore, beads.MailStore, time.Time) (int, error) {
+func (b *blockingWispGC) runGC(beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	b.runs.Add(1)
 	b.started <- struct{}{}
 	<-b.release
@@ -237,7 +237,7 @@ func newContextBlockingWispGC() *contextBlockingWispGC {
 	return c
 }
 
-func (c *contextBlockingWispGC) runGCContext(ctx context.Context, _ beads.GraphStore, _ beads.MailStore, _ time.Time) (int, error) {
+func (c *contextBlockingWispGC) runGCContext(ctx context.Context, _ beads.GraphStore, _ beads.SessionStore, _ beads.MailStore, _ time.Time) (int, error) {
 	c.runs.Add(1)
 	c.started <- struct{}{}
 	select {
@@ -283,7 +283,7 @@ type panickingWispGC struct{ runs atomic.Int32 }
 
 func (p *panickingWispGC) shouldRun(time.Time) bool { return true }
 
-func (p *panickingWispGC) runGC(beads.GraphStore, beads.MailStore, time.Time) (int, error) {
+func (p *panickingWispGC) runGC(beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	p.runs.Add(1)
 	panic("store exploded")
 }
@@ -343,7 +343,7 @@ func TestMemoryWispGCRunGCContextStopsWhenCancelled(t *testing.T) {
 	wg := newWispGC(time.Minute, time.Hour, time.Hour).(*memoryWispGC)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	purged, err := wg.runGCContext(ctx, beads.GraphStore{Store: store}, beads.MailStore{Store: store}, time.Now())
+	purged, err := wg.runGCContext(ctx, beads.GraphStore{Store: store}, beads.SessionStore{Store: store}, beads.MailStore{Store: store}, time.Now())
 	if purged != 0 || err == nil || !strings.Contains(err.Error(), "sweep abandoned before spec_sidecars") {
 		t.Fatalf("runGCContext(canceled) = (%d, %v), want (0, sweep abandoned before spec_sidecars)", purged, err)
 	}
@@ -481,7 +481,7 @@ func TestMemoryWispGCRunGCLogsArmTimings(t *testing.T) {
 
 	store := beads.NewMemStore()
 	wg := newWispGC(time.Minute, time.Hour, time.Hour)
-	if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, time.Now()); err != nil {
+	if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{Store: store}, beads.MailStore{Store: store}, time.Now()); err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
 	line := ""

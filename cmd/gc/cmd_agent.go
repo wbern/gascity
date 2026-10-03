@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -16,8 +17,16 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
+
+// loadCityConfigCalls counts every full TOML load performed by
+// loadCityConfigFS (city.toml + all pack includes). Store-open call sites on
+// hot per-tick paths (order dispatch) must reuse an already-resolved
+// *config.City instead of driving this counter once per scope per tick
+// (ga-237xpr) — tests assert on this counter to guard against a regression.
+var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
 
@@ -37,6 +46,7 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 // per-invocation gc bd profiler. Outside that opt-in diagnostic it is exactly
 // the same load path as loadCityConfig.
 func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, warningWriter ...io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	warningOutput := resolveLoadCityConfigWarningWriter(warningWriter...)
 	endBuiltinPackIncludes := profiler.phase("config_builtin_pack_includes")
@@ -86,6 +96,7 @@ var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
@@ -108,11 +119,23 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 // briefly reflect stale builtin-pack content after an upgrade until a normal
 // gc command refreshes the generated packs.
 func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	return loadPrematerializedCityConfig(fs, tomlPath, skipRevisionSnapshot, resolveLoadCityConfigWarningWriter(warningWriter...))
+}
+
+func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	return loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+}
+
+// loadPrematerializedCityConfig is the shared body of the loaders that take
+// builtin packs as they already are on disk. It differs from loadCityConfigFS
+// only in skipping the refresh; opts is what separates a blocking load from an
+// advisory one.
+func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	emitLoadCityConfigWarnings(warnings, prov)
 	if err := validatePackRuntimeRegistrations(cfg); err != nil {
 		return nil, err
 	}
@@ -120,8 +143,30 @@ func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warn
 	return cfg, nil
 }
 
-func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	return loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
+// advisoryLoad is the load option set for a config load nobody asked for.
+//
+// RepoCacheNonBlocking is the load-bearing half: the repo-cache lock is held
+// for the whole of a cache write, which includes its network clone, so a
+// blocking load turns one `gc import install` into a hang for every other gc
+// process on the machine. An advisory load reports config.ErrRepoCacheBusy
+// instead and its caller degrades to "no pack state right now".
+var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true}
+
+// loadCityConfigAdvisory loads city config for callers that would rather have
+// no answer than a slow one: eager pack-command discovery and shell
+// completion, both of which run on input the user has not submitted yet. It
+// takes builtin packs as they already are on disk like the completion loader
+// it replaces, and additionally never waits on the repo cache.
+//
+// Nothing an advisory load has to say belongs on the user's terminal — it is
+// reporting on a command they did not type — so both the provenance warnings
+// and the default logger's output are discarded here rather than at each call
+// site.
+func loadCityConfigAdvisory(cityPath string) (cfg *config.City, err error) {
+	quietDefaultLogger(func() {
+		cfg, err = loadPrematerializedCityConfig(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), advisoryLoad, io.Discard)
+	})
+	return cfg, err
 }
 
 var loadCityConfigDefaultWarningWriter = func() io.Writer {
@@ -180,10 +225,16 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsRetiredKeyWarning(warning) {
 		return true
 	}
+	if config.IsSessionReconcilerAliasWarning(warning) {
+		return true
+	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}
 	if config.IsDisabledNamedSessionWarning(warning) {
+		return true
+	}
+	if config.IsSessionSetupTimeoutAdvisory(warning) {
 		return true
 	}
 	if config.IsAlwaysFreshWakeModeWarning(warning) {
@@ -357,8 +408,13 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
-	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
-	if strings.Contains(input, "/") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
+	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
+	// matches the corresponding pool template. Mirrors the shared resolver
+	// helper (internal/agentutil/resolve.go), which gates on
+	// ContainsAny(input, "/.") so dot-qualified instances resolve too
+	// (#4843).
+	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
 			return a, true
 		}
@@ -553,7 +609,12 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg)
+	st, err := loadSuspensionState(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg), cityPath, st)
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -578,7 +639,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology, cityPath string, st suspensionstate.State) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -593,8 +654,8 @@ func agentListItems(cfg *config.City) []AgentListItem {
 			WorkDir:              a.WorkDir,
 			Provider:             a.Provider,
 			Session:              a.Session,
-			Suspended:            a.Suspended,
-			WorkQuery:            a.EffectiveWorkQueryForBeads(cfg.Beads),
+			Suspended:            isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st),
+			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,
 			ConfiguredSlingQuery: a.SlingQuery,
@@ -970,13 +1031,7 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	// Try to find agent in raw config.
 	if resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg)); ok {
 		resolvedQN := resolved.QualifiedName()
-		for i := range cfg.Agents {
-			if cfg.Agents[i].QualifiedName() == resolvedQN {
-				cfg.Agents[i].Suspended = suspended
-				break
-			}
-		}
-		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+		if err := config.WriteCityAgentSuspendedForEdit(fs, tomlPath, cfg, resolvedQN, suspended); err != nil {
 			fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

@@ -87,7 +87,8 @@ const defaultRemoteShell = "/bin/sh"
 //     with [runtime.ErrSessionExists] (has-session precheck, and re-checked if
 //     new-session fails, since the connection drops tmux's stderr on a non-zero
 //     exit). Inert env is injected via tmux -e (requires remote tmux >= 3.2);
-//     secret env is staged into private files on the box before launch.
+//     secret env is staged into private files on the box first, so no value
+//     reaches a command line on either end (see [stagedEnv]).
 //   - SessionSetup, SessionSetupScript (piped to a remote sh), and SessionLive
 //     run on the box after creation, best-effort. Every setup step runs with the
 //     session WorkDir as cwd and the session env (cfg.Env + GC_SESSION) exported,
@@ -121,6 +122,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 	args = append(args, resolveCommand(cfg))
 
+	// Secret env values never travel in a command line — not the box's, not this
+	// ssh client's. They are staged into private files on the box and referenced
+	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
+	// PreStart carries is what names the staged file.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
 	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
 	if err != nil {
@@ -269,6 +274,9 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
+	// respawn-pane takes no -e, so nothing is re-injected into the session
+	// environment; the staged file exists only so the setup prelude can export
+	// secrets without putting them on a command line.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
 	staged, err := p.stageSecretEnv(ctx, secretEnv, nil)
 	if err != nil {
@@ -414,8 +422,25 @@ func (p *Provider) ClearScrollback(name string) error {
 }
 
 // SetMeta stores a key-value pair in the tmux session environment.
+//
+// A value that is not argv-safe (see [runtime.ArgvSafeEnvKey]) is staged on the
+// box and applied with `source-file`, exactly as Start stages secret env, so it
+// reaches neither the local ssh client's argv nor the box's. SetMeta stays
+// best-effort, but a staging failure skips the write rather than falling back to
+// argv — that fallback is the leak.
 func (p *Provider) SetMeta(name, key, value string) error {
-	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", name, key, value)
+	ctx := context.Background()
+	args := []string{"set-environment", "-t", name, key, value}
+	if !runtime.ArgvSecretEnvValue(key, value) {
+		_, _, _ = p.tmux(ctx, name, args...)
+		return nil
+	}
+	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	if err != nil {
+		return nil // best-effort; never fall back to argv
+	}
+	defer p.cleanupStagedEnv(ctx, name, staged)
+	_, _, _ = p.tmux(ctx, name, "source-file", staged.tmuxPath)
 	return nil
 }
 
@@ -525,6 +550,12 @@ func attachArgs(ep Endpoint, name string) []string {
 // provide. The remote command or script body is appended after this prefix; a
 // failed cd aborts with exit 1 (which fails PreStart and is discarded by the
 // best-effort steps).
+//
+// Most of this prelude ends up inside an `sh -c ...` argument, so it is
+// command-line-visible on both ends of the connection. Secret values are
+// therefore not written into it: envPath names the 0600 file staged on the box
+// (see [stagedEnv]) and the prelude only sources it. envPath is empty when the
+// session carries no secrets, in which case every value is inert and inlined.
 func setupPrelude(cfg runtime.Config, name, envPath string) string {
 	var b strings.Builder
 	if cfg.WorkDir != "" {
@@ -535,7 +566,7 @@ func setupPrelude(cfg runtime.Config, name, envPath string) string {
 	}
 	for _, k := range sortedKeys(cfg.Env) {
 		if envPath != "" && runtime.ArgvSecretEnvValue(k, cfg.Env[k]) {
-			continue
+			continue // sourced from envPath instead
 		}
 		b.WriteString("export " + k + "=" + shellQuote([]string{cfg.Env[k]}) + "\n")
 	}

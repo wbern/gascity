@@ -42,7 +42,7 @@ func TestRunAnalyzeContinuity_RecycledSessionRetainedMetadata(t *testing.T) {
 	dir := t.TempDir()
 	writeAnalyzeContinuityCity(t, dir)
 
-	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	store := continuitySeededStore(beads.Bead{
 		ID:        "crm-459akft",
 		Title:     "Diagnose regression",
@@ -95,7 +95,7 @@ func TestRunAnalyzeContinuity_HumanGateNeverStalled(t *testing.T) {
 	dir := t.TempDir()
 	writeAnalyzeContinuityCity(t, dir)
 
-	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	store := continuitySeededStore(beads.Bead{
 		ID:        "crm-459akft",
 		Title:     "Diagnose regression",

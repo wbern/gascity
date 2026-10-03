@@ -713,6 +713,59 @@ func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
 	}
 }
 
+// TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry reproduces
+// gc-e2xqk end to end: a typed deliverable close must not mint attempt 2.
+func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review.attempt.1",
+			"gc.attempt":          "1",
+			"gc.outcome.producer": "formula-step",
+		},
+	})
+	// gc-outcome-close records work_id = the closed bead's own ID.
+	disposition := fmt.Sprintf(`{"contract_version":1,"disposition":"deliverable","work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, attempt1.ID)
+	if err := store.SetMetadata(attempt1.ID, "gc.coordinator_outcome.producer_disposition", disposition); err != nil {
+		t.Fatalf("set producer_disposition: %v", err)
+	}
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass (no spurious retry)", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+}
+
 func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -2480,10 +2533,20 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 	if applyStep.Metadata["gc.attempt"] != "3" {
 		t.Errorf("apply gc.attempt = %q, want 3", applyStep.Metadata["gc.attempt"])
 	}
+	// gastownhall/gascity#5246: a plain child (no Retry/Ralph/Drain) must still
+	// get a default gc.kind, mirroring the root's unconditional stamp above —
+	// otherwise it matches isWorkRecordGatedBead's (Type=="task" && gc.kind=="")
+	// test and gets wrongly swept into the ADR-0009 work-record close gate.
+	if applyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("apply gc.kind = %q, want task", applyStep.Metadata["gc.kind"])
+	}
 
 	verifyStep := recipe.StepByID("mol-test.converge.iteration.3.verify")
 	if verifyStep == nil {
 		t.Fatal("missing verify step")
+	}
+	if verifyStep.Metadata["gc.kind"] != "task" {
+		t.Errorf("verify gc.kind = %q, want task", verifyStep.Metadata["gc.kind"])
 	}
 	applyScopeCheck := recipe.StepByID("mol-test.converge.iteration.3.apply-scope-check")
 	if applyScopeCheck == nil {
@@ -2516,9 +2579,13 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 			foundScopeControlDep = true
 		}
 		if dep.StepID == "mol-test.converge.iteration.3" &&
-			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify" &&
 			dep.Type == "blocks" {
 			foundScopeBodyDep = true
+		}
+		if dep.StepID == "mol-test.converge.iteration.3" &&
+			dep.DependsOnID == "mol-test.converge.iteration.3.verify-scope-check" {
+			t.Errorf("scope body blocks on the scope-check that closes it: %+v", dep)
 		}
 	}
 	if !foundBlocksDep {
@@ -2528,7 +2595,7 @@ func TestBuildAttemptRecipeRalphWithChildren(t *testing.T) {
 		t.Errorf("missing dep: apply scope-check blocks on apply; deps = %+v", recipe.Deps)
 	}
 	if !foundScopeBodyDep {
-		t.Errorf("missing dep: scope body blocks on verify scope-check; deps = %+v", recipe.Deps)
+		t.Errorf("missing dep: scope body blocks on verify; deps = %+v", recipe.Deps)
 	}
 
 	// Children should NOT have parent-child deps to the scope root —
@@ -3100,7 +3167,7 @@ func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType strin
 
 func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
 	t.Helper()
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
@@ -3144,12 +3211,15 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	recipe := buildAttemptRecipe(step, control, 1)
 	scopeID := "mol.review-loop.iteration.1"
 
-	// Scope must block on each child.
+	// The scope body must block on each child, and on the raw child rather
+	// than on that child's scope-check: every one of those scope-checks
+	// closes this body, so blocking on one is a permanent deadlock
+	// (ga-a6zy9).
 	expectedBlockers := []string{
-		scopeID + ".review-claude-scope-check",
-		scopeID + ".review-codex-scope-check",
-		scopeID + ".synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-claude",
+		scopeID + ".review-codex",
+		scopeID + ".synthesize",
+		scopeID + ".apply-fixes",
 	}
 
 	scopeDeps := map[string]bool{}
@@ -3162,6 +3232,9 @@ func TestBuildAttemptRecipeScopeBlocksOnAllChildren(t *testing.T) {
 	for _, expected := range expectedBlockers {
 		if !scopeDeps[expected] {
 			t.Errorf("scope %q missing blocks dep on %q; scope deps = %v", scopeID, expected, scopeDeps)
+		}
+		if scopeDeps[expected+"-scope-check"] {
+			t.Errorf("scope %q blocks on %q, the control that closes it", scopeID, expected+"-scope-check")
 		}
 	}
 }
@@ -3250,7 +3323,9 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 
-	// Scope blocks on all 4 child scope-check controls.
+	// Scope body blocks on all 4 children directly. It must NOT block on
+	// their scope-check controls: each of those closes this body, so the
+	// edge would be a permanent deadlock (ga-a6zy9).
 	scopeBlockers := map[string]bool{}
 	for _, dep := range recipe.Deps {
 		if dep.StepID == scopeID && dep.Type == "blocks" {
@@ -3258,13 +3333,16 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 		}
 	}
 	for _, childID := range []string{
-		scopeID + ".review-pipeline.review-claude-scope-check",
-		scopeID + ".review-pipeline.review-codex-scope-check",
-		scopeID + ".review-pipeline.synthesize-scope-check",
-		scopeID + ".apply-fixes-scope-check",
+		scopeID + ".review-pipeline.review-claude",
+		scopeID + ".review-pipeline.review-codex",
+		scopeID + ".review-pipeline.synthesize",
+		scopeID + ".apply-fixes",
 	} {
 		if !scopeBlockers[childID] {
 			t.Errorf("scope missing blocks dep on %q", childID)
+		}
+		if scopeBlockers[childID+"-scope-check"] {
+			t.Errorf("scope blocks on %q, the control that closes it", childID+"-scope-check")
 		}
 	}
 

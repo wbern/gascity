@@ -36,7 +36,7 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, nil)
 	if partial {
 		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
 	}
@@ -57,20 +57,20 @@ func TestControllerDemandRouteTargetExcludesDispatchHeldWork(t *testing.T) {
 	templates := map[string]struct{}{"crm/gastown.polecat": {}}
 	for _, hold := range beadmeta.DispatchHoldLabels {
 		t.Run(hold, func(t *testing.T) {
-			got := controllerDemandRouteTarget(&config.City{}, beads.Bead{
+			got, ok := demandServableForTemplates(&config.City{}, beads.Bead{
 				ID: "held-work", Labels: []string{hold},
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
 			}, templates)
-			if got != "" {
-				t.Fatalf("controllerDemandRouteTarget() = %q, want empty for %s", got, hold)
+			if ok || got != "" {
+				t.Fatalf("demandServableForTemplates() = (%q, %v), want (\"\", false) for %s", got, ok, hold)
 			}
 		})
 	}
 
-	if got := controllerDemandRouteTarget(&config.City{}, beads.Bead{
+	if got, ok := demandServableForTemplates(&config.City{}, beads.Bead{
 		ID: "eligible-work", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "crm/gastown.polecat"},
-	}, templates); got != "crm/gastown.polecat" {
-		t.Fatalf("controllerDemandRouteTarget() = %q, want eligible route", got)
+	}, templates); !ok || got != "crm/gastown.polecat" {
+		t.Fatalf("demandServableForTemplates() = (%q, %v), want eligible route", got, ok)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T)
 	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork(cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, nil)
 
 	if !partial {
 		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")
@@ -298,7 +298,7 @@ func TestCollectAssignedWorkBeadsExcludesBlockedFromDemandButReaperStillSeesIt(t
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
 
-	found, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, nil)
+	found, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
