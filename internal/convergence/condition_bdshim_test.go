@@ -35,6 +35,9 @@ func TestConditionEnvInjectsGCBdReal(t *testing.T) {
 	realDir := t.TempDir()
 	realBd := writeExecutableBd(t, realDir)
 	t.Setenv("PATH", citylayout.ShimbinDir(city)+string(os.PathListSeparator)+realDir)
+	// An inherited GC_BD_REAL (set in every managed session) is honored as an
+	// explicit passthrough and would mask PATH resolution.
+	t.Setenv(citylayout.RealBdEnvVar, "")
 
 	got := ""
 	for _, e := range (ConditionEnv{BeadID: "gc2-1", CityPath: city}).Environ() {
@@ -56,6 +59,7 @@ func TestConditionEnvOmitsGCBdRealWhenNoRealBd(t *testing.T) {
 	city := t.TempDir()
 	writeExecutableBd(t, citylayout.ShimbinDir(city)) // only the shim's bd
 	t.Setenv("PATH", citylayout.ShimbinDir(city))
+	t.Setenv(citylayout.RealBdEnvVar, "")
 
 	for _, e := range (ConditionEnv{CityPath: city}).Environ() {
 		if strings.HasPrefix(e, citylayout.RealBdEnvVar+"=") {

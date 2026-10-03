@@ -4,55 +4,318 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func TestSecretSessionEnvUsesPrivateCommandFile(t *testing.T) {
-	exec := &fakeExecutor{}
+// TestNewSessionKeepsSecretEnvOutOfArgv is the unit guard: a value that is not
+// on the argv allow list must never appear in the tmux command line.
+func TestNewSessionKeepsSecretEnvOutOfArgv(t *testing.T) {
+	const secret = "sk-test-not-a-real-credential"
+	fake := &fakeExecutor{}
 	tm := NewTmux()
-	tm.exec = exec
-	const secret = "generated-secret-canary"
-	if err := tm.NewSessionWithCommandAndEnv("gc-secret-file", "/work", "claude", map[string]string{"OPENAI_API_KEY": secret, "GC_RIG": "rig"}); err != nil {
+	tm.exec = fake
+
+	env := map[string]string{"ANTHROPIC_AUTH_TOKEN": secret, "GC_RIG": "rig-a", "LC_ALL": ""}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-secret-env", "/work", "claude", env); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
-	for _, call := range exec.calls {
-		if strings.Contains(strings.Join(call, "\x00"), secret) {
-			t.Fatal("secret canary reached tmux argv")
+	if len(fake.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+	for _, call := range fake.calls {
+		for _, arg := range call {
+			if strings.Contains(arg, secret) {
+				t.Fatalf("secret value reached tmux argv: %v", call)
+			}
 		}
 	}
-	if got := exec.calls[0]; !containsArgs(got, "start-server", ";", "source-file") || containsArg(got, "-e") {
-		t.Fatal("secret environment did not use source-file-only argv")
+
+	create := fake.calls[0]
+	if len(create) < 4 || create[len(create)-4] != "start-server" || create[len(create)-3] != ";" || create[len(create)-2] != "source-file" {
+		t.Fatalf("session was not created from a command file: %v", create)
+	}
+	// Even the inert vars ride the file once one secret forces it: the whole
+	// command moves, so there is no partial argv to get the split wrong.
+	if slices.Contains(create, "-e") {
+		t.Errorf("no -e flag may survive on the argv path: %v", create)
 	}
 }
 
-func TestInertSessionEnvRemainsOnArgv(t *testing.T) {
-	exec := &fakeExecutor{}
+// TestNewSessionKeepsInertEnvOnArgv pins the other half of the contract: an
+// environment that cannot authenticate anything needs no temp file, so a host
+// with a read-only temp dir still starts those sessions.
+func TestNewSessionKeepsInertEnvOnArgv(t *testing.T) {
+	fake := &fakeExecutor{}
 	tm := NewTmux()
-	tm.exec = exec
-	if err := tm.NewSessionWithCommandAndEnv("gc-inert-file", "/work", "claude", map[string]string{"GC_RIG": "rig", "LANG": "C"}); err != nil {
+	tm.exec = fake
+
+	env := map[string]string{"GC_RIG": "rig-a", "LANG": "en_US.UTF-8"}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-inert-env", "/work", "claude", env); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
-	if got := strings.Join(exec.calls[0], "\x00"); !strings.Contains(got, "\x00-e\x00GC_RIG=rig\x00") || strings.Contains(got, "source-file") {
-		t.Fatal("inert environment unexpectedly left the argv path")
+	joined := strings.Join(fake.calls[0], "\x00")
+	if !strings.Contains(joined, "\x00-e\x00GC_RIG=rig-a\x00") {
+		t.Errorf("inert env did not stay on the -e path: %v", fake.calls[0])
+	}
+	if strings.Contains(joined, "source-file") {
+		t.Errorf("inert env must not stage a command file: %v", fake.calls[0])
 	}
 }
 
-func TestSecretSessionEnvFailsClosedWhenStagingFails(t *testing.T) {
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "absent"))
-	exec := &fakeExecutor{}
+// TestNewSessionFailsClosedWhenFileUnwritable proves the fix cannot silently
+// degrade into the leak it replaces.
+func TestNewSessionFailsClosedWhenFileUnwritable(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	fake := &fakeExecutor{}
 	tm := NewTmux()
-	tm.exec = exec
-	if err := tm.NewSessionWithCommandAndEnv("gc-stage-fail", "", "claude", map[string]string{"OPENAI_API_KEY": "generated-secret-canary"}); err == nil {
-		t.Fatal("secret session must fail when private staging fails")
+	tm.exec = fake
+
+	env := map[string]string{"OPENAI_API_KEY": "sk-test-not-a-real-credential"}
+	err := tm.NewSessionWithCommandAndEnv("gc-test-nofile", "/work", "claude", env)
+	if err == nil {
+		t.Fatal("session creation must fail when the command file cannot be staged")
 	}
-	if len(exec.calls) != 0 {
-		t.Fatal("tmux must not run after secret staging failure")
+	if len(fake.calls) != 0 {
+		t.Errorf("no tmux command may run once staging failed: %v", fake.calls)
 	}
 }
 
+func TestStageTmuxCommandFileIsPrivateAndRemovable(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	path, cleanup, err := stageTmuxCommandFile("new-session -d")
+	if err != nil {
+		t.Fatalf("stageTmuxCommandFile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat staged file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("staged file mode = %04o, want 0600", got)
+	}
+	// The file name is random, but the directory holding it must not be
+	// traversable either — a world-executable temp dir is what lets another
+	// user stat their way to it.
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat staged dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("staged dir mode = %04o, want 0700", got)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(body) != "new-session -d\n" {
+		t.Errorf("staged file body = %q", body)
+	}
+	cleanup()
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("staged dir survived cleanup: %v", err)
+	}
+}
+
+// TestSweepStaleStagedDirs covers the crash-between-create-and-cleanup case: a
+// process killed before its deferred remove runs leaves a secret-bearing file
+// with nothing to collect it, so the next session create does.
+func TestSweepStaleStagedDirs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	old := time.Now().Add(-2 * staleStagedDirAge)
+
+	stale := filepath.Join(dir, stagedDirPrefix+"orphan")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, stagedFileName), []byte("new-session -e K=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := filepath.Join(dir, stagedDirPrefix+"inflight")
+	if err := os.Mkdir(fresh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Not ours: an unrelated temp directory of the same age must survive.
+	bystander := filepath.Join(dir, "someone-elses-dir")
+	if err := os.Mkdir(bystander, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bystander, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepStaleStagedDirs()
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale staged dir survived the sweep: %v", err)
+	}
+	for _, keep := range []string{fresh, bystander} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("sweep removed %s, which it must not touch: %v", filepath.Base(keep), err)
+		}
+	}
+}
+
+// TestNewSessionSweepsStaleStagedDirs pins the sweep to the moment a session is
+// created, which is the only moment the staging directory is known to be in
+// use.
+func TestNewSessionSweepsStaleStagedDirs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	stale := filepath.Join(dir, stagedDirPrefix+"orphan")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, stagedFileName), []byte("new-session -e K=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleStagedDirAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	tm := NewTmux()
+	tm.exec = &fakeExecutor{}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-sweep", "", "claude",
+		map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-test-not-a-real-credential"}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("session create did not sweep the orphaned staged dir: %v", err)
+	}
+}
+
+func TestTmuxQuote(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"plain", "'plain'"},
+		{"", "''"},
+		{"a b", "'a b'"},
+		{"it's", `'it'\''s'`},
+		{"two\nlines", "'two\nlines'"},
+		{`$HOME #{x} "q" \z;`, `'$HOME #{x} "q" \z;'`},
+	} {
+		if got := tmuxQuote(tc.in); got != tc.want {
+			t.Errorf("tmuxQuote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTmuxCommandLineQuotesEveryArgument(t *testing.T) {
+	got := tmuxCommandLine([]string{"new-session", "-d", "-s", "s", "-e", `K=a'b$c#d`, "agent --x"})
+	want := `'new-session' '-d' '-s' 's' '-e' 'K=a'\''b$c#d' 'agent --x'`
+	if got != want {
+		t.Errorf("tmuxCommandLine =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestNoSecretEnvValueReachesAnyTmuxArgv is the property guard across every
+// local-tmux path that carries env values: session creation AND the later
+// set-environment used by SetMeta. Any value whose key is not on the argv allow
+// list must be absent from every tmux argv, however it is spelled.
+func TestNoSecretEnvValueReachesAnyTmuxArgv(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	secrets := map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":    "sk-ant-canary-1",
+		"OPENAI_API_KEY":          "sk-openai-canary-2",
+		"GC_INSTANCE_TOKEN":       "instance-canary-3",
+		"SOME_FUTURE_UNKNOWN_VAR": "future-canary-'quoted' $x #{y}\nline2",
+	}
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	env := map[string]string{"GC_RIG": "rig-a"}
+	for k, v := range secrets {
+		env[k] = v
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-prop", "/work", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	for k, v := range secrets {
+		if err := tm.SetEnvironment("gc-test-prop", k, v); err != nil {
+			t.Fatalf("SetEnvironment(%s): %v", k, err)
+		}
+	}
+	if len(fake.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+	for _, call := range fake.calls {
+		joined := strings.Join(call, "\x00")
+		for k, v := range secrets {
+			if strings.Contains(joined, v) {
+				t.Fatalf("value of %s reached tmux argv", k)
+			}
+		}
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(os.TempDir(), stagedDirPrefix+"*")); len(leftovers) != 0 {
+		t.Errorf("staged directories survived: %v", leftovers)
+	}
+}
+
+// TestSetEnvironmentStagesSecretValue pins the mechanism: a secret value is
+// set by sourcing a command file (no start-server — set-environment must not
+// spawn a server for a session that cannot exist on it).
+func TestSetEnvironmentStagesSecretValue(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "GC_INSTANCE_TOKEN", "tok-secret"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("tmux calls = %v, want exactly one source-file", fake.calls)
+	}
+	call := fake.calls[0]
+	if call[len(call)-2] != "source-file" || slices.Contains(call, "start-server") {
+		t.Errorf("secret SetEnvironment did not source a command file: %v", call)
+	}
+}
+
+// TestSetEnvironmentKeepsInertValueOnArgv keeps the common SetMeta path
+// (identity, epochs) file-free.
+func TestSetEnvironmentKeepsInertValueOnArgv(t *testing.T) {
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "GC_SESSION_ID", "gc-123"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+	want := []string{"set-environment", "-t", "=gc-test-meta", "GC_SESSION_ID", "gc-123"}
+	if got := fake.calls[0]; !slices.Equal(got[len(got)-len(want):], want) {
+		t.Errorf("inert SetEnvironment argv = %v, want suffix %v", got, want)
+	}
+}
+
+// TestSetEnvironmentFailsClosedWhenFileUnwritable proves SetEnvironment cannot
+// degrade to the argv leak when staging fails.
+func TestSetEnvironmentFailsClosedWhenFileUnwritable(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "OPENAI_API_KEY", "sk-test"); err == nil {
+		t.Fatal("SetEnvironment must fail when the command file cannot be staged")
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("no tmux command may run once staging failed: %v", fake.calls)
+	}
+}
+
+// TestSecretSessionEnvPreservesErrSessionExists keeps the duplicate-session
+// sentinel intact through the staged command-file path, so EnsureSessionFresh
+// and its callers still recognize an existing session.
 func TestSecretSessionEnvPreservesErrSessionExists(t *testing.T) {
 	exec := &fakeExecutor{err: ErrSessionExists}
 	tm := NewTmux()
@@ -63,27 +326,8 @@ func TestSecretSessionEnvPreservesErrSessionExists(t *testing.T) {
 	}
 }
 
-func TestStageTmuxCommandFileIsPrivateAndCleansUp(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	path, cleanup, err := stageTmuxCommandFile("new-session -d")
-	if err != nil {
-		t.Fatalf("stage: %v", err)
-	}
-	if got, err := os.Stat(path); err != nil || got.Mode().Perm() != 0o600 {
-		t.Fatal("staged file must be mode 0600")
-	}
-	if got, err := os.Stat(filepath.Dir(path)); err != nil || got.Mode().Perm() != 0o700 {
-		t.Fatal("staged directory must be mode 0700")
-	}
-	if body, err := os.ReadFile(path); err != nil || string(body) != "new-session -d\n" {
-		t.Fatal("staged command was not byte-identical")
-	}
-	cleanup()
-	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
-		t.Fatal("staged directory survived cleanup")
-	}
-}
-
+// TestStageTmuxCommandFileConcurrentCreation proves concurrent starters each
+// get their own private staging path.
 func TestStageTmuxCommandFileConcurrentCreation(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	const workers = 24
@@ -119,92 +363,4 @@ func TestStageTmuxCommandFileConcurrentCreation(t *testing.T) {
 	if len(seen) != workers {
 		t.Fatalf("created %d paths, want %d", len(seen), workers)
 	}
-}
-
-func TestSweepStaleStagedDirs(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("TMPDIR", dir)
-	old := time.Now().Add(-2 * staleStagedDirAge)
-	stale := filepath.Join(dir, stagedDirPrefix+"orphan")
-	fresh := filepath.Join(dir, stagedDirPrefix+"inflight")
-	bystander := filepath.Join(dir, "bystander")
-	for _, path := range []string{stale, fresh, bystander} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(bystander, old, old); err != nil {
-		t.Fatal(err)
-	}
-	sweepStaleStagedDirs()
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatal("stale staged directory survived")
-	}
-	for _, path := range []string{fresh, bystander} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("sweep removed %s", filepath.Base(path))
-		}
-	}
-}
-
-func TestNewSessionSweepsStaleStagedDirs(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("TMPDIR", dir)
-	stale := filepath.Join(dir, stagedDirPrefix+"orphan")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, stagedFileName), []byte("new-session -e K=generated-canary\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-2 * staleStagedDirAge)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-	tm := NewTmux()
-	tm.exec = &fakeExecutor{}
-	if err := tm.NewSessionWithCommandAndEnv("gc-sweep-call", "", "claude", map[string]string{"OPENAI_API_KEY": "generated-secret-canary"}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatal("secret session creation did not sweep stale staging directory")
-	}
-}
-
-func TestTmuxCommandFileQuoting(t *testing.T) {
-	args := []string{"new-session", "-e", "K=a'b$c#d;\\x\nnext", `agent "quoted"`}
-	want := "'new-session' '-e' 'K=a'\\''b$c#d;\\x\nnext' 'agent \"quoted\"'"
-	if got := tmuxCommandLine(args); got != want {
-		t.Errorf("tmux command quoting changed")
-	}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
-}
-
-func containsArgs(args []string, want ...string) bool {
-	for index := range args {
-		if len(args)-index >= len(want) {
-			match := true
-			for offset := range want {
-				if args[index+offset] != want[offset] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-		}
-	}
-	return false
 }

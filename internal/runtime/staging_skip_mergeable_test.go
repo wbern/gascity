@@ -27,7 +27,7 @@ func codexHooksOverlaySrc(t *testing.T) string {
 }
 
 // TestStageProviderOverlayDirSkippingMergeableSkipsCodexHooks is the horizon
-// guard (gcw-mnck invariant #3): the build_desired_state staging entry point
+// guard (invariant #3): the build_desired_state staging entry point
 // must skip reconciler-owned mergeable files while still staging non-mergeable
 // siblings, so hooks.Install remains the sole writer in the home dir.
 func TestStageProviderOverlayDirSkippingMergeableSkipsCodexHooks(t *testing.T) {
@@ -48,7 +48,7 @@ func TestStageProviderOverlayDirSkippingMergeableSkipsCodexHooks(t *testing.T) {
 }
 
 // TestStageProviderOverlayDirStagesCodexHooks locks the no-regression contract
-// (gcw-mnck invariant #3 / #2): the runtime task-worktree path (plain
+// (invariant #3 / #2): the runtime task-worktree path (plain
 // StageProviderOverlayDir, used by StageSessionWorkDir) still writes the codex
 // hook file, which is the only hook source for live task sessions.
 func TestStageProviderOverlayDirStagesCodexHooks(t *testing.T) {
@@ -66,7 +66,7 @@ func TestStageProviderOverlayDirStagesCodexHooks(t *testing.T) {
 }
 
 // TestStageSessionWorkDirStagesFunctionalCodexHooks is the no-regression test
-// (gcw-mnck #2) at the session-staging boundary: StageSessionWorkDir, invoked
+// (invariant #2) at the session-staging boundary: StageSessionWorkDir, invoked
 // on every codex task-session Start, must still write a functional
 // .codex/hooks.json (SessionStart present). The fix must not touch this path.
 func TestStageSessionWorkDirStagesFunctionalCodexHooks(t *testing.T) {

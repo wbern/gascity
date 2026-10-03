@@ -156,11 +156,11 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		// Live so bd's raw --status=open filter drops blocked/deferred rows
 		// before mapBdStatus collapses them into "open" and the check reports
 		// work the instance is correct to leave alone (same tradeoff as
-		// listOpenForControllerDemandLive). TierBoth because routed work on both
-		// issues and wisps tiers must be read.
+		// listOpenForControllerDemandLive). FederatedReadTier because a
+		// relocated class leg answers at exactly the tier asked.
 		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Status:   "open",
-			TierMode: beads.TierBoth,
+			TierMode: beads.FederatedReadTier,
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
 		})
 		if err != nil {

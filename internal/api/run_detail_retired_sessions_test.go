@@ -139,16 +139,6 @@ type singleCityPaths map[string]string
 
 func (m singleCityPaths) CityPath(n string) (string, bool) { p, ok := m[n]; return p, ok }
 
-// Cities satisfies dashboardbff.CityResolver, which in this tree also drives
-// Plane.Start's startup eager-warm of each served city's run-view fold.
-func (m singleCityPaths) Cities() []dashboardbff.CityRef {
-	refs := make([]dashboardbff.CityRef, 0, len(m))
-	for name, path := range m {
-		refs = append(refs, dashboardbff.CityRef{Name: name, Path: path})
-	}
-	return refs
-}
-
 // writeRetiredRunEventLog writes a graph.v2 run root plus one closed step per session id
 // into the city's append-only event log, the source the run tailer folds.
 func writeRetiredRunEventLog(t *testing.T, cityPath string, sessionIDs []string) {

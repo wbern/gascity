@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestDoAgentListJSON(t *testing.T) {
@@ -79,6 +80,45 @@ sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
 	if worker.WorkQuery != "bd ready --label=frontend" || worker.SlingQuery == "" {
 		t.Fatalf("worker routing fields = %+v", worker)
 	}
+}
+
+func TestDoAgentListJSONUsesRuntimeRigSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "frontend"
+path = "/rig/frontend"
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "frontend", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doAgentList(fsys.OSFS{}, cityPath, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doAgentList --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result AgentListJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	for _, item := range result.Agents {
+		if item.QualifiedName == "frontend/worker" {
+			if !item.Suspended {
+				t.Fatalf("frontend/worker = %+v, want runtime rig suspension", item)
+			}
+			return
+		}
+	}
+	t.Fatalf("frontend/worker missing from %+v", result.Agents)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +403,31 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 	if _, ok := resolveAgentIdentity(cfg, "worker-1", ""); ok {
 		t.Fatal("resolveAgentIdentity(worker-1) = true, want false for canonical singleton pool")
+	}
+}
+
+// TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a
+// regression for #4843: a binding-qualified, city-scoped pool instance like
+// "testpack.worker-1" must resolve to its "testpack.worker" pool. The
+// CLI-local resolveAgentIdentity gated its Step 2b pool-instance check on
+// strings.Contains(input, "/"), so the dot-qualified form was never routed
+// to resolvePoolInstance — even though the shared resolver helper
+// (internal/agentutil/resolve.go) already handles it via ContainsAny(input, "/.").
+func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", BindingName: "testpack", Dir: "", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}
+	a, ok := resolveAgentIdentity(cfg, "testpack.worker-1", "")
+	if !ok {
+		t.Fatalf("resolveAgentIdentity(testpack.worker-1) = (_, false), want the worker pool instance")
+	}
+	if a.Name != "worker-1" {
+		t.Fatalf("resolveAgentIdentity(testpack.worker-1) resolved Name = %q, want %q", a.Name, "worker-1")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "testpack.worker-3", ""); ok {
+		t.Fatal("resolveAgentIdentity(testpack.worker-3) = true, want false: exceeds max_active_sessions=2")
 	}
 }
 
@@ -1621,7 +1686,7 @@ func TestNamepoolPoolWorkerClaimTargetsPoolNotInstance(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolveAgentIdentity(%q) failed; the pool template must resolve", pool)
 	}
-	q := poolAgent.EffectiveWorkQueryForBeads(cfg.Beads)
+	q := poolAgent.EffectiveWorkQueryFor(config.QueryTopology{Beads: cfg.Beads})
 	if !strings.Contains(q, pool) {
 		t.Fatalf("pool work query does not target the pool %q:\n%s", pool, q)
 	}
@@ -1665,7 +1730,7 @@ func TestNumericPoolInstanceClaimTargetsPool(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolveAgentIdentity(%q) failed; a numeric pool instance must resolve", pool+"-1")
 	}
-	q := inst.EffectiveWorkQueryForBeads(cfg.Beads)
+	q := inst.EffectiveWorkQueryFor(config.QueryTopology{Beads: cfg.Beads})
 	if !strings.Contains(q, pool) {
 		t.Fatalf("numeric pool instance work query does not target the pool %q:\n%s", pool, q)
 	}
@@ -1736,7 +1801,7 @@ namepool = "namepools/mad-max.txt"
 	if !ok {
 		t.Fatalf("resolveAgentIdentity(%q) failed; the pool template must resolve", pool)
 	}
-	q := resolved.EffectiveWorkQueryForBeads(cfg.Beads)
+	q := resolved.EffectiveWorkQueryFor(config.QueryTopology{Beads: cfg.Beads})
 	if !strings.Contains(q, pool) {
 		t.Fatalf("pool work query does not target the pool %q:\n%s", pool, q)
 	}

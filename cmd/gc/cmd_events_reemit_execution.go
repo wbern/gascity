@@ -91,7 +91,7 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 		return fmt.Errorf("opening city work store: %w", err)
 	}
 	projection, err := executionevent.ProjectCurrent(
-		beads.GraphStore{Store: resolveGraphStore(store, cfg, cityPath, nil)},
+		beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)},
 		beads.WorkStore{Store: store},
 		strings.TrimSpace(runID),
 	)
@@ -130,7 +130,7 @@ func openExistingExecutionReemitStore(ctx context.Context, cityPath string, cfg 
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	switch {
 	case provider == "file":
-		store, err := openExistingScopeLocalFileStore(scopeRoot)
+		store, err := openExistingScopeLocalFileStore(scopeRoot, cityPath)
 		if err != nil {
 			return nil, fmt.Errorf("opening existing file store: %w", err)
 		}

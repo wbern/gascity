@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -225,5 +226,49 @@ func TestAsyncStartFinalCommitStaleCleanup(t *testing.T) {
 				t.Fatalf("stale completion overwrote rollback: status=%s state=%s", got.Status, got.Metadata["state"])
 			}
 		})
+	}
+}
+
+func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(1)}}}
+	now := time.Now()
+	bp := newAgentBuildParams("test-city", "/city", cfg, sp, now, store, io.Discard)
+	bp.sessionBeads = newSessionBeadSnapshot(nil)
+	name := poolIdentitySessionName("worker", "worker")
+	if err := sp.Start(t.Context(), name, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta(name, "GC_SESSION_ID", "retired-owner"); err != nil {
+		t.Fatal(err)
+	}
+	create := func() (sessionpkg.Info, error) {
+		bp.sessionBeads = newSessionBeadSnapshot(nil)
+		return createPoolSessionBeadWithGuardedAliasUsingLock(bp, &cfg.Agents[0], "worker", "worker", 0, nil,
+			func(_ string, _ []string, fn func() error) error { return fn() })
+	}
+	for range 5 {
+		info, err := create()
+		if !errors.Is(err, errPoolSessionNameUnavailable) {
+			t.Errorf("occupied singleton create: err=%v, want name unavailable", err)
+		}
+		if info.ID != "" {
+			// Model the old retry loop, which invalidates each new pending bead.
+			closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+		}
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || len(all) != 0 {
+		t.Fatalf("occupied singleton minted %d beads: %v", len(all), err)
+	}
+	if owner, err := sp.GetMeta(name, "GC_SESSION_ID"); err != nil || owner != "retired-owner" || !sp.IsRunning(name) {
+		t.Fatal("retry changed the occupying runtime")
+	}
+	if err := sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := create(); err != nil || info.ID == "" {
+		t.Fatalf("vacated singleton did not recover: %v", err)
 	}
 }

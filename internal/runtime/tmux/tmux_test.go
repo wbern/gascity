@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -31,6 +33,19 @@ var testSocketName = fmt.Sprintf("gctest-%d-%d", os.Getpid(), time.Now().UnixNan
 func hasTmux() bool {
 	_, err := exec.LookPath("tmux")
 	return err == nil
+}
+
+// privateSocketName returns a short, unique, gctest-prefixed socket name for a
+// test that needs its own tmux SERVER — one forked from THIS process, so the
+// server's global environment is the test's own. The package socket hands back a
+// server started by whichever test ran first, which never saw the test's env.
+//
+// Short on purpose: the full socket path must fit a unix sun_path (~107 bytes),
+// and suffixing testSocketName (already ~34 chars under a per-run temp root)
+// overflows it — which tmux reports as the thoroughly misleading "no server
+// running" from new-session.
+func privateSocketName(tag string) string {
+	return fmt.Sprintf("gctest-%d-%s%d", os.Getpid(), tag, time.Now().UnixNano()%1e9)
 }
 
 // testTmux returns a Tmux instance that uses an isolated test socket.
@@ -1958,8 +1973,8 @@ func TestSetGetRemoveEnvironment(t *testing.T) {
 
 	// Get should now fail (variable unset).
 	_, err = tm.GetEnvironment(sessionName, "GC_TEST_VAR")
-	if !errors.Is(err, errEnvironmentUnset) {
-		t.Errorf("GetEnvironment after RemoveEnvironment error = %v, want errEnvironmentUnset", err)
+	if !errors.Is(err, errEnvUnset) {
+		t.Errorf("GetEnvironment after RemoveEnvironment error = %v, want errEnvUnset", err)
 	}
 
 	// Removing a variable that doesn't exist should not error.
@@ -2146,6 +2161,208 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
 }
 
+func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 3 {
+		t.Fatalf("paste-buffer calls = %d, want 3: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 3 {
+		t.Fatalf("paste-buffer calls = %d, want 3: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 1 {
+		t.Fatalf("paste-buffer calls = %d, want 1: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var pasteCalls int
+	for _, call := range fe.calls {
+		if strings.Contains("\x00"+strings.Join(call, "\x00")+"\x00", "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if pasteCalls != 1 {
+		t.Fatalf("paste-buffer calls = %d, want 1: %#v", pasteCalls, fe.calls)
+	}
+}
+
+func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *testing.T) {
+	errs := make([]error, 6)
+	errs[3] = errors.New("not in a mode")
+	fe := &fakeExecutor{errs: errs}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	text := strings.Repeat("x", copilotMaxPasteBytes*2)
+	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	var loadCalls, pasteCalls int
+	for _, call := range fe.calls {
+		joined := "\x00" + strings.Join(call, "\x00") + "\x00"
+		if strings.Contains(joined, "\x00load-buffer\x00") {
+			loadCalls++
+		}
+		if strings.Contains(joined, "\x00paste-buffer\x00") {
+			pasteCalls++
+		}
+	}
+	if loadCalls != 3 || pasteCalls != 3 {
+		t.Fatalf("load/paste calls = %d/%d, want 3/3: %#v", loadCalls, pasteCalls, fe.calls)
+	}
+}
+
+func TestNudgeStartupWithoutProviderUsesOrdinaryDelivery(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := testTmux()
+	sessionName := "gt-test-startup-no-provider-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", nil); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// Wait for the pane to be running `cat -v` rather than the launching shell.
+	shellsToExclude := []string{"bash", "zsh", "sh"}
+	if err := tm.WaitForCommand(context.Background(), sessionName, shellsToExclude, 5*time.Second); err != nil {
+		t.Fatalf("waiting for pane command: %v", err)
+	}
+
+	if err := tm.nudgeStartupSession(sessionName, "startup prompt"); err != nil {
+		t.Fatalf("nudgeStartupSession without GC_PROVIDER: %v", err)
+	}
+}
+
+func TestSplitPasteTextPreservesUTF8AndPrefersNewlines(t *testing.T) {
+	text := "alpha\n" + strings.Repeat("界", 8) + "\nomega"
+	chunks := splitPasteText(text, 10)
+
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %q, want %q", got, text)
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid UTF-8: %q", i, chunk)
+		}
+		if len(chunk) > 10 {
+			t.Fatalf("chunk %d size = %d, want <= 10", i, len(chunk))
+		}
+	}
+	if chunks[0] != "alpha\n" {
+		t.Fatalf("first chunk = %q, want newline boundary %q", chunks[0], "alpha\\n")
+	}
+}
+
+func TestSplitPasteTextPreservesInvalidUTF8AndMakesProgress(t *testing.T) {
+	text := string([]byte{0x80, 0x80, 0x80, 0x80, 0x80})
+	chunks := splitPasteText(text, 2)
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %v, want %v", []byte(got), []byte(text))
+	}
+	for i, chunk := range chunks {
+		if len(chunk) == 0 || len(chunk) > 2 {
+			t.Fatalf("chunk %d size = %d, want 1..2", i, len(chunk))
+		}
+	}
+}
+
+func TestSendPasteChunksPausesBetweenChunks(t *testing.T) {
+	if copilotPasteChunkDelay != 500*time.Millisecond {
+		t.Fatalf("copilotPasteChunkDelay = %s, want 500ms", copilotPasteChunkDelay)
+	}
+	var sent []string
+	pauses := 0
+	err := sendPasteChunks([]string{"one", "two", "three"}, func(chunk string) error {
+		sent = append(sent, chunk)
+		return nil
+	}, func() { pauses++ })
+	if err != nil {
+		t.Fatalf("sendPasteChunks() = %v, want nil", err)
+	}
+	if got := strings.Join(sent, ""); got != "onetwothree" {
+		t.Fatalf("sent text = %q, want %q", got, "onetwothree")
+	}
+	if pauses != 2 {
+		t.Fatalf("pauses = %d, want 2", pauses)
+	}
+}
+
+func TestSendPasteChunksMarksPartialDelivery(t *testing.T) {
+	sends := 0
+	err := sendPasteChunks([]string{"one", "two"}, func(string) error {
+		sends++
+		if sends == 2 {
+			return errors.New("paste failed")
+		}
+		return nil
+	}, func() {})
+	if !errors.Is(err, errPartialPasteDelivery) {
+		t.Fatalf("sendPasteChunks() error = %v, want errPartialPasteDelivery", err)
+	}
+}
+
 func assertTmuxCommand(t *testing.T, args []string, want string) {
 	t.Helper()
 
@@ -2172,10 +2389,47 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	// Give shell a moment to initialize
 	time.Sleep(200 * time.Millisecond)
 
-	// NudgeSession should succeed on a ready session
+	// NudgeSession should succeed on a ready session. A plain shell pane has
+	// no busy-state indicator, so this exercises the fallback path, which
+	// reports nil on a successful send regardless (see tmux.go:NudgeSession).
 	err := tm.NudgeSession(sessionName, "test message")
 	if err != nil {
 		t.Errorf("NudgeSession() = %v, want nil", err)
+	}
+}
+
+func TestNudgeSessionFallbackRecordsUnconfirmedDiagnostic(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	runtimeDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.RuntimeDir = runtimeDir
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := "gt-test-nudge-unconfirmed-diag-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(200 * time.Millisecond)
+
+	// A plain shell pane (no GC_PROVIDER) takes the fallback path, which can
+	// never confirm delivery. The send must still report success...
+	if err := tm.NudgeSession(sessionName, "test message"); err != nil {
+		t.Fatalf("NudgeSession() = %v, want nil", err)
+	}
+
+	// ...while recording a best-effort diagnostic so the gap stays
+	// observable (bead dr-6siig DoD option (b)).
+	path := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir), sessionName, "nudge-unconfirmed.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected diagnostic file at %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), "test message") {
+		t.Errorf("diagnostic file = %q, want it to contain the nudge text", string(data))
 	}
 }
 
@@ -2196,7 +2450,10 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// codex is submit-verify eligible, and the fake pane here is `cat -v`, which
+	// can never show a busy indicator — so ErrNudgeSubmitUnconfirmed is the
+	// correct outcome, exactly as it is for claude below.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2205,9 +2462,7 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	if strings.Contains(out, "^[") {
-		t.Fatalf("CapturePaneAll contained Escape for codex nudge:\n%s", out)
-	}
+	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
 }
 
 func TestNudgeSessionSkipsEscapeForCodexWithoutProviderEnv(t *testing.T) {
@@ -2257,7 +2512,7 @@ func main() {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2266,8 +2521,32 @@ func main() {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	if strings.Contains(out, "^[") {
-		t.Fatalf("CapturePaneAll contained Escape for codex nudge without provider env:\n%s", out)
+	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
+}
+
+// assertCodexEscapeIsPartOfTheSubmitSequence is what these two rows guard now
+// that codex has a declared submit sequence.
+//
+// They used to assert that NO Escape reached a codex pane. That was true when
+// codex's submit was a lone Enter and the only Escape on offer was the
+// pre-submit one at step 3 of NudgeSession, which codex skips. It is false by
+// design since upstream #4706: codex buffers a send-keys burst as a paste, so a
+// lone trailing Enter is swallowed as a composer newline, and codex's actual
+// submit is Escape then Enter (nudgeSubmitKeySequences).
+//
+// What still matters, and what these rows now pin against a real pane, is that
+// codex never receives Escape-Escape — the step-3 Escape plus the submit
+// sequence's would be exactly that, and codex binds it to backtrack rather than
+// submit. The COUNT is deliberately not pinned: a never-busy fake pane makes
+// submitEnterAndConfirm re-send, so the pane legitimately sees one Escape per
+// attempt. Adjacency is the invariant.
+func assertCodexEscapeIsPartOfTheSubmitSequence(t *testing.T, out string) {
+	t.Helper()
+	if !strings.Contains(out, "^[") {
+		t.Fatalf("codex pane saw no Escape; its submit sequence is Escape then Enter (#4706):\n%s", out)
+	}
+	if strings.Contains(out, "^[^[") {
+		t.Fatalf("codex pane saw Escape-Escape, which codex reads as backtrack rather than submit:\n%s", out)
 	}
 }
 
@@ -2534,6 +2813,77 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 			got := paneContainsBusyIndicator(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneContainsBusyIndicator(%v) = %v, want %v", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPaneShowsDrainedComposerDefaultPrefix covers the unconfigured-session
+// case: an empty ready-prompt prefix falls back to DefaultReadyPromptPrefix.
+func TestPaneShowsDrainedComposerDefaultPrefix(t *testing.T) {
+	longSent := strings.Repeat("x", 50)
+	longSentFirst40 := strings.Repeat("x", 40)
+
+	tests := []struct {
+		name  string
+		lines []string
+		sent  string
+		want  bool
+	}{
+		{"nil lines", nil, "hello", false},
+		{"no ready-prompt line observed", []string{"some output", "still no prompt"}, "hello", false},
+		{"bare drained composer", []string{"❯ "}, "hello", true},
+		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
+		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
+		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		{
+			"long draft truncated to pane width still detected via 40-rune compare",
+			[]string{"❯ " + longSentFirst40},
+			longSent,
+			false,
+		},
+		{
+			"long draft's composer drained",
+			[]string{"❯ "},
+			longSent,
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier draft, now bare",
+			[]string{"❯ hello", "✻ Worked for 2s", "❯ "},
+			"hello",
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier bare, now drafted",
+			[]string{"❯ ", "some noise", "❯ hello"},
+			"hello",
+			false,
+		},
+		{
+			"real captured idle mayor pane: bare composer beneath a done marker",
+			[]string{"✻ Worked for 1m 49s", "", "❯ ", "  bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, still drafted",
+			[]string{"❯ first line of reminder"},
+			"\nfirst line of reminder\nsecond line",
+			false,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, composer drained",
+			[]string{"❯ "},
+			"\nfirst line of reminder\nsecond line",
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := paneShowsDrainedComposer(tt.lines, tt.sent, "")
+			if got != tt.want {
+				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}
 		})
 	}
@@ -3315,4 +3665,56 @@ func processAlive(pid string) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil || err == syscall.EPERM
+}
+
+// TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild is the
+// child-level proof behind convergence.ScrubTokenEnv and
+// processenv.ControllerOnlyEnvKeys: the controller token is withheld from agent
+// panes by an EMPTY value, not by dropping the key.
+//
+// A pane's shell inherits the tmux SERVER's global environment, which holds
+// whatever the controller exported when the server started. A key merely absent
+// from the -e set therefore arrives in the child carrying the controller's real
+// value — asserting on the env map alone cannot see that. Only the empty value
+// produces the `env -u` prefix that makes the var genuinely absent from the
+// child process.
+func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the server it starts forks from THIS
+	// process and its global environment carries the token. The package socket
+	// would hand back a server started by an earlier test, which never saw it.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("tp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "child-token")
+	sessionName := "gc-test-token-pin"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	command := fmt.Sprintf(`sh -c 'printf %%s "[${%s-ABSENT}]" > %s; sleep 30'`, tokenVar, report)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, command, map[string]string{tokenVar: ""}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	// Bounded poll on the pane's own report — the condition this test is about —
+	// rather than elapsed wall time. A leak shows up as a timeout whose message
+	// carries what the pane actually saw.
+	waitForMarker(t, report, "[ABSENT]")
+
+	got, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("reading pane report: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("pane child received the controller token: %s", got)
+	}
 }

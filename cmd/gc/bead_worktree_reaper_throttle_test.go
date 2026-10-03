@@ -45,7 +45,7 @@ func TestReapClosedBeadWorktrees_HonoursPerPassCap(t *testing.T) {
 	cityPath, cfg, stores := reapThrottleFixture(t, 5, 2)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 2 {
 		t.Fatalf("Reaped = %d entries, want 2 (the cap)\nstderr:\n%s", len(report.Reaped), stderr.String())
@@ -59,7 +59,7 @@ func TestReapClosedBeadWorktrees_DeferredByCapIsReported(t *testing.T) {
 	cityPath, cfg, stores := reapThrottleFixture(t, 5, 2)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	deferred := 0
 	for _, d := range report.Protected {
@@ -81,7 +81,7 @@ func TestReapClosedBeadWorktrees_ZeroCapMeansUnlimited(t *testing.T) {
 	cityPath, cfg, stores := reapThrottleFixture(t, 4, 0)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 4 {
 		t.Fatalf("Reaped = %d, want all 4 with the cap disabled\nstderr:\n%s", len(report.Reaped), stderr.String())
@@ -95,7 +95,7 @@ func TestReapClosedBeadWorktrees_DryRunIgnoresTheCap(t *testing.T) {
 	cityPath, cfg, stores := reapThrottleFixture(t, 5, 2)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, true, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, true, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 5 {
 		t.Fatalf("dry-run would-reap = %d, want all 5: a cap paces removals, it must not hide the backlog", len(report.Reaped))
@@ -113,7 +113,7 @@ func TestReapClosedBeadWorktrees_PacesBetweenRemovals(t *testing.T) {
 	t.Cleanup(func() { reapPaceFn = prev })
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 3 {
 		t.Fatalf("Reaped = %d, want 3", len(report.Reaped))
@@ -135,7 +135,7 @@ func TestReapClosedBeadWorktrees_DryRunDoesNotPace(t *testing.T) {
 	t.Cleanup(func() { reapPaceFn = prev })
 
 	var stderr bytes.Buffer
-	reapClosedBeadWorktrees(cityPath, cfg, stores, nil, true, events.Discard, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, stores, nil, true, events.Discard, nil, &stderr)
 
 	if paced != 0 {
 		t.Errorf("pace hook called %d times under dry-run, want 0", paced)

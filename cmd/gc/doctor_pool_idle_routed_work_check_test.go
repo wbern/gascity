@@ -284,7 +284,7 @@ func TestPoolIdleRoutedWorkCheckOKWhenRoutedWorkIsBlockedInBackingStore(t *testi
 
 // poolIdleRoutedWorkTierStore serves routed work that lives on the wisp tier: it
 // answers the routed-work query only when the caller asks for both tiers, the
-// way a relocated coordination-class store does (see beads.TierBoth).
+// way a relocated coordination-class store does (see beads.FederatedReadTier).
 // A read left at the TierIssues zero value gets nothing back.
 type poolIdleRoutedWorkTierStore struct {
 	beads.Store

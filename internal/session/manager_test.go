@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -64,7 +63,7 @@ func awaitStaleKeyWaiterEntry(t *testing.T, waiter *manualStaleKeyDetectionWaite
 		if got != want {
 			t.Fatalf("stale-key waiter entered for %q, want %q", got, want)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for stale-key waiter entry for %q", want)
 	}
 }
@@ -74,7 +73,7 @@ func awaitSessionOperation(t *testing.T, result <-chan error, description string
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(goroutineHangBudget):
 		t.Fatalf("timed out waiting for %s", description)
 		return nil
 	}
@@ -1773,7 +1772,7 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	mgr := NewManagerWithOptions(store, sp)
 
 	info, err := mgr.CreateSession(
-		context.Background(), CreateOptions{Alias: "mayor", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--mayor", Template: "reviewer", Title: "Mayor", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GC_AGENT": "stale"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			"configured_named_session":  "true",
 			"configured_named_identity": "mayor",
 			"session_origin":            "named",
@@ -1800,10 +1799,39 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 		"GC_TEMPLATE":       "reviewer",
 		"GC_SESSION_ORIGIN": "named",
 		"GC_AGENT":          "mayor",
+		"BEADS_ACTOR":       "mayor",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
+	}
+	if !strings.Contains(env["GIT_SSH_COMMAND"], "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", env["GIT_SSH_COMMAND"])
+	}
+}
+
+func TestCreateMergesSSHKeepaliveIntoExistingGitSSHCommand(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--worker", Template: "worker", Title: "Worker", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GIT_SSH_COMMAND": "ssh -i /keys/id -o IdentitiesOnly=yes"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+			"session_origin": "ephemeral",
+		}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cfg := sp.LastStartConfig("test-city--worker")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	got := cfg.Env["GIT_SSH_COMMAND"]
+	if !strings.Contains(got, "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want keepalive", got)
+	}
+	if !strings.Contains(got, "-i /keys/id") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want original key flags", got)
 	}
 }
 
@@ -1894,10 +1922,11 @@ func TestCreateAliaslessMultiSessionUsesConcreteRuntimeIdentity(t *testing.T) {
 	for key, want := range map[string]string{
 		"GC_SESSION_ID":     info.ID,
 		"GC_SESSION_NAME":   "ant-adhoc-123",
-		"GC_ALIAS":          "demo/ant-adhoc-123",
+		"GC_ALIAS":          "",
 		"GC_TEMPLATE":       "demo/ant",
 		"GC_SESSION_ORIGIN": "manual",
-		"GC_AGENT":          "demo/ant-adhoc-123",
+		"GC_AGENT":          "ant-adhoc-123",
+		"BEADS_ACTOR":       "ant-adhoc-123",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
@@ -2822,6 +2851,48 @@ func TestRename(t *testing.T) {
 	}
 }
 
+// TestUpdatePresentationRefusesBlankTitle guards the bead store's non-empty
+// title rule at the boundary that takes the title from user input. Without it a
+// blank rename either reaches the store and comes back as a storage validation
+// error (bd: "title is required", surfaced as a 500 by the API) or, on stores
+// that do not validate, silently blanks the session title.
+func TestUpdatePresentationRefusesBlankTitle(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "old-alias", ExplicitName: "", Template: "helper", Title: "old title", Command: "echo test", WorkDir: "/tmp", Provider: "test", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		err := mgr.Rename(info.ID, blank)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("Rename(%q) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+		// A blank title must also refuse a combined presentation update, so the
+		// alias half is not applied without the title half.
+		nextAlias := "new-alias"
+		err = mgr.UpdatePresentation(info.ID, &blank, &nextAlias)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("UpdatePresentation(title=%q, alias) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Title != "old title" {
+		t.Fatalf("Title = %q, want the original title untouched", bead.Title)
+	}
+	if bead.Metadata["alias"] != "old-alias" {
+		t.Fatalf("alias = %q, want the original alias untouched", bead.Metadata["alias"])
+	}
+}
+
 func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2838,12 +2909,14 @@ func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 		t.Fatalf("UpdatePresentation(alias): %v", err)
 	}
 
-	got, err := sp.GetMeta(info.SessionName, "GC_ALIAS")
-	if err != nil {
-		t.Fatalf("GetMeta(GC_ALIAS): %v", err)
-	}
-	if got != nextAlias {
-		t.Fatalf("GC_ALIAS = %q, want %q", got, nextAlias)
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "BEADS_ACTOR"} {
+		got, err := sp.GetMeta(info.SessionName, key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != nextAlias {
+			t.Fatalf("%s = %q, want %q", key, got, nextAlias)
+		}
 	}
 
 	bead, err := store.Get(info.ID)
@@ -4782,6 +4855,100 @@ func TestTranscriptPathSkipsAmbiguousWorkDirFallback(t *testing.T) {
 	}
 }
 
+// TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous pins the reason
+// codes behind an empty transcript path. TranscriptPath returns ("", nil) for
+// three unrelated situations, so a caller that treats every empty result the same
+// way cannot tell a permanent refusal from a transcript that has not been written
+// yet. TranscriptPathClassified separates them.
+func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) {
+	newManagerWithSession := func(t *testing.T, workDir string, titles ...string) (*Manager, []Info) {
+		t.Helper()
+		store := beads.NewMemStore()
+		mgr := NewManagerWithOptions(store, runtime.NewFake())
+		infos := make([]Info, 0, len(titles))
+		for _, title := range titles {
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create %s: %v", title, err)
+			}
+			infos = append(infos, info)
+		}
+		return mgr, infos
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "only")
+
+		// Sole session on the workdir, nothing written to disk yet.
+		path, lookup, err := mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty before any transcript is written", path)
+		}
+		if lookup != TranscriptAbsent {
+			t.Fatalf("lookup = %v, want TranscriptAbsent", lookup)
+		}
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		want := filepath.Join(slugDir, "latest.jsonl")
+		if err := os.WriteFile(want, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		path, lookup, err = mgr.TranscriptPathClassified(infos[0].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified after write: %v", err)
+		}
+		if path != want {
+			t.Fatalf("path = %q, want %q", path, want)
+		}
+		if lookup != TranscriptFound {
+			t.Fatalf("lookup = %v, want TranscriptFound", lookup)
+		}
+	})
+
+	t.Run("ambiguous", func(t *testing.T) {
+		workDir := t.TempDir()
+		searchBase := t.TempDir()
+		mgr, infos := newManagerWithSession(t, workDir, "one")
+		if err := mgr.Kill(infos[0].ID); err != nil {
+			t.Fatalf("Kill(one): %v", err)
+		}
+		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create two: %v", err)
+		}
+
+		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+		if err := os.MkdirAll(slugDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(slugDir, "latest.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		// "one" was killed, not closed, while sharing the workdir with "two": the
+		// refusal is deliberate, not a missing file — the transcript above exists
+		// and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(two.ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("path = %q, want empty when the workdir fallback is ambiguous", path)
+		}
+		if lookup != TranscriptAmbiguous {
+			t.Fatalf("lookup = %v, want TranscriptAmbiguous", lookup)
+		}
+	})
+}
+
 func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -5434,6 +5601,63 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 	}
 }
 
+// A first-start session launched with "claude ... --session-id <key>" carries no
+// resume flag, so the resume fallback in retryFreshStartAfterStaleKey never
+// reaches it. When the embedded session id diverges from the bead's current
+// session_key (a concurrent fresh start minted a new key, or a stale store
+// read), the keyed stripSessionIDFlag is a no-op and — before the
+// stripSessionIDFlagArg fallback — the retry replayed the dead
+// "--session-id <oldkey>" verbatim into the same "id already in use" provider
+// rejection the retry exists to escape. This pins the value-agnostic fallback:
+// the retried Start command must drop the diverged session id.
+func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	sp := &startupDeathProvider{Fake: base}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously-skip-permissions", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	sp.armed = true
+
+	// A first-start command (no resume flag) whose --session-id carries a
+	// DIVERGED key (KEY_A) while the bead's session_key is KEY_B. The keyed
+	// strip ("--session-id key-B-current") cannot match it; only the
+	// value-agnostic fallback produces a clean fresh start.
+	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	if err != nil {
+		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
+	}
+
+	var retryCommand string
+	for _, call := range base.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			retryCommand = call.Config.Command
+		}
+	}
+	if retryCommand == "" {
+		t.Fatalf("fresh retry Start call not recorded: %#v", base.Calls)
+	}
+	if want := "claude --dangerously-skip-permissions"; retryCommand != want {
+		t.Fatalf("fresh retry command = %q, want %q (diverged --session-id must be stripped)", retryCommand, want)
+	}
+}
+
 // Issue #1655 — a session created without resume capability
 // (ProviderResume{} on Create → empty resume_flag in bead metadata)
 // must still be able to recover from a stale session_key. The
@@ -5687,5 +5911,97 @@ func TestCreateSessionBeadOnlyStampsPendingCreateStartedAtFromManagerClock(t *te
 	}
 	if !got.Equal(fakeNow) {
 		t.Errorf("pending_create_started_at = %v, want %v (manager clock, not real wall clock)", got, fakeNow)
+	}
+}
+
+// TestTranscriptPathZCodeResolvesEachSeatByBeadID pins the wiring that keys a
+// zcode transcript by the seat. Two seats can share session_name and
+// continuation_epoch (a pool slot re-seated within one run), and the adapter's
+// mirror scope tells them apart only by the session bead id gc exports to it
+// as GC_SESSION_ID — so that is what the lookup must carry, with the name-only
+// scope kept as the fallback for mirrors written before the seat was part of
+// the key.
+func TestTranscriptPathZCodeResolvesEachSeatByBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	workDir := t.TempDir()
+	const sharedName = "beads--gc__implementation-reviewer-1-pool"
+
+	var infos []Info
+	for _, title := range []string{"seat-a", "seat-b", "seat-c"} {
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "zcode-repl", WorkDir: workDir, Provider: "zcode", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create %s: %v", title, err)
+		}
+		if err := store.SetMetadataBatch(info.ID, map[string]string{"session_name": sharedName, "continuation_epoch": "1"}); err != nil {
+			t.Fatalf("SetMetadataBatch %s: %v", title, err)
+		}
+		infos = append(infos, info)
+	}
+
+	searchBase := t.TempDir()
+	write := func(scope, id string) string {
+		dir := filepath.Join(searchBase, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+	seatA := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[0].ID, "1"), "sess_a")
+	seatB := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[1].ID, "1"), "sess_b")
+	legacy := write(sessionlog.ZCodeMirrorScope(sharedName, "1"), "sess_legacy")
+
+	for i, want := range []string{seatA, seatB, legacy} {
+		got, err := mgr.TranscriptPath(infos[i].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPath(%s): %v", infos[i].ID, err)
+		}
+		if got != want {
+			t.Fatalf("TranscriptPath(%s) = %q, want %q", infos[i].ID, got, want)
+		}
+	}
+}
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{Fake: sp})
+
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("ObserveRuntimeForInfo = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
 	}
 }

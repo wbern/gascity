@@ -64,13 +64,21 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	// One verifier per pass: the ready check and the repair path both validate
-	// the shared synthetic cache directory, and within a single pass that is the
-	// same question asked twice.
-	verifier := newSyntheticCacheVerifier()
-	if state.ready && requiredBuiltinSourcesUsable(cityPath, verifier) && lockedBundledImportsUsable(cityPath, verifier) {
-		return nil
+	// The ready fast path re-validates the shared synthetic cache so an
+	// in-place corruption after readiness is still detected and repaired. It
+	// uses a verifier that reuses an earlier pass's positive verdict while the
+	// cache tree's stat fingerprint is unchanged, so that guarantee no longer
+	// re-reads every cached pack file on every config load.
+	if state.ready {
+		warm := newWarmSyntheticCacheVerifier()
+		if requiredBuiltinSourcesUsable(cityPath, warm) && lockedBundledImportsUsable(cityPath, warm) {
+			return nil
+		}
 	}
+	// One verifier for the whole pass: the repair paths below validate the
+	// shared synthetic cache directory, and within a single pass that is the
+	// same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
 	state.ready = false
 
 	var problems []error
@@ -86,6 +94,8 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	pruneRetiredSystemPacks(cityPath, warningWriter)
 
 	if len(problems) > 0 {
+		// A fresh verifier: the repairs above just rewrote caches, so this
+		// last-resort check must not reuse anything decided before them.
 		if !requiredBuiltinSourcesUsable(cityPath, newSyntheticCacheVerifier()) {
 			state.lastWarning = ""
 			return fmt.Errorf("preparing builtin pack caches: %w", problems[0])
@@ -236,62 +246,13 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 	return imports, ordered
 }
 
-// syntheticCacheVerifier deduplicates ValidateSyntheticRepo within ONE
-// readiness pass.
-//
-// Every bundled source of a repository shares a single synthetic cache
-// directory — core, bd, dolt and gastown all resolve to the same path — and
-// ValidateSyntheticRepo checks every pack layout in that directory regardless
-// of which source asked. The required-sources and locked-imports helpers
-// therefore each re-validated the identical directory, doubling a walk that
-// os.ReadFile's every cached pack file to compare it against the embedded copy.
-// Measured on `gc bd list --json --limit 5`, that walk was 42% of the process's
-// CPU samples, split evenly between the two callers.
-//
-// Only POSITIVE results are memoized. A negative means the caller is about to
-// repair the cache, after which the verdict would be stale; leaving negatives
-// uncached keeps a post-repair re-check honest. Each verifier is scoped to one
-// pass, so a verdict is never carried across readiness checks and every check
-// still validates fresh — the same rule the per-helper dedupe already followed,
-// applied across helpers instead of within each one.
-type syntheticCacheVerifier struct {
-	valid map[string]struct{}
-}
-
-func newSyntheticCacheVerifier() *syntheticCacheVerifier {
-	return &syntheticCacheVerifier{valid: make(map[string]struct{})}
-}
-
-// Valid reports whether the synthetic cache at cachePath validates for commit,
-// reusing a positive verdict already reached in this pass.
-func (v *syntheticCacheVerifier) Valid(cachePath, repository, commit string) bool {
-	key := cachePath + "\x00" + repository + "\x00" + commit
-	if v != nil {
-		if _, ok := v.valid[key]; ok {
-			return true
-		}
-	}
-	if builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit) != nil {
-		return false
-	}
-	if v != nil {
-		v.valid[key] = struct{}{}
-	}
-	return true
-}
-
-// Invalidate drops a cached verdict after the cache is rewritten.
-func (v *syntheticCacheVerifier) Invalidate(cachePath, repository, commit string) {
-	if v == nil {
-		return
-	}
-	delete(v.valid, cachePath+"\x00"+repository+"\x00"+commit)
-}
-
 // ensureRequiredBuiltinSourcesCached hydrates the user-global cache for the
 // required bundled sources at the canonical pin, independent of packs.lock,
 // so the stable shim target and pre-migration cities always have the
 // current binary's content available.
+// The verifier scopes cache validation to the calling readiness pass; every
+// required source of a repository shares one synthetic cache directory, so
+// without it the same directory is walked once per source.
 func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	commit := bundledPackImportCommit()
 	for name, source := range requiredBuiltinSources(cityPath) {
@@ -309,33 +270,21 @@ func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCach
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
 			return fmt.Errorf("caching bundled %s pack: %w", name, err)
 		}
-		verifier.Invalidate(cachePath, repository, commit)
 	}
 	return nil
 }
 
 func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	commit := bundledPackImportCommit()
-	// Every bundled source of a repository shares one synthetic cache
-	// directory, and ValidateSyntheticRepo checks all pack layouts in that
-	// directory regardless of which source asked. Validating once per source
-	// therefore repeated an identical whole-tree check. Deduplicate by cache
-	// path: this drops repeated work inside a single readiness check without
-	// caching a verdict across checks, so each check still validates fresh.
-	validated := make(map[string]struct{})
 	for _, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return false
 		}
-		if _, done := validated[cachePath]; done {
-			continue
-		}
 		repository, known := builtinpacks.RepositoryForSource(source)
 		if !known || !verifier.Valid(cachePath, repository, commit) {
 			return false
 		}
-		validated[cachePath] = struct{}{}
 	}
 	return true
 }

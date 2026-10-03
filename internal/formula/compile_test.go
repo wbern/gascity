@@ -795,9 +795,8 @@ timeout = "30s"
 		t.Fatal("missing workflow finalizer")
 	}
 
-	// The root's edge to its own finalizer is "tracks", not "blocks": the
-	// finalizer is what closes the root, so a "blocks" edge would leave the
-	// root permanently unclosable (ga-a6zy9). See ba85a40e2 (#5202).
+	// The root reaches its finalizer through an informational edge, never a
+	// blocking one: the finalizer is what closes the root (ga-a6zy9).
 	assertHasDep("ralph-demo", "ralph-demo.workflow-finalize", "tracks")
 	assertLacksDep("ralph-demo", "ralph-demo.workflow-finalize", "blocks")
 	assertLacksDep("ralph-demo", "ralph-demo.design", "blocks")
@@ -975,14 +974,8 @@ needs = ["setup"]
 			foundBlocks = true
 		}
 		if dep.StepID == "graph-demo" && dep.DependsOnID == "graph-demo.workflow-finalize" {
-			// The root's edge to its own finalizer must be "tracks", not
-			// "blocks": the finalizer is what closes the root
-			// (processWorkflowFinalize), so a "blocks" edge here would leave
-			// the root permanently unclosable — the store refuses to close a
-			// blocked issue, and the finalizer is the only bead that could
-			// ever clear the blocker (ga-a6zy9). See ba85a40e2 (#5202).
 			if dep.Type != "tracks" {
-				t.Fatalf("root -> workflow-finalize dep type = %q, want tracks", dep.Type)
+				t.Fatalf("root -> workflow-finalize dep type = %q, want tracks (the finalizer closes the root)", dep.Type)
 			}
 			foundRootFinalize = true
 		}
@@ -991,7 +984,7 @@ needs = ["setup"]
 		t.Fatal("missing work -> setup blocks dep")
 	}
 	if !foundRootFinalize {
-		t.Fatal("missing root -> workflow-finalize dep")
+		t.Fatal("missing root -> workflow-finalize tracks dep")
 	}
 }
 
@@ -1097,10 +1090,6 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 		if dep.StepID == cleanup.ID && dep.DependsOnID == body.ID && dep.Type == "blocks" {
 			foundCleanupDep = true
 		}
-		// The root's edge to its own finalizer is "tracks", not "blocks":
-		// the finalizer is what closes the root, so a "blocks" edge would
-		// leave the root permanently unclosable (ga-a6zy9). See ba85a40e2
-		// (#5202).
 		if dep.StepID == root.ID && dep.DependsOnID == finalizer.ID && dep.Type == "tracks" {
 			foundRootFinalize = true
 		}
@@ -1132,9 +1121,16 @@ func TestCompileScopedWorkCarriesScopeAndCleanupMetadata(t *testing.T) {
 	assertBefore("mol-scoped-work.load-context", "mol-scoped-work.workspace-setup")
 	assertBefore("mol-scoped-work.workspace-setup", "mol-scoped-work.workspace-setup-scope-check")
 	assertBefore("mol-scoped-work.preflight-tests", "mol-scoped-work.preflight-tests-scope-check")
-	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.body")
+	assertBefore("mol-scoped-work.submit", "mol-scoped-work.submit-scope-check")
+	// The body latches its members directly, not their scope-checks: a
+	// scope-check closes the body, so a body blocked on one never converges
+	// (ga-a6zy9). The body therefore sorts after its last member, and the
+	// now-unreferenced trailing scope-check sorts before the finalizer that
+	// waits on it.
+	assertBefore("mol-scoped-work.submit", "mol-scoped-work.body")
 	assertBefore("mol-scoped-work.body", "mol-scoped-work.cleanup-worktree")
 	assertBefore("mol-scoped-work.cleanup-worktree", "mol-scoped-work.workflow-finalize")
+	assertBefore("mol-scoped-work.submit-scope-check", "mol-scoped-work.workflow-finalize")
 
 	// The teardown retry control must block on its own attempt.1, matching
 	// the invariant in processRetryControl: a retry-manager is only ever
@@ -1204,6 +1200,14 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 					t.Fatalf("%s description missing structured output key %q", step.ID, required)
 				}
 			}
+			for _, required := range []string{
+				"Do not set `gc.failure_class`",
+				"retry-control metadata",
+			} {
+				if !strings.Contains(step.Description, required) {
+					t.Fatalf("%s description missing success metadata-boundary instruction %q", step.ID, required)
+				}
+			}
 			if !strings.Contains(step.Description, "{{base_ref}}") {
 				t.Fatalf("%s description missing base_ref prompt placeholder", step.ID)
 			}
@@ -1236,6 +1240,14 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 		} {
 			if !strings.Contains(step.Description, required) {
 				t.Fatalf("%s description missing synthesis contract key %q", step.ID, required)
+			}
+		}
+		for _, required := range []string{
+			"Do not set `gc.failure_class`",
+			"retry-control metadata",
+		} {
+			if !strings.Contains(step.Description, required) {
+				t.Fatalf("%s description missing success metadata-boundary instruction %q", step.ID, required)
 			}
 		}
 	}

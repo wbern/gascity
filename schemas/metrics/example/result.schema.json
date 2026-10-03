@@ -207,11 +207,23 @@
               "whoami",
               "runtime-heartbeat",
               "pack-registry-requests",
+              "events-reemit-execution",
+              "storage-migrate",
+              "storage-status",
+              "ready",
+              "storage-recover-stranded",
+              "beads-metadata-cas",
+              "worktree-cleanup",
+              "worktree-ensure",
+              "worktree-verify",
+              "storage-preflight",
+              "nudge-drop",
+              "beads-city-migrate-proxied",
               "worktree-scan",
               "mcp-validate",
               "worktree-reap",
-              "events-reemit-execution",
-              "run-cancel"
+              "run-cancel",
+              "analyze-continuity"
             ]
           },
           "event_id": {

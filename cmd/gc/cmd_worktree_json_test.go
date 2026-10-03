@@ -65,7 +65,7 @@ func stubWorktreeCityDeps(t *testing.T) {
 			{Path: "/wt/held", Reason: "unlanded commits"},
 		}, nil
 	}
-	worktreeReapClosedBeadWorktrees = func(string, *config.City, map[string]beads.Store, []string, bool, events.Recorder, io.Writer) reapReport {
+	worktreeReapClosedBeadWorktrees = func(string, *config.City, map[string]beads.Store, []string, bool, events.Recorder, *reapSkipTracker, io.Writer) reapReport {
 		return reapReport{
 			DryRun: true,
 			Reaped: []reapDecision{{BeadID: "b-1", Rig: "demo", Branch: "polecat/b-1", Path: "/wt/1"}},

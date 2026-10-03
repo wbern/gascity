@@ -48,22 +48,34 @@ type BreakdownCopyEntry struct {
 // The bump rebaselines existing v4 hashes silently instead of draining the
 // fleet once on rollout. (#3840)
 //
-// v6: provider hook files staged from a session workdir are fingerprinted over
-// the pack-overlay SOURCE that staging will write onto them, not over the
-// workdir copy that staging rewrites. Hashing the destination made starting a
-// session move its own fingerprint, so the next reconcile tick read config
-// drift and restarted it. Like v5, the bump rebaselines existing v5 hashes
-// silently instead of draining the fleet once on rollout. (gcw-0cv5)
-const FingerprintVersion = "v6"
+// v6 (upstream): operator-authored config env (workspace/provider/agent/
+// rig-patch env, captured before passthrough/credentials/generated values are
+// merged) gets its own dedicated Launch-tier identity field
+// (Config.OperatorEnv), separate from Env and FingerprintExtra (Option A',
+// ga-3a42sp). The bump rebaselines existing v5 hashes silently rather than
+// draining the fleet. (ga-i91hrn)
+//
+// v6 (fork): provider hook files staged from a session workdir are
+// fingerprinted over the pack-overlay SOURCE that staging will write onto
+// them, not over the workdir copy that staging rewrites. Hashing the
+// destination made starting a session move its own fingerprint, so the next
+// reconcile tick read config drift and restarted it. (gcw-0cv5)
+//
+// v7: both histories above independently claimed v6 with different hashing
+// inputs (the fork also hashes CodexSessionFlags and excludes the "skills:"
+// FingerprintExtra keyspace). The merged inputs match neither v6, so the bump
+// rebaselines either v6 silently instead of draining the fleet once on
+// rollout.
+const FingerprintVersion = "v7"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
 // the agent should be restarted (via drain when drain ops are available).
 //
-// Included: Command, Lifecycle, Env, FingerprintExtra (pool config, etc.),
-// PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
-// overlay slots, CopyFiles, CodexSessionFlags, AcceptStartupDialogs, MouseOn,
-// SessionLive.
+// Included: Command, Lifecycle, Env, OperatorEnv (config-authored env
+// identity), FingerprintExtra (pool config, etc.), PreStart, SessionSetup,
+// SessionSetupScript, OverlayDir, effective provider overlay slots, CopyFiles,
+// CodexSessionFlags, AcceptStartupDialogs, MouseOn, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
 // ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
@@ -301,6 +313,19 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// so a credential rotation moves no fingerprint. Optional/conditional, so an
 	// unset Upstream leaves every existing config's fingerprint byte-identical.
 	hashOptionalString(h, "upstream", cfg.Upstream)
+
+	// OperatorEnv (Option A', ga-3a42sp — config-authored env identity).
+	// LAUNCH-half: also hashed by hashLaunchFields, so a config-authored env
+	// change relaunches the agent in the warm box rather than reprovisioning.
+	// Prefixed with "operator_env" so its framing cannot collide with the
+	// FingerprintExtra map hashed above, even when both carry the same
+	// key/value pairs. Conditional, so an empty/nil OperatorEnv leaves every
+	// existing config's fingerprint byte-identical.
+	if len(cfg.OperatorEnv) > 0 {
+		h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
+		hashSortedMap(h, cfg.OperatorEnv)
+	}
 }
 
 func hashCodexSessionFlags(h hash.Hash, payload *CodexSessionFlagsPayload) {

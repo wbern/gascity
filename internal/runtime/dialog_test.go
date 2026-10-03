@@ -94,7 +94,7 @@ func TestWorkspaceTrustDialogDoesNotConfirmExit(t *testing.T) {
 		func(int) (string, error) { return content, nil },
 		func(keys ...string) error { sent = append(sent, keys...); return nil },
 	)
-	if !errors.Is(err, errWorkspaceTrustUnconfirmed) {
+	if !errors.Is(err, ErrWorkspaceTrustUnconfirmed) {
 		t.Fatalf("error = %v, want unconfirmed trust dialog", err)
 	}
 	if len(sent) > 0 && sent[0] == "Enter" {
@@ -128,30 +128,14 @@ func TestWorkspaceTrustDialogRetriesDroppedSelection(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTrustStreamRetriesDroppedSelection(t *testing.T) {
-	withZeroDialogTimings(t)
-	stream := &replayableSnapshotStream{update: make(chan struct{})}
-	stream.publish("Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm")
-	cursor := newReplayableSnapshotCursorFromStream(stream)
-	var sent []string
-	seen, err := acceptWorkspaceTrustDialogFromStream(context.Background(), time.Second, cursor, func(keys ...string) error {
-		for _, key := range keys {
-			sent = append(sent, key)
-			if key == "Down" && len(sent) == 2 {
-				stream.publish("Quick safety check\n  No, exit\n❯ Yes, I trust this folder\nEnter to confirm")
-			}
-		}
-		return nil
-	})
-	if err != nil || !seen {
-		t.Fatalf("seen=%t err=%v", seen, err)
-	}
-	if want := []string{"Down", "Down", "Enter"}; !reflect.DeepEqual(sent, want) {
-		t.Fatalf("sent = %v, want %v", sent, want)
-	}
-}
-
-func TestWorkspaceTrustStreamLeavesUnmovedExitUnconfirmed(t *testing.T) {
+// TestWorkspaceTrustStreamSendsNothingWhileExitSelected pins the merged
+// stream contract on the real Claude "Quick safety check" frame: a snapshot
+// stream cannot re-read the screen, so with "No, exit" selected it sends no
+// keys and reports the stream inconclusive, handing the move to the
+// synchronous closed loop. Dropped-selection retries are covered there by
+// TestWorkspaceTrustDialogRetriesDroppedSelection and
+// TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks.
+func TestWorkspaceTrustStreamSendsNothingWhileExitSelected(t *testing.T) {
 	withZeroDialogTimings(t)
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	stream.publish("Quick safety check\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm")
@@ -161,16 +145,11 @@ func TestWorkspaceTrustStreamLeavesUnmovedExitUnconfirmed(t *testing.T) {
 		sent = append(sent, keys...)
 		return nil
 	})
-	if !seen || !errors.Is(err, errWorkspaceTrustUnconfirmed) {
-		t.Fatalf("seen=%t err=%v, want unconfirmed dialog", seen, err)
+	if !seen || !errors.Is(err, errStartupDialogStreamInconclusive) {
+		t.Fatalf("seen=%t err=%v, want inconclusive stream", seen, err)
 	}
-	if len(sent) != maxTrustDialogMoveAttempts {
-		t.Fatalf("sent = %v, want exactly %d movement attempts", sent, maxTrustDialogMoveAttempts)
-	}
-	for _, key := range sent {
-		if key != "Down" {
-			t.Fatalf("sent unsafe key %q while exit remained selected", key)
-		}
+	if len(sent) != 0 {
+		t.Fatalf("sent = %v while exit remained selected, want no keys", sent)
 	}
 }
 
@@ -1906,6 +1885,81 @@ func TestContainsCustomAPIKeyDialog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := containsCustomAPIKeyDialog(tt.content); got != tt.want {
 				t.Fatalf("containsCustomAPIKeyDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// feedbackSurveySessionFixture is a byte-accurate capture of Claude Code's
+// post-turn "How is Claude doing this session?" feedback survey (ga-zg7fjq).
+const feedbackSurveySessionFixture = `⏺ Done — pushed the branch and replied on the PR.
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+// feedbackSurveyMemoryFixture is a byte-accurate capture of the memory-
+// recollection variant of the same survey, mounted with showNotSure:true so
+// it carries an extra "4: Unsure" cell and an embedded recalled-memory line
+// instead of a stable title (ga-zg7fjq).
+const feedbackSurveyMemoryFixture = `⏺ Reading the config.
+
+● Claude recalled a memory:
+
+  The user prefers tabs over spaces.
+
+  How was Claude's recollection? (optional)
+  1: Bad    2: Fine   3: Good   4: Unsure  0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+func TestContainsFeedbackSurveyModal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "session feedback variant",
+			content: feedbackSurveySessionFixture,
+			want:    true,
+		},
+		{
+			name:    "memory recollection variant",
+			content: feedbackSurveyMemoryFixture,
+			want:    true,
+		},
+		{
+			name: "labels scattered across lines is not a match",
+			content: "⏺ The survey asks 1: Bad or 3: Good — I picked Fine.\n" +
+				"  Dismiss is 0, per the docs.",
+			want: false,
+		},
+		{
+			name:    "normal output",
+			content: "Starting Claude Code...",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			content: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsFeedbackSurveyModal(tt.content); got != tt.want {
+				t.Fatalf("ContainsFeedbackSurveyModal(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}

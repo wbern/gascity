@@ -157,7 +157,7 @@ func TestReconcileSessionBeads_DrainedPoolSlotIsRetiredAtTheDeadline(t *testing.
 			if err != nil {
 				t.Fatalf("loadSessionBeadSnapshot: %v", err)
 			}
-			if openSessionNameTaken(snapshot, poolSeatName, "") {
+			if openSessionNameTaken(snapshot, poolSeatName) {
 				t.Fatal("session_name still held by an open bead; the pool still cannot mint a seat")
 			}
 
@@ -352,6 +352,38 @@ func TestReconcileSessionBeads_DrainDeadlineRetireRefusesWhenStopUnconfirmed(t *
 				t.Fatalf("emitted %d retirement events for an unconfirmed stop, want 0", len(fired))
 			}
 		})
+	}
+}
+
+// An empty token that came with a read error must not pass the retire's kill
+// fence: no kill, the slot is kept, and the retire is re-evaluated next pass.
+func TestDrainDeadlineRetireDefersOnUnverifiableToken(t *testing.T) {
+	env := poolSeatEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	env.setSessionMetadata(&seat, map[string]string{"instance_token": "tok-a"})
+	env.sp.GetMetaErrors[poolSeatName] = map[string]error{
+		"GC_INSTANCE_TOKEN": errors.New("show-environment: fork failed"),
+	}
+
+	env.reconcile([]beads.Bead{seat})
+
+	if !env.sp.IsRunning(poolSeatName) {
+		t.Fatalf("runtime stopped although its instance token could not be read; stderr=%q", env.stderr.String())
+	}
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("seat retired over an unverifiable token: metadata=%v", got.Metadata)
+	}
+	if fired := drainDeadlineRetiredEvents(rec); len(fired) != 0 {
+		t.Fatalf("emitted %d retirement events, want 0", len(fired))
+	}
+	if !strings.Contains(env.stderr.String(), "token_unverifiable") {
+		t.Fatalf("stderr = %q, want token_unverifiable diagnostic", env.stderr.String())
 	}
 }
 

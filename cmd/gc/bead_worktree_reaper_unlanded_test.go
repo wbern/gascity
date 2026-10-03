@@ -31,7 +31,7 @@ func TestReapClosedBeadWorktrees_FlagsUnlandedWork(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want exactly 1 (the branch preserves the commit)", report.Reaped)
@@ -54,7 +54,7 @@ func TestReapClosedBeadWorktrees_DirtyTreeIsNotUnlandedWork(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Protected) != 1 {
 		t.Fatalf("Protected = %+v, want exactly 1", report.Protected)

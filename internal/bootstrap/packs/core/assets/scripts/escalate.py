@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -58,10 +59,50 @@ def deliver(root, recipient, subject, body, now, interval, cap, send):
                 os.unlink(pending)
 
 
+def send_timeout_secs():
+    """Return the positive send bound escalate.sh exported (default 30s)."""
+    raw = os.environ.get('GC_ESCALATE_SEND_TIMEOUT_SECS', '30')
+    return int(raw) if raw.isdigit() and int(raw) > 0 else 30
+
+
+def send_mail(recipient, subject, message, notify, limit):
+    """Send one mail, bounding the send plus its wake by limit seconds.
+
+    The mail bead is written before the wake blocks, so a bound that trips
+    costs the wake and not the message: it is reported and counted as sent,
+    which keeps a caller from retrying mail that landed. The child runs in its
+    own session so the whole wake process group is reaped on expiry.
+    """
+    argv = ['gc', 'mail', 'send', recipient]
+    if notify:
+        argv.append('--notify')
+    argv += ['-s', subject, '-m', message]
+    proc = subprocess.Popen(argv, start_new_session=True)
+    try:
+        rc = proc.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, None)):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=grace)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        print('escalate: mail to %s sent; wake exceeded %ds and was abandoned' % (recipient, limit), file=sys.stderr)
+        return
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, argv)
+
+
 def main():
     recipient, subject, body = sys.argv[1:]
+    notify = os.environ.get('GC_ESCALATE_NOTIFY') == '1'
+    limit = send_timeout_secs()
     def send(message):
-        subprocess.run(['gc', 'mail', 'send', recipient, '-s', subject, '-m', message], check=True)
+        send_mail(recipient, subject, message, notify, limit)
     # Explicit incident/operator notification bypass remains available.
     if os.environ.get('GC_ESCALATE_DEDUP_DISABLE') == '1':
         send(body)

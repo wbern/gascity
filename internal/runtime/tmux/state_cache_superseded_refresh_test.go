@@ -162,9 +162,13 @@ func TestStateCache_SupersededRefreshKeepsSessionEvictedMidFetch(t *testing.T) {
 	}
 	cache.mu.RLock()
 	dirty = cache.dirty
+	pending := len(cache.evictedAt)
 	cache.mu.RUnlock()
 	if dirty {
 		t.Fatal("cache still dirty after an unsuperseded refresh")
+	}
+	if pending != 0 {
+		t.Fatalf("evictedAt holds %d entries after a clean refresh, want them pruned", pending)
 	}
 }
 

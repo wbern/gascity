@@ -74,7 +74,8 @@ func lockedBundledCanonicalImports(cityPath string) ([]lockedBundledImport, erro
 // install". A cache that already validates is skipped lock-free; only on
 // validation failure does the preflight take the write-locked
 // packman.EnsureRepoInCache repair path, which revalidates under the lock
-// (a concurrent repair between the two checks is therefore benign).
+// (a concurrent repair between the two checks is therefore benign). The
+// verifier scopes that validation to the calling readiness pass.
 func ensureBundledLockedRemoteImportsCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
@@ -95,7 +96,6 @@ func ensureBundledLockedRemoteImportsCached(cityPath string, verifier *synthetic
 		if _, err := packman.EnsureRepoInCache(cityPath, imp.source, imp.commit); err != nil {
 			return fmt.Errorf("caching bundled import %q from packs.lock: %w", imp.source, err)
 		}
-		verifier.Invalidate(cachePath, repository, imp.commit)
 	}
 	return nil
 }
@@ -109,30 +109,21 @@ func ensureBundledLockedRemoteImportsCached(cityPath string, verifier *synthetic
 // locked-but-missing synthetic cache. A lockfile that cannot be read or that
 // has a malformed entry is reported unusable so the caller falls through to
 // ensureBundledLockedRemoteImportsCached, which surfaces the underlying error.
+// The verifier scopes that validation to the calling readiness pass.
 func lockedBundledImportsUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
 		return false
 	}
-	// Bundled imports of one repository share a synthetic cache directory and
-	// ValidateSyntheticRepo checks every pack layout in it, so validating per
-	// import repeated the same whole-tree check. Deduplicate within this pass;
-	// the next readiness check still validates fresh.
-	validated := make(map[string]struct{})
 	for _, imp := range imports {
 		cachePath, err := packman.RepoCachePath(imp.source, imp.commit)
 		if err != nil {
 			return false
 		}
-		key := cachePath + "\x00" + imp.commit
-		if _, done := validated[key]; done {
-			continue
-		}
 		repository, known := builtinpacks.RepositoryForSource(imp.source)
 		if !known || !verifier.Valid(cachePath, repository, imp.commit) {
 			return false
 		}
-		validated[key] = struct{}{}
 	}
 	return true
 }

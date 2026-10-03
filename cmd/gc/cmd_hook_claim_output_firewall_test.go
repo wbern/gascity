@@ -81,7 +81,7 @@ func TestCompletedHookClaimDoesNotBecomeRetryableWhenRequiredSpillFails(t *testi
 	ops := hookClaimOps{}
 	ops.applyDefaults()
 	result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: hookClaimCommandName, Action: "work", ContinuationAssigned: []string{strings.Repeat("secret", 200)}}
-	if code := writeHookClaimWorkResultForBead(result, beads.Bead{ID: "gcw-1"}, hookClaimOptions{Assignee: "worker", JSON: true}, ops, ".", &stdout, &stderr); code != 0 {
+	if code := writeHookClaimWorkResultForBead(result, beads.Bead{ID: "gcw-1"}, hookClaimOptions{Assignee: "worker", JSON: true}, ops, ".", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("completed claim code=%d, want success; stderr=%q", code, stderr.String())
 	}
 }

@@ -18,6 +18,7 @@ type nudgeRoutingExecutor struct {
 	provider    string               // reply to show-environment GC_PROVIDER; "" = unset
 	readyPrefix string               // reply to show-environment GC_READY_PROMPT_PREFIX
 	pane        string               // reply to capture-pane (the busy/idle footer)
+	attached    string               // reply to the #{session_attached} probe; "" = unparseable (probe error)
 	errFor      func([]string) error // optional injected tmux command failure
 }
 
@@ -35,6 +36,8 @@ func (e *nudgeRoutingExecutor) execute(args []string) (string, error) {
 	switch {
 	case strings.Contains(joined, "#{pane_in_mode}"):
 		return e.inMode, nil
+	case strings.Contains(joined, "#{session_attached}"):
+		return e.attached, nil
 	case callHasTokens(args, "show-environment"):
 		if args[len(args)-1] == sessionReadyPromptEnvKey && e.readyPrefix != "" {
 			return sessionReadyPromptEnvKey + "=" + e.readyPrefix, nil
@@ -127,8 +130,11 @@ func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 	})
 }
 
+// The pre-paste C-u clear runs only on a session probed as unattached (#5192);
+// the attached and probe-error cases are pinned by
+// TestNudgeSessionSkipsClearWhenAttached and TestNudgeSessionAttachProbeErrorKeepsInput.
 func TestNudgeSessionClearsPendingInputBeforeLiteralPaste(t *testing.T) {
-	fe := &nudgeRoutingExecutor{inMode: "0", provider: "opencode"}
+	fe := &nudgeRoutingExecutor{inMode: "0", provider: "opencode", attached: "sess|0"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 	if err := tm.NudgeSession("sess", "hello"); err != nil {
@@ -150,6 +156,7 @@ func TestNudgeSessionStopsWhenClearingPendingInputFails(t *testing.T) {
 	fe := &nudgeRoutingExecutor{
 		inMode:   "0",
 		provider: "opencode",
+		attached: "sess|0",
 		errFor: func(args []string) error {
 			if callHasTokens(args, "send-keys", "C-u") {
 				return want

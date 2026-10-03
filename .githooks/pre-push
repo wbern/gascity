@@ -2,7 +2,53 @@
 set -euo pipefail
 
 # This fork disables automatic parallel test fan-out because it can exhaust a
-# developer workstation. Keep the hook non-blocking; focused and serial tests
-# remain available explicitly.
-cat >/dev/null
+# developer workstation. Keep the hook non-blocking for tests; focused and
+# serial tests remain available explicitly. The beads chain and the bead
+# ownership guard below still run on every push.
+#
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref
+# on stdin (see githooks(5)).
+
+zero="0000000000000000000000000000000000000000"
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# The ref list arrives once on stdin but two consumers need it: the beads chain
+# and the ref scan below. Buffer it and replay it to each.
+refs_stdin="$(cat)"
+
+# `$(cat)` strips trailing newlines, so re-terminate the final line: `read`
+# returns non-zero on an unterminated line and the scan would drop it. The
+# emptiness guard keeps `printf` from manufacturing a blank ref line.
+replay_refs() {
+  [ -n "$refs_stdin" ] && printf '%s\n' "$refs_stdin"
+  return 0
+}
+
+# .githooks owns core.hooksPath, so this call is the only thing keeping beads'
+# own pre-push hook alive.
+"$repo_root/.githooks/lib/beads-chain.sh" pre-push "$@" < <(replay_refs)
+
+any_non_deletion=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  # Branch deletion — nothing to guard.
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  any_non_deletion=1
+done < <(replay_refs)
+
+# Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
+# immediately before this push leaves the machine, once per invocation
+# (not per ref). A mayor ruling (reassign/close/hold/reroute) that landed
+# after this push was queued must not be allowed to clobber a branch another
+# agent has since taken over. Bypass: `git push --no-verify`.
+if [ "$any_non_deletion" -eq 1 ]; then
+  # shellcheck source=../scripts/push-ownership-guard.sh disable=SC1091
+  . "$repo_root/scripts/push-ownership-guard.sh"
+  if ! assert_bead_still_claimed; then
+    exit 1
+  fi
+fi
+
 echo "automatic parallel test fan-out disabled in the wbern fork; use focused or serial tests" >&2

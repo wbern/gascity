@@ -72,6 +72,13 @@ var knownProjectionGaps = map[string]string{
 	"source_location":     "UNMODELLED",
 	"source_system":       "UNMODELLED",
 	"timeout":             "UNMODELLED",
+	// bd v1.3 claim leasing (node-local leases table) and the create-selected
+	// history/replication marker. gc's claim and ephemerality model do not
+	// read either; carrying them means adopting bd's lease semantics.
+	"lease_expires_at":   "UNMODELLED",
+	"heartbeat_at":       "UNMODELLED",
+	"lease_granted_node": "UNMODELLED",
+	"storage_class":      "UNMODELLED",
 
 	// MOLECULE / event vocabulary
 	"actor":               "MOLECULE",

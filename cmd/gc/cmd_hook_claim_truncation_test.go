@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,7 +49,15 @@ func TestDecodeHookClaimBeadsKeepsRealPayloads(t *testing.T) {
 // its internal store reads must not be bounded a second time: doing so is what
 // made an existing assignment invisible and armed a wrong claim.
 func TestHookClaimStoreReadsAreExemptFromTheOutputFirewall(t *testing.T) {
-	t.Setenv(citylayout.RealBdEnvVar, "/usr/local/bin/bd")
+	// The exemption is gated on a positively identified bdshim (controlReadyShimmed),
+	// so the claim env carries a real-bd marker and a shimbin PATH built in a temp
+	// dir rather than depending on what the host happens to have installed.
+	shimEnv := shimmedBdEnvForTest(t, t.TempDir())
+	claimEnv := []string{
+		citylayout.RealBdEnvVar + "=" + shimEnv[citylayout.RealBdEnvVar],
+		"GC_BIN=" + shimEnv["GC_BIN"],
+		"PATH=" + filepath.Dir(shimEnv["GC_BIN"]),
+	}
 	originalRunner := hookClaimCommandRunnerWithEnvContext
 	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
 
@@ -60,7 +69,7 @@ func TestHookClaimStoreReadsAreExemptFromTheOutputFirewall(t *testing.T) {
 		}
 	}
 
-	bead, found, err := hookResolveBeadWithBdStore(context.Background(), "/rig", nil, "work-1")
+	bead, found, err := hookResolveBeadWithBdStore(context.Background(), "/rig", claimEnv, "work-1")
 	if err != nil || !found || bead.ID != "work-1" {
 		t.Fatalf("hookResolveBeadWithBdStore() = (%#v, %v, %v)", bead, found, err)
 	}

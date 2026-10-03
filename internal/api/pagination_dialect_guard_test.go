@@ -88,6 +88,10 @@ var grandfatheredDialects = map[string][]string{
 // Unlike keyset lists, these are not held to the unified default/maximum
 // limit schema — each feed keeps its own documented bound.
 var boundedLimitOnlyFeeds = map[string]bool{
+	// Fork control-plane projection (3bb9889ad): limit bounds the matching
+	// entries considered (max 5000) and the compact response is capped at 100
+	// rows. It is a bounded ready-discovery summary, not a list to walk.
+	"GET /v0/city/{cityName}/beads/ready/summary":  true,
 	"GET /v0/city/{cityName}/formulas/feed":        true,
 	"GET /v0/city/{cityName}/formulas/{name}/runs": true,
 	"GET /v0/city/{cityName}/orders/feed":          true,

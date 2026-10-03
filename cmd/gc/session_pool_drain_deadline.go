@@ -293,7 +293,7 @@ func poolSlotRetireBlocker(info sessionpkg.Info, now time.Time) string {
 // form <template>-<n> as a legitimate claim by that pool's own session. A pool
 // slot's alias diverges from its session_name exactly when the runtime name
 // steps aside to "<identity>-pool" — the ga-rxhu2 specimen's own shape. Probing
-// the narrower {ID, session_name, configured_named_identity} set would be blind
+// the narrower config-aware set, which drops a rebinding slot alias, would be blind
 // to the agent's own claims on precisely the configuration this bound targets,
 // and unlike every other consumer of that narrow set, this path uses the answer
 // to authorize a Kill, not just a close of an already-dead runtime.
@@ -303,17 +303,11 @@ func poolSlotRetireAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []
 	return compactSessionAssignmentIdentifiers(raw)
 }
 
-// poolSlotRetireHasAssignedWork probes for work held under any of the seat's
-// assignment identities. It fails closed on an unreadable store (a smaller
-// answer presented as authoritative would read as "holds nothing", and this
-// path acts on that).
-//
-// Fork adaptation of upstream #5995: the fork has neither the residency
-// resolver walk (#5277) nor the close-gate own-drain-step exclusion (#4765).
-// The probe therefore covers the session's reachable stores AND every known
-// city/rig store, and counts the session's own drain step as work. Both
-// deviations can only refuse a retirement upstream would allow; they never
-// permit one upstream would refuse.
+// poolSlotRetireHasAssignedWork probes every reachable store for work held
+// under any of the seat's assignment identities, excluding the session's own
+// mol-do-work drain step exactly as the drain-ack close gate does. It fails
+// closed on an unreadable leg (a smaller answer presented as authoritative
+// would read as "holds nothing", and this path acts on that).
 func poolSlotRetireHasAssignedWork(
 	cityPath string,
 	cfg *config.City,
@@ -322,16 +316,9 @@ func poolSlotRetireHasAssignedWork(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	reachable, err := reachableStoresForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return false, err
-	}
-	for _, s := range reachable {
-		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
-			return has, err
-		}
-	}
-	return sessionHasAssignedWorkInStoresForStatuses(store, rigStores, identifiers, []string{"open", "in_progress"})
+	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
+	})
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -385,6 +372,7 @@ func retirePoolSlotAtDrainDeadline(
 	deferClosesOnBoot bool,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) (sessionpkg.MetadataPatch, bool) {
 	if store == nil || sp == nil || info.ID == "" || info.Closed {
@@ -423,7 +411,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, stderr)
+	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, dt, clk.Now(), stderr)
 	if !stopped {
 		return nil, false
 	}
@@ -531,6 +519,8 @@ func poolSlotRuntimeStoppedForRetire(
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
+	dt *drainTracker,
+	now time.Time,
 	stderr io.Writer,
 ) (confirmedGone bool, performedStop bool) {
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
@@ -542,8 +532,13 @@ func poolSlotRuntimeStoppedForRetire(
 		return true, false
 	}
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && actual != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "session reconciler: drain-deadline retire of %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+			return false, false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.retire", fmt.Sprintf(
+				"session reconciler: drain-deadline retire of %s skipped: instance token unverifiable (token_unverifiable): %v", name, err), now)
 			return false, false
 		}
 	}

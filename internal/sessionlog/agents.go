@@ -150,7 +150,12 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 			return nil, fmt.Errorf("parsing agent %q metadata: %w", agentID, err)
 		}
 		// Metadata is authoritative: current provider transcripts leave the
-		// JSONL parentToolUseId empty, while this file carries the real join key.
+		// JSONL parentToolUseId empty, while this file carries the real join
+		// key. An absent or empty toolUseId carries no such key, so it must
+		// not erase one already recovered from the transcript.
+		if strings.TrimSpace(meta.ToolUseID) == "" {
+			continue
+		}
 		mappingsByAgent[agentID] = meta.ToolUseID
 	}
 	ids := make([]string, 0, len(mappingsByAgent))
