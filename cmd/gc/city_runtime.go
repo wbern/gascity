@@ -1737,13 +1737,16 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
+	// The staleAfter cutoff protects in-flight dispatches regardless of which
+	// order they belong to, so a direct all-orders sweep is safe and recovers
+	// the jam without depending on any single order being scheduled — but only
+	// while the cutoff outlasts every configured order's own timeout (see
+	// orderTrackingWatchdogStaleAfter, gcw-gpefh).
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	staleAfter := orderTrackingWatchdogStaleAfter(cr.configuredOrders())
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, staleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1753,6 +1756,37 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// configuredOrders returns the orders known to the current dispatcher and to
+// any retired dispatcher still draining, whose runs may outlive a reload.
+func (cr *CityRuntime) configuredOrders() []orders.Order {
+	var aa []orders.Order
+	if m, ok := cr.od.(*memoryOrderDispatcher); ok && m != nil {
+		aa = append(aa, m.aa...)
+	}
+	for _, retired := range cr.retiredOrderDispatchers {
+		if m, ok := retired.(*memoryOrderDispatcher); ok && m != nil {
+			aa = append(aa, m.aa...)
+		}
+	}
+	return aa
+}
+
+// orderTrackingWatchdogStaleAfter is the watchdog's staleness cutoff: the base
+// orderTrackingSweepWatchdogStaleAfter, raised to the longest configured order
+// timeout plus orderTrackingWatchdogTimeoutGrace. A fixed 2m cutoff closed the
+// tracking bead of any run still inside its own timeout (exec orders default to
+// 300s), so the cooldown order re-fired while the first run was live
+// (gcw-gpefh).
+func orderTrackingWatchdogStaleAfter(aa []orders.Order) time.Duration {
+	cutoff := orderTrackingSweepWatchdogStaleAfter
+	for i := range aa {
+		if d := aa[i].TimeoutOrDefault() + orderTrackingWatchdogTimeoutGrace; d > cutoff {
+			cutoff = d
+		}
+	}
+	return cutoff
 }
 
 // bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
