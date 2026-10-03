@@ -343,7 +343,11 @@ func TestRestampHookAdoption(t *testing.T) {
 		// close on the spelling that could not be moved, so adopting it hands
 		// the worker the #5716 loop instead of a recoverable refusal.
 		{name: "failed CAS on a work-store bead is not adopted", actor: sessionID, canonical: legacy, err: errors.New("boom"), wantCalls: 1, wantAdopt: false, wantRecovery: true},
-		{name: "unsupported CAS on a work-store bead is not adopted", actor: sessionID, canonical: legacy, err: beads.ErrConditionalTransferUnsupported, wantCalls: 1, wantAdopt: false, wantRecovery: true},
+		// A bd too old for --if-assignee (< 1.2.1) also predates the close-path
+		// actor fence that arrived with it, so the legacy spelling cannot block
+		// the worker: adopt as-is rather than strand the bead, and prescribe no
+		// recovery that would need the missing flag.
+		{name: "unsupported CAS on a work-store bead adopts as-is", actor: sessionID, canonical: legacy, err: beads.ErrConditionalTransferUnsupported, wantCalls: 1, wantAdopt: true, wantAssignee: legacy, wantStderrHas: "predates conditional assignee transfer", wantStderrLacks: "bd update ga-1 --if-assignee"},
 		// The same unsupported error from the class route means the opposite:
 		// nothing fences a graph-resident close, so the bead is adopted and no
 		// recovery command is prescribed (none exists for a gcg- id).

@@ -1494,11 +1494,15 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 //     relocated graph store. Nothing downstream fences that bead's close on the
 //     stored assignee, so the legacy spelling costs the worker nothing and there
 //     is no recovery to prescribe: adopt as-is.
+//   - a bd too old for --if-assignee (ErrConditionalTransferUnsupported from
+//     the work store). bd added --if-assignee and its close/update actor fence
+//     in the same release (1.2.1), so such a bd cannot reject this worker's
+//     close on the legacy spelling either: adopt as-is.
 //   - anything else, which is the work store, whose door bd fences byte for
-//     byte. A failure there — a transient bd error, or a bd too old for
-//     --if-assignee — is if anything STRONGER evidence that the stored spelling
-//     is still wrong, so handing the bead over would hand over the #5716 loop:
-//     refuse adoption and print the manual recovery.
+//     byte. A failure there — a transient bd error — is if anything STRONGER
+//     evidence that the stored spelling is still wrong, so handing the bead
+//     over would hand over the #5716 loop: refuse adoption and print the
+//     manual recovery.
 //
 // The one surviving fail-open on a work-store bead is hookAdoptionUnverified,
 // where the readback could not be made at all: `current` is then the work
@@ -1537,6 +1541,15 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 	switch {
 	case errors.Is(err, errRestampGraphResident):
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: it is graph-resident, which has no conditional-transfer primitive and no close-path actor fence, so the spelling does not need to move to %q\n", beadID, current, target) //nolint:errcheck
+		return true
+	case errors.Is(err, beads.ErrConditionalTransferUnsupported):
+		// bd gained --if-assignee and its close/update actor fence
+		// (storage.ErrAssigneeMismatch) in the same release, 1.2.1. A bd that
+		// rejects --if-assignee therefore cannot reject this worker's close on
+		// the legacy spelling either, so refusing adoption would only strand
+		// the bead. Adopt as-is; the spelling moves on the first claim after bd
+		// is upgraded.
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: this bd predates conditional assignee transfer, and a bd without it has no close-path actor fence either, so the spelling does not block this worker; it moves to %q once bd supports --if-assignee\n", beadID, current, target) //nolint:errcheck
 		return true
 	case verdict == hookClaimMinted:
 		fmt.Fprintf(stderr, "gc hook --claim: claimed %s under assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it moves; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
