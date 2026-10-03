@@ -47,11 +47,40 @@ if [ -n "$SEVERITY" ] && ! printf '%s' "$SUBJECT" | grep -Eq '\[[^]]+\]$'; then
 fi
 
 RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
+
+# Wake the recipient when it is an agent session. Without this the send writes
+# a message bead and emits an event with no subscriber, so a paused agent finds
+# the escalation only on a turn boundary it may never reach — which is how a
+# maintenance advisory can fire on schedule for a day and reach nobody.
+#
+# `human` is the exception: it names an operator inbox with no session behind
+# it, so there is nothing to wake and the flag would fail against it.
+#
+# The send is bounded because a wake can outlive the send it follows, and an
+# escalation hanging here would stall the maintenance run that raised it. The
+# mail is already written by the time the wake blocks, so a bound that trips
+# costs the wake and not the message. Delivery is best-effort either way, so
+# nothing that must survive belongs only in this mail.
+GC_ESCALATE_NOTIFY=0
+if [ "$RECIPIENT" != "human" ]; then
+    GC_ESCALATE_NOTIFY=1
+fi
+
+ESCALATE_SEND_TIMEOUT_SECS="${GC_ESCALATE_SEND_TIMEOUT_SECS:-30}"
+case "$ESCALATE_SEND_TIMEOUT_SECS" in
+    ''|*[!0-9]*) ESCALATE_SEND_TIMEOUT_SECS=30 ;;
+    *[1-9]*) ;;
+    *) ESCALATE_SEND_TIMEOUT_SECS=30 ;;
+esac
+export GC_ESCALATE_NOTIFY
+export GC_ESCALATE_SEND_TIMEOUT_SECS="$ESCALATE_SEND_TIMEOUT_SECS"
+
 # The same subject/recipient owns one durable condition receipt. Exact body
 # changes (including a new head, blocker or decision) reset its reminder budget;
 # severity changes are distinct subjects. Defaults send at most five times with
 # 1h/2h/4h/8h repeat gaps. GC_ESCALATE_DEDUP_DISABLE=1 forces explicit delivery.
 # Python supplies process-scoped flock on both Linux and macOS. Failure is loud,
-# leaving caller retries available; no mail is archived or removed here.
+# leaving caller retries available; no mail is archived or removed here. The
+# sender honours GC_ESCALATE_NOTIFY and GC_ESCALATE_SEND_TIMEOUT_SECS above.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec python3 "$SCRIPT_DIR/escalate.py" "$RECIPIENT" "$SUBJECT" "$MESSAGE"

@@ -69,7 +69,10 @@ func (s *fakeAssignedStepStore) ops() hookClaimOps {
 			return b, true, nil
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		// A claimed bead is always stamped with the write-once gc.claimed_at
+		// (OBS-001); keep that write in memory instead of shelling out to bd.
+		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error { return nil },
 	}
 }
 

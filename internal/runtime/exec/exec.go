@@ -109,7 +109,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// observed winner, while os.ErrProcessDone leaves the flag false and
 	// preserves the ordinary exit result because completion was observed first.
 	// Neither result claims physical signal-delivery ordering.
-	if cancellationAccepted.Load() {
+	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
 	return "", p.runError(err, stderr.String(), args)
@@ -129,33 +129,59 @@ func (p *Provider) cancellationError(ctxErr error, stderr string, args []string)
 	return fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
 }
 
-// startCollisionPhrases are adapter stderr idioms that mean a live session
-// already owns the requested name. The exec provider infers
-// [runtime.ErrSessionExists] from adapter stderr, so cleanup must recognize
-// each supported phrasing before it can safely tear down a failed start.
+// startCollisionPhrases are the adapter stderr idioms that mean "a live session
+// already owns this name". exec is the only provider that INFERS
+// [runtime.ErrSessionExists] from the adapter's message instead of returning it
+// structurally, so this list is the whole detector — and packs word the refusal
+// differently ("already exists" and "already running" are both in use).
+//
+// Under-matching is the dangerous direction: the sentinel is what stops
+// cleanupAfterStartFailure from tearing down the box a healthy session is
+// already running in, so an unrecognized phrasing costs a live session. A false
+// match only forgoes cleanup of one box.
 var startCollisionPhrases = []string{"already exists", "already running"}
 
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
-// provider's contract: exit code 2 is an unknown operation treated as success
-// (forward compatible, nil error), a start-op name collision maps to
-// [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
+// provider's contract via [classifyExecExit]. A failure that is not an exit
+// status (the script could not run at all) classifies as no exit code.
 func (p *Provider) runError(runErr error, stderr string, args []string) error {
+	code := -1
 	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
-		return nil
+	if errors.As(runErr, &exitErr) {
+		code = exitErr.ExitCode()
 	}
 	errMsg := strings.TrimSpace(stderr)
 	if errMsg == "" {
 		errMsg = runErr.Error()
 	}
-	if len(args) > 0 && args[0] == "start" && isStartCollision(errMsg) {
-		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
+	op := ""
+	if len(args) > 0 {
+		op = args[0]
 	}
-	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+	return classifyExecExit(op, code, errMsg, fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg))
 }
 
-// isStartCollision reports whether a failed start operation says the name is
-// already owned by a live session.
+// classifyExecExit maps an adapter op's exit code and message onto the
+// provider's contract. base is the formatted adapter error. Exit code 2 is an
+// unknown operation treated as success (forward compatible, nil error); a
+// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
+// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
+// ([runtime.CapacityError]); everything else is base unchanged.
+func classifyExecExit(op string, code int, msg string, base error) error {
+	switch {
+	case code == 2:
+		return nil
+	case op == "start" && isStartCollision(msg):
+		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
+	case op == "start" && code == runtime.ExitCodeTempFail:
+		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
+	default:
+		return base
+	}
+}
+
+// isStartCollision reports whether a failed start op's message says the name is
+// already taken by a live session.
 func isStartCollision(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	for _, phrase := range startCollisionPhrases {
@@ -183,26 +209,58 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	// Was this name already occupied before we touched it? Asked structurally,
+	// before the attempt, because it is the only question whose answer cannot
+	// be garbled by how the adapter happens to word a refusal — and it is the
+	// question the teardown below actually depends on.
+	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
+	foreignBox := occupancyKnown && occupiedBefore
+
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-		return p.cleanupAfterStartFailure(name, err)
+		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err))
+		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
 	}
 
 	return nil
 }
 
-// cleanupAfterStartFailure tears down the box an adapter may have created
-// before a start failure. Name collisions are excluded because that box belongs
-// to the already-running session, not this failed attempt.
-func (p *Provider) cleanupAfterStartFailure(name string, startErr error) error {
-	if errors.Is(startErr, runtime.ErrSessionExists) {
+// cleanupAfterStartFailure tears down the box the adapter may already have
+// created before startErr, and returns the error Start should report. By the
+// time the `start` op fails the box usually exists — the adapter provisions it
+// and then blocks polling for readiness, so the common failure is gc hitting
+// its own startTimeout with the box already up. Without this teardown that box
+// is orphaned, and because a fresh session name is minted per attempt the retry
+// leaks another one.
+//
+// Two conditions skip the teardown, because in both of them the box belongs to
+// a live session rather than to this attempt, and stopping it would destroy a
+// healthy session:
+//
+//   - [runtime.ErrSessionExists] — the adapter refused in wording
+//     startCollisionPhrases recognizes.
+//   - foreignBox — the adapter reported the box already up BEFORE this attempt
+//     ran, which is the same fact established structurally instead of by
+//     reading prose. That distinction matters wherever a session name is a
+//     function of agent identity (named sessions, tmux_alias pools): a retry
+//     deliberately re-targets the name the previous attempt used, so collisions
+//     are steady state, and a
+//     phrasing this package has never seen would otherwise tear down a live
+//     agent's box on an ordinary retry (ga-vcjr9). A pack that cannot answer
+//     `is-running` reports neither occupancy nor vacancy and keeps the previous
+//     behavior exactly — the gate only ever withholds a teardown, never adds
+//     one.
+//
+// Stop deliberately runs on its own background context (see run), so cleanup
+// still happens when the caller's context is the thing that died.
+func (p *Provider) cleanupAfterStartFailure(name string, startErr error, foreignBox bool) error {
+	if foreignBox || errors.Is(startErr, runtime.ErrSessionExists) {
 		return startErr
 	}
 	if stopErr := p.Stop(name); stopErr != nil {
@@ -592,11 +650,31 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning checks if the session is alive: script is-running <name>
 // Returns true only if stdout is "true". Errors → false.
 func (p *Provider) IsRunning(name string) bool {
+	occupied, _ := p.boxOccupancy(name)
+	return occupied
+}
+
+// boxOccupancy asks `is-running <name>` and reports both the answer and
+// whether there was one. Only a literal "true" or "false" is an answer; an op
+// error, an unknown op (exit 2 on a pack with no is-running), or empty output
+// means the adapter could not tell.
+//
+// [Provider.IsRunning] flattens that to a bool because its callers only need
+// "treat as not running". A caller deciding whether it may destroy the box
+// needs the distinction: "no" authorizes a teardown, "I don't know" must not.
+func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 	out, err := p.run(nil, "is-running", name)
 	if err != nil {
-		return false
+		return false, false
 	}
-	return strings.TrimSpace(out) == "true"
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // IsAttached reports terminal attachment via `script is-attached <name>`

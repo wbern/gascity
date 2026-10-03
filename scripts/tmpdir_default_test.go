@@ -134,6 +134,9 @@ func TestShardScriptsDefaultTMPDirOffSharedTmpTmpfs(t *testing.T) {
 				t.Fatalf("read %s: %v", relPath, err)
 			}
 			content := string(data)
+			if relPath == "scripts/test-local-parallel" {
+				skipIfLocalParallelRunnerDisabled(t, content)
+			}
 			if strings.Contains(content, oldPattern) {
 				t.Fatalf("%s still falls back to the shared /tmp tmpfs via %q", relPath, oldPattern)
 			}

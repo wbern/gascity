@@ -4,16 +4,36 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
+
+type blockingStartProvider struct {
+	runtime.Provider
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	close(p.started)
+	select {
+	case <-p.release:
+		return p.Provider.Start(ctx, name, cfg)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 type startUnavailableLivenessProvider struct {
 	*runtime.Fake
@@ -107,6 +127,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
@@ -137,6 +158,62 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 	}
 }
 
+func TestStartPreparedStartCandidateRefusesRigSuspendedBeforeSpawn(t *testing.T) {
+	cityPath := t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "aoa", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	sp := runtime.NewFake()
+	rig := config.Rig{Name: "aoa", Path: "/rig/aoa"}
+	_, err := startPreparedStartCandidate(context.Background(), preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{SessionName: "aoa--worker-1", SessionNameMetadata: "aoa--worker-1"},
+			tp:   TemplateParams{TemplateName: "worker", RigName: "aoa"},
+		},
+		cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+	}, cityPath, nil, sp, &config.City{Rigs: []config.Rig{rig}}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), `rig "aoa" is suspended`) {
+		t.Fatalf("error = %v, want suspended rig refusal", err)
+	}
+	if sp.CountCalls("Start", "aoa--worker-1") != 0 {
+		t.Fatal("provider Start ran after suspension landed before spawn")
+	}
+}
+
+func TestStartPreparedStartCandidateDoesNotKillSessionSuspendedDuringSpawn(t *testing.T) {
+	cityPath := t.TempDir()
+	fake := runtime.NewFake()
+	sp := &blockingStartProvider{Provider: fake, started: make(chan struct{}), release: make(chan struct{})}
+	rig := config.Rig{Name: "aoa", Path: "/rig/aoa"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := startPreparedStartCandidate(context.Background(), preparedStart{
+			candidate: startCandidate{
+				info: sessionpkg.Info{SessionName: "aoa--worker-1", SessionNameMetadata: "aoa--worker-1"},
+				tp:   TemplateParams{TemplateName: "worker", RigName: "aoa"},
+			},
+			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+		}, cityPath, nil, sp, &config.City{Rigs: []config.Rig{rig}}, nil, nil, nil)
+		done <- err
+	}()
+	<-sp.started
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "aoa", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	close(sp.release)
+	if err := <-done; err != nil {
+		t.Fatalf("in-flight start returned %v, want completion", err)
+	}
+	if !fake.IsRunning("aoa--worker-1") {
+		t.Fatal("session crossing the suspension boundary was killed")
+	}
+	if fake.CountCalls("Stop", "aoa--worker-1") != 0 {
+		t.Fatal("suspension killed an in-flight session")
+	}
+}
+
 func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) {
 	sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
 
@@ -152,6 +229,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 		"",
 		nil,
 		sp,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -181,7 +259,7 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"", nil, sp, nil, nil, nil,
+		"", nil, sp, nil, nil, nil, nil,
 	)
 	if err != nil || !started {
 		t.Fatalf("startPreparedStartCandidate = (%v, %v), want started without error", started, err)

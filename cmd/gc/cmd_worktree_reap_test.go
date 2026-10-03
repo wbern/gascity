@@ -53,7 +53,7 @@ func installReapCmdHarness(t *testing.T, h *reapCmdHarness) {
 	worktreeLiveWorkerDirsFn = func(string) (map[string]bool, error) {
 		return map[string]bool{"/live/one": true}, nil
 	}
-	worktreeReapClosedBeadWorktrees = func(cp string, _ *config.City, _ map[string]beads.Store, liveDirs []string, dryRun bool, _ events.Recorder, _ io.Writer) reapReport {
+	worktreeReapClosedBeadWorktrees = func(cp string, _ *config.City, _ map[string]beads.Store, liveDirs []string, dryRun bool, _ events.Recorder, _ *reapSkipTracker, _ io.Writer) reapReport {
 		h.called++
 		h.gotDryRun = dryRun
 		h.gotCityPath = cp

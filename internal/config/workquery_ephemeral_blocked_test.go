@@ -93,7 +93,7 @@ func TestEphemeralReadyProbeWithholdsBlockedStep(t *testing.T) {
 // the same class of read and applies no gate whatsoever, so a blocked,
 // in_progress, assigned wisp step is re-served on every hook tick.
 func TestEphemeralInProgressProbeGatesOnReadiness(t *testing.T) {
-	script := ephemeralAssignedInProgressProbeScript("id", false)
+	script := ephemeralAssignedInProgressProbeScript("id", QueryTopology{})
 
 	// The probe's own jq must not be the only filter: it selects on assignee
 	// alone. Assert the emitted script performs readiness gating, by either
@@ -118,8 +118,8 @@ func TestEphemeralInProgressProbeGatesOnReadiness(t *testing.T) {
 // READY probe disables itself under those semantics (bd ready
 // --include-ephemeral covers it); the in_progress probe keeps running ungated.
 func TestEphemeralInProgressProbeIgnoresBD105Semantics(t *testing.T) {
-	legacy := ephemeralAssignedInProgressProbeScript("id", false)
-	modern := ephemeralAssignedInProgressProbeScript("id", true)
+	legacy := ephemeralAssignedInProgressProbeScript("id", QueryTopology{})
+	modern := ephemeralAssignedInProgressProbeScript("id", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
 
 	if legacy != modern {
 		t.Skip("in_progress probe now varies with bd ready semantics; revisit this pin")
@@ -146,7 +146,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	got := strings.TrimSpace(runShellWithFakeBd(t, poolDemandCountShell("worker-pool", false), nil, bdScript))
+	got := strings.TrimSpace(runShellWithFakeBd(t, poolDemandCountShell("worker-pool", QueryTopology{}), nil, bdScript))
 	if got != "1" {
 		t.Fatalf("pool demand = %q, want 1 ready ephemeral candidate behind an older blocked candidate", got)
 	}
@@ -164,7 +164,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := ephemeralAssignedReadyProbeScript("id", false) + `printf "[]"`
+	script := ephemeralAssignedReadyProbeScript("id", QueryTopology{}) + `printf "[]"`
 	got := runShellWithFakeBd(t, script, map[string]string{"id": "sess-1"}, bdScript)
 	if !strings.Contains(got, `"step-ready"`) || strings.Contains(got, `"step-blocked"`) {
 		t.Fatalf("assigned ready probe did not scan past blocked head: %q", got)

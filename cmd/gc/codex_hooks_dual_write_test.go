@@ -60,13 +60,13 @@ func codexSessionStartMatchers(t *testing.T, path string) []string {
 	return matchers
 }
 
-// furiosaHybridCodexHooks is the live hybrid captured from the gc2 furiosa
-// polecat (see gcw-zd0v / gcw-mnck): the reconciler's bound `matcher:"startup"`
+// driftedCodexHooks is a live hybrid captured from a drifted Codex
+// agent (see #3866 / #3808): the reconciler's bound `matcher:"startup"`
 // SessionStart entry coexisting with the overlay's pre-#3866 unbound
 // `matcher:""` `gc prime` entry, plus the unbound PreCompact/UserPromptSubmit
 // entries. `gc doctor` flags this as codex-hooks-drift ("needs upgrade")
 // forever because the two writers keep re-seeding disagreeing matchers.
-const furiosaHybridCodexHooks = `{
+const driftedCodexHooks = `{
   "hooks": {
     "PreCompact": [
       {
@@ -128,18 +128,18 @@ const furiosaHybridCodexHooks = `{
   }
 }`
 
-// seedFuriosaHybrid writes the live hybrid fixture into workDir/.codex/hooks.json
+// seedDriftedHybrid writes the live hybrid fixture into workDir/.codex/hooks.json
 // with its bound SessionStart entry pinned to cityDir, reproducing the drifted
 // starting state a reconcile tick must converge.
-func seedFuriosaHybrid(t *testing.T, cityDir, workDir string) {
+func seedDriftedHybrid(t *testing.T, cityDir, workDir string) {
 	t.Helper()
 	dir := filepath.Join(workDir, ".codex")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir .codex: %v", err)
 	}
-	body := strings.ReplaceAll(furiosaHybridCodexHooks, "__CITY__", cityDir)
+	body := strings.ReplaceAll(driftedCodexHooks, "__CITY__", cityDir)
 	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(body), 0o644); err != nil {
-		t.Fatalf("seed furiosa hybrid: %v", err)
+		t.Fatalf("seed drifted hybrid: %v", err)
 	}
 }
 
@@ -166,10 +166,10 @@ func installCodex(t *testing.T, cityDir, workDir string) {
 	}
 }
 
-// TestCodexHooksConvergeWithSkipStaging is the gcw-mnck reproduce+fix test.
+// TestCodexHooksConvergeWithSkipStaging is the dual-writer reproduce+fix test.
 //
 // The build_desired_state home-dir tick is staging followed by hooks.Install on
-// the SAME dir. Starting from the live furiosa hybrid, hooks.Install converges
+// the SAME dir. Starting from the live drifted hybrid, hooks.Install converges
 // the document to a single bound SessionStart entry — but the LEGACY staging
 // path re-merges the overlay's unbound `matcher:""` entry back in on the very
 // next tick, so the on-disk document a fresh `gc doctor`/session-start reads
@@ -199,7 +199,7 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 		}
 	}
 
-	// assertManagedEventsIntact guards the gcw-mnck regression surface. Because
+	// assertManagedEventsIntact guards the dual-writer regression surface. Because
 	// the home-dir staging path now skips the ENTIRE .codex/hooks.json, hooks.Install
 	// must remain the sole, COMPLETE writer: the converged document has to keep the
 	// managed PreCompact (context-cycle handoff) and UserPromptSubmit (mail check +
@@ -246,7 +246,7 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	// The file must be converged and bound at EVERY observation point, including
 	// the post-staging states where the legacy path re-drifts.
 	fixedWork := t.TempDir()
-	seedFuriosaHybrid(t, cityDir, fixedWork)
+	seedDriftedHybrid(t, cityDir, fixedWork)
 	stageCodex(t, overlaySrc, fixedWork, true)
 	installCodex(t, cityDir, fixedWork)
 	assertSingleBound(t, fixedWork, "fixed after install")
@@ -259,7 +259,7 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 	// staging step the unbound overlay entry is merged back in, re-creating the
 	// hybrid a reconcile tick can never settle. This is the drift the fix removes.
 	legacyWork := t.TempDir()
-	seedFuriosaHybrid(t, cityDir, legacyWork)
+	seedDriftedHybrid(t, cityDir, legacyWork)
 	stageCodex(t, overlaySrc, legacyWork, false)
 	installCodex(t, cityDir, legacyWork)
 	stageCodex(t, overlaySrc, legacyWork, false)
@@ -278,7 +278,7 @@ func TestStageSessionWorkDirConvergesManagedCodexHooks(t *testing.T) {
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
-	seedFuriosaHybrid(t, cityDir, workDir)
+	seedDriftedHybrid(t, cityDir, workDir)
 	installCodex(t, cityDir, workDir)
 
 	cfg := runtime.Config{
@@ -387,8 +387,8 @@ func TestStageSessionWorkDirConvergesCanonicalOwnerAndStripsLinkedManagedHooks(t
 
 	cityDir := t.TempDir()
 	overlaySrc := seedCodexOverlay(t)
-	seedFuriosaHybrid(t, cityDir, mainWorktree)
-	seedFuriosaHybrid(t, cityDir, linkedWorktree)
+	seedDriftedHybrid(t, cityDir, mainWorktree)
+	seedDriftedHybrid(t, cityDir, linkedWorktree)
 	canonicalHooks := filepath.Join(mainWorktree, ".codex", "hooks.json")
 	cfg := runtime.Config{
 		WorkDir:           linkedWorktree,
@@ -505,7 +505,7 @@ func TestBuildDesiredStateRuntimeStagingConvergesManagedCodexHooks(t *testing.T)
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
 	workDir := filepath.Join(cityDir, "persistent-worker")
-	seedFuriosaHybrid(t, cityDir, workDir)
+	seedDriftedHybrid(t, cityDir, workDir)
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city", Provider: "test"},
@@ -575,7 +575,7 @@ func TestResolvedWorkerRuntimeConvergesManagedCodexHooks(t *testing.T) {
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
 	workDir := filepath.Join(cityDir, "persistent-worker")
-	seedFuriosaHybrid(t, cityDir, workDir)
+	seedDriftedHybrid(t, cityDir, workDir)
 	installCodex(t, cityDir, workDir)
 
 	cfg := &config.City{
@@ -697,7 +697,7 @@ func TestPrepareTemplateResolution_T3CodexGeneratedHooksLeavesHookFileByteIdenti
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(.codex): %v", err)
 	}
-	original := []byte(strings.ReplaceAll(furiosaHybridCodexHooks, "__CITY__", cityDir))
+	original := []byte(strings.ReplaceAll(driftedCodexHooks, "__CITY__", cityDir))
 	hooksPath := filepath.Join(hooksDir, "hooks.json")
 	if err := os.WriteFile(hooksPath, original, 0o644); err != nil {
 		t.Fatalf("write existing hooks: %v", err)

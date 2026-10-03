@@ -33,7 +33,7 @@ func TestReapLoadGuard_SkipsPassWhenLoadExceedsCeiling(t *testing.T) {
 	stubReapLoad(t, float64(runtime.NumCPU())*10, nil)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("pass ran under a breached load ceiling: reaped=%d protected=%d", len(report.Reaped), len(report.Protected))
@@ -50,7 +50,7 @@ func TestReapLoadGuard_RunsWhenLoadIsUnderCeiling(t *testing.T) {
 	stubReapLoad(t, 0.01, nil)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %d, want 1 on an idle host\nstderr:\n%s", len(report.Reaped), stderr.String())
@@ -70,7 +70,7 @@ func TestReapLoadGuard_UnreadableLoadProceeds(t *testing.T) {
 	stubReapLoad(t, float64(runtime.NumCPU())*100, errors.New("no load source"))
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %d, want 1: an unreadable load must not disable the reaper\nstderr:\n%s", len(report.Reaped), stderr.String())
@@ -87,7 +87,7 @@ func TestReapLoadGuard_ZeroPercentDisablesTheGuard(t *testing.T) {
 	stubReapLoad(t, float64(runtime.NumCPU())*100, nil)
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, stores, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %d, want 1 with the guard disabled", len(report.Reaped))

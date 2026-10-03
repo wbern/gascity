@@ -79,7 +79,7 @@ func TestOverrideEnvReachesScheduledDispatchProcess(t *testing.T) {
 	})
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
 	}

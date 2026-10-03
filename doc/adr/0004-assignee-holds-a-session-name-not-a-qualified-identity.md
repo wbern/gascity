@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: "0007"
 date: 2026-08-08
 applies_to:
   - "internal/dispatch/control.go"

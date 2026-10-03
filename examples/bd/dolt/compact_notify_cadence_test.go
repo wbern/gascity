@@ -8,15 +8,16 @@ import (
 )
 
 // TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle pins the
-// "too loud" half of gcw-vmm00.39: a stale pending-push marker that stays
+// "too loud" half of ga-0fdnyn: a stale pending-push marker that stays
 // unresolved across repeated compact cycles must not page the operator on
 // every single cycle. Previously ensure_remote_push_retry_fresh had no
 // dedup at all, so an unresolved marker sent one identical mail per compact
-// invocation. The event still fires every cycle so automation keeps
-// observing each check; only the mail is gated.
+// invocation (observed in production: 40 mails for one unchanged my_db
+// marker). The event still fires every cycle so automation keeps observing
+// each check; only the mail is gated.
 func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
 	}
@@ -24,11 +25,11 @@ func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 	resetCompactGCLog(t, fixture)
 
-	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
 		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
 	}
-	thirdOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	thirdOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
 		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", thirdOut)
 	}
@@ -48,14 +49,15 @@ func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T
 }
 
 // TestCompactScriptQuarantineRenotifiesAfterBackstopElapses pins the "too
-// quiet" half of gcw-vmm00.39: an unresolved quarantine with an UNCHANGED
+// quiet" half of ga-0fdnyn: an unresolved quarantine with an UNCHANGED
 // reason must still page again once the renotify backstop elapses.
-// Previously quarantine_should_notify (now marker_should_notify) deduped on
-// exact reason match with no time backstop, so a real, still-unresolved
-// integrity failure was reported exactly once and then silently ignored
-// forever. This must not regress TestCompactScriptQuarantineReasonChangeReMails
-// (a changed reason still re-mails immediately, independent of the backstop)
-// or TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
+// Previously quarantine_should_notify deduped on exact reason match with no
+// time backstop, so a real, still-unresolved integrity failure was reported
+// exactly once and then silently ignored forever (observed in production:
+// gascity notify sidecar seen_count=26, notify_count=1). This must not regress
+// TestCompactScriptQuarantineReasonChangeReMails (a changed reason still
+// re-mails immediately, independent of the backstop) or
+// TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
 // (an unchanged reason within the backstop window still dedups).
 func TestCompactScriptQuarantineRenotifiesAfterBackstopElapses(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
@@ -73,11 +75,11 @@ func TestCompactScriptQuarantineRenotifiesAfterBackstopElapses(t *testing.T) {
 		t.Fatalf("dedup should be established after two cycles, want 1 mail, got %d\nlog:\n%s", len(mailLines), log)
 	}
 
-	// Force the backstop to have elapsed by backdating the marker's own
-	// notify bookkeeping, matching the file's existing convention of aging
-	// marker fields directly rather than faking the clock.
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	replaceCompactMarkerField(t, marker, "last_notified_ts", "2000-01-01T00:00:00Z")
+	// Force the backstop to have elapsed by backdating the notify sidecar,
+	// matching the file's existing convention of aging persisted cadence state
+	// directly rather than faking the clock.
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	replaceCompactMarkerField(t, notifyState, "last_notified_ts", "2000-01-01T00:00:00Z")
 
 	thirdOut, err := fixture.run(t, "below_threshold")
 	if err == nil {
@@ -102,15 +104,14 @@ func TestCompactScriptQuarantineRenotifiesAfterBackstopElapses(t *testing.T) {
 }
 
 // TestCompactScriptBareGCExistingQuarantineDoesNotRemailEveryCycle pins the
-// bare-GC half of gcw-vmm00.39 that the original port missed: bare_gc_database
-// called the ungated send_compact_quarantine_alert wrapper directly, which has
-// no marker_should_notify dedup and no record_marker_notify_state bookkeeping.
-// Because --bare-gc and flatten are mutually exclusive run modes, a
-// --bare-gc-only deployment against an unresolved quarantine mailed the mayor
-// on every single cycle forever, with seen_count/notify_count frozen since
-// they were never bumped. Measured on GC3: 57 mails over 31 hours from one
-// marker. bare_gc_database must now share report_existing_quarantine with
-// flatten_database so it dedups and its bookkeeping actually advances.
+// bare-GC half of the quarantine renotify cadence (gcw-vmm00.43):
+// bare_gc_database once called an ungated alert wrapper directly, with no
+// marker_should_notify dedup and no notify bookkeeping. Because --bare-gc and
+// flatten are mutually exclusive run modes, a --bare-gc-only deployment against
+// an unresolved quarantine mailed the operator on every single cycle forever
+// (measured: 57 mails over 31 hours from one marker). bare_gc_database must
+// share report_existing_quarantine with flatten_database so it dedups and its
+// notify-state sidecar actually advances.
 func TestCompactScriptBareGCExistingQuarantineDoesNotRemailEveryCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
@@ -140,13 +141,14 @@ func TestCompactScriptBareGCExistingQuarantineDoesNotRemailEveryCycle(t *testing
 		t.Fatalf("each --bare-gc cycle should still emit an event even when the mail is suppressed, got %d\nlog:\n%s", len(eventLines), log)
 	}
 
-	if seenCount := compactMarkerValue(t, marker, "seen_count"); seenCount != "2" {
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if seenCount := compactMarkerValue(t, notifyState, "seen_count"); seenCount != "2" {
 		t.Fatalf("bookkeeping must advance on every --bare-gc cycle, not stay frozen: seen_count = %q, want 2", seenCount)
 	}
-	if notifyCount := compactMarkerValue(t, marker, "notify_count"); notifyCount != "1" {
+	if notifyCount := compactMarkerValue(t, notifyState, "notify_count"); notifyCount != "1" {
 		t.Fatalf("notify_count must advance on the emitted cycle, not stay frozen: notify_count = %q, want 1", notifyCount)
 	}
-	if lastNotifiedTS := compactMarkerValue(t, marker, "last_notified_ts"); lastNotifiedTS == "" {
+	if lastNotifiedTS := compactMarkerValue(t, notifyState, "last_notified_ts"); lastNotifiedTS == "" {
 		t.Fatal("last_notified_ts must be recorded once bare-gc's alert fires")
 	}
 }

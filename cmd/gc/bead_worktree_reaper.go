@@ -81,9 +81,13 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted or ignored files and no unpushed commits — the two
-//     forms of work that live inside this worktree and that its removal would
-//     destroy. Either probe failing protects the tree.
+//  6. Git state: no uncommitted or ignored files and no unlanded commits that
+//     removing the worktree would orphan — commits reachable from no branch,
+//     tag, or remote-tracking ref. The test is deliberately reachability, not
+//     push state: `git worktree remove` deletes the checkout, not refs/heads,
+//     and a merge queue that deletes the merged branch from origin would
+//     otherwise hold every merged bead's worktree forever (gastownhall/gascity
+//     ga-uh1m). Any probe failing protects the tree.
 //
 // Stashes are deliberately not a gate. refs/stash lives in the repository's
 // common git dir, so `git stash list` run inside a linked worktree reports
@@ -101,13 +105,25 @@ type reapReport struct {
 // what it protected, but removes nothing. liveSessionDirs is the active-session
 // working-directory set the liveness gate cross-checks against, alongside the
 // authoritative /proc cwd scan.
+//
+// skips carries skip-reporting history across sweeps so an unchanged decision
+// is announced once rather than on every tick; a nil tracker reports every
+// skip. It never changes what is reaped or what the returned report contains —
+// see reapSkipTracker.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
+	skips *reapSkipTracker,
 	stderr io.Writer,
 ) reapReport {
 	report := reapReport{DryRun: dryRun}
@@ -117,9 +133,12 @@ func reapClosedBeadWorktrees(
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return report
 	}
+
+	skips.beginPass()
+	defer skips.endPass()
 
 	// Build a guard set of session home names so agent template directories
 	// are never touched.
@@ -168,7 +187,7 @@ func reapClosedBeadWorktrees(
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}
@@ -180,10 +199,21 @@ func reapClosedBeadWorktrees(
 		}
 		rigWorktreeDir := filepath.Join(wtRoot, rigName)
 
-		worktrees, err := git.New(rigRoot).WorktreeList()
+		// discoverWorktreeLiveness is the single shared scan: it enumerates
+		// every worktree git knows about for this rig — including ones
+		// outside .gc/worktrees entirely — and computes liveness for each
+		// against the pass's authoritative live set. Pass 1 below still
+		// narrows to gc-owned candidates before anything is ever reaped;
+		// pass 2 reuses the liveness already computed here instead of
+		// re-scanning per candidate.
+		worktreeLivenessResults, err := discoverWorktreeLiveness(rigRoot, live, liveSessionDirs)
 		if err != nil {
 			fmt.Fprintf(stderr, "reapClosedBeadWorktrees: listing worktrees for rig %s (%s): %v\n", rigName, rigRoot, err) //nolint:errcheck
 			continue
+		}
+		livenessByPath := make(map[string]worktreeLiveness, len(worktreeLivenessResults))
+		for _, wl := range worktreeLivenessResults {
+			livenessByPath[wl.Path] = wl
 		}
 
 		// Pass 1: discover reap-eligible candidates — closed bead, and old
@@ -192,7 +222,7 @@ func reapClosedBeadWorktrees(
 		// borrow-veto scan below can run as a single batched query per rig
 		// (FR-3) instead of once per worktree.
 		var candidates []reapCandidate
-		for _, wt := range worktrees {
+		for _, wt := range worktreeLivenessResults {
 			worktreePath := wt.Path
 
 			// Only per-bead worktrees under this rig's .gc/worktrees/<rig>/
@@ -214,8 +244,8 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
-			// Extract a bead ID candidate from the worktree's leaf name.
-			beadID := extractBeadIDFromWorktreeName(cfg, base)
+			// Resolve which bead this worktree belongs to from its path.
+			beadID := extractBeadIDFromWorktreePath(cfg, rigWorktreeDir, worktreePath)
 			if beadID == "" {
 				continue
 			}
@@ -239,15 +269,17 @@ func reapClosedBeadWorktrees(
 			case !ok:
 				reason = "worktree age indeterminate (failing closed)"
 			case minAge > 0 && age < minAge:
-				reason = fmt.Sprintf("worktree too young to reap (quarantine): age=%s min_age=%s", age.Round(time.Second), minAge)
+				reason = fmt.Sprintf("worktree too young to reap (quarantine): min_age=%s", minAge)
 			}
 			if reason != "" {
 				branch, _ := git.New(worktreePath).CurrentBranch()
-				fmt.Fprintf(stderr, //nolint:errcheck
-					"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
-					worktreePath, beadID, reason,
-				)
-				recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				if skips.shouldSurface(worktreePath, reason) {
+					fmt.Fprintf(stderr, //nolint:errcheck
+						"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
+						worktreePath, beadID, reason,
+					)
+					recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				}
 				report.Protected = append(report.Protected, reapDecision{
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason,
 				})
@@ -270,11 +302,13 @@ func reapClosedBeadWorktrees(
 			reason := fmt.Sprintf("borrow-veto scan failed (failing closed): %v", listErr)
 			for _, c := range candidates {
 				branch, _ := git.New(c.worktreePath).CurrentBranch()
-				fmt.Fprintf(stderr, //nolint:errcheck
-					"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
-					c.worktreePath, c.beadID, reason,
-				)
-				recordReapSkipped(rec, c.beadID, c.worktreePath, rigName, reason)
+				if skips.shouldSurface(c.worktreePath, reason) {
+					fmt.Fprintf(stderr, //nolint:errcheck
+						"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
+						c.worktreePath, c.beadID, reason,
+					)
+					recordReapSkipped(rec, c.beadID, c.worktreePath, rigName, reason)
+				}
 				report.Protected = append(report.Protected, reapDecision{
 					BeadID: c.beadID, Path: c.worktreePath, Rig: rigName, Branch: branch, Reason: reason,
 				})
@@ -298,14 +332,15 @@ func reapClosedBeadWorktrees(
 
 			// Liveness gate (fail closed). Protect the tree when a live process
 			// or active session is working in it, or when liveness could not be
-			// determined at all.
+			// determined at all. Reuses the liveness already computed by
+			// discoverWorktreeLiveness above rather than re-scanning.
 			if reason == "" {
 				switch {
 				case !live.scanned:
 					reason = "liveness scan unavailable (failing closed, protecting all)"
 				default:
-					if isLive, why := worktreeIsLive(worktreePath, live, liveSessionDirs); isLive {
-						reason = "live: " + why
+					if wl := livenessByPath[worktreePath]; wl.Live {
+						reason = "live: " + wl.Reason
 					}
 				}
 			}
@@ -333,16 +368,17 @@ func reapClosedBeadWorktrees(
 				holdsUnlandedWork = unlandedErr == nil && hasUnlanded
 				switch {
 				case unlandedErr != nil:
-					reason = fmt.Sprintf("unsafe git state: unlanded probe failed: %v", unlandedErr)
+					reason = fmt.Sprintf("unsafe git state: unlanded git probe failed (failing closed): %v", unlandedErr)
 				case preservedErr != nil:
-					reason = fmt.Sprintf("unsafe git state: preservation probe failed: %v", preservedErr)
+					reason = fmt.Sprintf("unsafe git state: preservation git probe failed (failing closed): %v", preservedErr)
 				case hasUncommitted:
 					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unlanded=%v", hasUncommitted, hasUnlanded)
 				case hasUnlanded && hasUnpreserved:
 					// The only shape removal actually destroys: commits no
 					// durable ref carries, so the worktree's own HEAD is their
-					// last holder.
-					reason = "unsafe git state: uncommitted=false unlanded=true unpreserved=true (commits reachable from no branch, tag or remote)"
+					// last holder. unreachable=true keeps upstream's reason
+					// vocabulary (ga-uh1m) for the same condition.
+					reason = "unsafe git state: uncommitted=false unlanded=true unpreserved=true unreachable=true (commits reachable from no branch, tag or remote)"
 				case hasUnlanded:
 					// Unlanded but branch-backed. Removal cannot destroy these
 					// commits, so it is not a reason to hold the working files
@@ -389,11 +425,13 @@ func reapClosedBeadWorktrees(
 			branch, _ := wg.CurrentBranch()
 
 			if reason != "" {
-				fmt.Fprintf(stderr, //nolint:errcheck
-					"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
-					worktreePath, beadID, reason,
-				)
-				recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				if skips.shouldSurface(worktreePath, reason) {
+					fmt.Fprintf(stderr, //nolint:errcheck
+						"reapClosedBeadWorktrees: protecting %s (bead %s closed but %s)\n",
+						worktreePath, beadID, reason,
+					)
+					recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				}
 				report.Protected = append(report.Protected, reapDecision{
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
 					Reason: reason, HoldsUnlandedWork: holdsUnlandedWork,
@@ -430,11 +468,13 @@ func reapClosedBeadWorktrees(
 
 			if dryRun {
 				const whatIf = "dry-run: would reap (closed bead, clean tree, no live process)"
-				fmt.Fprintf(stderr, //nolint:errcheck
-					"reapClosedBeadWorktrees: %s: %s for closed bead %s\n",
-					whatIf, worktreePath, beadID,
-				)
-				recordReapSkipped(rec, beadID, worktreePath, rigName, whatIf)
+				if skips.shouldSurface(worktreePath, whatIf) {
+					fmt.Fprintf(stderr, //nolint:errcheck
+						"reapClosedBeadWorktrees: %s: %s for closed bead %s\n",
+						whatIf, worktreePath, beadID,
+					)
+					recordReapSkipped(rec, beadID, worktreePath, rigName, whatIf)
+				}
 				report.Reaped = append(report.Reaped, reapDecision{
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Warning: warning,
 					HoldsUnlandedWork: holdsUnlandedWork,
@@ -493,6 +533,83 @@ var reapPaceFn = time.Sleep
 type reapCandidate struct {
 	beadID       string
 	worktreePath string
+}
+
+// reapSkipTracker makes the reaper's skip reporting edge-triggered, so a
+// worktree is announced when its situation changes rather than on every sweep.
+//
+// The reaper re-evaluates every worktree on each controller tick (~12s), and a
+// tree it cannot reap — unpushed commits, a live process, an indeterminate age
+// — stays protected for hours or days. Re-announcing that unchanged decision
+// every tick made this one event 95% of all city telemetry (~500 events/min,
+// ~260 MB/day of events.jsonl) while carrying no information a reader did not
+// already have. The steady state is exactly what is not worth saying.
+//
+// A worktree is therefore surfaced when it is first skipped and whenever its
+// reason changes; while the reason holds, both the event and the log line stay
+// silent. Paths absent from a pass are forgotten, so a tree that stops being a
+// candidate and later returns announces itself again. Suppression governs
+// reporting only — reapReport still lists every worktree acted on, so callers
+// reading the report (the dry-run summary, the tick's phase counters) see the
+// full picture on every pass.
+//
+// The tracker is owned by the controller runtime and touched only from the
+// serial reconciler tick, so it carries no lock, matching the other per-tick
+// state on CityRuntime. A nil *reapSkipTracker surfaces every skip, preserving
+// the unsuppressed behavior for one-shot callers that have no pass history to
+// compare against.
+type reapSkipTracker struct {
+	lastReason map[string]string   // worktree path -> reason last surfaced
+	thisPass   map[string]struct{} // paths evaluated in the pass under way
+}
+
+// newReapSkipTracker returns a tracker with no recorded history, so the first
+// pass through it surfaces every skip.
+func newReapSkipTracker() *reapSkipTracker {
+	return &reapSkipTracker{
+		lastReason: make(map[string]string),
+		thisPass:   make(map[string]struct{}),
+	}
+}
+
+// beginPass starts a sweep, clearing the set of paths seen so endPass can
+// forget the ones that dropped out.
+func (t *reapSkipTracker) beginPass() {
+	if t == nil {
+		return
+	}
+	t.thisPass = make(map[string]struct{}, len(t.lastReason))
+}
+
+// shouldSurface records that worktreePath is being skipped for reason during
+// the pass under way, and reports whether that is news: true when the path was
+// not skipped as of the previous pass, or was skipped for a different reason.
+// False means the decision is an unchanged repeat, and the caller emits
+// neither the event nor the log line.
+func (t *reapSkipTracker) shouldSurface(worktreePath, reason string) bool {
+	if t == nil {
+		return true
+	}
+	t.thisPass[worktreePath] = struct{}{}
+	if prev, tracked := t.lastReason[worktreePath]; tracked && prev == reason {
+		return false
+	}
+	t.lastReason[worktreePath] = reason
+	return true
+}
+
+// endPass forgets every path the pass did not evaluate, bounding the tracker to
+// the worktrees currently in the sweep and letting a path that returns later
+// surface again.
+func (t *reapSkipTracker) endPass() {
+	if t == nil {
+		return
+	}
+	for path := range t.lastReason {
+		if _, seen := t.thisPass[path]; !seen {
+			delete(t.lastReason, path)
+		}
+	}
 }
 
 // computeWorktreeAge returns how long ago worktreePath was created, using the
@@ -583,6 +700,30 @@ func rigRootByName(cfg *config.City, rigName string) string {
 		}
 	}
 	return ""
+}
+
+// extractBeadIDFromWorktreePath resolves which bead a worktree belongs to from
+// its path: from the leaf directory name, or — only when the leaf carries no
+// bead ID — from its parent directory name.
+//
+// The parent fallback covers worktrees laid out as
+// "<bead-id>-<slug>/worktree", where the leaf is a fixed literal and only the
+// parent names the bead. Reading the leaf alone resolved those to no bead at
+// all, so they were skipped before any safety gate ran and could never be
+// reaped or even reported as protected.
+//
+// The climb is exactly one level and stops at boundary (the rig's worktree
+// root), so it can never mistake an ancestor directory outside the rig's
+// worktree subtree for the owning bead.
+func extractBeadIDFromWorktreePath(cfg *config.City, boundary, worktreePath string) string {
+	if beadID := extractBeadIDFromWorktreeName(cfg, filepath.Base(worktreePath)); beadID != "" {
+		return beadID
+	}
+	parent := filepath.Dir(worktreePath)
+	if !isStrictlyUnderDir(boundary, parent) {
+		return ""
+	}
+	return extractBeadIDFromWorktreeName(cfg, filepath.Base(parent))
 }
 
 // extractBeadIDFromWorktreeName scans consecutive dash-separated segment pairs

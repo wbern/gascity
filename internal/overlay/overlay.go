@@ -52,15 +52,18 @@ type preserveExistingFunc func(relPath string) bool
 
 // skipRuntimeMirror reports whether relPath is the runtime `.gc` mirror (the
 // entry itself or anything beneath it) at the root of a copy operation, so it is
-// never staged into an overlay destination. It is intentionally placed in both
-// shared recursive walks — copyDirRecursive and copyDirWithSkipRecursive — so it
-// applies to every public entry point: CopyDir, StageDir, stageDirStrict,
-// CopyFileOrDir, CopyDirWithSkip, and the provider-aware CopyDirForProvider(s)
-// (WithSkip). That is correct for today's callers, which are all
-// overlay-to-workdir staging paths where a top-level `.gc/` mirror must never be
-// copied; a future caller that legitimately needs to copy a tree containing a
-// top-level `.gc/` would need a variant that does not carry this guard. Names
-// merely prefixed with ".gc" (e.g. ".gcignore") are not matched.
+// never staged into an overlay destination. It is intentionally placed in the
+// shared copyDirRecursive walk, so it applies to every copyDir caller —
+// CopyDir, StageDir, stageDirStrict, CopyFileOrDir, and the provider-aware
+// CopyDirForProvider(s) — not only the provider-specific staging paths. That is
+// correct for today's callers, which are all overlay-to-workdir staging paths
+// where a top-level `.gc/` mirror must never be copied; a future caller that
+// legitimately needs to copy a tree containing a top-level `.gc/` would need a
+// variant that does not carry this guard. Names merely prefixed with ".gc"
+// (e.g. ".gcignore") are not matched.
+//
+// It is unconditional: a caller-supplied SkipFunc can only skip more, never
+// re-enable staging of the runtime mirror.
 func skipRuntimeMirror(relPath string) bool {
 	clean := filepath.Clean(relPath)
 	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
@@ -80,9 +83,10 @@ func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveE
 	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting, skip)
 }
 
-// copyDirRecursive walks srcBase/rel and copies files into dstBase/rel. When
-// skip is non-nil, entries for which it returns true are omitted (files and
-// whole subtrees), matching CopyDirWithSkip semantics on the best-effort path.
+// copyDirRecursive walks srcBase/rel and copies files into dstBase/rel. The
+// runtime `.gc` mirror is always skipped. When skip is non-nil, entries for
+// which it returns true are additionally omitted (files and whole subtrees),
+// matching CopyDirWithSkip semantics on the best-effort path.
 func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	srcPath := srcBase
 	if rel != "" {
@@ -100,11 +104,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 			entryRel = filepath.Join(rel, entry.Name())
 		}
 
-		if skipRuntimeMirror(entryRel) {
-			continue
-		}
-
-		if skip != nil && skip(entryRel, entry.IsDir()) {
+		if skipRuntimeMirror(entryRel) || (skip != nil && skip(entryRel, entry.IsDir())) {
 			continue
 		}
 
@@ -181,10 +181,6 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 			entryRel = filepath.Join(rel, entry.Name())
 		}
 
-		if skipRuntimeMirror(entryRel) {
-			continue
-		}
-
 		if skip != nil && skip(entryRel, entry.IsDir()) {
 			continue
 		}
@@ -234,6 +230,21 @@ func isPerProviderPath(relPath string) bool {
 		len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
 }
 
+// universalOverlaySkip composes the skips for the universal (non per-provider)
+// copy phase. That phase runs through CopyDirWithSkip, which does not carry
+// copyDirRecursive's unconditional runtime-mirror guard, so the guard is
+// applied here explicitly: the runtime `.gc` mirror is never staged, the
+// per-provider/ subtree is deferred to the resolved provider slots, and the
+// caller's optional skip may only skip more.
+func universalOverlaySkip(skip SkipFunc) SkipFunc {
+	return func(relPath string, isDir bool) bool {
+		if skipRuntimeMirror(relPath) || isPerProviderPath(relPath) {
+			return true
+		}
+		return skip != nil && skip(relPath, isDir)
+	}
+}
+
 // CopyDirForProvider copies overlay files with provider awareness:
 //  1. Copies everything EXCEPT the per-provider/ subtree (universal files).
 //  2. If per-provider/<providerName>/ exists, copies its contents into dst
@@ -252,10 +263,8 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
 
-	// Step 1: copy universal files (skip per-provider/).
-	if err := CopyDirWithSkip(srcDir, dstDir, func(relPath string, _ bool) bool {
-		return isPerProviderPath(relPath)
-	}, stderr); err != nil {
+	// Step 1: copy universal files (skip per-provider/ and the runtime mirror).
+	if err := CopyDirWithSkip(srcDir, dstDir, universalOverlaySkip(nil), stderr); err != nil {
 		return err
 	}
 
@@ -289,13 +298,18 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 // omits any file for which skip returns true, in BOTH the universal and the
 // per-provider copy phases.
 //
-// It exists for the build_desired_state home-dir staging path (gcw-mnck): that
+// It exists for the build_desired_state home-dir staging path: that
 // path stages provider overlays and then runs hooks.Install on the SAME
 // directory. Reconciler-owned mergeable files (overlay.IsMergeablePath —
 // .codex/hooks.json et al.) must be skipped here so hooks.Install is the sole
-// writer and the two writers cannot leave a permanent hybrid hook document. The
-// runtime task-worktree staging path passes a nil skip and keeps staging those
-// files, because there hooks.Install never runs and staging is the sole writer.
+// writer on that reconcile tick and the two writers cannot leave a permanent
+// hybrid hook document. The runtime task-worktree staging path passes a nil
+// skip and keeps staging those files, because there hooks.Install never runs
+// and staging is the sole writer.
+//
+// The skip does not make hooks.Install the only writer everywhere: for a
+// persistent agent, session-start staging writes the same paths via the
+// nil-skip path, so a hybrid can reappear until the next tick converges it.
 func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip SkipFunc, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
@@ -308,14 +322,9 @@ func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
 
-	// Step 1: copy universal files (skip per-provider/ and caller-skipped paths).
-	universalSkip := func(relPath string, isDir bool) bool {
-		if isPerProviderPath(relPath) {
-			return true
-		}
-		return skip != nil && skip(relPath, isDir)
-	}
-	if err := CopyDirWithSkip(srcDir, dstDir, universalSkip, stderr); err != nil {
+	// Step 1: copy universal files (skip per-provider/, the runtime mirror, and
+	// caller-skipped paths).
+	if err := CopyDirWithSkip(srcDir, dstDir, universalOverlaySkip(skip), stderr); err != nil {
 		return err
 	}
 
@@ -432,7 +441,7 @@ func copyCanonicalJSONFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
-	return os.WriteFile(dst, canonical, info.Mode().Perm())
+	return os.WriteFile(dst, canonical, info.Mode().Perm()|0o200)
 }
 
 // copyFile copies a single file preserving permissions.
@@ -453,7 +462,10 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("stat %q: %w", src, err)
 	}
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	// Remote build workers materialize action inputs read-only; copies made
+	// for later in-place editing (gc init over an example template) must be
+	// owner-writable regardless of the source mode.
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm()|0o200)
 	if err != nil {
 		return fmt.Errorf("creating %q: %w", dst, err)
 	}

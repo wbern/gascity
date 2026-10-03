@@ -22,16 +22,6 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// runGitAllowFail runs a git command in dir and ignores a non-zero exit, for
-// setup steps whose precondition may legitimately be absent.
-func runGitAllowFail(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = sanitizeGitEnv(os.Environ())
-	_ = cmd.Run()
-}
-
 // newTrunkRepo returns a clone of a fresh bare remote with one pushed commit
 // on a "main" trunk. The clone is configured for committing.
 func newTrunkRepo(t *testing.T) string {
@@ -311,7 +301,7 @@ func TestHasUnlandedCommits_NoTrunkRefFailsClosed(t *testing.T) {
 	runGit(t, clone, "commit", "-m", "base")
 	runGit(t, clone, "push", "-u", "origin", "release-2026")
 	// Some clones carry no origin/HEAD symref at all.
-	runGitAllowFail(t, clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+	_, _ = runGitAllowFail(t, clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 
 	writeFile(t, clone, "more.txt", "more\n")
 	runGit(t, clone, "add", "more.txt")

@@ -1,17 +1,23 @@
 package main
 
 import (
+	"fmt"
+	"log"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // poolNewDemandLoadAverageFn is the host load probe the new-demand veto
@@ -67,11 +73,20 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// WorktreeSpec is the single-owner evidence published by the provisioner.
+	// When present, the pool path verifies it before publishing work_dir on a
+	// session bead; a mismatch fails the whole atomic metadata update.
+	WorktreeSpec *worktree.Spec
+	// WorktreeError carries incomplete/conflicting worktree evidence discovered
+	// while building demand. The realization path fails closed before creating
+	// or updating a session bead.
+	WorktreeError string
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
-	// FloorGuarantee marks a "new" request created to satisfy an agent's
-	// min_active_sessions floor (as opposed to elastic scale-check demand).
+	// FloorGuarantee marks a "new" request that satisfies an agent's
+	// min_active_sessions floor, whether reserveNestedCapFloors minted it for
+	// the floor or it was an elastic scale-check request the floor absorbed.
 	// The per-tick create-budget allocator reserves a token for each
 	// floor-bearing template before round-robining the remainder, so a cold
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
@@ -83,25 +98,137 @@ func beadPriority(b beads.Bead) int {
 	if b.Priority != nil {
 		return *b.Priority
 	}
-	// Match the store's own default for a nil priority (readySortPriority,
-	// internal/beads/query.go:420-424) rather than 0. Under the old
-	// descending comparator, a 0 default happened to sort last (least
-	// urgent) and looked harmless; under the ascending-urgent comparator
-	// (gcw-tuwx8.5) 0 is the HIGHEST urgency, so defaulting an unset
-	// priority to 0 would let unprioritized work jump ahead of every
-	// explicitly-prioritized P1-P4 bead.
+	// nil Priority round-trips through native_dolt_store as bd's documented
+	// mid default (P2), not "highest" — match that semantics here so an
+	// unset-priority bead cannot out-schedule an explicitly-labeled P1 bead.
 	return 2
 }
 
-// anonymousNewTierPriority is the BeadPriority assigned to "new" tier
-// SessionRequests that carry no real bead priority yet (anonymous
-// scale-check demand, in-flight reuse). Real bd priorities are 0-4
-// (ascending-urgent, 0=highest — doltlite_read_store.go:396). This sentinel
-// must sort as less urgent than every real priority so anonymous demand
-// never outranks resume/wake-tier requests built from actual in-progress
-// work; it only ties (and falls to the tier tie-break) against other
-// anonymous new-tier requests, preserving resume/wake-always-before-new.
-const anonymousNewTierPriority = 5
+// beadPriorityRankOffset is the base of the scheduler's descending rank scale.
+// It sits above every bd priority (0-4) so a rank-bearing request always sorts
+// ahead of the "new"/floor-guarantee requests that leave SessionRequest.
+// BeadPriority at its zero value.
+const beadPriorityRankOffset = 10
+
+// beadPriorityRank converts a bd priority — ascending-urgent, where P0 is the
+// most urgent — into the descending rank SessionRequest.BeadPriority is sorted
+// by, where a larger value is scheduled first. Without this inversion a P4 bead
+// would out-schedule a P0 one.
+func beadPriorityRank(p int) int {
+	return beadPriorityRankOffset - p
+}
+
+// legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed by
+// work bead ID. worktreeSpecForBead runs for every ready bead on every
+// scale-check tick and nothing backfills ownership metadata onto beads that
+// never published it, so an unguarded log line would repeat for the life of
+// the process.
+var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
+
+// worktreeSpecForBead reconstructs the exact single-owner verification input
+// from metadata published after gc worktree ensure succeeds. A work_dir with
+// incomplete or conflicting evidence is an error, never permission to launch
+// a session into an unverified directory.
+func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, error) {
+	canonicalPath := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	legacyPath := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if canonicalPath != "" && legacyPath != "" && canonicalPath != legacyPath {
+		return nil, fmt.Errorf("work bead %s has conflicting %s=%q and %s=%q",
+			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
+	}
+	path := canonicalPath
+	pathKey := beadmeta.WorkDirMetadataKey
+	if path == "" {
+		path = legacyPath
+		pathKey = beadmeta.LegacyWorkDirMetadataKey
+	}
+	if path == "" {
+		return nil, nil
+	}
+	values := []struct {
+		key   string
+		value string
+	}{
+		{beadmeta.WorktreeRepoMetadataKey, bead.Metadata[beadmeta.WorktreeRepoMetadataKey]},
+		{beadmeta.WorktreeRootMetadataKey, bead.Metadata[beadmeta.WorktreeRootMetadataKey]},
+		{beadmeta.WorkBranchMetadataKey, bead.Metadata[beadmeta.WorkBranchMetadataKey]},
+		{beadmeta.WorktreeBaseRefMetadataKey, bead.Metadata[beadmeta.WorktreeBaseRefMetadataKey]},
+		{beadmeta.WorktreeBaseSHAMetadataKey, bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]},
+		{beadmeta.WorktreeCreatorMetadataKey, bead.Metadata[beadmeta.WorktreeCreatorMetadataKey]},
+		{beadmeta.WorktreeOwnerMetadataKey, bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]},
+		{beadmeta.WorktreeGenerationMetadataKey, bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]},
+		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
+	}
+	missing := make([]string, 0, len(values))
+	present := make([]string, 0, len(values))
+	for _, item := range values {
+		if strings.TrimSpace(item.value) == "" {
+			missing = append(missing, item.key)
+		} else {
+			present = append(present, item.key)
+		}
+	}
+	if len(missing) == len(values) {
+		// A bead carrying work_dir without any ownership evidence is not
+		// incomplete evidence -- it never claimed to publish any. Recipe steps
+		// are still minted this way (stampDrainItemRecipe in
+		// internal/dispatch/drain.go copies both work_dir spellings and none
+		// of the nine ownership keys), so treat it as an unmanaged workspace
+		// and let the seat spawn as it always did, instead of erroring it into
+		// permanent starvation.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
+				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey {
+		// gc.work_branch alone is not incomplete evidence either -- it is the
+		// shape a hook claim's ambient branch stamp produces on an otherwise
+		// unmanaged bead (hookClaimIdentityPatch stamps gc.work_branch onto
+		// any bead with a resolvable branch, independent of whether the bead
+		// ever published worktree ownership evidence). Treat it the same as
+		// the zero-key case above instead of hard-erroring the seat into
+		// permanent starvation the first time a hook claim touches it.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with only %s published; treating as unmanaged",
+				bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey)
+		}
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
+	}
+	// The bead's own gc.root_store_ref is the canonical spelling
+	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
+	// the workspace provenance. The caller's storeRef is a probe shorthand
+	// ("city"), so verification against durable provenance compares unequal
+	// strings and refuses a workspace that is in fact ours. Prefer the bead's
+	// value and keep the shorthand only as a fallback for beads that carry no
+	// canonical ref.
+	resolvedStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if resolvedStoreRef == "" {
+		resolvedStoreRef = strings.TrimSpace(storeRef)
+	}
+	if resolvedStoreRef == "" {
+		return nil, fmt.Errorf("work bead %s has %s=%q but no store reference", bead.ID, beadmeta.WorkDirMetadataKey, path)
+	}
+	return &worktree.Spec{
+		RepoDir:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRepoMetadataKey]),
+		Root:       strings.TrimSpace(bead.Metadata[beadmeta.WorktreeRootMetadataKey]),
+		Path:       path,
+		Branch:     strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]),
+		Base:       strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseRefMetadataKey]),
+		BaseSHA:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeBaseSHAMetadataKey]),
+		BeadID:     strings.TrimSpace(bead.ID),
+		StoreRef:   resolvedStoreRef,
+		Creator:    strings.TrimSpace(bead.Metadata[beadmeta.WorktreeCreatorMetadataKey]),
+		Owner:      strings.TrimSpace(bead.Metadata[beadmeta.WorktreeOwnerMetadataKey]),
+		Generation: strings.TrimSpace(bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]),
+		Lifecycle:  strings.TrimSpace(bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]),
+	}, nil
+}
 
 // PoolDesiredState holds the desired state for a single agent template.
 type PoolDesiredState struct {
@@ -136,18 +263,18 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // scaleCheckCounts maps agent template → new session demand from scale_check.
 // Pass nil for either when unavailable.
 //
-// The convenience wrappers below (ComputePoolDesiredStates,
-// ComputePoolDesiredStatesTraced, ComputePoolDesiredStatesWithDemandTraced)
-// each draw a fresh rotation seed from poolNewDemandInterleaveCounter for a
-// single, standalone call. When a tick calls this computation MORE THAN ONCE
-// on the same inputs — the reconciler builds desired state once to
-// materialize sessions and again to compute the wake-demand count
+// The convenience wrappers below that take no seed (ComputePoolDesiredStates,
+// ComputePoolDesiredStatesAt, ComputePoolDesiredStatesTraced, ...) each draw a
+// fresh rotation seed from poolNewDemandInterleaveCounter and probe the host
+// load once for a single, standalone call. When a tick calls this computation
+// MORE THAN ONCE on the same inputs — the reconciler builds desired state once
+// to materialize sessions and again to compute the wake-demand count
 // (city_runtime.go's paired buildDesiredState + PoolDesiredCounts calls) —
-// callers MUST use the "WithSeed" variants and thread the same seed through
-// both calls (typically stored once on DesiredStateResult). Otherwise the
-// two calls can round-robin-rotate to different splits on one tick and
-// disagree about which sessions exist versus which should be awake
-// (gcw-tuwx8.4 PR #126 review cycle 3).
+// callers MUST use the "WithSeed" variants and thread the same seed, load-veto
+// decision, and decision time through both calls (typically stored once on
+// DesiredStateResult). Otherwise the two calls can round-robin-rotate to
+// different splits on one tick and disagree about which sessions exist versus
+// which should be awake (gcw-tuwx8.4 PR #126 review cycle 3).
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -182,6 +309,34 @@ func ComputePoolDesiredStatesWithSeed(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, nil, nil)
 }
 
+// ComputePoolDesiredStatesWithSeedAt is ComputePoolDesiredStatesWithSeed at a
+// caller-supplied decision time, so post-create retention agrees with the
+// paired call that used the same time.
+func ComputePoolDesiredStatesWithSeedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	decisionTime time.Time,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptions(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, nil, decisionTime, nil)
+}
+
+// ComputePoolDesiredStatesAt computes pool demand at a caller-supplied
+// decision time so post-create retention is consistent with its session
+// snapshot.
+func ComputePoolDesiredStatesAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	decisionTime time.Time,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+}
+
 func ComputePoolDesiredStatesTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -209,26 +364,54 @@ func ComputePoolDesiredStatesTracedWithSeed(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, admissionVerdicts, trace)
 }
 
+// ComputePoolDesiredStatesTracedWithSeedAt is
+// ComputePoolDesiredStatesTracedWithSeed at a caller-supplied decision time.
+// The paired wake-count call should pass the same decision time the build
+// call used so post-create protection and pending-create floors agree.
+func ComputePoolDesiredStatesTracedWithSeedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptions(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, seed, loadVeto, admissionVerdicts, decisionTime, trace)
+}
+
+// ComputePoolDesiredStatesTracedAt is ComputePoolDesiredStatesAt with
+// reconciler decision tracing.
+func ComputePoolDesiredStatesTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+}
+
 func ComputePoolDesiredStatesWithDemandTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
-	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, trace)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedWithSeed is
 // ComputePoolDesiredStatesWithDemandTraced for a caller that must agree with
 // another call on the same tick's rotation and load-veto decision (see the
-// package doc above ComputePoolDesiredStates). This is the variant
-// buildDesiredState uses: it draws the seed and resolves the load veto
-// itself, passes both here, and records them on DesiredStateResult so the
-// paired wake-count call later in the same tick can reuse them via
-// ComputePoolDesiredStatesTracedWithSeed.
+// package doc above ComputePoolDesiredStates). assignedWorkStoreRefs, when
+// non-nil, carries the city or rig store provenance of each assigned work
+// bead, aligned by index.
 func ComputePoolDesiredStatesWithDemandTracedWithSeed(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -244,13 +427,48 @@ func ComputePoolDesiredStatesWithDemandTracedWithSeed(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, loadVeto, admissionVerdicts, trace)
 }
 
+// ComputePoolDesiredStatesWithDemandTracedWithSeedAt is
+// ComputePoolDesiredStatesWithDemandTracedWithSeed at a caller-supplied
+// decision time. This is the variant buildDesiredState uses: it draws the
+// seed and resolves the load veto itself, passes both here with its pool
+// decision time, and records them on DesiredStateResult so the paired
+// wake-count call later in the same tick can reuse them.
+func ComputePoolDesiredStatesWithDemandTracedWithSeedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	seed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptions(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, seed, loadVeto, admissionVerdicts, decisionTime, trace)
+}
+
+// ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
+// caller-supplied decision time while preserving per-work demand provenance.
+func ComputePoolDesiredStatesWithDemandTracedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+}
+
 // nextPoolNewDemandInterleaveSeed draws the next rotation seed for a
 // standalone (unpaired) call. Advancing here, one layer above
 // computePoolDesiredStates, mirrors poolSessionCreateFairShareCounter's
-// placement (build_desired_state.go:201, advanced in
-// configurePoolSessionCreateFairShare — after desired state is computed, not
-// inside it) and keeps computePoolDesiredStates itself a pure function of a
-// given seed.
+// placement (advanced in configurePoolSessionCreateFairShare — after desired
+// state is computed, not inside it) and keeps computePoolDesiredStates itself
+// a pure function of a given seed.
 func nextPoolNewDemandInterleaveSeed() uint64 {
 	return poolNewDemandInterleaveCounter.Add(1) - 1
 }
@@ -265,6 +483,52 @@ func computePoolDesiredStates(
 	newDemandInterleaveSeed uint64,
 	loadVeto poolNewDemandLoadVeto,
 	admissionVerdicts map[string]AdmissionVerdict,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptions(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, newDemandInterleaveSeed, loadVeto, admissionVerdicts, time.Time{}, trace)
+}
+
+// computePoolDesiredStatesAt is the standalone decision-time entry point: it
+// draws a fresh rotation seed and resolves the load veto for this one call.
+func computePoolDesiredStatesAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptions(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, trace)
+}
+
+// poolTemplateDemand is one template's sizing inputs for the fair-share new
+// demand interleave in computePoolDesiredStatesWithOptions.
+type poolTemplateDemand struct {
+	agent       *config.Agent
+	template    string
+	scaleCount  int
+	demandCount int
+	newCount    int
+	protected   int
+	inFlight    int
+	concrete    []SessionRequest
+	anonymous   int
+	residualIDs []string
+	demand      scaleCheckDemand
+}
+
+func computePoolDesiredStatesWithOptions(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	newDemandInterleaveSeed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
@@ -284,6 +548,11 @@ func computePoolDesiredStates(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
+	// asleepSessionBeadIDs marks non-closed sessions whose runtime state is
+	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
+	// wake_mode="fresh" agent must not resume one of these stale rows — see the
+	// resume-tier guard below.
+	asleepSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -301,6 +570,9 @@ func computePoolDesiredStates(
 		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
 		}
+		if sb.State == sessionpkg.StateAsleep {
+			asleepSessionBeadIDs[sb.ID] = true
+		}
 	}
 
 	aliasHeldTemplates := canonicalSingletonAliasHeldTemplates(cfg, sessionInfos)
@@ -308,7 +580,11 @@ func computePoolDesiredStates(
 	// now anchors the defer_until readiness gate below. An OPEN assigned bead
 	// hidden from claim by a future defer_until is not actionable, so waking a
 	// session for it would only drain-and-re-wake every tick (gcw-ehvg P1a).
-	now := time.Now()
+	// It shares the caller's decision time when one was supplied.
+	now := decisionTime
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -328,15 +604,21 @@ func computePoolDesiredStates(
 		for workIndex, wb := range assignedWorkBeads {
 			workStoreRef := ""
 			if len(assignedWorkStoreRefs) == len(assignedWorkBeads) && len(assignedWorkStoreRefs) > 0 {
-				var valid bool
-				workStoreRef, valid = canonicalContinuationClaimStoreRef(cfg.Workspace.Name, assignedWorkStoreRefs[workIndex])
-				if !valid {
+				canonical, valid := canonicalContinuationClaimStoreRef(cfg.Workspace.Name, assignedWorkStoreRefs[workIndex])
+				switch {
+				case valid:
+					workStoreRef = canonical
+				case strings.TrimSpace(assignedWorkStoreRefs[workIndex]) != "":
 					// A non-empty aligned provenance value that cannot name a
 					// canonical city or rig store must not be propagated into a
 					// session request. Treating it as a generic fallback could
 					// claim work from the wrong store.
 					continue
 				}
+				// An empty aligned value carries no provenance at all — the
+				// single-store shape of a city with no workspace name — so it
+				// keeps the legacy no-store-ref fallback rather than dropping
+				// the work.
 			}
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
@@ -380,9 +662,47 @@ func computePoolDesiredStates(
 				if namedSessionBeadIDs[sessionBeadID] {
 					continue
 				}
+				// A wake_mode="fresh" pool agent must not inherit a stale
+				// *asleep* session bead: by configuration it never wants the
+				// old session's state back, so resuming that row leaves the
+				// pool bound to a session it will not reuse and the assigned
+				// work stranded. Plan a clean session bound to the same work
+				// instead — the wake-known-identity tier with an empty
+				// SessionBeadID, the same shape the closed-session case
+				// already uses. A live (non-asleep) session still resumes;
+				// agents with unset or wake_mode="resume" are unaffected.
+				// (gastownhall/gascity#4849)
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					if _, ok := wakeRequestedTemplates[template]; ok {
+						continue
+					}
+					wakeRequestedTemplates[template] = struct{}{}
+					resumeRequests = append(resumeRequests, SessionRequest{
+						Template:     template,
+						BeadPriority: beadPriorityRank(beadPriority(wb)),
+						Tier:         "wake-known-identity",
+						// SessionBeadID intentionally empty: the stale asleep
+						// bead must not be reused, so realizePoolDesiredSessions
+						// plans a clean create.
+						WorkBeadID:     wb.ID,
+						WorkBeadTitle:  strings.TrimSpace(wb.Title),
+						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+						WorkStoreRef:   workStoreRef,
+						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					})
+					if trace != nil {
+						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
+							"tier":                   "wake-known-identity",
+							"work_bead":              wb.ID,
+							"skipped_asleep_session": sessionBeadID,
+						})
+					}
+					continue
+				}
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:       template,
-					BeadPriority:   beadPriority(wb),
+					BeadPriority:   beadPriorityRank(beadPriority(wb)),
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
@@ -418,7 +738,7 @@ func computePoolDesiredStates(
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
 				Template:       template,
-				BeadPriority:   beadPriority(wb),
+				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
@@ -437,15 +757,41 @@ func computePoolDesiredStates(
 	}
 
 	limits := newNestedCapLimits(cfg)
-	resumeUsage := acceptedNestedCapUsage(limits, resumeRequests)
-	allRequests := append([]SessionRequest(nil), resumeRequests...)
 	resumeSessionBeadIDs := make(map[string]struct{}, len(resumeRequests))
 	for _, req := range resumeRequests {
 		if req.SessionBeadID != "" {
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
+	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, info := range sessionInfos {
+		if info.ID == "" {
+			continue
+		}
+		sessionInfoByID[info.ID] = info
+	}
+	// A wake-known request has assigned work but no surviving concrete session
+	// identity. Freshly completed unassigned pool sessions are valid concrete
+	// capacity for that request. Bind them before calculating residual protected
+	// demand so wake-known + protection cannot materialize the same capacity
+	// twice.
+	for i := range resumeRequests {
+		req := &resumeRequests[i]
+		if req.Tier != "wake-known-identity" || req.SessionBeadID != "" {
+			continue
+		}
+		candidates := protectedNewRequests[req.Template]
+		if len(candidates) == 0 {
+			continue
+		}
+		req.SessionBeadID = candidates[0].SessionBeadID
+		protectedNewRequests[req.Template] = candidates[1:]
+	}
+	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	floorUsage := acceptedNestedCapUsage(limits, concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests))
+	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
+	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
 	// New-demand load veto: while the host's 1-minute load average exceeded
 	// the configured ceiling AT THE TIME THE CALLER RESOLVED loadVeto,
@@ -484,15 +830,17 @@ func computePoolDesiredStates(
 	// are calculated independently from assigned work and must not be deducted
 	// from that count. Pool-created sessions that have not claimed work yet
 	// represent already-spent new demand, so they occupy the first new-demand
-	// slots explicitly before anonymous creates are materialized.
-	type templateDemand struct {
-		agent      *config.Agent
-		template   string
-		scaleCount int
-		ownCap     int
-		inFlight   []SessionRequest
-	}
-	var demands []templateDemand
+	// slots explicitly before anonymous creates are materialized. Freshly
+	// completed sessions also establish a short-lived demand floor so a sibling
+	// startup is not drained merely because another worker claimed first.
+	//
+	// Each template's candidates are sized against the static resume-only
+	// baseline (usage is never mutated in this loop), not against capacity
+	// accumulated across templates in declaration order, so a shared
+	// workspace or rig cap is divided across contention by the interleave
+	// below instead of exhausted by whichever template is declared first
+	// (gcw-tuwx8.4). applyNestedCaps remains the authoritative admission.
+	var demands []poolTemplateDemand
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended {
@@ -500,7 +848,8 @@ func computePoolDesiredStates(
 		}
 		template := agent.QualifiedName()
 		scaleCount, hasScaleCount := scaleCheckCounts[template]
-		if !hasScaleCount || scaleCount <= 0 {
+		protected := protectedNewRequests[template]
+		if !hasScaleCount && len(protected) == 0 {
 			// A template with no demand never becomes a key in
 			// scaleCheckCounts, so without this record the skip is silent and
 			// a pool that correctly wants zero sessions reads exactly like a
@@ -510,13 +859,13 @@ func computePoolDesiredStates(
 			if trace != nil {
 				trace.RecordDecision(TraceSitePoolDemandCompute, TraceReasonNoDemand, TraceOutcomeSkipped, template, "", traceRecordPayload{
 					"scale_check": scaleCount,
-					"protected":   0,
+					"protected":   len(protected),
 					"in_flight":   len(inFlightNewRequests[template]),
 				})
 			}
 			continue
 		}
-		templateInFlight := inFlightNewRequests[template]
+		inFlight := inFlightNewRequests[template]
 		templateAdmissionVetoed := false
 		if av, ok := admissionVerdicts[template]; ok && !av.Allowed {
 			templateAdmissionVetoed = true
@@ -525,58 +874,72 @@ func computePoolDesiredStates(
 			// Anonymous new demand is declined under load pressure or admission veto, but
 			// in-flight requests represent sessions already created and
 			// mid-start — already-spent capacity, not new load — so they
-			// remain admissible up to their own count.
-			scaleCount = minInt(scaleCount, len(templateInFlight))
+			// remain admissible up to their own count. Protected sessions are
+			// concrete capacity too and keep their own floor below.
+			scaleCount = minInt(scaleCount, len(inFlight))
 		}
 		if templateAdmissionVetoed && trace != nil {
 			trace.RecordDecision(TraceSiteAdmissionCheckExec, TraceReasonAdmissionGate, TraceOutcomeDeny, template, "", traceRecordPayload{
 				"reason":             admissionVerdicts[template].Reason,
 				"demand_vetoed":      scaleCheckCounts[template],
-				"in_flight_retained": len(templateInFlight),
+				"in_flight_retained": len(inFlight),
 			})
 		}
 		if _, ok := aliasHeldTemplates[template]; ok {
 			continue
 		}
-		// ownCap bounds candidate generation by what this template could
-		// use if it alone had the full remaining headroom (evaluated
-		// against the static resume-only baseline, not accumulated
-		// across templates below). It keeps a single oversubscribed
-		// template from materializing hundreds of doomed candidates
-		// when nothing else is contending for the same cap, while still
-		// letting the real, authoritative admission below decide who
-		// wins when two templates truly do share a binding cap.
-		demands = append(demands, templateDemand{
-			agent:      agent,
-			template:   template,
-			scaleCount: scaleCount,
-			ownCap:     capNewDemandCount(limits, resumeUsage, agent, scaleCount),
-			inFlight:   templateInFlight,
+		inFlightFloor := 0
+		for _, req := range inFlight {
+			if info, ok := sessionInfoByID[req.SessionBeadID]; ok && poolSessionWithinPendingCreateLease(info, cfg, decisionTime) {
+				inFlightFloor++
+			}
+		}
+		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
+		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)
+		concreteLimit := concreteNestedCapLimit(limits, usage, template, newCount, effectiveDemand, len(protected)+len(inFlight))
+		protectedCount := minInt(len(protected), concreteLimit)
+		inFlightCount := minInt(len(inFlight), concreteLimit-protectedCount)
+		reusedCount := protectedCount + inFlightCount
+		selectedConcrete := make([]SessionRequest, 0, reusedCount)
+		selectedConcrete = append(selectedConcrete, protected[:protectedCount]...)
+		selectedConcrete = append(selectedConcrete, inFlight[:inFlightCount]...)
+		demand := scaleCheckDemand[template]
+		selectedConcrete, residualWorkBeadIDs := allocateScaleDemandToConcrete(demand, selectedConcrete)
+		demands = append(demands, poolTemplateDemand{
+			agent:       agent,
+			template:    template,
+			scaleCount:  scaleCount,
+			demandCount: effectiveDemand,
+			newCount:    newCount,
+			protected:   len(protected),
+			inFlight:    len(inFlight),
+			concrete:    selectedConcrete,
+			anonymous:   max(0, newCount-reusedCount),
+			residualIDs: residualWorkBeadIDs,
+			demand:      demand,
 		})
 	}
 
 	if len(demands) > 0 {
 		start := int(newDemandInterleaveSeed % uint64(len(demands)))
-		demands = append(append([]templateDemand(nil), demands[start:]...), demands[:start]...)
+		demands = append(append([]poolTemplateDemand(nil), demands[start:]...), demands[:start]...)
 
-		// Emit every contending template's in-flight requests before any
-		// template's anonymous ones. An in-flight request carries
-		// SessionBeadID and stands for a session that already exists and is
-		// mid-create; sweepUndesiredPoolSessionBeads protects a still-leased
+		// Emit every contending template's concrete (protected and in-flight)
+		// requests before any template's anonymous ones. A concrete request
+		// carries SessionBeadID and stands for a session that already exists;
+		// sweepUndesiredPoolSessionBeads protects a still-leased
 		// pending_create_claim or non-stale creating session regardless of
 		// whether it appears in this tick's desired state, so dropping it
 		// from desired does not free its slot — the session survives the
-		// sweep either way. Interleaving an in-flight request against
-		// another template's anonymous one on equal terms would let the
-		// anonymous request win a shared cap and add a session on top of
-		// the in-flight one that the sweep keeps regardless, over-subscribing
-		// the cap (gcw-tuwx8.4 PR #126 review cycle 3). This mirrors
-		// build_desired_state.go:206-210, which excludes SessionBeadID != ""
-		// from fresh-create fair-share budget for the same reason.
+		// sweep either way. Interleaving a concrete request against another
+		// template's anonymous one on equal terms would let the anonymous
+		// request win a shared cap and add a session on top of the concrete
+		// one that the sweep keeps regardless, over-subscribing the cap
+		// (gcw-tuwx8.4 PR #126 review cycle 3). This mirrors
+		// build_desired_state.go, which excludes SessionBeadID != "" from
+		// fresh-create fair-share budget for the same reason.
 		for _, td := range demands {
-			for round := 0; round < len(td.inFlight) && round < td.ownCap; round++ {
-				allRequests = append(allRequests, td.inFlight[round])
-			}
+			allRequests = append(allRequests, td.concrete...)
 		}
 
 		// Interleave only the anonymous remainder, one slot per template per
@@ -586,24 +949,27 @@ func computePoolDesiredStates(
 		for round := 0; ; round++ {
 			progressed := false
 			for _, td := range demands {
-				index := len(td.inFlight) + round
-				if index >= td.ownCap {
+				if round >= td.anonymous {
 					continue
 				}
 				progressed = true
-				allRequests = append(allRequests, newTierSessionRequest(td.template, scaleCheckDemand[td.template], index))
+				workBeadID := ""
+				if round < len(td.residualIDs) {
+					workBeadID = td.residualIDs[round]
+				}
+				allRequests = append(allRequests, newTierSessionRequest(td.template, td.demand, workBeadID))
 			}
 			if !progressed {
 				break
 			}
 		}
 
-		// applyNestedCaps below performs the real, authoritative admission
-		// (priority-sorted, all tiers together); replay the identical
-		// accept/reject algorithm here purely to explain it per template —
-		// generating the trace from the same final allRequests set this
-		// pass produced keeps the reported cap/current values accurate even
-		// when a shared cap (not a per-template one) is what actually binds.
+		// applyNestedCaps below performs the real, authoritative admission;
+		// replay the accept/reject algorithm here purely to explain it per
+		// template — generating the trace from the same final allRequests set
+		// this pass produced keeps the reported cap/current values accurate
+		// even when a shared cap (not a per-template one) is what actually
+		// binds.
 		finalUsage := acceptedNestedCapUsage(limits, allRequests)
 		acceptedNewByTemplate := make(map[string]int, len(demands))
 		for _, req := range finalUsage.requests {
@@ -612,20 +978,21 @@ func computePoolDesiredStates(
 			}
 		}
 		for _, td := range demands {
-			acceptedNew := acceptedNewByTemplate[td.template]
+			acceptedNew := minInt(acceptedNewByTemplate[td.template], td.newCount)
 			// newDemandBlockingScope's predicates (capMax - usage.count <=
 			// newCount) assume usage has not yet absorbed newCount — feeding
 			// it finalUsage, which already counts this template's own
 			// acceptedNew, double-counts and can blame the wrong cap.
 			// Exclude this template's own accepted new-tier contribution
 			// before handing it to the trace.
-			preAcceptUsage := usageExcludingTemplateNew(finalUsage, td.template, limits.agentRig[td.template], acceptedNew)
-			recordNewDemandCapTrace(trace, td.template, td.agent, limits, preAcceptUsage, td.scaleCount, acceptedNew)
-			if len(td.inFlight) > 0 && trace != nil {
-				reused := minInt(len(td.inFlight), acceptedNew)
+			preAcceptUsage := usageExcludingTemplateNew(finalUsage, td.template, limits.agentRig[td.template], acceptedNewByTemplate[td.template])
+			recordNewDemandCapTrace(trace, td.template, td.agent, limits, preAcceptUsage, td.demandCount, acceptedNew)
+			if td.scaleCount > 0 && td.protected+td.inFlight > 0 && trace != nil {
+				reused := minInt(len(td.concrete), acceptedNew)
 				trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, td.template, "", traceRecordPayload{
 					"scale_check":   td.scaleCount,
-					"in_flight":     len(td.inFlight),
+					"in_flight":     td.inFlight,
+					"protected":     td.protected,
 					"reused":        reused,
 					"anonymous_new": acceptedNew - reused,
 				})
@@ -644,57 +1011,105 @@ func computePoolDesiredStates(
 // across both calls instead of each call silently advancing it independently.
 var poolNewDemandInterleaveCounter atomic.Uint64
 
-// newTierSessionRequest builds the anonymous "new" tier SessionRequest for
-// the index-th slot of template's scale_check demand, threading the driving
-// work bead's identity when scaleCheckDemand has it.
-//
-// Deliberately leaves BeadPriority at anonymousNewTierPriority rather than a
-// real bead priority. admission's comparator (applyNestedCaps,
-// acceptedNestedCapUsage) sorts BeadPriority ascending-urgent, matching real
-// bead priorities (doltlite_read_store.go:396 orders ASC;
-// TestCachingStoreReadyReturnsCanonicalOrder pins it) — gcw-tuwx8.5 fixed the
-// comparator's polarity. Threading demand.Priorities here is still deferred
-// to a follow-up: it needs its own reachability test proving two new-tier
-// requests with different priorities produce a different admission outcome
-// (scaleCheckDemand leaves BeadPriority at the anonymous sentinel today, so
-// the comparator's priority branch never fires between new requests — that
-// may not survive contact with how the clamps actually order work).
-func newTierSessionRequest(template string, demand scaleCheckDemand, index int) SessionRequest {
-	workBeadID := ""
-	workBeadTitle := ""
-	workPack := ""
-	workWorkspace := ""
-	workStoreRef := ""
-	workParentSID := ""
-	if len(demand.WorkBeadIDs) > index {
-		workBeadID = strings.TrimSpace(demand.WorkBeadIDs[index])
-		if demand.Titles != nil {
-			workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+// newTierSessionRequest builds an anonymous "new" tier SessionRequest for
+// template, threading the driving work bead's identity and worktree evidence
+// from scaleCheckDemand when workBeadID names residual demand. BeadPriority
+// stays at its zero value, which ranks below every beadPriorityRank-bearing
+// resume or wake request (see beadPriorityRankOffset).
+func newTierSessionRequest(template string, demand scaleCheckDemand, workBeadID string) SessionRequest {
+	request := SessionRequest{Template: template, Tier: "new"}
+	if strings.TrimSpace(workBeadID) == "" {
+		return request
+	}
+	return requestWithScaleDemandProvenance(request, demand, workBeadID)
+}
+
+func concreteNestedCapRequests(
+	cfg *config.City,
+	resumeRequests []SessionRequest,
+	protectedRequests map[string][]SessionRequest,
+	inFlightRequests map[string][]SessionRequest,
+) []SessionRequest {
+	requests := append([]SessionRequest(nil), resumeRequests...)
+	for i := range cfg.Agents {
+		template := cfg.Agents[i].QualifiedName()
+		requests = append(requests, protectedRequests[template]...)
+		requests = append(requests, inFlightRequests[template]...)
+	}
+	return requests
+}
+
+// allocateScaleDemandToConcrete matches concrete reused capacity against scale
+// demand by identity, then rebinds unmatched concrete capacity to the earliest
+// unclaimed demand. A concrete request carrying B covers B even when demand is
+// ordered [A, B]; a stale X (or blank trigger) is rebound to A rather than
+// silently consuming A while remaining pointed at X. Surplus concrete capacity
+// with no residual demand keeps its prior trigger because its protection floor
+// is independent of scale demand.
+func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRequest) ([]SessionRequest, []string) {
+	allocated := append([]SessionRequest(nil), concrete...)
+	uniqueDemand := make([]string, 0, len(demand.WorkBeadIDs))
+	demandSet := make(map[string]struct{}, len(demand.WorkBeadIDs))
+	for _, rawID := range demand.WorkBeadIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
 		}
-		if demand.Packs != nil {
-			workPack = strings.TrimSpace(demand.Packs[workBeadID])
+		if _, seen := demandSet[id]; seen {
+			continue
 		}
-		if demand.Workspaces != nil {
-			workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+		demandSet[id] = struct{}{}
+		uniqueDemand = append(uniqueDemand, id)
+	}
+
+	matched := make(map[string]struct{}, len(allocated))
+	unmatchedConcrete := make([]int, 0, len(allocated))
+	for i, request := range allocated {
+		id := strings.TrimSpace(request.WorkBeadID)
+		if _, demanded := demandSet[id]; demanded {
+			if _, alreadyMatched := matched[id]; !alreadyMatched {
+				matched[id] = struct{}{}
+				allocated[i] = requestWithScaleDemandProvenance(request, demand, id)
+				continue
+			}
 		}
-		if demand.StoreRefs != nil {
-			workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-		}
-		if demand.ParentSIDs != nil {
-			workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+		unmatchedConcrete = append(unmatchedConcrete, i)
+	}
+
+	remaining := make([]string, 0, len(uniqueDemand)-len(matched))
+	for _, id := range uniqueDemand {
+		if _, covered := matched[id]; !covered {
+			remaining = append(remaining, id)
 		}
 	}
-	return SessionRequest{
-		Template:       template,
-		BeadPriority:   anonymousNewTierPriority,
-		Tier:           "new",
-		WorkBeadID:     workBeadID,
-		WorkBeadTitle:  workBeadTitle,
-		WorkPack:       workPack,
-		WorkWorkspace:  workWorkspace,
-		WorkStoreRef:   workStoreRef,
-		BrainParentSID: workParentSID,
+	rebound := minInt(len(unmatchedConcrete), len(remaining))
+	for i := 0; i < rebound; i++ {
+		idx := unmatchedConcrete[i]
+		allocated[idx] = requestWithScaleDemandProvenance(allocated[idx], demand, remaining[i])
 	}
+	return allocated, remaining[rebound:]
+}
+
+func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckDemand, workBeadID string) SessionRequest {
+	workBeadID = strings.TrimSpace(workBeadID)
+	request.WorkBeadID = workBeadID
+	request.WorkBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
+	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
+	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
+	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
+	// Worktree evidence is per-bead like every field above it. Carrying the
+	// previous bead's spec into a rebound request would hand the session a
+	// workspace verified for other work.
+	request.WorktreeSpec = nil
+	request.WorktreeError = ""
+	if demand.WorktreeSpecs != nil {
+		request.WorktreeSpec = demand.WorktreeSpecs[workBeadID]
+	}
+	if demand.WorktreeErrors != nil {
+		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
+	}
+	return request
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
@@ -739,8 +1154,14 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 	return held
 }
 
-func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
-	requests := make(map[string][]SessionRequest)
+func poolNewDemandRequests(
+	cfg *config.City,
+	sessionInfos []sessionpkg.Info,
+	resumeSessionBeadIDs map[string]struct{},
+	decisionTime time.Time,
+) (map[string][]SessionRequest, map[string][]SessionRequest) {
+	protected := make(map[string][]SessionRequest)
+	inFlight := make(map[string][]SessionRequest)
 	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
 	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
 		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
@@ -770,21 +1191,102 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 			if normalizedSessionTemplateInfo(sb, cfg) != template {
 				continue
 			}
-			if !poolSessionConsumesNewDemandInfo(sb) {
-				continue
-			}
-			requests[template] = append(requests[template], SessionRequest{
+			req := SessionRequest{
 				Template:       template,
-				BeadPriority:   anonymousNewTierPriority,
 				Tier:           "new",
 				SessionBeadID:  sb.ID,
 				WorkBeadID:     strings.TrimSpace(sb.TriggerBeadID),
+				WorkPack:       strings.TrimSpace(sb.Pack),
+				WorkWorkspace:  strings.TrimSpace(sb.PackWorkspace),
 				WorkStoreRef:   strings.TrimSpace(sb.TriggerBeadStoreRef),
 				BrainParentSID: strings.TrimSpace(sb.BrainParentSID),
-			})
+			}
+			if poolSessionEligibleForProtectedDemand(sb, decisionTime) {
+				protected[template] = append(protected[template], req)
+				continue
+			}
+			if poolSessionConsumesNewDemandInfo(sb) {
+				inFlight[template] = append(inFlight[template], req)
+			}
 		}
 	}
-	return requests
+	return protected, inFlight
+}
+
+// poolSessionWithinPostCreateProtection reports whether a successfully-created,
+// reusable pool session is still in the same grace window used by the
+// steady-state sweep. decisionTime is injected by the desired-state build so all
+// decisions in a tick share one clock observation. A future marker fails
+// closed: the writer and reader share a host clock, so negative age indicates
+// corrupt metadata rather than a legitimate grace window.
+func poolSessionWithinPostCreateProtection(info sessionpkg.Info, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if info.Closed || isDrainedSessionInfo(info) || isFailedCreateSessionInfo(info) ||
+		sessionHasProviderTerminalErrorInfo(info) {
+		return false
+	}
+	state := strings.TrimSpace(info.MetadataState)
+	if state != "active" && state != "awake" {
+		return false
+	}
+	if strings.TrimSpace(info.StateReason) != "creation_complete" {
+		return false
+	}
+	creationCompleteAt, ok := parseRFC3339Metadata(info.CreationCompleteAt)
+	if !ok {
+		return false
+	}
+	age := decisionTime.Sub(creationCompleteAt)
+	return age >= 0 && age < postCreateProtectionTimeout
+}
+
+// poolSessionEligibleForProtectedDemand is intentionally narrower than the
+// sweep-retention predicate above. A fresh dependency-only or lifecycle-blocked
+// session should survive the post-create sweep window, but it is not runnable
+// generic capacity and therefore must neither establish a demand floor nor bind
+// a wake-known request.
+func poolSessionEligibleForProtectedDemand(info sessionpkg.Info, decisionTime time.Time) bool {
+	return poolSessionWithinPostCreateProtection(info, decisionTime) &&
+		!info.DependencyOnly &&
+		strings.TrimSpace(info.WaitHold) == "" &&
+		!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
+		!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
+}
+
+// poolSessionWithinPendingCreateLease reports whether an in-flight
+// pending-create pool session is still within its own lease window and should
+// therefore establish a demand floor of its own, mirroring the protected-
+// session floor above. decisionTime is injected the same way as
+// poolSessionWithinPostCreateProtection so every decision in a tick shares one
+// clock observation; a zero decisionTime fails closed for the same reason.
+//
+// The lease arithmetic itself is not reimplemented here: it delegates to
+// pendingCreateLeaseExpiredForRollbackInfo (session_reconciler.go), the exact
+// predicate the reconciler's own rollback path uses, so a bead genuinely stuck
+// past its lease is never propped up by this floor — it still rolls back on
+// schedule. That function only reasons about beads in a rollback-eligible
+// state (start-pending/creating/asleep, via pendingCreateRollbackState) and
+// returns false (not expired) for any other state as a no-op default, so the
+// state gate is re-checked here first: a pending_create_claim left set on an
+// already-stopped or failed-create session is not a live in-flight attempt
+// and must not establish a floor, regardless of how recently it was created.
+func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if !info.PendingCreateClaim {
+		return false
+	}
+	if !pendingCreateRollbackState(info.MetadataState) {
+		return false
+	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already
@@ -802,15 +1304,41 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
-// Accepts requests in priority order, rejecting any that would exceed a cap.
+//
+// Admission runs in three phases, and the phase order — not BeadPriority — is
+// the outer precedence:
+//
+//  1. Concrete requests (resume-like tier, or any request carrying a
+//     SessionBeadID) are admitted first, so among the requests this function
+//     is given they outrank *all* new demand regardless of BeadPriority: at a
+//     saturated cap a low-priority live session keeps the last slot and a
+//     higher-priority new request is rejected. That is deliberate.
+//     Reconciliation already owns those sessions, so preempting one to start a
+//     new request would trade work in progress for work not yet begun, and no
+//     cap this pass enforces is violated by keeping it. The guarantee stops at
+//     this function's inputs: computePoolDesiredStatesAt's demand pre-pass
+//     selects each template's concrete candidates under newCount (see
+//     concreteNestedCapLimit), so a template declared later in cfg.Agents can
+//     lose a live session before phase 1 ever sees the request (ga-2c8ll).
+//  2. Agent floors reserve capacity out of what phase 1 left. When floors
+//     exceed a cap, qualified template name order decides which floor receives
+//     the scarce capacity; rejected floor traces identify the loser.
+//  3. Demand not consumed by phase 1 or 2 competes by BeadPriority. Priority is
+//     therefore the precedence *within* new demand, not across phases.
+//
+// TestApplyNestedCaps_NoFloorsPreservesDemandPriority pins both regimes.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
-	// Sort by priority ascending-urgent (bd: 0=highest), resume tier first
-	// within same priority. bd priority is NOT a "bigger number wins" scale —
-	// readySortPriority/doltlite_read_store.go:396 order beads ASC, so a P0
-	// bead is more urgent than a P4 bead. gcw-tuwx8.5.
+	// Order the phase-3 priority walk: priority DESC, resume tier first within
+	// same priority. BeadPriority is a descending rank (beadPriorityRank
+	// inverts bd's ascending-urgent priority, so a P0 bead outranks a P4 one).
+	// Phase 1 walks this same slice but does not honor the order
+	// as an admission ranking against new demand — it admits every concrete
+	// request that fits — so this sort does not decide concrete-versus-new
+	// precedence. Among concrete requests competing for a binding cap the order
+	// is still the tiebreaker: the earlier one in this order wins.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
-			return requests[i].BeadPriority < requests[j].BeadPriority
+			return requests[i].BeadPriority > requests[j].BeadPriority
 		}
 		// Resume-like tiers before new tier at same priority.
 		if requests[i].Tier != requests[j].Tier {
@@ -821,11 +1349,15 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 
 	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
-
-	// Walk sorted requests, accepting each if all caps have room.
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
+	consumed := acceptConcreteNestedCapRequests(requests, limits, &usage, accepted, trace)
+	reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, consumed, trace)
 
-	for _, req := range requests {
+	// Walk demand not already used by a floor, accepting by priority.
+	for i, req := range requests {
+		if consumed[i] {
+			continue
+		}
 		template := req.Template
 		if usage.isDuplicateSessionRequest(req) {
 			continue
@@ -847,38 +1379,6 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		usage.accept(req, limits)
 	}
 
-	// Fill agent mins (if caps allow).
-	for i := range cfg.Agents {
-		agent := &cfg.Agents[i]
-		if agent.Suspended {
-			continue
-		}
-		template := agent.QualifiedName()
-		minSess := agent.EffectiveMinActiveSessions()
-		if _, ok := aliasHeldTemplates[template]; ok {
-			continue
-		}
-		for usage.agentCount[template] < minSess {
-			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				FloorGuarantee: true,
-			}
-			if _, _, _, rejected := usage.rejection(req, limits); rejected {
-				break
-			}
-			accepted[template] = append(accepted[template], req)
-			if trace != nil {
-				trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, template, "", traceRecordPayload{
-					"min":     minSess,
-					"current": usage.agentCount[template],
-					"tier":    "new",
-				})
-			}
-			usage.accept(req, limits)
-		}
-	}
-
 	// Build output.
 	var result []PoolDesiredState
 	for template, reqs := range accepted {
@@ -894,11 +1394,141 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	return result
 }
 
+// acceptConcreteNestedCapRequests reserves capacity for sessions that already
+// exist, are being resumed, or are in flight. Floors may preempt anonymous new
+// demand, but must not displace concrete capacity that reconciliation is
+// already responsible for preserving.
+func acceptConcreteNestedCapRequests(
+	requests []SessionRequest,
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	trace *sessionReconcilerTraceCycle,
+) []bool {
+	consumed := make([]bool, len(requests))
+	for i, request := range requests {
+		if !isResumeLikeTier(request.Tier) && request.SessionBeadID == "" {
+			continue
+		}
+		if usage.isDuplicateSessionRequest(request) {
+			consumed[i] = true
+			continue
+		}
+		if site, reason, payload, rejected := usage.rejection(request, limits); rejected {
+			if trace != nil {
+				trace.RecordDecision(site, reason, TraceOutcomeRejected, request.Template, "", payload)
+			}
+			consumed[i] = true
+			continue
+		}
+		accepted[request.Template] = append(accepted[request.Template], request)
+		usage.accept(request, limits)
+		consumed[i] = true
+	}
+	return consumed
+}
+
+type nestedCapFloor struct {
+	template string
+	minimum  int
+}
+
+func reserveNestedCapFloors(
+	cfg *config.City,
+	requests []SessionRequest,
+	aliasHeldTemplates map[string]struct{},
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	consumed []bool,
+	trace *sessionReconcilerTraceCycle,
+) {
+	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		template := agent.QualifiedName()
+		if agent.Suspended || agent.EffectiveMinActiveSessions() == 0 {
+			continue
+		}
+		if _, held := aliasHeldTemplates[template]; held {
+			continue
+		}
+		floors = append(floors, nestedCapFloor{template: template, minimum: agent.EffectiveMinActiveSessions()})
+	}
+	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
+
+	for _, floor := range floors {
+		if limits.agentRigUnresolved[floor.template] {
+			log.Printf("pool desired state: template %q rig_resolution_error: refusing min_active_sessions floor %d for non-city agent",
+				floor.template, floor.minimum)
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolRigCap, TraceReasonRigCap, TraceOutcomeRejected, floor.template, "", traceRecordPayload{
+					"floor_template":       floor.template,
+					"floor_min":            floor.minimum,
+					"rig_resolution_error": true,
+				})
+			}
+			continue
+		}
+		for i, request := range requests {
+			if usage.agentCount[floor.template] >= floor.minimum {
+				break
+			}
+			if request.Template != floor.template || consumed[i] {
+				continue
+			}
+			consumed[i] = true
+			request.FloorGuarantee = request.Tier == "new"
+			if !acceptNestedCapFloor(request, floor, limits, usage, accepted, trace) {
+				break
+			}
+		}
+		for usage.agentCount[floor.template] < floor.minimum {
+			request := SessionRequest{Template: floor.template, Tier: "new", FloorGuarantee: true}
+			if !acceptNestedCapFloor(request, floor, limits, usage, accepted, trace) {
+				break
+			}
+		}
+	}
+}
+
+func acceptNestedCapFloor(
+	request SessionRequest,
+	floor nestedCapFloor,
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if usage.isDuplicateSessionRequest(request) {
+		return true
+	}
+	if site, reason, payload, rejected := usage.rejection(request, limits); rejected {
+		if trace != nil {
+			payload["floor_template"] = floor.template
+			payload["floor_min"] = floor.minimum
+			trace.RecordDecision(site, reason, TraceOutcomeRejected, floor.template, "", payload)
+		}
+		return false
+	}
+	accepted[floor.template] = append(accepted[floor.template], request)
+	if trace != nil {
+		trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, floor.template, "", traceRecordPayload{
+			"min":     floor.minimum,
+			"current": usage.agentCount[floor.template],
+			"tier":    request.Tier,
+		})
+	}
+	usage.accept(request, limits)
+	return true
+}
+
 type nestedCapLimits struct {
-	workspaceMax int
-	rigMax       map[string]int
-	agentMax     map[string]int
-	agentRig     map[string]string
+	workspaceMax       int
+	rigMax             map[string]int
+	agentMax           map[string]int
+	agentRig           map[string]string
+	agentRigUnresolved map[string]bool
 }
 
 type nestedCapUsage struct {
@@ -909,12 +1539,15 @@ type nestedCapUsage struct {
 	requests        []SessionRequest
 }
 
+type nestedCapFloorReservations map[string]int
+
 func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	limits := nestedCapLimits{
-		workspaceMax: -1,
-		rigMax:       make(map[string]int),
-		agentMax:     make(map[string]int),
-		agentRig:     make(map[string]string),
+		workspaceMax:       -1,
+		rigMax:             make(map[string]int),
+		agentMax:           make(map[string]int),
+		agentRig:           make(map[string]string),
+		agentRigUnresolved: make(map[string]bool),
 	}
 	if cfg.Workspace.MaxActiveSessions != nil {
 		limits.workspaceMax = *cfg.Workspace.MaxActiveSessions
@@ -929,7 +1562,7 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		template := agent.QualifiedName()
-		limits.agentRig[template] = agent.Dir
+		limits.agentRig[template], limits.agentRigUnresolved[template] = nestedCapAgentRigName(agent, cfg.Rigs)
 		resolved := agent.ResolvedMaxActiveSessions(cfg)
 		if resolved != nil {
 			limits.agentMax[template] = *resolved
@@ -938,6 +1571,31 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 		}
 	}
 	return limits
+}
+
+// nestedCapAgentRigName distinguishes no rig cap ("", false), a resolved rig
+// (name, false), and an explicitly rig-scoped agent with no matching rig ("", true).
+func nestedCapAgentRigName(agent *config.Agent, rigs []config.Rig) (string, bool) {
+	if rigName := agentRigScopeName(agent, rigs); rigName != "" {
+		return rigName, false
+	}
+	if agent == nil {
+		return "", false
+	}
+	scope := strings.TrimSpace(agent.Scope)
+	if scope == "city" {
+		return "", false
+	}
+	agentDir := filepath.Clean(strings.TrimSpace(agent.Dir))
+	if agentDir == "." {
+		return "", scope == "rig"
+	}
+	for _, rig := range rigs {
+		if rig.Path != "" && filepath.Clean(rig.Path) == agentDir {
+			return rig.Name, false
+		}
+	}
+	return "", scope == "rig"
 }
 
 func newNestedCapUsage() nestedCapUsage {
@@ -992,12 +1650,12 @@ func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string,
 func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
 	usage := newNestedCapUsage()
 	sorted := append([]SessionRequest(nil), requests...)
-	// Same ascending-urgent ordering as applyNestedCaps (gcw-tuwx8.5) — this
-	// mirror sort must agree with the one that produced requests, or usage
-	// simulated here diverges from what was actually accepted.
+	// Same descending-rank ordering as applyNestedCaps — this mirror sort must
+	// agree with the one that produced requests, or usage simulated here
+	// diverges from what was actually accepted.
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].BeadPriority != sorted[j].BeadPriority {
-			return sorted[i].BeadPriority < sorted[j].BeadPriority
+			return sorted[i].BeadPriority > sorted[j].BeadPriority
 		}
 		if sorted[i].Tier != sorted[j].Tier {
 			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)
@@ -1012,17 +1670,116 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 	return usage
 }
 
+func newNestedCapFloorReservations(
+	cfg *config.City,
+	aliasHeldTemplates map[string]struct{},
+	limits nestedCapLimits,
+	usage nestedCapUsage,
+) nestedCapFloorReservations {
+	reservations := make(nestedCapFloorReservations)
+	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		template := agent.QualifiedName()
+		if agent.Suspended {
+			continue
+		}
+		if _, held := aliasHeldTemplates[template]; held {
+			continue
+		}
+		minimum := agent.EffectiveMinActiveSessions()
+		if agentMax := limits.agentMax[template]; agentMax >= 0 {
+			minimum = minInt(minimum, agentMax)
+		}
+		if minimum > usage.agentCount[template] {
+			floors = append(floors, nestedCapFloor{template: template, minimum: minimum})
+		}
+	}
+	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
+	rigReserved := make(map[string]int)
+	workspaceReserved := 0
+	for _, floor := range floors {
+		if limits.agentRigUnresolved[floor.template] {
+			continue
+		}
+		grant := floor.minimum - usage.agentCount[floor.template]
+		if rig := limits.agentRig[floor.template]; rig != "" {
+			if rigMax := limits.rigMax[rig]; rigMax >= 0 {
+				grant = minInt(grant, rigMax-usage.rigCount[rig]-rigReserved[rig])
+			}
+		}
+		if limits.workspaceMax >= 0 {
+			grant = minInt(grant, limits.workspaceMax-usage.workspaceCount-workspaceReserved)
+		}
+		if grant <= 0 {
+			continue
+		}
+		reservations[floor.template] = usage.agentCount[floor.template] + grant
+		workspaceReserved += grant
+		if rig := limits.agentRig[floor.template]; rig != "" {
+			rigReserved[rig] += grant
+		}
+	}
+	return reservations
+}
+
+// concreteNestedCapLimit bounds how many already-concrete requests (protected
+// plus in-flight) the demand pre-pass selects for a template and charges to the
+// shared cap usage. For a normally-capped template newCount already carries
+// every applicable bound. capNewDemandCount instead fails closed at 0 for an
+// explicitly rig-scoped agent whose rig does not resolve, which must not also
+// drop the concrete sessions reconciliation already owns, so the bound is
+// rebuilt here from the template's own agent max. Of the three caps, that is
+// the one applyNestedCaps still enforces per-template on such a request: the
+// rig cap drops out because an unresolved rig contributes no rig counter
+// (nestedCapAgentRigName leaves agentRig empty), and the workspace cap is
+// shared rather than per-template (see below). Floor reservations are
+// deliberately not subtracted — a floor must never displace concrete capacity.
+//
+// Without the agent-max bound the pre-pass charged usage for concrete requests
+// the authoritative applyNestedCaps pass rejects anyway, and because that pass
+// can only reject candidates and never mint them, the over-charge permanently
+// cost every later template in the cfg.Agents loop that much new-demand
+// headroom. The shared workspace max is deliberately still not applied here: it
+// would make a live session's survival depend on cfg.Agents order, dropping a
+// late template's protected session before applyNestedCaps — whose
+// concrete-first phase is the authority on that contest — ever sees it. Leaving
+// it out only over-generates concrete candidates for that pass to reject, and
+// the workspace over-charge that can remain is inert: once usage reaches the
+// workspace cap, later templates have no new-demand headroom either way.
+func concreteNestedCapLimit(limits nestedCapLimits, usage nestedCapUsage, template string, newCount, effectiveDemand, concreteCount int) int {
+	// The normal path leaves the whole bound to newCount. The demand pre-pass
+	// sizes newCount against a static concrete baseline rather than capacity
+	// accumulated across earlier cfg.Agents templates (gcw-tuwx8.4), so a
+	// later-declared template's live session is not dropped merely for its
+	// declaration order; applyNestedCaps' concrete-first phase decides any
+	// genuine contest. (Upstream tracks the accumulated-usage variant of this
+	// asymmetry in ga-2c8ll.)
+	if !limits.agentRigUnresolved[template] {
+		return newCount
+	}
+	limit := minInt(effectiveDemand, concreteCount)
+	if agentMax := limits.agentMax[template]; agentMax >= 0 {
+		limit = minInt(limit, max(0, agentMax-usage.agentCount[template]))
+	}
+	return limit
+}
+
 // capNewDemandCount bounds demand by agent, rig, and workspace headroom
-// remaining against usage. Callers evaluating multiple templates that may
-// share a rig or workspace cap must pass a static, unmutated usage snapshot
-// per template (not one accumulated across templates in declaration order)
-// so the result reflects this template's own headroom rather than whatever
-// an earlier template already consumed (gcw-tuwx8.4).
-func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {
+// remaining against usage, net of capacity floors reserve for other templates.
+// Callers evaluating multiple templates that may share a rig or workspace cap
+// must pass a static, unmutated usage snapshot per template (not one
+// accumulated across templates in declaration order) so the result reflects
+// this template's own headroom rather than whatever an earlier template
+// already consumed (gcw-tuwx8.4).
+func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, floors nestedCapFloorReservations, agent *config.Agent, demand int) int {
 	if demand <= 0 {
 		return 0
 	}
 	template := agent.QualifiedName()
+	if limits.agentRigUnresolved[template] {
+		return 0
+	}
 	remaining := demand
 	if agentMax := limits.agentMax[template]; agentMax >= 0 {
 		remaining = minInt(remaining, agentMax-usage.agentCount[template])
@@ -1033,16 +1790,31 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *conf
 			rigMax = -1
 		}
 		if rigMax >= 0 {
-			remaining = minInt(remaining, rigMax-usage.rigCount[rig])
+			headroom := rigMax - usage.rigCount[rig] - floors.reservedForOthers(usage, template, rig, limits)
+			remaining = minInt(remaining, headroom)
 		}
 	}
 	if limits.workspaceMax >= 0 {
-		remaining = minInt(remaining, limits.workspaceMax-usage.workspaceCount)
+		headroom := limits.workspaceMax - usage.workspaceCount - floors.reservedForOthers(usage, template, "", limits)
+		remaining = minInt(remaining, headroom)
 	}
 	if remaining < 0 {
 		return 0
 	}
 	return remaining
+}
+
+func (r nestedCapFloorReservations) reservedForOthers(usage nestedCapUsage, template, rig string, limits nestedCapLimits) int {
+	reserved := 0
+	for floorTemplate, minimum := range r {
+		if floorTemplate == template || (rig != "" && limits.agentRig[floorTemplate] != rig) {
+			continue
+		}
+		if unmet := minimum - usage.agentCount[floorTemplate]; unmet > 0 {
+			reserved += unmet
+		}
+	}
+	return reserved
 }
 
 func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
@@ -1112,7 +1884,28 @@ func recordNewDemandCapTrace(
 	scaleCount int,
 	newCount int,
 ) {
-	if trace == nil || scaleCount <= 0 || newCount >= scaleCount {
+	if scaleCount <= 0 || newCount >= scaleCount {
+		return
+	}
+	if limits.agentRigUnresolved[template] {
+		log.Printf("pool desired state: template %q rig_resolution_error: refusing %d new session(s) for non-city agent scope=%q dir=%q",
+			template, scaleCount-newCount, strings.TrimSpace(agent.Scope), strings.TrimSpace(agent.Dir))
+		if trace != nil {
+			trace.RecordDecision(TraceSitePoolNewDemandCap, TraceReasonRigCap, TraceOutcomeRejected, template, "", traceRecordPayload{
+				"scale_check":          scaleCount,
+				"accepted_new":         newCount,
+				"blocked_new":          scaleCount - newCount,
+				"current":              usage.agentCount[template],
+				"max":                  0,
+				"blocking_sessions":    []string{},
+				"blocking_work_beads":  []string{},
+				"active_capacity_kind": "rig_resolution_error",
+				"rig_resolution_error": true,
+			})
+		}
+		return
+	}
+	if trace == nil {
 		return
 	}
 	site, reason, capMax, current, blockers := newDemandBlockingScope(template, agent, limits, usage, newCount)

@@ -19,20 +19,18 @@ func TestResolveContextAdvisoryPerAgentOverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestContextAdvisorySelectTierKeepsLegacyThresholdBoundaries(t *testing.T) {
-	policy := ResolveContextAdvisory(contextAdvisoryPtr(DefaultContextAdvisory()))
-
-	if _, ok := policy.SelectTier(59.9); ok {
-		t.Fatal("59.9% selected an advisory tier; legacy context injection begins at 60%")
-	}
-	if tier, ok := policy.SelectTier(60); !ok || tier.Threshold != 60 {
-		t.Fatalf("60%% tier = %#v, %t; want the 60%% advisory tier", tier, ok)
-	}
-	if tier, ok := policy.SelectTier(80); !ok || tier.Threshold != 60 {
-		t.Fatalf("80%% tier = %#v, %t; want the 60%% advisory tier", tier, ok)
-	}
-	if tier, ok := policy.SelectTier(80.1); !ok || tier.Threshold != 80 {
-		t.Fatalf("80.1%% tier = %#v, %t; want the 80%% urgent tier", tier, ok)
+func TestDefaultContextAdvisoryPreservesThresholdBoundaries(t *testing.T) {
+	builtin := DefaultContextAdvisory()
+	policy := ResolveContextAdvisory(&builtin)
+	for _, test := range []struct {
+		pct  float64
+		want int
+		ok   bool
+	}{{59.9, 0, false}, {60, 60, true}, {80, 60, true}, {80.1, 80, true}} {
+		tier, ok := policy.SelectTier(test.pct)
+		if ok != test.ok || (ok && tier.Threshold != test.want) {
+			t.Errorf("SelectTier(%v) = (%+v, %v), want threshold %d, found %v", test.pct, tier, ok, test.want, test.ok)
+		}
 	}
 }
 

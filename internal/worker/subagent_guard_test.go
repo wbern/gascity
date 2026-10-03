@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -20,11 +19,11 @@ func (t fakeSubagentGuardTranscript) AgentMappings(context.Context) ([]AgentMapp
 	return t.mappings, t.err
 }
 
-func (t fakeSubagentGuardTranscript) Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error) {
+func (t fakeSubagentGuardTranscript) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
-	return &TranscriptResult{RawMessages: t.raw}, nil
+	return t.raw, nil
 }
 
 func TestInFlightBackgroundSubagents(t *testing.T) {
@@ -71,7 +70,10 @@ func TestInFlightBackgroundSubagents_Incident20260802Golden(t *testing.T) {
 		{"terminated subagent excluded", "testdata/subagent_guard_terminated_20260802.jsonl", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			live, err := InFlightBackgroundSubagents(context.Background(), fakeSubagentGuardTranscript{mappings: mappings, raw: loadSubagentGuardJSONL(t, tt.fixture)})
+			// Drive the real SessionLogAdapter from a file on disk: injecting
+			// RawMessages skips the read path these fixtures exist to pin.
+			path := fixtureOnDisk(t, tt.fixture)
+			live, err := InFlightBackgroundSubagents(context.Background(), adapterBackedTranscript{mappings: mappings, path: path})
 			if err != nil {
 				t.Fatalf("InFlightBackgroundSubagents: %v", err)
 			}
@@ -99,22 +101,4 @@ func loadSubagentGuardMappings(t *testing.T) []AgentMapping {
 		t.Fatal(err)
 	}
 	return mappings
-}
-
-func loadSubagentGuardJSONL(t *testing.T, path string) []json.RawMessage {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	entries := make([]json.RawMessage, 0, len(lines))
-	for _, line := range lines {
-		if json.Valid([]byte(line)) {
-			entries = append(entries, json.RawMessage(line))
-		} else {
-			t.Fatalf("invalid fixture JSON: %s", line)
-		}
-	}
-	return entries
 }

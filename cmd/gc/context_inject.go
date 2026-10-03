@@ -155,57 +155,73 @@ func transcriptContextReaders(hookFormat string) []transcriptContextReader {
 // them, so an empty or unexpected value costs a wasted scan rather than an
 // answer.
 func contextInjectLine(hookInput []byte, hookFormat string) string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
-	case "0", "false", "off":
-		return ""
-	}
-	var in hookStdinInput
-	if err := json.Unmarshal(hookInput, &in); err != nil {
-		return ""
-	}
-	path := transcriptPathForHook(in)
-	if path == "" {
-		return ""
-	}
-	for _, read := range transcriptContextReaders(hookFormat) {
-		if c, ok := read(path); ok {
-			return contextUsageMessage(c.Tokens, contextWindowTokens(c.Models, c.ProviderWindow))
-		}
-	}
-	return ""
+	return contextInjectLineForAdvisory(hookInput, hookFormat, nil, nil)
 }
 
-// contextInjectLineForAdvisory applies global and agent-scoped context advisory
-// configuration to one hook payload. Environment variables remain the final
+// contextInjectLineForAdvisory applies city and agent context-advisory
+// configuration to a hook payload. Environment variables remain the final
 // compatibility override for enablement, thresholds, and window size.
 func contextInjectLineForAdvisory(hookInput []byte, hookFormat string, global, agent *config.ContextAdvisory) string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
-	case "0", "false", "off":
-		return ""
-	}
-	var in hookStdinInput
-	if err := json.Unmarshal(hookInput, &in); err != nil {
-		return ""
-	}
-	path := transcriptPathForHook(in)
-	if path == "" {
-		return ""
-	}
-	builtin := config.DefaultContextAdvisory()
-	policy := config.ResolveContextAdvisory(&builtin, global, agent)
-	for _, read := range transcriptContextReaders(hookFormat) {
-		if c, ok := read(path); ok {
-			return contextUsageMessageForPolicy(c.Tokens, contextWindowTokensWithOverride(c.Models, c.ProviderWindow, policy.WindowTokens), policy)
-		}
-	}
-	return ""
+	return contextInjectLineForSample(readContextUsageSample(hookInput, hookFormat), global, agent)
 }
 
+// contextInjectLineForNudgeTarget renders the advisory for a resolved nudge
+// target, applying its city defaults and agent-scoped overrides.
 func contextInjectLineForNudgeTarget(hookInput []byte, hookFormat string, target nudgeTarget) string {
 	if target.cfg == nil {
 		return contextInjectLine(hookInput, hookFormat)
 	}
 	return contextInjectLineForAdvisory(hookInput, hookFormat, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
+}
+
+// contextUsageSample is the context footprint read from one provider hook
+// payload, so a hook that renders the advisory after other work reads the
+// transcript once.
+type contextUsageSample struct {
+	tokens int
+	models []string
+	// providerWindow is the window the provider reported for the invocation,
+	// or 0 when it reported none (see contextWindowTokensWithOverride).
+	providerWindow int
+	// ok is false when injection is disabled, the payload names no
+	// transcript, or the transcript has no usage entry yet. No advisory policy
+	// renders a line for such a sample.
+	ok bool
+}
+
+// readContextUsageSample reads the context footprint for a hook payload,
+// trying every transcript dialect in the order hookFormat suggests (see
+// transcriptContextReaders).
+func readContextUsageSample(hookInput []byte, hookFormat string) contextUsageSample {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
+	case "0", "false", "off":
+		return contextUsageSample{}
+	}
+	var in hookStdinInput
+	if err := json.Unmarshal(hookInput, &in); err != nil {
+		return contextUsageSample{}
+	}
+	path := transcriptPathForHook(in)
+	if path == "" {
+		return contextUsageSample{}
+	}
+	for _, read := range transcriptContextReaders(hookFormat) {
+		if c, ok := read(path); ok {
+			return contextUsageSample{tokens: c.Tokens, models: c.Models, providerWindow: c.ProviderWindow, ok: true}
+		}
+	}
+	return contextUsageSample{}
+}
+
+// contextInjectLineForSample is contextInjectLineForAdvisory over a sample
+// already read from the hook payload.
+func contextInjectLineForSample(sample contextUsageSample, global, agent *config.ContextAdvisory) string {
+	if !sample.ok {
+		return ""
+	}
+	builtin := config.DefaultContextAdvisory()
+	policy := config.ResolveContextAdvisory(&builtin, global, agent)
+	return contextUsageMessageForPolicy(sample.tokens, contextWindowTokensWithOverride(sample.models, sample.providerWindow, policy.WindowTokens), policy)
 }
 
 // transcriptPathForHook resolves the transcript to read for a hook payload.
@@ -234,8 +250,9 @@ func transcriptPathForHook(in hookStdinInput) string {
 // returns the context footprint of the most recent usage entry (prompt-side
 // input tokens + cache reads + cache writes ≈ current context size) plus every
 // non-empty model string seen — the window is the MAX over those (see
-// contextWindowTokens), so a smaller-window sidecar/compaction call logged in
-// the same transcript can't shrink the main-loop session's window.
+// contextWindowTokensWithOverride), so a smaller-window sidecar/compaction
+// call logged in the same transcript can't shrink the main-loop session's
+// window.
 func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 	const tailBytes = 2 << 20 // last 2MiB is ample for the newest entries
 	f, err := os.Open(path)   //nolint:gosec // path comes from the provider hook input
@@ -280,27 +297,28 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 	return tokens, models, ok
 }
 
-// contextWindowTokens resolves the session's context window as the MAX window
-// of any model it ran (they share one context), so a smaller-window sidecar or
-// compaction call (e.g. a 200k-window Haiku entry inside a 1M Fable session)
-// can't flip the session to the 200k default and fire the urgent tier at ~20%
-// of real usage. Per-model windows come from the shared modelwindow package so
-// this agrees with the API/session-log path; an unrecognized model (window 0)
-// floors to the conservative default. GC_CONTEXT_WINDOW_TOKENS overrides —
-// gc-managed deployments that know the launch model should pin it for
-// determinism.
+// contextWindowTokens resolves the session's context window with no
+// configured advisory window; see contextWindowTokensWithOverride.
+func contextWindowTokens(models []string, providerWindow int) int {
+	return contextWindowTokensWithOverride(models, providerWindow, 0)
+}
+
+// contextWindowTokensWithOverride resolves the session's context window as the
+// MAX window of any model it ran (they share one context), so a smaller-window
+// sidecar or compaction call (e.g. a 200k-window Haiku entry inside a 1M Fable
+// session) can't flip the session to the 200k default and fire the urgent tier
+// at ~20% of real usage. Per-model windows come from the shared modelwindow
+// package so this agrees with the API/session-log path; an unrecognized model
+// (window 0) floors to the conservative default. GC_CONTEXT_WINDOW_TOKENS
+// overrides first — gc-managed deployments that know the launch model should
+// pin it for determinism — then configuredWindow, the advisory policy's
+// window_tokens, when non-zero.
 //
 // providerWindow is the window the provider reported for the invocation, or 0
 // when it reported none (always 0 on the Claude path, which has no such field).
 // It outranks the model table because a model string can be absent from the
 // read window entirely, and flooring to the conservative default in that case
 // understates the window and fires advisories far below the real threshold.
-// The env override still wins over everything: it is the operator's documented
-// last word when detection is wrong.
-func contextWindowTokens(models []string, providerWindow int) int {
-	return contextWindowTokensWithOverride(models, providerWindow, 0)
-}
-
 func contextWindowTokensWithOverride(models []string, providerWindow, configuredWindow int) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -323,30 +341,6 @@ func contextWindowTokensWithOverride(models []string, providerWindow, configured
 		return modelwindow.Default
 	}
 	return best
-}
-
-// contextUsageMessage renders the guidance line for tokens used of window, or
-// "" below the advisory threshold.
-func contextUsageMessage(tokens, window int) string {
-	if window <= 0 {
-		return ""
-	}
-	advisory := thresholdPct("GC_CONTEXT_ADVISORY_PCT", 60)
-	urgent := thresholdPct("GC_CONTEXT_URGENT_PCT", 80)
-	pct := 100 * float64(tokens) / float64(window)
-	k := func(n int) string { return fmt.Sprintf("%dk", (n+500)/1000) }
-	switch {
-	case pct < float64(advisory):
-		return ""
-	case pct <= float64(urgent):
-		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%). Approaching the recycle zone. Steer toward a clean seam: finish in-flight work, don't open new long-horizon tasks, and keep durable notes/work-items current so a handoff is cheap. Plan to run `gc handoff` and recycle before this climbs into the urgent band — a fresh session from durable notes outperforms riding lossy compaction.\n",
-			k(tokens), k(window), pct)
-	default:
-		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, keep durable notes + work-item updates + memory current, then run `gc handoff \"<where you were + next step>\"`. That writes your continuation note and recycles you fresh from it — or, if you are an attended session the controller cannot restart, it hands off and you reattach for the fresh session. Prefer this over riding lossy compaction; repeated compaction degrades awareness. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of recycling.)\n",
-			k(tokens), k(window), pct)
-	}
 }
 
 func contextUsageMessageForPolicy(tokens, window int, policy config.ContextAdvisoryPolicy) string {

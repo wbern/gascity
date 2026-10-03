@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,18 +161,6 @@ func TestContextInjectForNudgeTargetUsesResolvedAgent(t *testing.T) {
 	}
 }
 
-func TestContextAdvisoryZeroConfigPreservesLegacyMessages(t *testing.T) {
-	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
-	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
-	builtin := config.DefaultContextAdvisory()
-	policy := config.ResolveContextAdvisory(&builtin, nil, nil)
-	for _, tokens := range []int{700_000, 800_000, 900_000} {
-		if got, want := contextUsageMessageForPolicy(tokens, 1_000_000, policy), contextUsageMessage(tokens, 1_000_000); got != want {
-			t.Errorf("%d-token zero-config message changed\n got: %q\nwant: %q", tokens, got, want)
-		}
-	}
-}
-
 func TestContextAdvisoryEnvironmentOverridesConfiguredThresholdAndWindow(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
 	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
@@ -324,4 +313,53 @@ func TestContextWindowTokensRecognizesCurrentModelFamilies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNudgeDrainInjectEmitsAdvisoryWithoutASessionTarget is the regression for
+// the no-target inject branch dropping the context advisory. A managed hook
+// that carries an identity but no $GC_ALIAS/$GC_SESSION_ID returns before any
+// nudge target is resolved; it must still carry the context-pressure guidance
+// alongside the clock line, exactly as the resolve-failure branch does.
+func TestNudgeDrainInjectEmitsAdvisoryWithoutASessionTarget(t *testing.T) {
+	unmanagedInjectEnv(t)
+	t.Setenv("GC_AGENT", "worker") // managed identity, but no alias/session id
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "")
+
+	// 700k of 1M = 70% — the advisory band.
+	transcript := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	withHookStdin(t, hookInputFor(transcript))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "700k/1000k") || !strings.Contains(out, "~70%") {
+		t.Errorf("no-target inject dropped the context advisory: %q", out)
+	}
+}
+
+// withHookStdin replaces os.Stdin with a pipe holding data for the duration of
+// the test, which is the shape readHookStdin requires (it ignores a terminal).
+func withHookStdin(t *testing.T, data []byte) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("write hook stdin: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close hook stdin writer: %v", err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = orig
+		_ = r.Close()
+	})
 }

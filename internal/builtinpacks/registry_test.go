@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const testCommit = "abcdef123456abcdef123456abcdef123456abcd"
@@ -85,7 +87,10 @@ func TestGascityBundledSubpathsExistInWorkingTree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed; cannot locate repo root")
 	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Join(filepath.Dir(thisFile), "..", "..")
+	}
 	for _, pack := range All() {
 		if pack.Subpath == "" {
 			continue
@@ -408,6 +413,9 @@ func writeFile(t *testing.T, path, data string) {
 
 func testRepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -544,12 +552,21 @@ func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
 }
 
 // TestValidateSyntheticRepoRejectsStrayFilesAnywhere pins the coverage that
-// justifies validatePackFiles no longer walking its own directory. The whole-tree
-// walk in validateSyntheticRepoFileSet checks every path against the union of all
-// layout manifests, which strictly subsumes a per-pack check: a file that is
-// unexpected for its own pack is absent from the union too. Nested layouts
-// (examples/bd contains examples/bd/dolt) are covered explicitly, because that is
-// the case where a per-pack and a union check could conceivably disagree.
+// justifies validatePackFiles no longer walking its own directory, and that
+// scoping the allowed set to the cache's own repository does not weaken it.
+//
+// validateSyntheticRepoFileSet walks the whole tree once and checks every path
+// against the union of the manifests of that repository's layouts. That union
+// check strictly subsumes a per-pack one: ValidateSyntheticRepo calls
+// validatePackFiles for exactly the layouts the union is built from, so a file
+// unexpected for its own pack is absent from the union too. Scoping only removes
+// paths from that union, so nothing a stray could previously land on has become
+// allowed.
+//
+// Nested layouts (examples/bd contains examples/bd/dolt) are covered explicitly:
+// flattening several manifests into one allowed set is where a per-pack and a
+// union check could conceivably disagree, and both the nested directory and its
+// parent are exercised.
 func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -578,22 +595,57 @@ func TestValidateSyntheticRepoRejectsStrayFilesAnywhere(t *testing.T) {
 }
 
 // TestSyntheticRepoAllowedPathsIsStable pins that memoizing the allowed-path sets
-// does not change what they contain across calls.
+// does not change what they contain across calls, and — now that the memo is
+// keyed by repository — that each repository gets its own set rather than
+// whichever one was computed first.
 func TestSyntheticRepoAllowedPathsIsStable(t *testing.T) {
-	files1, dirs1, err := syntheticRepoAllowedPaths(Repository)
-	if err != nil {
-		t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+	for _, tc := range []struct {
+		name       string
+		repository string
+	}{
+		{"gascity.git", Repository},
+		{"public packs", PublicRepository},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repository := tc.repository
+			files1, dirs1, err := syntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("syntheticRepoAllowedPaths: %v", err)
+			}
+			files2, dirs2, err := syntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("syntheticRepoAllowedPaths (second call): %v", err)
+			}
+			if len(files1) != len(files2) || len(dirs1) != len(dirs2) {
+				t.Fatalf("allowed paths changed between calls: files %d/%d dirs %d/%d",
+					len(files1), len(files2), len(dirs1), len(dirs2))
+			}
+			if len(files1) == 0 {
+				t.Fatal("allowed file set is empty")
+			}
+			freshFiles, freshDirs, err := computeSyntheticRepoAllowedPaths(repository)
+			if err != nil {
+				t.Fatalf("computeSyntheticRepoAllowedPaths: %v", err)
+			}
+			assertPathSetsEqual(t, "files", files1, freshFiles)
+			assertPathSetsEqual(t, "dirs", dirs1, freshDirs)
+		})
 	}
-	files2, dirs2, err := syntheticRepoAllowedPaths(Repository)
-	if err != nil {
-		t.Fatalf("syntheticRepoAllowedPaths (second call): %v", err)
+}
+
+// assertPathSetsEqual reports every difference between a memoized path set and a
+// freshly computed one, so a mis-keyed memo names the paths it got wrong.
+func assertPathSetsEqual(t *testing.T, kind string, cached, fresh map[string]struct{}) {
+	t.Helper()
+	for rel := range fresh {
+		if _, ok := cached[rel]; !ok {
+			t.Errorf("memoized %s set missing %s", kind, rel)
+		}
 	}
-	if len(files1) != len(files2) || len(dirs1) != len(dirs2) {
-		t.Fatalf("allowed paths changed between calls: files %d/%d dirs %d/%d",
-			len(files1), len(files2), len(dirs1), len(dirs2))
-	}
-	if len(files1) == 0 {
-		t.Fatal("allowed file set is empty")
+	for rel := range cached {
+		if _, ok := fresh[rel]; !ok {
+			t.Errorf("memoized %s set has extra %s", kind, rel)
+		}
 	}
 }
 
