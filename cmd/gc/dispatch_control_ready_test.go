@@ -1065,11 +1065,17 @@ func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T)
 		t.Run(payload, func(t *testing.T) {
 			now := time.Unix(1000, 0)
 			controlReadyNow = func() time.Time { return now }
+			// calls counts only the expensive whole-set summary; an incomplete
+			// summary also takes the bounded scoped fallback (gcw-f84jn), whose
+			// slices carry --assignee or --metadata-field.
 			calls := 0
 			controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
-				calls++
-				if !strings.Contains(strings.Join(args, " "), "--include-ephemeral") {
+				joined := strings.Join(args, " ")
+				if !strings.Contains(joined, "--include-ephemeral") {
 					t.Fatalf("ephemeral query lost its flag: %v", args)
+				}
+				if !strings.Contains(joined, "--assignee=") && !strings.Contains(joined, "--metadata-field") {
+					calls++
 				}
 				return payload, nil
 			}
@@ -1107,9 +1113,17 @@ func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
 	originalExecutable := controlReadyExecutable
 	originalRunner := controlReadyCommandRunner
 	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
-	calls := 0
-	controlReadyCommandRunner = func(string, []string, string, string, []string) (string, error) {
-		calls++
+	// The runner answers every call, including the scoped fallback slices
+	// (gcw-f84jn), with an incomplete summary, so the fallback also fails and
+	// the scan stays fail-closed with the typed integrity cause.
+	calls, scopedCalls := 0, 0
+	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "--assignee=") || strings.Contains(joined, "--metadata-field") {
+			scopedCalls++
+		} else {
+			calls++
+		}
 		return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":2,"omitted":1,"beads":[{"id":"gcw-one"}]}`, nil
 	}
 	t.Cleanup(func() {
@@ -1129,6 +1143,9 @@ func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("summary calls = %d, want 1 during %s backoff", calls, controlReadyCacheFailureBackoff)
+	}
+	if scopedCalls != 1 {
+		t.Fatalf("scoped fallback calls = %d, want 1 (fallback outcome reused within %s)", scopedCalls, controlReadyCacheTTL)
 	}
 }
 
@@ -1316,5 +1333,101 @@ printf '[{"id":"ga-plain"}]'
 	}
 	if len(got) != 1 || got[0].ID != "ga-plain" {
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
+	}
+}
+
+// TestTryControlReadyFallsBackToScopedSummariesWhenWholeSetSummaryIncomplete
+// pins gcw-f84jn: on a large rig the single unscoped ready summary overflows
+// the bounded projection (live: total=1228 rows=45 omitted=1183). Refusing it
+// as "no work" left the control dispatcher blind to its own control beads for
+// weeks. The scan must fall back to the scoped assignee/route summaries and
+// still surface the dispatcher's work.
+func TestTryControlReadyFallsBackToScopedSummariesWhenWholeSetSummaryIncomplete(t *testing.T) {
+	resetControlReadyCache(t)
+	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
+	t.Setenv("GC_BEADS", "bd")
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	query := workflowServeControlReadyQuery(agentCfg)
+	parsed, ok := parseControlReadyQuery(query)
+	if !ok {
+		t.Fatalf("parseControlReadyQuery(%q) not recognized", query)
+	}
+
+	var unrelated []string
+	for i := 0; i < 45; i++ {
+		unrelated = append(unrelated, fmt.Sprintf(`{"id":"gci-noise%02d","status":"open","type":"task","created_at":"2026-09-01T00:00:00Z","assignee":"someone-else"}`, i))
+	}
+	incomplete := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":1228,"omitted":1183,"beads":[` + strings.Join(unrelated, ",") + `]}`
+	routed := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":1,"omitted":0,"beads":[{"id":"gci-finalize","status":"open","type":"task","created_at":"2026-09-12T00:00:00Z","routing_metadata":{"gc.routed_to":"` + parsed.target + `"}}]}`
+	empty := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`
+
+	var scopedCalls int
+	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case !strings.Contains(joined, "--assignee=") && !strings.Contains(joined, "--metadata-field"):
+			return incomplete, nil
+		case strings.Contains(joined, "--metadata-field gc.routed_to="+parsed.target):
+			scopedCalls++
+			return routed, nil
+		default:
+			scopedCalls++
+			return empty, nil
+		}
+	}
+
+	dir := t.TempDir()
+	queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	if err != nil {
+		t.Fatalf("tryControlReadyFromCacheOrFallback: %v (an incomplete whole-set summary must fall back, not blind the dispatcher)", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true for a control-ready query")
+	}
+	if scopedCalls == 0 {
+		t.Fatal("no scoped summary calls; fallback did not run")
+	}
+	if len(queue) != 1 || queue[0].ID != "gci-finalize" {
+		t.Fatalf("queue = %#v, want the routed control bead gci-finalize", queue)
+	}
+}
+
+// TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails keeps
+// the fail-loud contract: if the scoped fallback also fails, the scan errors
+// rather than reading as an empty queue.
+func TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails(t *testing.T) {
+	resetControlReadyCache(t)
+	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner = originalExecutable, originalRunner
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
+	t.Setenv("GC_BEADS", "bd")
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	query := workflowServeControlReadyQuery(agentCfg)
+	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "--assignee=") && !strings.Contains(joined, "--metadata-field") {
+			return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":300,"omitted":250,"beads":[]}`, nil
+		}
+		return "", errors.New("bd unavailable")
+	}
+
+	dir := t.TempDir()
+	queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	if err == nil {
+		t.Fatalf("err = nil, queue = %#v; a failed scoped fallback must stay loud", queue)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if !strings.Contains(err.Error(), "incomplete control-ready summary") || !strings.Contains(err.Error(), "scoped fallback") {
+		t.Fatalf("err = %v, want both the integrity cause and the scoped failure", err)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -429,6 +430,16 @@ func controlReadyBindingReady(dir string, binding beads.Store, includeEphemeral 
 // It therefore preserves the summary completeness contract without silently
 // dropping a controller's own work when unrelated city work is large.
 func controlReadyScopedSummaryQueue(dir string, env map[string]string, parsed parsedControlReadyQuery) ([]hookBead, error) {
+	rows, err := controlReadyScopedSummaryReady(dir, env, parsed)
+	if err != nil {
+		return nil, err
+	}
+	return beadsToHookBeads(rows), nil
+}
+
+// controlReadyScopedSummaryReady runs the scoped assignee and route summaries
+// behind controlReadyScopedSummaryQueue and returns their merged rows.
+func controlReadyScopedSummaryReady(dir string, env map[string]string, parsed parsedControlReadyQuery) ([]beads.Bead, error) {
 	runtimeEnv := mergeRuntimeEnv(os.Environ(), env)
 	includeEphemeral := parsed.includeEphemeral
 	var groups [][]beads.Bead
@@ -471,7 +482,64 @@ func controlReadyScopedSummaryQueue(dir string, env map[string]string, parsed pa
 			}
 		}
 	}
-	return beadsToHookBeads(mergeControlReadyGroups(groups...)), nil
+	return mergeControlReadyGroups(groups...), nil
+}
+
+// controlReadyIncompleteSummaryFallback answers a control-ready scan whose
+// whole-set summary could not prove completeness. On a large rig the single
+// unscoped ready summary overflows the bounded projection, and refusing it
+// left the control dispatcher blind to its own work for as long as unrelated
+// ready work stayed above the cap (gcw-f84jn). The scoped assignee and route
+// summaries each cover one small slice, so they stay inside the bound; the
+// relocated graph leg is merged exactly as controlReadyFallbackReady merges
+// it, and the result goes through the same evaluateControlReady filter.
+// handled is false when err is not a summary-integrity failure, or the
+// environment does not use the summary contract.
+func controlReadyIncompleteSummaryFallback(cause error, dir, cityPath string, env map[string]string, parsed parsedControlReadyQuery) (rows []beads.Bead, handled bool, err error) {
+	var integrity *controlReadySummaryIntegrityError
+	if !errors.As(cause, &integrity) || !controlReadyUsesSummary(env) {
+		return nil, false, nil
+	}
+	log.Printf("control-ready: %v for %s; falling back to scoped assignee/route summaries", cause, dir)
+	rows, err = controlReadyScopedSummaryReady(dir, env, parsed)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w; scoped fallback: %w", cause, err)
+	}
+	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
+		graphRows, err := controlReadyBindingReady(dir, binding, parsed.includeEphemeral)
+		if err != nil {
+			return nil, true, err
+		}
+		rows = mergeControlReadyLegs(rows, graphRows)
+	}
+	return rows, true, nil
+}
+
+// cachedControlReadyIncompleteSummaryFallback runs
+// controlReadyIncompleteSummaryFallback for a cache entry whose whole-set
+// summary prime failed integrity, reusing the entry's last fallback outcome
+// for controlReadyCacheTTL. The failed whole-set prime itself stays in its
+// controlReadyCacheFailureBackoff, so a large rig pays one round of scoped
+// summaries per TTL rather than a subprocess fan-out on every drain-loop
+// scan (gcw-dsi74).
+func cachedControlReadyIncompleteSummaryFallback(entry *controlReadyCacheEntry, dir, cityPath string, env map[string]string, parsed parsedControlReadyQuery) (rows []beads.Bead, handled bool, err error) {
+	now := controlReadyNow()
+	controlReadyCacheRegistry.mu.Lock()
+	if !entry.fallbackAt.IsZero() && now.Sub(entry.fallbackAt) < controlReadyCacheTTL {
+		rows, err = entry.fallbackRows, entry.fallbackErr
+		controlReadyCacheRegistry.mu.Unlock()
+		return rows, true, err
+	}
+	controlReadyCacheRegistry.mu.Unlock()
+
+	rows, handled, err = controlReadyIncompleteSummaryFallback(entry.err, dir, cityPath, env, parsed)
+	if !handled {
+		return nil, false, nil
+	}
+	controlReadyCacheRegistry.mu.Lock()
+	entry.fallbackRows, entry.fallbackErr, entry.fallbackAt = rows, err, now
+	controlReadyCacheRegistry.mu.Unlock()
+	return rows, true, err
 }
 
 var controlReadyExecutable = os.Executable
@@ -674,6 +742,11 @@ type controlReadyCacheEntry struct {
 	retryAfter       time.Time
 	err              error
 	includeEphemeral bool
+	// fallbackRows/fallbackErr/fallbackAt memoize the scoped fallback taken
+	// when the whole-set summary prime failed integrity (gcw-f84jn).
+	fallbackRows []beads.Bead
+	fallbackErr  error
+	fallbackAt   time.Time
 }
 
 var controlReadyNow = time.Now
@@ -903,6 +976,12 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	if !parsed.includeEphemeral || controlReadyUsesSummary(env) {
 		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral, parsed); entry != nil {
 			if entry.err != nil {
+				if rows, ok, err := cachedControlReadyIncompleteSummaryFallback(entry, dir, cityPath, env, parsed); ok {
+					if err != nil {
+						return nil, true, err
+					}
+					return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), true, nil
+				}
 				return nil, true, entry.err
 			}
 			if entry.caches == nil {
@@ -916,6 +995,12 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 
 	ready, err := controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
 	if err != nil {
+		if rows, ok, fallbackErr := controlReadyIncompleteSummaryFallback(err, dir, cityPath, env, parsed); ok {
+			if fallbackErr != nil {
+				return nil, true, fallbackErr
+			}
+			return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), true, nil
+		}
 		return nil, true, err
 	}
 	return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
