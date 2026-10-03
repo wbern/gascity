@@ -45,13 +45,16 @@ const (
 	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
 
-	orderTrackingSweepOrder                = "order-tracking-sweep"
-	orderTrackingBeadPolicyName            = "order_tracking"
-	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
-	minClosedOrderTrackingRetained         = 10
-	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
-	orderTrackingSweepWatchdogInterval     = 30 * time.Second
-	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
+	orderTrackingSweepOrder              = "order-tracking-sweep"
+	orderTrackingBeadPolicyName          = "order_tracking"
+	defaultOrderTrackingSweepStaleAfter  = 10 * time.Minute
+	minClosedOrderTrackingRetained       = 10
+	legacyOrderTrackingRetentionBucket   = "\x00legacy-unscoped-order-tracking"
+	orderTrackingSweepWatchdogInterval   = 30 * time.Second
+	orderTrackingSweepWatchdogStaleAfter = 2 * time.Minute
+	// orderTrackingWatchdogTimeoutGrace is added to the longest configured
+	// order timeout when deriving the watchdog cutoff (gcw-gpefh).
+	orderTrackingWatchdogTimeoutGrace      = time.Minute
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
