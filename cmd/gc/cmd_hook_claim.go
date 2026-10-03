@@ -1486,9 +1486,9 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 // A lost CAS means the bead changed hands between the readback and the write,
 // so it is not adopted.
 //
-// A restamp that FAILED is decided by where the bead lives, not by the error
-// value, because the same beads.ErrConditionalTransferUnsupported reaches here
-// from two places with opposite correct answers:
+// A restamp that FAILED is decided by why it failed. The same
+// beads.ErrConditionalTransferUnsupported reaches here from two places, and both
+// now adopt as-is, for different reasons (the stderr note names which):
 //
 //   - errRestampGraphResident, from the class route for a bead resident in the
 //     relocated graph store. Nothing downstream fences that bead's close on the

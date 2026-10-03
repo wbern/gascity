@@ -12,7 +12,7 @@ for why this exists and how it is enforced.
 | [0004](0004-assignee-holds-a-session-name-not-a-qualified-identity.md) | superseded by 0007 | A bead's `assignee` holds a session name, not a qualified identity | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go` |
 | [0005](0005-session-destruction-guards-operator-initiated-paths-only.md) | accepted | Session-destruction guards cover operator-initiated paths only; self-handoff is deliberately unguarded | `cmd/gc/subagent_kill_guard.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go`, `internal/worker/subagent_guard.go` |
 | [0006](0006-attended-session-self-recycle-requires-explicit-handoff-opt-in.md) | accepted | Attended sessions recycle only through an explicit self-handoff opt-in | `cmd/gc/cmd_handoff.go` |
-| [0007](0007-assignee-holds-the-claiming-sessions-claim-identity.md) | accepted | `assignee` holds the claiming session's claim identity: session name (dispatch/graph routing), alias (named), session bead id (unaliased pool) | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `cmd/gc/cmd_hook_claim*.go`, `cmd/gc/pool*.go` |
+| [0007](0007-assignee-holds-the-claiming-sessions-claim-identity.md) | accepted | `assignee` holds the claim identity: session bead id (direct-session dispatch/graph routing), alias else session bead id (`gc hook --claim`) | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go`, `cmd/gc/build_desired_state.go`, `cmd/gc/cmd_hook_claim*.go`, `cmd/gc/pool*.go` |
 
 ## Writing one
 

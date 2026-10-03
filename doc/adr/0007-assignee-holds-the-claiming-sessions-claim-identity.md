@@ -56,12 +56,20 @@ ADR supersedes it rather than leaving the reversal implicit.
 
 | Writer | Value written |
 | --- | --- |
-| dispatch / graph routing (`internal/dispatch/control.go`, `internal/graphroute`) | the binding's session name (unchanged from ADR-0004) |
-| `gc hook --claim`, named session | the session's alias |
-| `gc hook --claim`, unaliased pool / ephemeral session | the session bead id |
+| dispatch / graph routing (`internal/dispatch/control.go`, `internal/graphroute`), step bound to a direct session | the session bead id (`binding.directSessionID` / `binding.DirectSessionID`) |
+| dispatch / graph routing, any other binding | no assignee; the step is routed through `gc.routed_to` |
+| `gc hook --claim` | the claiming session's alias when it has one, otherwise its session bead id |
 
-All three are intended. None is to be "fixed" by normalizing writes to a
-single form.
+Every row is intended. None is to be "fixed" by normalizing writes to a
+single form. ADR-0004's dispatch/graph-routing writes of `binding.SessionName`
+(`control.go:1121`, `graphroute.go:206` at the time) no longer exist: upstream
+replaced them with the direct-session bead id above, so the `rig--agent`
+session-name spelling now survives only on beads written before the sync.
+
+One exception to the CAS re-stamp: when the work store's bd rejects
+`--if-assignee` (bd < 1.2.1, which also predates bd's close/update actor
+fence), `gc hook --claim` adopts the legacy spelling as-is rather than
+refusing; it moves on the first claim after bd is upgraded.
 
 ADR-0004's reading rule stands unchanged: identity resolution across
 spellings is the job of identity-aware surfaces, not raw beads filters. The

@@ -655,12 +655,12 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// the bead is adopted as-is (the pre-re-stamp behavior). Anything else
 	// is the work store's, like the release above.
 	//
-	// The unsupported answer is tagged with errRestampGraphResident, because the
-	// caller's decision turns on WHERE the bead lives rather than on the error:
-	// the identical beads.ErrConditionalTransferUnsupported from the work store
-	// (a bd below the --if-assignee floor) means the opposite — a bead whose
-	// close bd will fence on the spelling that could not be moved — and must
-	// refuse adoption. See restampHookAdoption.
+	// The unsupported answer is tagged with errRestampGraphResident so the caller
+	// can say WHY the bead is adopted as-is: here nothing fences a graph-resident
+	// close. The identical beads.ErrConditionalTransferUnsupported from the work
+	// store (a bd below the --if-assignee floor) is adopted as-is too, because
+	// such a bd also predates the close/update actor fence. See
+	// restampHookAdoption.
 	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
 		if route.knownResident(beadID) {
 			return false, errRestampGraphResident

@@ -500,7 +500,6 @@ func controlReadyIncompleteSummaryFallback(cause error, dir, cityPath string, en
 	if !errors.As(cause, &integrity) || !controlReadyUsesSummary(env) {
 		return nil, false, nil
 	}
-	log.Printf("control-ready: %v for %s; falling back to scoped assignee/route summaries", cause, dir)
 	rows, err = controlReadyScopedSummaryReady(dir, env, parsed)
 	if err != nil {
 		return nil, true, fmt.Errorf("%w; scoped fallback: %w", cause, err)
@@ -508,7 +507,7 @@ func controlReadyIncompleteSummaryFallback(cause error, dir, cityPath string, en
 	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
 		graphRows, err := controlReadyBindingReady(dir, binding, parsed.includeEphemeral)
 		if err != nil {
-			return nil, true, err
+			return nil, true, fmt.Errorf("%w; scoped fallback graph leg: %w", cause, err)
 		}
 		rows = mergeControlReadyLegs(rows, graphRows)
 	}
@@ -530,9 +529,13 @@ func cachedControlReadyIncompleteSummaryFallback(entry *controlReadyCacheEntry, 
 		controlReadyCacheRegistry.mu.Unlock()
 		return rows, true, err
 	}
+	first := entry.fallbackAt.IsZero()
 	controlReadyCacheRegistry.mu.Unlock()
 
 	rows, handled, err = controlReadyIncompleteSummaryFallback(entry.err, dir, cityPath, env, parsed)
+	if handled && first {
+		log.Printf("control-ready: %v for %s; falling back to scoped assignee/route summaries", entry.err, dir)
+	}
 	if !handled {
 		return nil, false, nil
 	}
