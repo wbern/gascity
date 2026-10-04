@@ -2219,6 +2219,15 @@ func applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error 
 	if err != nil {
 		return err
 	}
+	if pinned == "" && citylayout.ShimInstalled(cityPath) {
+		// gc's own bd must never resolve through the city's bd-shim: a
+		// controller PATH that carries the shim bin dir would run the shim
+		// without GC_BD_REAL and trip its self-passthrough guard, failing
+		// every city's init once the native store is unavailable.
+		if realBd, err := citylayout.ResolveRealBd(cityPath); err == nil {
+			pinned = realBd
+		}
+	}
 	// Always write the resolved value: an empty pin masks a stale inherited
 	// BD_BIN that execCommandRunner would otherwise exec from the base env.
 	env["BD_BIN"] = pinned
