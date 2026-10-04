@@ -14,6 +14,7 @@ for why this exists and how it is enforced.
 | [0006](0006-attended-session-self-recycle-requires-explicit-handoff-opt-in.md) | accepted | Attended sessions recycle only through an explicit self-handoff opt-in | `cmd/gc/cmd_handoff.go` |
 | [0007](0007-assignee-holds-the-claiming-sessions-claim-identity.md) | accepted | `assignee` holds the claim identity: session bead id (direct-session dispatch/graph routing), alias else session bead id (`gc hook --claim`) | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go`, `cmd/gc/build_desired_state.go`, `cmd/gc/cmd_hook_claim*.go`, `cmd/gc/pool*.go` |
 | [0008](0008-retire-bdshim-real-bd-on-path.md) | accepted | Retire bdshim: `bd` on PATH is real bd, fleet runs `bd_shim = "off"`; shim code stays dormant one release as rollback | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go`, `cmd/gc/bd_*.go` |
+| [0009](0009-agents-work-from-evidence.md) | accepted | Agents work from evidence: observe before concluding; reproduce, fix, re-observe; name the evidence and its limits; proportion, not ceremony; confirm the target before destructive or outward-facing actions | `AGENTS.md`, `CLAUDE.md`, `TESTING.md`, `engdocs/contributors/**`, `internal/bootstrap/packs/**` (md/toml), `examples/**/*.md` |
 
 ## Writing one
 
