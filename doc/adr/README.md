@@ -7,12 +7,13 @@ for why this exists and how it is enforced.
 | ADR | Status | Decision | Governs |
 | --- | --- | --- | --- |
 | [0001](0001-record-architectural-decisions-with-adr-lint.md) | accepted | Record decisions as ADRs under `doc/adr/`, linted by `adr-lint`, advisory, local-only | `doc/adr/**`, `.githooks/**` |
-| [0002](0002-bdshim-stays-gc-bd-does-not-become-standalone.md) | accepted | bdshim stays; `gc bd` reaches `bd` by exec, not in-process | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go` |
+| [0002](0002-bdshim-stays-gc-bd-does-not-become-standalone.md) | superseded by 0008 | bdshim stays; `gc bd` reaches `bd` by exec, not in-process | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go` |
 | [0003](0003-worktree-removal-must-check-ignored-files.md) | accepted | Automated worktree removal must check ignored files; `git worktree remove` is not a backstop | the three `cmd/gc` worktree-removal paths, `internal/git/**` |
 | [0004](0004-assignee-holds-a-session-name-not-a-qualified-identity.md) | superseded by 0007 | A bead's `assignee` holds a session name, not a qualified identity | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go` |
 | [0005](0005-session-destruction-guards-operator-initiated-paths-only.md) | accepted | Session-destruction guards cover operator-initiated paths only; self-handoff is deliberately unguarded | `cmd/gc/subagent_kill_guard.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go`, `internal/worker/subagent_guard.go` |
 | [0006](0006-attended-session-self-recycle-requires-explicit-handoff-opt-in.md) | accepted | Attended sessions recycle only through an explicit self-handoff opt-in | `cmd/gc/cmd_handoff.go` |
 | [0007](0007-assignee-holds-the-claiming-sessions-claim-identity.md) | accepted | `assignee` holds the claim identity: session bead id (direct-session dispatch/graph routing), alias else session bead id (`gc hook --claim`) | `internal/dispatch/control.go`, `internal/graphroute/graphroute.go`, `internal/agent/session_name.go`, `cmd/gc/build_desired_state.go`, `cmd/gc/cmd_hook_claim*.go`, `cmd/gc/pool*.go` |
+| [0008](0008-retire-bdshim-real-bd-on-path.md) | accepted | Retire bdshim: `bd` on PATH is real bd, fleet runs `bd_shim = "off"`; shim code stays dormant one release as rollback | `cmd/bdshim/**`, `internal/bdshim/**`, `internal/bddispatch/**`, `cmd/gc/cmd_bd.go`, `cmd/gc/bd_*.go` |
 
 ## Writing one
 
