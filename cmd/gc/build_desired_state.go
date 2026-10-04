@@ -2065,7 +2065,7 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = session.BuildClosedNamedSessionBeadIndex(cityStore)
+			closedIdx, idxErr = closedNamedIndexCache.get(cityStore)
 			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
