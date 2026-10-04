@@ -78,6 +78,25 @@ const controlReadyCacheTTL = 3 * time.Second
 // storm. The failure remains loud to the caller throughout the bounded pause.
 const controlReadyCacheFailureBackoff = 30 * time.Second
 
+// controlReadyFallbackMinTTL is the shortest time a scoped fallback round
+// (taken when the whole-set summary prime fails integrity on a large rig) is
+// reused before the next round. One round is several scoped bd ready calls;
+// on a ~100k-issue rig each takes seconds, so reusing it for only
+// controlReadyCacheTTL ran rounds back to back and saturated Dolt (gcw-qg49y).
+// Control steps on such a rig are picked up within this bound.
+const controlReadyFallbackMinTTL = 30 * time.Second
+
+// controlReadyFallbackTTL returns how long a scoped fallback round that took
+// lastRound is reused: at least controlReadyFallbackMinTTL, and twice the round
+// when rounds are slow, so the fallback never spends more than about a third
+// of the time querying.
+func controlReadyFallbackTTL(lastRound time.Duration) time.Duration {
+	if ttl := 2 * lastRound; ttl > controlReadyFallbackMinTTL {
+		return ttl
+	}
+	return controlReadyFallbackMinTTL
+}
+
 // parsedControlReadyQuery holds the values workflowServeControlReadyQueryForBeads
 // bakes into its generated shell command as env-var prefix assignments.
 type parsedControlReadyQuery struct {
@@ -517,14 +536,15 @@ func controlReadyIncompleteSummaryFallback(cause error, dir, cityPath string, en
 // cachedControlReadyIncompleteSummaryFallback runs
 // controlReadyIncompleteSummaryFallback for a cache entry whose whole-set
 // summary prime failed integrity, reusing the entry's last fallback outcome
-// for controlReadyCacheTTL. The failed whole-set prime itself stays in its
-// controlReadyCacheFailureBackoff, so a large rig pays one round of scoped
-// summaries per TTL rather than a subprocess fan-out on every drain-loop
-// scan (gcw-dsi74).
+// for controlReadyFallbackTTL of that round's duration. The failed whole-set
+// prime itself stays in its controlReadyCacheFailureBackoff, and a re-prime
+// that fails again carries the memo forward, so a large rig pays one round of
+// scoped summaries per fallback TTL rather than a subprocess fan-out on every
+// drain-loop scan (gcw-dsi74, gcw-qg49y).
 func cachedControlReadyIncompleteSummaryFallback(entry *controlReadyCacheEntry, dir, cityPath string, env map[string]string, parsed parsedControlReadyQuery) (rows []beads.Bead, handled bool, err error) {
 	now := controlReadyNow()
 	controlReadyCacheRegistry.mu.Lock()
-	if !entry.fallbackAt.IsZero() && now.Sub(entry.fallbackAt) < controlReadyCacheTTL {
+	if !entry.fallbackAt.IsZero() && now.Sub(entry.fallbackAt) < controlReadyFallbackTTL(entry.fallbackDur) {
 		rows, err = entry.fallbackRows, entry.fallbackErr
 		controlReadyCacheRegistry.mu.Unlock()
 		return rows, true, err
@@ -539,8 +559,9 @@ func cachedControlReadyIncompleteSummaryFallback(entry *controlReadyCacheEntry, 
 	if !handled {
 		return nil, false, nil
 	}
+	end := controlReadyNow()
 	controlReadyCacheRegistry.mu.Lock()
-	entry.fallbackRows, entry.fallbackErr, entry.fallbackAt = rows, err, now
+	entry.fallbackRows, entry.fallbackErr, entry.fallbackAt, entry.fallbackDur = rows, err, end, end.Sub(now)
 	controlReadyCacheRegistry.mu.Unlock()
 	return rows, true, err
 }
@@ -746,10 +767,12 @@ type controlReadyCacheEntry struct {
 	err              error
 	includeEphemeral bool
 	// fallbackRows/fallbackErr/fallbackAt memoize the scoped fallback taken
-	// when the whole-set summary prime failed integrity (gcw-f84jn).
+	// when the whole-set summary prime failed integrity (gcw-f84jn);
+	// fallbackDur is how long that round took and sets its reuse TTL.
 	fallbackRows []beads.Bead
 	fallbackErr  error
 	fallbackAt   time.Time
+	fallbackDur  time.Duration
 }
 
 var controlReadyNow = time.Now
@@ -828,12 +851,18 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 
 	if controlReadyUsesSummary(env) {
 		ready, err := controlReadyFallbackReady(dir, cityPath, env, includeEphemeral)
+		prev := entry
 		entry = &controlReadyCacheEntry{ready: ready, queryKey: queryKey, primedAt: controlReadyNow(), err: err, includeEphemeral: includeEphemeral}
 		if entry.err != nil {
 			entry.retryAfter = now.Add(controlReadyCacheFailureBackoff)
 			log.Printf("control-ready cache: bounded summary prime failed for %s: %v (retry after %s)", dir, entry.err, entry.retryAfter.Format(time.RFC3339))
 		}
 		controlReadyCacheRegistry.mu.Lock()
+		if entry.err != nil && ok && prev.includeEphemeral == includeEphemeral && prev.queryKey == queryKey {
+			// Still failing: keep the scoped fallback memo so its own TTL, not
+			// the whole-set retry cadence, decides when the next round runs.
+			entry.fallbackRows, entry.fallbackErr, entry.fallbackAt, entry.fallbackDur = prev.fallbackRows, prev.fallbackErr, prev.fallbackAt, prev.fallbackDur
+		}
 		controlReadyCacheRegistry.byDir[dir] = entry
 		controlReadyCacheRegistry.mu.Unlock()
 		return entry
