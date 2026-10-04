@@ -1431,3 +1431,104 @@ func TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails(t *tes
 		t.Fatalf("err = %v, want both the integrity cause and the scoped failure", err)
 	}
 }
+
+// controlReadyIncompleteFallbackHarness wires a fake clock and a runner whose
+// whole-set summary always fails integrity (as on a large rig) and whose
+// scoped calls each advance the clock by perCall, so one fallback round can
+// outlast controlReadyCacheTTL the way it does on GC3 crm (gcw-qg49y).
+func controlReadyIncompleteFallbackHarness(t *testing.T, perCall time.Duration) (now *time.Time, rounds *int, scan func()) {
+	t.Helper()
+	resetControlReadyCache(t)
+	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow
+	t.Cleanup(func() {
+		controlReadyExecutable, controlReadyCommandRunner, controlReadyNow = originalExecutable, originalRunner, originalNow
+	})
+	controlReadyExecutable = func() (string, error) { return "/opt/gascity/current/gc", nil }
+	t.Setenv("GC_BEADS", "bd")
+	clock := time.Unix(1000, 0)
+	controlReadyNow = func() time.Time { return clock }
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	query := workflowServeControlReadyQuery(agentCfg)
+	incomplete := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":1228,"omitted":1228,"beads":[]}`
+	empty := `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`
+	scopedCalls, lastRoundStart := 0, -1
+	roundCount := 0
+	controlReadyCommandRunner = func(_ string, args []string, _, _ string, _ []string) (string, error) {
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "--assignee=") && !strings.Contains(joined, "--metadata-field") {
+			lastRoundStart = -1
+			return incomplete, nil
+		}
+		if lastRoundStart < 0 {
+			roundCount++
+			lastRoundStart = scopedCalls
+		}
+		scopedCalls++
+		clock = clock.Add(perCall)
+		return empty, nil
+	}
+	dir := t.TempDir()
+	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd"}
+	scan = func() {
+		t.Helper()
+		// A scan that reuses a memoized round must not be counted as a new one.
+		lastRoundStart = -1
+		if _, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env); err != nil || !handled {
+			t.Fatalf("tryControlReadyFromCacheOrFallback: handled=%v err=%v", handled, err)
+		}
+	}
+	return &clock, &roundCount, scan
+}
+
+// TestControlReadyIncompleteFallbackIsThrottledAcrossScans pins gcw-qg49y: on
+// a rig whose whole-set summary is always incomplete, repeated readiness scans
+// over a minute must not run scoped fallback rounds back to back. Before the
+// fix the fallback memo lived for controlReadyCacheTTL (3s), shorter than one
+// round, and was dropped on every 30s whole-set re-prime.
+func TestControlReadyIncompleteFallbackIsThrottledAcrossScans(t *testing.T) {
+	clock, rounds, scan := controlReadyIncompleteFallbackHarness(t, 400*time.Millisecond)
+	start := *clock
+	for clock.Sub(start) < 60*time.Second {
+		scan()
+		*clock = clock.Add(2 * time.Second) // drain-loop cadence between scans
+	}
+	if *rounds > 2 {
+		t.Fatalf("scoped fallback rounds in 60s = %d, want <= 2 (one per %s)", *rounds, controlReadyFallbackMinTTL)
+	}
+	if *rounds == 0 {
+		t.Fatal("no scoped fallback round ran; the dispatcher would be blind")
+	}
+}
+
+// TestControlReadyIncompleteFallbackTTLStretchesForSlowRounds keeps a slow
+// round (each scoped call several seconds, as on crm) from re-running as soon
+// as the minimum TTL elapses: the memo lives for twice the last round.
+func TestControlReadyIncompleteFallbackTTLStretchesForSlowRounds(t *testing.T) {
+	clock, rounds, scan := controlReadyIncompleteFallbackHarness(t, 5*time.Second)
+	scan()
+	if *rounds != 1 {
+		t.Fatalf("rounds after first scan = %d, want 1", *rounds)
+	}
+	roundEnd := *clock
+	*clock = roundEnd.Add(controlReadyFallbackMinTTL + 5*time.Second)
+	scan()
+	if *rounds != 1 {
+		t.Fatalf("rounds = %d after %s, want the slow round still memoized (TTL = 2x round)", *rounds, clock.Sub(roundEnd))
+	}
+}
+
+func TestControlReadyFallbackTTL(t *testing.T) {
+	for _, tc := range []struct {
+		round time.Duration
+		want  time.Duration
+	}{
+		{0, controlReadyFallbackMinTTL},
+		{3 * time.Second, controlReadyFallbackMinTTL},
+		{controlReadyFallbackMinTTL, 2 * controlReadyFallbackMinTTL},
+	} {
+		if got := controlReadyFallbackTTL(tc.round); got != tc.want {
+			t.Errorf("controlReadyFallbackTTL(%s) = %s, want %s", tc.round, got, tc.want)
+		}
+	}
+}
