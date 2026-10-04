@@ -16,6 +16,9 @@ set -euo pipefail
 # degradation. When bd is not installed (e.g. CI/docker image builds) it skips
 # rather than fails, so it only ever blocks a genuinely mismatched build.
 #
+# A deliberate staged bd upgrade (deploy gc first, upgrade bd after) is
+# acknowledged with GC_BEADS_BD_SKEW_ACK=<installed bd version>.
+#
 # See gas-city-infra memory: dolt-connection-drops-bd-version-mismatch.
 
 GOMOD="${1:-go.mod}"
@@ -46,6 +49,24 @@ if [ -z "$bd_ver" ]; then
 fi
 
 if [ "$beads_ver" != "$bd_ver" ]; then
+  # A staged bd upgrade deliberately ships a gc linked against a newer beads
+  # library while the installed bd is still the older release: preflight
+  # version_compat then keeps gc on the bd-CLI store (BdStore) until bd is
+  # upgraded. GC_BEADS_BD_SKEW_ACK must name the installed bd version exactly,
+  # so an ack cannot silently outlive the rollout it was given for.
+  ack="${GC_BEADS_BD_SKEW_ACK:-}"
+  if [ -n "$ack" ] && [ "${ack#v}" = "$bd_ver" ]; then
+    cat >&2 <<EOF
+check-beads-bd-version: SKEW ACKNOWLEDGED via GC_BEADS_BD_SKEW_ACK=${ack}
+
+  go.mod linked beads = v${beads_ver}
+  installed bd binary = v${bd_ver}
+
+Building anyway. Preflight version_compat will keep gc on the bd-CLI store
+(BdStore) instead of the native store until bd matches the linked library.
+EOF
+    exit 0
+  fi
   cat >&2 <<EOF
 check-beads-bd-version: BEADS VERSION SKEW — refusing to build.
 
@@ -60,6 +81,9 @@ Fix: align them — bump the go.mod 'github.com/steveyegge/beads' require to
 v${bd_ver} (or install bd v${beads_ver}) so the linked library matches the
 binary, then rebuild. This skew typically returns after an upstream merge
 resets the go.mod pin; do not ship a mismatched build.
+
+Deliberate staged bd upgrade (gc first, bd after)? Acknowledge this exact
+skew with GC_BEADS_BD_SKEW_ACK=${bd_ver} and rebuild.
 EOF
   exit 1
 fi
