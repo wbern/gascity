@@ -677,6 +677,7 @@ go_test(
         "async_start_command_gate_test.go",
         "backend_env_census_test.go",
         "bd_env_backend_registry_test.go",
+        "bd_env_controller_shim_test.go",
         "bd_env_credential_probe_snapshot_test.go",
         "bd_env_hosted_probe_cache_test.go",
         "bd_env_proxied_test.go",
