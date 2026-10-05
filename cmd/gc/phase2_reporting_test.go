@@ -119,7 +119,7 @@ func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp Templat
 	case !startupNudgeMatches(tc, cfg.Nudge):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.Nudge = %q, want startup nudge plus %q", cfg.Nudge, "nudge-"+tc.family)).WithEvidence(evidence)
-	case !reflect.DeepEqual(cfg.PreStart, []string{"echo pre-" + tc.family}):
+	case !reflect.DeepEqual(phase2PreStartWithoutProjectMCP(cfg.PreStart), []string{"echo pre-" + tc.family}):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.PreStart = %v, want %v", cfg.PreStart, []string{"echo pre-" + tc.family})).WithEvidence(evidence)
 	case !reflect.DeepEqual(cfg.SessionSetup, []string{"echo setup-" + tc.family}):
@@ -463,4 +463,19 @@ func phase2PreparedEvidence(tc phase2ProviderCase, prepared *preparedStart) map[
 	}
 
 	return evidence
+}
+
+// phase2PreStartWithoutProjectMCP drops the gc-appended "internal project-mcp"
+// step: the fork projects stage-2 MCP even for an empty catalog so an emptied
+// projection is reconciled (ffd7e9efb), which upstream only does when the
+// catalog has servers. The configured pre-start must still come through intact.
+func phase2PreStartWithoutProjectMCP(preStart []string) []string {
+	out := make([]string, 0, len(preStart))
+	for _, cmd := range preStart {
+		if strings.Contains(cmd, " internal project-mcp ") {
+			continue
+		}
+		out = append(out, cmd)
+	}
+	return out
 }
