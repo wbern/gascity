@@ -42,7 +42,10 @@ max_active_sessions = 1
 	}
 }
 
-func TestMcpValidateRejectsImplicitEmptyCatalogConflict(t *testing.T) {
+func TestMcpValidateAllowsImplicitEmptyCatalogAgentOnSharedTarget(t *testing.T) {
+	// Since #181 (77796869e) an implicit provider agent with an empty catalog is
+	// skipped during stage-1 projection, so it no longer conflicts with an
+	// explicit agent that projects servers to the same target.
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
@@ -65,11 +68,49 @@ command = "npx"
 `)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"mcp", "validate"}, &stdout, &stderr)
-	if code == 0 {
+	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp validate failed (code %d): stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "MCP target conflict") {
+		t.Fatalf("stderr reports a conflict for an implicit empty-catalog agent:\n%s", stderr.String())
+	}
+}
+
+func TestMcpValidateRejectsExplicitAgentTargetConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+command = "echo"
+prompt_mode = "none"
+`, `
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/notes.toml", `
+name = "notes"
+command = "npx"
+`)
+	writeCatalogFile(t, cityDir, "agents/deputy/agent.toml", `
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/deputy/mcp/ledger.toml", `
+name = "ledger"
+command = "uvx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc mcp validate unexpectedly passed: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	for _, want := range []string{"MCP target conflict", "mayor", "claude"} {
+	for _, want := range []string{"MCP target conflict", "mayor", "deputy"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
 		}
