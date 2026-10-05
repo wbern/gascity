@@ -176,3 +176,31 @@ func TestDrainWorkflowServeWorkNonSingletonAgentStaysSingleStore(t *testing.T) {
 		t.Fatalf("queriedStores = %#v, want exactly [%q] for a non-singleton agent", queriedStores, cityPath)
 	}
 }
+
+// TestWorkflowServeStoresRigScopedDispatcherScansOnlyItsOwnStore pins
+// gcw-1smom: the all-rigs fanout exists for the city-scoped singleton (#3764
+// residual). A rig-scoped control-dispatcher (agent Dir = its rig) already
+// runs in its own rig store; scanning every other rig made N rig dispatchers
+// run N x N ready computations per cycle (GC3: crm's 3s ready ran 3x).
+func TestWorkflowServeStoresRigScopedDispatcherScansOnlyItsOwnStore(t *testing.T) {
+	cityPath := t.TempDir()
+	crmPath := filepath.Join(cityPath, "rigs", "crm")
+	wbernPath := filepath.Join(cityPath, "rigs", "gas-city-wbern")
+	cfg := &config.City{Rigs: []config.Rig{{Name: "crm", Path: crmPath}, {Name: "gas-city-wbern", Path: wbernPath}}}
+
+	rigAgent := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "crm"}
+	stores := workflowServeStores(cityPath, rigAgent, crmPath, map[string]string{"BEADS_DIR": crmPath}, cfg)
+	if len(stores) != 1 || stores[0].dir != crmPath {
+		t.Fatalf("rig-scoped dispatcher stores = %#v, want only its own store %q", stores, crmPath)
+	}
+
+	singleton := config.Agent{Name: config.ControlDispatcherAgentName}
+	stores = workflowServeStores(cityPath, singleton, cityPath, nil, cfg)
+	if len(stores) != 3 {
+		dirs := make([]string, 0, len(stores))
+		for _, s := range stores {
+			dirs = append(dirs, s.dir)
+		}
+		t.Fatalf("city singleton stores = %v, want city + both rigs (the #3764 fanout)", dirs)
+	}
+}

@@ -455,9 +455,14 @@ type workflowServeStoreQuery struct {
 // An earlier version reused the singleton's own workEnv for every store and
 // only varied the shell cwd, so every iteration still queried the city store
 // regardless of which rig path it changed directory into (gcw-kcm4).
+//
+// A rig-scoped control-dispatcher (agent Dir naming a configured rig) already
+// serves its own rig store and does not fan out: with one dispatcher per rig,
+// the fanout made every dispatcher run a ready scan in every rig, N x N scans
+// per cycle where N suffice (gcw-1smom).
 func workflowServeStores(cityPath string, agentCfg config.Agent, storePath string, workEnv map[string]string, cfg *config.City) []workflowServeStoreQuery {
 	stores := []workflowServeStoreQuery{{dir: storePath, env: workEnv}}
-	if cfg == nil || !isWorkflowServeControlDispatcherAgent(agentCfg) {
+	if cfg == nil || !isWorkflowServeControlDispatcherAgent(agentCfg) || isRigScopedAgent(agentCfg, cfg.Rigs) {
 		return stores
 	}
 	seen := map[string]struct{}{normalizePathForCompare(storePath): {}}
@@ -488,6 +493,21 @@ func workflowServeStores(cityPath string, agentCfg config.Agent, storePath strin
 		stores = append(stores, workflowServeStoreQuery{dir: rigDir, env: rigEnv})
 	}
 	return stores
+}
+
+// isRigScopedAgent reports whether agentCfg is bound to one of the configured
+// rigs (its Dir names the rig), as opposed to a city-scoped agent.
+func isRigScopedAgent(agentCfg config.Agent, rigs []config.Rig) bool {
+	dir := strings.TrimSpace(agentCfg.Dir)
+	if dir == "" {
+		return false
+	}
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Name) == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // drainWorkflowServeWork runs the control-dispatcher drain loop to completion
