@@ -40,6 +40,7 @@ jobs:
           go-version-file: go.mod
       - name: Observe required CI evidence for the PR head commit
         env:
+          EVIDENCE_CONTRACT: ${{ github.repository == 'wbern/gascity' && 'fork' || 'upstream' }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}

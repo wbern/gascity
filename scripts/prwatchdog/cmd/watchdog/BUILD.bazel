@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "watchdog_lib",
@@ -12,6 +12,19 @@ go_binary(
     name = "watchdog",
     embed = [":watchdog_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "watchdog_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":watchdog_lib"],
+    deps = [
+        "//internal/testenv",
+        "//scripts/prwatchdog",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
