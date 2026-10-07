@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -167,10 +166,9 @@ var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
 var _ DepMetadataReader = (*FileStore)(nil)
 
 type fileFreshness struct {
-	known   bool
-	exists  bool
-	size    int64
-	modTime time.Time
+	known  bool
+	exists bool
+	info   os.FileInfo
 }
 
 func (f fileFreshness) same(other fileFreshness) bool {
@@ -183,7 +181,7 @@ func (f fileFreshness) same(other fileFreshness) bool {
 	if !f.exists {
 		return true
 	}
-	return f.size == other.size && f.modTime.Equal(other.modTime)
+	return fsys.SameFileMetadata(f.info, other.info)
 }
 
 // FileStoreOption configures a FileStore at open time.
@@ -266,6 +264,8 @@ func (fs *FileStore) SetLocker(l Locker) {
 // Must be called with fmu held. Used after acquiring a cross-process flock to
 // pick up changes made by other processes since we last read.
 func (fs *FileStore) reloadFromDisk() error {
+	// A writer reload can replace memory independently of the read cache.
+	fs.freshness = fileFreshness{}
 	data, err := fs.fs.ReadFile(fs.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -293,24 +293,14 @@ func (fs *FileStore) currentFreshness() (fileFreshness, error) {
 		return fileFreshness{}, fmt.Errorf("stating file store: %w", err)
 	}
 	return fileFreshness{
-		known:   true,
-		exists:  true,
-		size:    fi.Size(),
-		modTime: fi.ModTime(),
+		known:  true,
+		exists: true,
+		info:   fi,
 	}, nil
 }
 
-func (fs *FileStore) refreshFreshnessCache() {
-	current, err := fs.currentFreshness()
-	if err != nil {
-		fs.freshness = fileFreshness{}
-		return
-	}
-	fs.freshness = current
-}
-
 // refreshReadStateLocked favors cross-process correctness for long-lived
-// readers, but uses an mtime+size fast path to avoid full JSON reloads on
+// readers, but uses an identity+change-time fast path to avoid full JSON reloads on
 // every read. The remaining per-read Stat cost is acceptable for now; if
 // polling latency becomes measurable, we can replace it with a lighter seq hint.
 // Read wrappers intentionally skip the cross-process locker because writers
@@ -335,7 +325,13 @@ func (fs *FileStore) refreshReadStateLocked() error {
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
-	fs.freshness = current
+	// Certify loaded bytes only if metadata stayed stable across ReadFile.
+	// A racing writer may leave this read with either complete version, but
+	// must not make the next read reuse bytes from a different version.
+	after, statErr := fs.currentFreshness()
+	if statErr == nil && current.same(after) {
+		fs.freshness = after
+	}
 	return nil
 }
 
@@ -761,6 +757,8 @@ func (fs *FileStore) save() error {
 	if err := fs.fs.Rename(tmp, fs.path); err != nil {
 		return fmt.Errorf("saving file store: %w", err)
 	}
-	fs.refreshFreshnessCache()
+	// A later writer can publish between Rename and Stat. Revalidate the
+	// actual disk bytes on the next read instead of caching its metadata.
+	fs.freshness = fileFreshness{}
 	return nil
 }

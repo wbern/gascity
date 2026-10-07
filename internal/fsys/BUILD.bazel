@@ -4,6 +4,7 @@ go_library(
     name = "fsys",
     srcs = [
         "atomic.go",
+        "content.go",
         "fake.go",
         "fsys.go",
         "read_regular_unix.go",
@@ -57,6 +58,7 @@ go_test(
         "atomic_internal_test.go",
         "atomic_test.go",
         "conformance_test.go",
+        "content_test.go",
         "fake_test.go",
         "read_regular_unix_internal_test.go",
         "remove_all_test.go",
