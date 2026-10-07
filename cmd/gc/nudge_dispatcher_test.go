@@ -669,3 +669,56 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 		t.Fatal("wakeCh not signaled after enqueue")
 	}
 }
+
+// TestDispatchAllQueuedNudgesReusesResolvedStore proves the supervisor's
+// maintenance pass does not reopen storage while holding the queue lock and
+// terminalizes the shadow through the supplied nudges-class handle.
+func TestDispatchAllQueuedNudgesReusesResolvedStore(t *testing.T) {
+	dir := t.TempDir()
+	supplied := &closeCountingWorkStore{Store: beads.NewMemStore()}
+	item := newQueuedNudge("unmatched", "expired", time.Now().Add(-25*time.Hour))
+	beadID, _, err := ensureQueuedNudgeBead(beads.NudgesStore{Store: supplied}, item)
+	if err != nil {
+		t.Fatalf("creating shadow: %v", err)
+	}
+	item.BeadID = beadID
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		state.Pending = append(state.Pending, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding queue: %v", err)
+	}
+	// A separate fallback store makes a wrong-store terminal write visible,
+	// even when the queue transition itself still succeeds.
+	opens := 0
+	previous := openNudgeWorkStore
+	openNudgeWorkStore = func(_, _ string) (beads.Store, error) {
+		opens++
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() { openNudgeWorkStore = previous })
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), supplied, nil, nil, newSessionBeadSnapshot(nil), nil)
+	if err != nil || delivered != 0 {
+		t.Fatalf("dispatch = (%d, %v), want (0, nil)", delivered, err)
+	}
+	if opens != 0 {
+		t.Errorf("additional storage opens = %d, want 0", opens)
+	}
+	if supplied.closes != 0 {
+		t.Errorf("caller store closes = %d, want 0", supplied.closes)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("loading queue: %v", err)
+	}
+	if len(state.Pending) != 0 || len(state.Dead) != 1 || state.Dead[0].ID != item.ID || state.Dead[0].LastError != "expired" {
+		t.Errorf("queue did not terminalize expired item: %+v", state)
+	}
+	shadow, err := supplied.Get(beadID)
+	if err != nil {
+		t.Fatalf("reading shadow: %v", err)
+	}
+	if shadow.Status != "closed" || shadow.Metadata["state"] != "expired" || shadow.Metadata["terminal_reason"] != "expired" {
+		t.Errorf("shadow did not terminalize in supplied store: %+v", shadow)
+	}
+}

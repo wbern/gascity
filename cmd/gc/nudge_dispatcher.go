@@ -133,7 +133,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (target agent has no open session, and never will again) can never
 	// reach — leaving it in Pending past its ExpiresAt forever. See
 	// ra-oudpha finding-3.
-	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+	if err := runNudgeQueueMaintenanceSweepWithStore(cityPath, beads.NudgesStore{Store: store}, now); err != nil {
 		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
 	state, err := nudgequeue.LoadState(cityPath)
