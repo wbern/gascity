@@ -22,6 +22,7 @@ type Sleeper interface {
 
 // PollOptions configures a Watch invocation.
 type PollOptions struct {
+	Contract                 Contract
 	HeadSHA                  string
 	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
@@ -38,6 +39,7 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 		runs, err := fetcher.FetchCheckRuns(ctx, opts.HeadSHA)
 
 		eval := Evaluate(Input{
+			Contract:                 opts.Contract,
 			HeadSHA:                  opts.HeadSHA,
 			CheckRuns:                runs,
 			Elapsed:                  elapsed,

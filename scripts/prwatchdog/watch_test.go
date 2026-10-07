@@ -154,3 +154,16 @@ func TestWatch_PassesThroughOptInLabels(t *testing.T) {
 		t.Fatalf("expected fail because the requested Mac run never appeared, got %+v", eval)
 	}
 }
+
+func TestWatchThreadsForkContract(t *testing.T) {
+	runs := []CheckRun{}
+	for _, name := range []string{ForkVerifyName, ForkLintName, ForkProofName} {
+		runs = append(runs, CheckRun{Name: name, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess})
+	}
+	clock := &fakeClock{}
+	fetcher := &scriptedFetcher{responses: []fetchResponse{{runs: runs}}}
+	eval := Watch(context.Background(), fetcher, clock, &fakeSleeper{clock: clock}, PollOptions{Contract: ContractFork, HeadSHA: testHeadSHA, Deadline: time.Minute, Interval: time.Minute})
+	if !eval.Pass || len(fetcher.calls) != 1 {
+		t.Fatalf("fork contract lost in polling: %+v, calls=%v", eval, fetcher.calls)
+	}
+}
