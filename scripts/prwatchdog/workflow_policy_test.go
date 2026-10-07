@@ -200,3 +200,68 @@ func TestWatchdogWorkflow_UsesExplicitPRHeadSHANotBareGithubSHA(t *testing.T) {
 		t.Fatalf("workflow must not use the bare github.sha context (resolves to the base ref under pull_request_target, not the PR head):\n%s", text)
 	}
 }
+
+func TestForkContractWorkflowProducerAgreement(t *testing.T) {
+	watchdog := loadWatchdogWorkflow(t)
+	jobs := watchdog["jobs"].(map[string]any)
+	steps := jobs["evidence"].(map[string]any)["steps"].([]any)
+	want := "${{ github.repository == 'wbern/gascity' && 'fork' || 'upstream' }}"
+	found := false
+	for _, raw := range steps {
+		step := raw.(map[string]any)
+		if env, ok := step["env"].(map[string]any); ok && env["EVIDENCE_CONTRACT"] == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("trusted workflow must explicitly select fork only for wbern/gascity")
+	}
+	body, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "fork-verify.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fork map[string]any
+	if err := yaml.Unmarshal(body, &fork); err != nil {
+		t.Fatal(err)
+	}
+	producers := fork["jobs"].(map[string]any)
+	for _, name := range []string{ForkVerifyName, ForkLintName} {
+		if _, ok := producers[name]; !ok {
+			t.Fatalf("missing producer %q", name)
+		}
+	}
+	proof := producers["handoff-config-proof"].(map[string]any)
+	if proof["name"] != ForkProofName || proof["needs"] != "verify" {
+		t.Fatalf("required proof producer miswired: %v", proof)
+	}
+	verify := producers["verify"].(map[string]any)
+	outputs := verify["outputs"].(map[string]any)
+	if outputs["handoff-config-proof"] != "${{ steps.handoff-config-proof.outputs.passed }}" {
+		t.Fatal("proof output disconnected")
+	}
+	found = false
+	for _, raw := range verify["steps"].([]any) {
+		step := raw.(map[string]any)
+		if step["id"] == "handoff-config-proof" {
+			run, _ := step["run"].(string)
+			if step["if"] != nil || !strings.Contains(run, "python3 scripts/prwatchdog/handoff_proof.py --head") || !strings.Contains(run, "passed=true") {
+				t.Fatal("proof must execute unconditionally before success output")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing executed proof")
+	}
+	for _, name := range []string{ForkVerifyName, ForkLintName} {
+		for _, raw := range producers[name].(map[string]any)["steps"].([]any) {
+			step := raw.(map[string]any)
+			if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "actions/checkout@") {
+				with := step["with"].(map[string]any)
+				if with["ref"] != "${{ github.event.pull_request.head.sha || github.sha }}" {
+					t.Fatalf("%s must test exact head", name)
+				}
+			}
+		}
+	}
+}

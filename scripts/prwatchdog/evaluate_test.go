@@ -360,3 +360,85 @@ func TestEvaluate_HumanReadableSummaryStates(t *testing.T) {
 		}
 	})
 }
+
+func TestForkEvidenceMismatch(t *testing.T) {
+	runs := []CheckRun{}
+	for _, name := range []string{"verify", "lint", "Fork / handoff-config proof"} {
+		runs = append(runs, CheckRun{Name: name, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess})
+	}
+	eval := Evaluate(Input{Contract: ContractFork, HeadSHA: testHeadSHA, CheckRuns: runs, Deadline: time.Minute, Elapsed: time.Minute})
+	if !eval.Pass {
+		t.Fatalf("executed fork evidence must pass explicit fork contract: %+v", eval)
+	}
+}
+
+func TestQueuedRerunSupersedesSuccessfulStartedRun(t *testing.T) {
+	runs := []CheckRun{
+		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: time.Now(), ID: 1},
+		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusQueued, ID: 2},
+		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess},
+	}
+	if eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Deadline: time.Minute}); eval.Pass {
+		t.Fatalf("pending rerun hidden: %+v", eval)
+	}
+}
+
+func TestForkContractFailsClosed(t *testing.T) {
+	for _, name := range []string{ForkVerifyName, ForkLintName, ForkProofName, MacCheckName, ReviewFormulasCheckName} {
+		for _, mode := range []string{"missing", "wrong-head", "queued", "failure", "skipped", "canceled"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				runs := []CheckRun{}
+				for _, n := range []string{ForkVerifyName, ForkLintName, ForkProofName, MacCheckName, ReviewFormulasCheckName} {
+					r := CheckRun{Name: n, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess}
+					if n == name {
+						switch mode {
+						case "missing":
+							continue
+						case "wrong-head":
+							r.HeadSHA = "other"
+						case "queued":
+							r.Status = StatusQueued
+						case "failure":
+							r.Conclusion = ConclusionFailure
+						case "skipped":
+							r.Conclusion = ConclusionSkipped
+						case "canceled":
+							r.Conclusion = ConclusionCancelled
+						}
+					}
+					runs = append(runs, r)
+				}
+				in := Input{Contract: ContractFork, HeadSHA: testHeadSHA, CheckRuns: runs, Deadline: time.Minute, NeedsMacLabel: true, NeedsReviewFormulasLabel: true}
+				if got := Evaluate(in); got.Pass {
+					t.Fatalf("false green before deadline: %+v", got)
+				}
+				in.Elapsed = time.Minute
+				if got := Evaluate(in); got.Pass || !got.Terminal {
+					t.Fatalf("must fail at deadline: %+v", got)
+				}
+			})
+		}
+	}
+	if got := Evaluate(Input{Contract: "unknown"}); got.Pass || !got.Terminal {
+		t.Fatalf("unknown policy accepted: %+v", got)
+	}
+}
+
+func TestContractProducerNames(t *testing.T) {
+	for _, contract := range []Contract{"", ContractUpstream, ContractFork} {
+		names, err := CheckNames(contract)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs := []CheckRun{}
+		for _, name := range names {
+			runs = append(runs, CheckRun{Name: name, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess})
+		}
+		if got := Evaluate(Input{Contract: contract, HeadSHA: testHeadSHA, CheckRuns: runs}); !got.Pass {
+			t.Fatalf("contract %q: %+v", contract, got)
+		}
+	}
+	if _, err := CheckNames("unknown"); err == nil {
+		t.Fatal("unknown producer contract accepted")
+	}
+}

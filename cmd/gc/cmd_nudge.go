@@ -3287,13 +3287,24 @@ func nudgeMaintenanceSweepDebounced(cityPath string, now time.Time) bool {
 // tick is the one path that iterates the whole queue every cycle regardless
 // of match outcome, so it owns running this sweep unconditionally.
 func runNudgeQueueMaintenanceSweep(cityPath string, now time.Time) error {
+	return runNudgeQueueMaintenanceSweepWithStore(cityPath, beads.NudgesStore{}, now)
+}
+
+// runNudgeQueueMaintenanceSweepWithStore borrows the resolved nudges store.
+// A nil store retains the lazy opener path; only a handle opened here is closed.
+func runNudgeQueueMaintenanceSweepWithStore(cityPath string, store beads.NudgesStore, now time.Time) error {
 	if nudgeMaintenanceSweepDebounced(cityPath, now) {
 		return nil
 	}
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		front := maint.frontForState(state)
+		var front *nudgequeue.Store
+		if store.Store != nil {
+			front = nudgeFrontDoor(store)
+		} else {
+			front = maint.frontForState(state)
+		}
 		deadline := now.Add(nudgeMaintenanceSweepBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err

@@ -26,6 +26,8 @@ permissions:
 
 jobs:
   verify:
+    outputs:
+      handoff-config-proof: ${{ steps.handoff-config-proof.outputs.passed }}
     # Canonical PR branches already run the complete Blacksmith CI graph.
     # This lightweight fallback exists only for forks that cannot use those
     # runners or repository secrets.
@@ -36,6 +38,8 @@ jobs:
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # The upstream CI graph owns real tmux integration coverage. This narrow
       # fork-only fence only compiles integration-tagged files when they change,
       # catching missing test-only helpers without starting a tmux server.
@@ -52,6 +56,24 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+      - name: Watchdog contract and execution-validator tests
+        run: |
+          go test ./scripts/prwatchdog/... -count=1
+          python3 -m unittest discover -s scripts/prwatchdog -p 'test_handoff_proof.py'
+      - name: Executed handoff/config proof
+        id: handoff-config-proof
+        env:
+          PROOF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 scripts/prwatchdog/handoff_proof.py --head "$PROOF_HEAD_SHA"
+          echo 'passed=true' >> "$GITHUB_OUTPUT"
+      - name: Preserve executed handoff/config evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: handoff-config-proof
+          path: handoff-config-proof/
+          if-no-files-found: error
       - name: Build (compiles the whole tree — catches compile errors the macOS ICU break hides)
         run: go build ./...
       - name: Compile changed tmux integration package
@@ -92,6 +114,19 @@ jobs:
       - name: Unit tests — bead store, bd dispatch, control dispatch, formula compiler, molecule graph
         run: go test ./internal/beads/ ./internal/bddispatch/ ./internal/dispatch/ ./internal/formula/ ./internal/molecule/ -count=1
 
+  handoff-config-proof:
+    name: Fork / handoff-config proof
+    needs: verify
+    if: ${{ always() && github.repository == 'wbern/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require executed proof from successful verification
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          PROOF_PASSED: ${{ needs.verify.outputs.handoff-config-proof }}
+        run: test "$VERIFY_RESULT" = success && test "$PROOF_PASSED" = true
+
   # Static analysis belongs on a runner, not on a developer's pre-commit hook.
   # Whole-program linters (staticcheck/unused/unparam) over ~3,400 Go files
   # need roughly 6.7GB at the default concurrency=NumCPU; on a workstation that
@@ -106,6 +141,8 @@ jobs:
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}

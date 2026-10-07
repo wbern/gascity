@@ -51,6 +51,30 @@ const (
 	ObservationDeadline = 25 * time.Minute
 )
 
+// Contract selects a fixed evidence policy. The zero value preserves upstream CI.
+type Contract string
+
+// Supported evidence contracts.
+const (
+	ContractUpstream Contract = "upstream"
+	ContractFork     Contract = "fork"
+	ForkVerifyName            = "verify"
+	ForkLintName              = "lint"
+	ForkProofName             = "Fork / handoff-config proof"
+)
+
+// CheckNames returns the exact check producers for a validated contract.
+func CheckNames(contract Contract) ([]string, error) {
+	switch contract {
+	case "", ContractUpstream:
+		return []string{CheckName, CIRequiredName, MacCheckName, ReviewFormulasCheckName}, nil
+	case ContractFork:
+		return []string{ForkVerifyName, ForkLintName, ForkProofName, MacCheckName, ReviewFormulasCheckName}, nil
+	default:
+		return nil, fmt.Errorf("unknown evidence contract %q", contract)
+	}
+}
+
 // CheckRun is a single GitHub check run observation for a head commit.
 type CheckRun struct {
 	Name       string
@@ -63,6 +87,7 @@ type CheckRun struct {
 
 // Input is the observed state for one evaluation of a pull request head.
 type Input struct {
+	Contract                 Contract
 	HeadSHA                  string
 	CheckRuns                []CheckRun
 	Elapsed                  time.Duration
@@ -74,6 +99,10 @@ type Input struct {
 
 // Summary is a human-readable rendering of each tracked check's state.
 type Summary struct {
+	Contract       Contract
+	ForkVerify     string
+	ForkLint       string
+	ForkProof      string
 	Check          string
 	CIRequired     string
 	Mac            string
@@ -99,8 +128,8 @@ const (
 )
 
 // latestRun returns the most recent CheckRun named name scoped to headSHA,
-// preferring the later StartedAt and, on an exact tie, the higher ID (the
-// later of two same-instant reruns).
+// preferring the higher check-run ID, including queued reruns without a
+// StartedAt. StartedAt breaks ties for observations without distinct IDs.
 func latestRun(runs []CheckRun, headSHA, name string) (CheckRun, bool) {
 	var best CheckRun
 	found := false
@@ -108,7 +137,7 @@ func latestRun(runs []CheckRun, headSHA, name string) (CheckRun, bool) {
 		if r.HeadSHA != headSHA || r.Name != name {
 			continue
 		}
-		if !found || r.StartedAt.After(best.StartedAt) || (r.StartedAt.Equal(best.StartedAt) && r.ID > best.ID) {
+		if !found || r.ID > best.ID || (r.ID == best.ID && r.StartedAt.After(best.StartedAt)) {
 			best = r
 			found = true
 		}
@@ -177,39 +206,59 @@ func evaluateGate(runs []CheckRun, headSHA, name, absentWord, inProgressWord str
 // whether the watchdog should keep observing, or stop with a pass/fail
 // verdict.
 func Evaluate(in Input) Evaluation {
+	if _, err := CheckNames(in.Contract); err != nil {
+		return Evaluation{Terminal: true, Reason: err.Error()}
+	}
 	if in.FetchError != nil {
 		return Evaluation{Terminal: true, Reason: fmt.Sprintf("fetching CI evidence: %v", in.FetchError)}
 	}
 
 	atDeadline := in.Elapsed >= in.Deadline
-	var summary Summary
+	summary := Summary{Contract: in.Contract}
+	if in.Contract == ContractFork {
+		for _, gate := range []struct {
+			name  string
+			state *string
+		}{
+			{ForkVerifyName, &summary.ForkVerify}, {ForkLintName, &summary.ForkLint}, {ForkProofName, &summary.ForkProof},
+		} {
+			v, word, _ := evaluateGate(in.CheckRuns, in.HeadSHA, gate.name, "incomplete", "incomplete", atDeadline)
+			*gate.state = word
+			if v == verdictWait {
+				return Evaluation{Summary: summary}
+			}
+			if v == verdictFail {
+				return Evaluation{Terminal: true, Reason: fmt.Sprintf("fork evidence %s: %s", gate.name, word), Summary: summary}
+			}
+		}
+	} else {
+		v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, CheckName, "never ran", "in progress", atDeadline)
+		summary.Check = word
+		switch {
+		case v == verdictWait:
+			return Evaluation{Summary: summary}
+		case v == verdictFail && fk == failNotConcluded:
+			return Evaluation{Terminal: true, Reason: "tests never ran", Summary: summary}
+		case v == verdictFail:
+			return Evaluation{Terminal: true, Reason: "CI ran but preflight did not pass", Summary: summary}
+		}
 
-	v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, CheckName, "never ran", "in progress", atDeadline)
-	summary.Check = word
-	switch {
-	case v == verdictWait:
-		return Evaluation{Summary: summary}
-	case v == verdictFail && fk == failNotConcluded:
-		return Evaluation{Terminal: true, Reason: "tests never ran", Summary: summary}
-	case v == verdictFail:
-		return Evaluation{Terminal: true, Reason: "CI ran but preflight did not pass", Summary: summary}
-	}
-
-	v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, CIRequiredName, "incomplete", "incomplete", atDeadline)
-	summary.CIRequired = word
-	switch {
-	case v == verdictWait:
-		return Evaluation{Summary: summary}
-	case v == verdictFail && fk == failNotConcluded:
-		return Evaluation{Terminal: true, Reason: "incomplete comprehensive evidence", Summary: summary}
-	case v == verdictFail:
-		return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, CIRequiredName, "incomplete", "incomplete", atDeadline)
+		summary.CIRequired = word
+		switch {
+		case v == verdictWait:
+			return Evaluation{Summary: summary}
+		case v == verdictFail && fk == failNotConcluded:
+			return Evaluation{Terminal: true, Reason: "incomplete comprehensive evidence", Summary: summary}
+		case v == verdictFail:
+			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+		}
 	}
 
 	if !in.NeedsMacLabel {
 		summary.Mac = "not requested (opt-in)"
 	} else {
-		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, MacCheckName, "incomplete", "incomplete", atDeadline)
+		v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, MacCheckName, "incomplete", "incomplete", atDeadline)
 		summary.Mac = word
 		switch {
 		case v == verdictWait:
@@ -224,7 +273,7 @@ func Evaluate(in Input) Evaluation {
 	if !in.NeedsReviewFormulasLabel {
 		summary.ReviewFormulas = "not explicitly requested; path routing may still apply"
 	} else {
-		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, ReviewFormulasCheckName, "incomplete", "incomplete", atDeadline)
+		v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, ReviewFormulasCheckName, "incomplete", "incomplete", atDeadline)
 		summary.ReviewFormulas = word
 		switch {
 		case v == verdictWait:
