@@ -128,11 +128,26 @@ is enabled. Busy exports defer without changing the archive.
 JSONL Git packing is opt-in: set `GC_JSONL_PACK_INTERVAL_SEC=21600` on the
 existing `jsonl-export` order for a six-hour minimum interval. The default is
 zero (disabled). Archives below `GC_JSONL_PACK_MIN_LOOSE_MB` (default 256 MiB)
-of loose objects skip packing. Dirty exports are never packed. Preflight also
+of loose objects skip packing. Dirty exports are never packed. The default
+`GC_JSONL_PACK_MODE=full` retains the existing `git gc --no-prune` path. Preflight also
 requires twice the current object-store size plus `GC_JSONL_PACK_MIN_FREE_MB`
 (default 1024 MiB) free for temporary packing files.
 
-Packing uses two threads, 64 MiB per-thread windows and a 32 MiB delta cache;
+For an archive too large for full packing, set `GC_JSONL_PACK_MODE=bounded`
+and an interval such as `GC_JSONL_PACK_INTERVAL_SEC=900` on that city's order.
+This runs one `git maintenance run --task=loose-objects` batch under the same
+exporter lock, with `GC_JSONL_PACK_BATCH_SIZE` limited to 1–64 (default 64),
+twice the largest loose object's size per batch plus a 20 GiB free-space reserve
+by default, and a 180-second timeout. Set `GC_JSONL_PACK_MAX_LOAD` to a
+positive host-specific load ceiling to defer busy runs; a missing load signal
+also defers. The first batch may temporarily increase disk use: Git removes
+already-packed loose copies on a later run. Each successful batch retains the
+pending-export obligation until the normal export completes. Bounded packing
+never expires unreachable objects or reflogs. It creates small pack files, so
+operators should also monitor pack count and plan separately bounded pack-file
+consolidation; do not enable unbounded full GC to solve that accumulation.
+
+Full packing uses two threads, 64 MiB per-thread windows and a 32 MiB delta cache;
 these are Git working-memory controls, not a hard RSS cap. It retains refs,
 reflogs, and unreachable objects (`gc --no-prune`), keeps automatic maintenance
 disabled, and runs bounded full integrity checks before and after packing.

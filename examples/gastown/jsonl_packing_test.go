@@ -227,8 +227,136 @@ echo busy-proven
 	}
 }
 
+func TestJSONLBoundedPacking(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"clean", "dirty", "low-free", "high-load", "missing-load", "pending-export", "bad-batch", "timeout"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			repo := filepath.Join(dir, "archive")
+			initSeedArchive(t, repo, 1)
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(dir, "state.json")
+			loadFile := filepath.Join(dir, "loadavg")
+			if err := os.WriteFile(loadFile, []byte("0.01 0.01 0.01 1/1 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			harness := filepath.Join(dir, "run.sh")
+			writeExecutable(t, harness, `#!/usr/bin/env bash
+set -euo pipefail
+. "$HELPER"
+read_state_json() { [ ! -f "$STATE" ] && echo '{}' || cat "$STATE"; }
+write_state_json() { printf '%s\n' "$1" > "$STATE"; }
+archive_lock
+archive_pack_if_due
+`)
+			writeExecutable(t, filepath.Join(bin, "git"), `#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GIT_LOG"
+exec "$REAL_GIT" "$@"
+`)
+			env := map[string]string{
+				"HELPER":       coreScriptPath("jsonl-archive-maintenance.sh"),
+				"ARCHIVE_REPO": repo, "STATE": state,
+				"GC_JSONL_PACK_INTERVAL_SEC": "1", "GC_JSONL_PACK_MODE": "bounded",
+				"GC_JSONL_PACK_MIN_FREE_MB": "1", "GC_JSONL_PACK_MIN_LOOSE_MB": "0",
+				"GC_JSONL_PACK_BATCH_SIZE": "4", "GC_JSONL_PACK_LOADAVG_FILE": loadFile,
+				"GC_JSONL_PACK_MAX_LOAD": "4",
+				"REAL_GIT":               realGit, "GIT_LOG": filepath.Join(dir, "git.log"),
+				"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			switch scenario {
+			case "dirty":
+				if err := os.WriteFile(filepath.Join(repo, "uncommitted"), []byte("keep"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "low-free":
+				writeExecutable(t, filepath.Join(bin, "df"), "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 100 99 1 99%% /\\n'\n")
+			case "high-load":
+				if err := os.WriteFile(loadFile, []byte("99.0 99.0 99.0 1/1 1\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-load":
+				env["GC_JSONL_PACK_LOADAVG_FILE"] = filepath.Join(dir, "absent-loadavg")
+			case "pending-export":
+				if err := os.WriteFile(state, []byte(`{"packing":{"pending_export":true}}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "bad-batch":
+				env["GC_JSONL_PACK_BATCH_SIZE"] = "65"
+			case "timeout":
+				realTimeout, err := exec.LookPath("timeout")
+				if err != nil {
+					t.Fatal(err)
+				}
+				env["REAL_TIMEOUT"] = realTimeout
+				writeExecutable(t, filepath.Join(bin, "timeout"), `#!/usr/bin/env bash
+if [ "$1" = --kill-after=10 ] && [ "$2" = 180 ]; then exit 124; fi
+exec "$REAL_TIMEOUT" "$@"
+`)
+			}
+			out, err := runScriptResult(t, harness, env)
+			if scenario == "timeout" || scenario == "bad-batch" {
+				if err == nil {
+					t.Fatalf("%s must fail closed: %s", scenario, out)
+				}
+				if scenario == "timeout" && !strings.Contains(err.Error(), "exit status 124") {
+					t.Fatalf("bounded timeout must propagate: %v %s", err, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v\n%s", scenario, err, out)
+			}
+			if scenario != "clean" {
+				packs, err := filepath.Glob(filepath.Join(repo, ".git", "objects", "pack", "*.pack"))
+				if err != nil || len(packs) != 0 {
+					t.Fatalf("%s unexpectedly packed archive: %v %v", scenario, packs, err)
+				}
+				return
+			}
+			data, err := os.ReadFile(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result struct {
+				Packing struct {
+					Mode        string `json:"mode"`
+					BatchSize   int    `json:"batch_size"`
+					Pending     bool   `json:"pending_export"`
+					LooseBefore int    `json:"loose_before_count"`
+					PacksBefore int    `json:"packs_before_count"`
+					PacksAfter  int    `json:"packs_after_count"`
+					FreeKiB     int64  `json:"free_kib"`
+					RequiredKiB int64  `json:"required_kib"`
+				} `json:"packing"`
+			}
+			if err := json.Unmarshal(data, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Packing.Mode != "bounded" || result.Packing.BatchSize != 4 || !result.Packing.Pending {
+				t.Fatalf("missing bounded packing receipt: %s", data)
+			}
+			if result.Packing.LooseBefore == 0 || result.Packing.PacksAfter <= result.Packing.PacksBefore || result.Packing.RequiredKiB == 0 || result.Packing.FreeKiB < result.Packing.RequiredKiB {
+				t.Fatalf("missing capacity/object-count proof: %s", data)
+			}
+			gitLog, err := os.ReadFile(env["GIT_LOG"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(gitLog), "maintenance run --task=loose-objects") || strings.Contains(string(gitLog), " gc --no-prune") {
+				t.Fatalf("wrong Git maintenance task: %s", gitLog)
+			}
+		})
+	}
+}
+
 func TestJsonlExportVerifiesPackingThroughNextExportAndPush(t *testing.T) {
-	for _, scenario := range []string{"success", "timeout-recovery", "export-failure", "empty-inventory", "push-failure"} {
+	for _, scenario := range []string{"success", "bounded-success", "timeout-recovery", "export-failure", "empty-inventory", "push-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			city, bin, state := t.TempDir(), t.TempDir(), t.TempDir()
 			repo := filepath.Join(city, "archive")
@@ -239,6 +367,10 @@ func TestJsonlExportVerifiesPackingThroughNextExportAndPush(t *testing.T) {
 			env["GC_JSONL_PACK_INTERVAL_SEC"] = "21600"
 			env["GC_JSONL_PACK_MIN_FREE_MB"] = "1"
 			env["GC_JSONL_PACK_MIN_LOOSE_MB"] = "0"
+			if scenario == "bounded-success" {
+				env["GC_JSONL_PACK_MODE"] = "bounded"
+				env["GC_JSONL_PACK_BATCH_SIZE"] = "4"
+			}
 			if scenario == "export-failure" {
 				writeIssuesPayloadDoltStub(t, bin, "malformed")
 			}
@@ -276,7 +408,7 @@ exec "$REAL_TIMEOUT" "$@"
 				}
 				out, err = runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
 			}
-			success := scenario == "success" || scenario == "timeout-recovery"
+			success := scenario == "success" || scenario == "bounded-success" || scenario == "timeout-recovery"
 			if success && err != nil {
 				t.Fatalf("export after packing: %v %s", err, out)
 			}
