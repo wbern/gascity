@@ -98,6 +98,10 @@
     },
     "Agent": {
       "properties": {
+        "capacity_group": {
+          "type": "string",
+          "description": "CapacityGroup names a shared workspace session capacity group."
+        },
         "name": {
           "type": "string",
           "description": "Name is the unique identifier for this agent."
@@ -500,6 +504,10 @@
     },
     "AgentOverride": {
       "properties": {
+        "capacity_group": {
+          "type": "string",
+          "description": "CapacityGroup names a shared workspace session capacity group."
+        },
         "agent": {
           "type": "string",
           "description": "Agent is the name of the pack agent to override (required)."
@@ -822,6 +830,10 @@
     },
     "AgentPatch": {
       "properties": {
+        "capacity_group": {
+          "type": "string",
+          "description": "CapacityGroup overrides or clears membership in a workspace capacity group."
+        },
         "dir": {
           "type": "string",
           "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."
@@ -3684,6 +3696,13 @@
     },
     "Workspace": {
       "properties": {
+        "capacity_groups": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "type": "object",
+          "description": "CapacityGroups caps concurrent sessions across templates in each named group. Zero prevents new admissions."
+        },
         "name": {
           "type": "string",
           "description": "Name is the legacy checked-in city name. Runtime identity now resolves\nfrom site binding (.gc/site.toml workspace_name), declared config, and\nbasename precedence instead; gc init writes the machine-local name to\nsite.toml and omits it from city.toml."

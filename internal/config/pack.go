@@ -2875,6 +2875,7 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 // the agent — a missed field fails the build.
 func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 	return &AgentPatch{
+		CapacityGroup:            ov.CapacityGroup,
 		WorkDir:                  ov.WorkDir,
 		TmuxAlias:                ov.TmuxAlias,
 		Scope:                    ov.Scope,

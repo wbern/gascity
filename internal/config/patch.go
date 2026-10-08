@@ -21,6 +21,8 @@ type Patches struct {
 // AgentPatch modifies existing agents identified by rig scope and Name.
 // Pointer fields distinguish "not set" from "set to zero value."
 type AgentPatch struct {
+	// CapacityGroup overrides or clears membership in a workspace capacity group.
+	CapacityGroup *string `toml:"capacity_group,omitempty" json:"CapacityGroup,omitempty"`
 	// Dir is the legacy targeting key for rig identity. Empty means
 	// city-scoped. New configs should set Rig instead; Dir remains the
 	// canonical resolved identity that both keys feed into.
@@ -550,6 +552,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 // enforce that every overridable field is wired in here (and, for the override
 // path, copied by toAgentPatch); a missed field fails the build.
 func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
+	if p.CapacityGroup != nil {
+		a.CapacityGroup = *p.CapacityGroup
+	}
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
 	}

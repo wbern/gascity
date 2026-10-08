@@ -61,8 +61,10 @@ func resolvePoolNewDemandLoadVeto(cfg *config.City, scaleCheckCounts map[string]
 
 // SessionRequest represents a single session the reconciler should start.
 type SessionRequest struct {
-	Template     string // agent template qualified name (e.g., "gascity/claude")
-	BeadPriority int    // priority of the driving work bead
+	// ExistingActive marks a concrete session whose active work must survive a reduced group cap.
+	ExistingActive bool
+	Template       string // agent template qualified name (e.g., "gascity/claude")
+	BeadPriority   int    // priority of the driving work bead
 	// Tier is "resume" for in-progress work with a live session,
 	// "wake-known-identity" for in-progress work whose session exited but
 	// template is configured, or "new" for ready unassigned work.
@@ -552,6 +554,7 @@ func computePoolDesiredStatesWithOptions(
 	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
 	// wake_mode="fresh" agent must not resume one of these stale rows — see the
 	// resume-tier guard below.
+	activeSessionBeadIDs := make(map[string]bool)
 	asleepSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
@@ -569,6 +572,9 @@ func computePoolDesiredStatesWithOptions(
 		}
 		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
+		}
+		if sb.State == sessionpkg.StateActive || sb.State == sessionpkg.StateAwake {
+			activeSessionBeadIDs[sb.ID] = true
 		}
 		if sb.State == sessionpkg.StateAsleep {
 			asleepSessionBeadIDs[sb.ID] = true
@@ -704,6 +710,7 @@ func computePoolDesiredStatesWithOptions(
 					Template:       template,
 					BeadPriority:   beadPriorityRank(beadPriority(wb)),
 					Tier:           "resume",
+					ExistingActive: activeSessionBeadIDs[sessionBeadID],
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
@@ -786,6 +793,7 @@ func computePoolDesiredStatesWithOptions(
 			continue
 		}
 		req.SessionBeadID = candidates[0].SessionBeadID
+		req.ExistingActive = activeSessionBeadIDs[req.SessionBeadID]
 		protectedNewRequests[req.Template] = candidates[1:]
 	}
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
@@ -896,7 +904,15 @@ func computePoolDesiredStatesWithOptions(
 		}
 		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)
-		concreteLimit := concreteNestedCapLimit(limits, usage, template, newCount, effectiveDemand, len(protected)+len(inFlight))
+		concreteDemand := newCount
+		if limits.agentGroup[template] != "" {
+			// A reduced group limit blocks additional demand, but must not drop
+			// protected or in-flight sessions before the concrete admission phase.
+			withoutGroup := limits
+			withoutGroup.agentGroup = nil
+			concreteDemand = capNewDemandCount(withoutGroup, usage, floorReservations, agent, effectiveDemand)
+		}
+		concreteLimit := concreteNestedCapLimit(limits, usage, template, concreteDemand, effectiveDemand, len(protected)+len(inFlight))
 		protectedCount := minInt(len(protected), concreteLimit)
 		inFlightCount := minInt(len(inFlight), concreteLimit-protectedCount)
 		reusedCount := protectedCount + inFlightCount
@@ -985,7 +1001,7 @@ func computePoolDesiredStatesWithOptions(
 			// acceptedNew, double-counts and can blame the wrong cap.
 			// Exclude this template's own accepted new-tier contribution
 			// before handing it to the trace.
-			preAcceptUsage := usageExcludingTemplateNew(finalUsage, td.template, limits.agentRig[td.template], acceptedNewByTemplate[td.template])
+			preAcceptUsage := usageExcludingTemplateNew(finalUsage, td.template, limits.agentRig[td.template], acceptedNewByTemplate[td.template], limits)
 			recordNewDemandCapTrace(trace, td.template, td.agent, limits, preAcceptUsage, td.demandCount, acceptedNew)
 			if td.scaleCount > 0 && td.protected+td.inFlight > 0 && trace != nil {
 				reused := minInt(len(td.concrete), acceptedNew)
@@ -1328,6 +1344,7 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 //
 // TestApplyNestedCaps_NoFloorsPreservesDemandPriority pins both regimes.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
+	limits := newNestedCapLimits(cfg)
 	// Order the phase-3 priority walk: priority DESC, resume tier first within
 	// same priority. BeadPriority is a descending rank (beadPriorityRank
 	// inverts bd's ascending-urgent priority, so a P0 bead outranks a P4 one).
@@ -1336,19 +1353,10 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	// request that fits — so this sort does not decide concrete-versus-new
 	// precedence. Among concrete requests competing for a binding cap the order
 	// is still the tiebreaker: the earlier one in this order wins.
-	sort.SliceStable(requests, func(i, j int) bool {
-		if requests[i].BeadPriority != requests[j].BeadPriority {
-			return requests[i].BeadPriority > requests[j].BeadPriority
-		}
-		// Resume-like tiers before new tier at same priority.
-		if requests[i].Tier != requests[j].Tier {
-			return isResumeLikeTier(requests[i].Tier) && !isResumeLikeTier(requests[j].Tier)
-		}
-		return false
-	})
+	sort.SliceStable(requests, func(i, j int) bool { return nestedCapRequestLess(requests[i], requests[j]) })
 
-	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
+	usage.reserveExistingGroups(limits, requests)
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
 	consumed := acceptConcreteNestedCapRequests(requests, limits, &usage, accepted, trace)
 	reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, consumed, trace)
@@ -1524,6 +1532,8 @@ func acceptNestedCapFloor(
 }
 
 type nestedCapLimits struct {
+	groupMax           map[string]int
+	agentGroup         map[string]string
 	workspaceMax       int
 	rigMax             map[string]int
 	agentMax           map[string]int
@@ -1532,18 +1542,37 @@ type nestedCapLimits struct {
 }
 
 type nestedCapUsage struct {
-	agentCount      map[string]int
-	rigCount        map[string]int
-	workspaceCount  int
-	seenSessionBead map[string]bool
-	requests        []SessionRequest
+	reservedGroupSessions map[string]bool
+	groupCount            map[string]int
+	agentCount            map[string]int
+	rigCount              map[string]int
+	workspaceCount        int
+	seenSessionBead       map[string]bool
+	requests              []SessionRequest
 }
 
 type nestedCapFloorReservations map[string]int
 
+// preservesCapacityGroup identifies already-spent capacity without exempting a wake request.
+func preservesCapacityGroup(req SessionRequest, limits nestedCapLimits) bool {
+	return limits.agentGroup[req.Template] != "" && req.SessionBeadID != "" && (req.ExistingActive || req.Tier == "new")
+}
+
+func nestedCapRequestLess(a, b SessionRequest) bool {
+	if a.BeadPriority != b.BeadPriority {
+		return a.BeadPriority > b.BeadPriority
+	}
+	if a.Tier != b.Tier {
+		return isResumeLikeTier(a.Tier) && !isResumeLikeTier(b.Tier)
+	}
+	return false
+}
+
 func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	limits := nestedCapLimits{
 		workspaceMax:       -1,
+		groupMax:           cfg.Workspace.CapacityGroups,
+		agentGroup:         make(map[string]string),
 		rigMax:             make(map[string]int),
 		agentMax:           make(map[string]int),
 		agentRig:           make(map[string]string),
@@ -1562,6 +1591,7 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		template := agent.QualifiedName()
+		limits.agentGroup[template] = agent.CapacityGroup
 		limits.agentRig[template], limits.agentRigUnresolved[template] = nestedCapAgentRigName(agent, cfg.Rigs)
 		resolved := agent.ResolvedMaxActiveSessions(cfg)
 		if resolved != nil {
@@ -1600,9 +1630,11 @@ func nestedCapAgentRigName(agent *config.Agent, rigs []config.Rig) (string, bool
 
 func newNestedCapUsage() nestedCapUsage {
 	return nestedCapUsage{
-		agentCount:      make(map[string]int),
-		rigCount:        make(map[string]int),
-		seenSessionBead: make(map[string]bool),
+		reservedGroupSessions: make(map[string]bool),
+		groupCount:            make(map[string]int),
+		agentCount:            make(map[string]int),
+		rigCount:              make(map[string]int),
+		seenSessionBead:       make(map[string]bool),
 	}
 }
 
@@ -1616,10 +1648,10 @@ func newNestedCapUsage() nestedCapUsage {
 //
 // The returned value is base itself, unmodified, when acceptedNew <= 0
 // (nothing to exclude), and a value with freshly cloned agentCount,
-// rigCount, and requests otherwise. seenSessionBead is never read by
+// rigCount, groupCount, and requests otherwise. seenSessionBead is never read by
 // newDemandBlockingScope, so it is intentionally left aliased with base in
 // both cases rather than cloned.
-func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string, acceptedNew int) nestedCapUsage {
+func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string, acceptedNew int, limits nestedCapLimits) nestedCapUsage {
 	if acceptedNew <= 0 {
 		return base
 	}
@@ -1636,6 +1668,13 @@ func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string,
 	if rig != "" {
 		adjusted.rigCount[rig] -= acceptedNew
 	}
+	adjusted.groupCount = make(map[string]int, len(base.groupCount))
+	for group, count := range base.groupCount {
+		adjusted.groupCount[group] = count
+	}
+	if group := limits.agentGroup[template]; group != "" {
+		adjusted.groupCount[group] -= acceptedNew
+	}
 	adjusted.workspaceCount -= acceptedNew
 	adjusted.requests = make([]SessionRequest, 0, len(base.requests))
 	for _, req := range base.requests {
@@ -1649,19 +1688,12 @@ func usageExcludingTemplateNew(base nestedCapUsage, template string, rig string,
 
 func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) nestedCapUsage {
 	usage := newNestedCapUsage()
+	usage.reserveExistingGroups(limits, requests)
 	sorted := append([]SessionRequest(nil), requests...)
 	// Same descending-rank ordering as applyNestedCaps — this mirror sort must
 	// agree with the one that produced requests, or usage simulated here
 	// diverges from what was actually accepted.
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].BeadPriority != sorted[j].BeadPriority {
-			return sorted[i].BeadPriority > sorted[j].BeadPriority
-		}
-		if sorted[i].Tier != sorted[j].Tier {
-			return isResumeLikeTier(sorted[i].Tier) && !isResumeLikeTier(sorted[j].Tier)
-		}
-		return false
-	})
+	sort.SliceStable(sorted, func(i, j int) bool { return nestedCapRequestLess(sorted[i], sorted[j]) })
 	for _, req := range sorted {
 		if usage.canAccept(req, limits) {
 			usage.accept(req, limits)
@@ -1696,6 +1728,7 @@ func newNestedCapFloorReservations(
 		}
 	}
 	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
+	groupReserved := make(map[string]int)
 	rigReserved := make(map[string]int)
 	workspaceReserved := 0
 	for _, floor := range floors {
@@ -1703,6 +1736,10 @@ func newNestedCapFloorReservations(
 			continue
 		}
 		grant := floor.minimum - usage.agentCount[floor.template]
+		if group := limits.agentGroup[floor.template]; group != "" {
+			grant = minInt(grant, limits.groupMax[group]-usage.groupCount[group]-groupReserved[group])
+		}
+
 		if rig := limits.agentRig[floor.template]; rig != "" {
 			if rigMax := limits.rigMax[rig]; rigMax >= 0 {
 				grant = minInt(grant, rigMax-usage.rigCount[rig]-rigReserved[rig])
@@ -1716,6 +1753,9 @@ func newNestedCapFloorReservations(
 		}
 		reservations[floor.template] = usage.agentCount[floor.template] + grant
 		workspaceReserved += grant
+		if group := limits.agentGroup[floor.template]; group != "" {
+			groupReserved[group] += grant
+		}
 		if rig := limits.agentRig[floor.template]; rig != "" {
 			rigReserved[rig] += grant
 		}
@@ -1794,6 +1834,15 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, floors nest
 			remaining = minInt(remaining, headroom)
 		}
 	}
+	if group := limits.agentGroup[template]; group != "" {
+		reserved := 0
+		for floorTemplate, minimum := range floors {
+			if floorTemplate != template && limits.agentGroup[floorTemplate] == group {
+				reserved += max(0, minimum-usage.agentCount[floorTemplate])
+			}
+		}
+		remaining = minInt(remaining, limits.groupMax[group]-usage.groupCount[group]-reserved)
+	}
 	if limits.workspaceMax >= 0 {
 		headroom := limits.workspaceMax - usage.workspaceCount - floors.reservedForOthers(usage, template, "", limits)
 		remaining = minInt(remaining, headroom)
@@ -1838,6 +1887,14 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (T
 			"tier":      req.Tier,
 		}, true
 	}
+	// Active assigned and concrete new-tier requests represent capacity already created, so retain
+	// them when the group is oversubscribed and charge every retained request.
+	if group := limits.agentGroup[template]; group != "" && !preservesCapacityGroup(req, limits) {
+		limit, defined := limits.groupMax[group]
+		if !defined || u.groupCount[group] >= limit {
+			return TraceSitePoolCapacityGroupCap, TraceReasonCapacityGroupCap, traceRecordPayload{"capacity_group": group, "group_max": limit, "current": u.groupCount[group], "tier": req.Tier}, true
+		}
+	}
 	rig := limits.agentRig[template]
 	if rig != "" {
 		rigMax, ok := limits.rigMax[rig]
@@ -1863,7 +1920,22 @@ func (u nestedCapUsage) rejection(req SessionRequest, limits nestedCapLimits) (T
 	return "", "", nil, false
 }
 
+// reserveExistingGroups charges already-spent group capacity before any wake
+// competes for it. Agent, rig, and workspace counts retain their priority walk.
+func (u *nestedCapUsage) reserveExistingGroups(limits nestedCapLimits, requests []SessionRequest) {
+	for _, req := range requests {
+		if !preservesCapacityGroup(req, limits) || u.reservedGroupSessions[req.SessionBeadID] {
+			continue
+		}
+		u.reservedGroupSessions[req.SessionBeadID] = true
+		u.groupCount[limits.agentGroup[req.Template]]++
+	}
+}
+
 func (u *nestedCapUsage) accept(req SessionRequest, limits nestedCapLimits) {
+	if group := limits.agentGroup[req.Template]; group != "" && !u.reservedGroupSessions[req.SessionBeadID] {
+		u.groupCount[group]++
+	}
 	u.agentCount[req.Template]++
 	if rig := limits.agentRig[req.Template]; rig != "" {
 		u.rigCount[rig]++
@@ -1958,6 +2030,9 @@ func newDemandBlockingScope(
 				})
 			}
 		}
+	}
+	if group := limits.agentGroup[template]; group != "" && limits.groupMax[group]-usage.groupCount[group] <= newCount {
+		return TraceSitePoolNewDemandCap, TraceReasonCapacityGroupCap, limits.groupMax[group], usage.groupCount[group], filterCapBlockers(usage.requests, func(req SessionRequest) bool { return limits.agentGroup[req.Template] == group })
 	}
 	if limits.workspaceMax >= 0 && limits.workspaceMax-usage.workspaceCount <= newCount {
 		return TraceSitePoolNewDemandCap, TraceReasonWorkspaceCap, limits.workspaceMax, usage.workspaceCount, usage.requests

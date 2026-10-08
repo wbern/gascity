@@ -690,6 +690,8 @@ type Rig struct {
 // AgentOverride modifies a pack-stamped agent for a specific rig.
 // Uses pointer fields to distinguish "not set" from "set to zero value."
 type AgentOverride struct {
+	// CapacityGroup names a shared workspace session capacity group.
+	CapacityGroup *string `toml:"capacity_group,omitempty"`
 	// Agent is the name of the pack agent to override (required).
 	Agent string `toml:"agent" jsonschema:"required"`
 	// Dir overrides the stamped dir (default: rig name).
@@ -1337,6 +1339,8 @@ func splitCompoundWord(word string) []string {
 // Workspace holds city-level metadata and optional defaults that apply
 // to all agents unless overridden per-agent.
 type Workspace struct {
+	// CapacityGroups caps concurrent sessions across templates in each named group. Zero prevents new admissions.
+	CapacityGroups map[string]int `toml:"capacity_groups,omitempty"`
 	// Name is the legacy checked-in city name. Runtime identity now resolves
 	// from site binding (.gc/site.toml workspace_name), declared config, and
 	// basename precedence instead; gc init writes the machine-local name to
@@ -3613,6 +3617,8 @@ const (
 
 // Agent defines a configured agent in the city.
 type Agent struct {
+	// CapacityGroup names a shared workspace session capacity group.
+	CapacityGroup string `toml:"capacity_group,omitempty"`
 	// Name is the unique identifier for this agent.
 	Name string `toml:"name" jsonschema:"required"`
 	// Description is a human-readable description shown in MC's session creation UI.
@@ -4655,6 +4661,27 @@ func ValidateAgents(agents []Agent) error {
 	return nil
 }
 
+// ValidateCapacityGroups checks shared session limits and effective agent membership.
+func ValidateCapacityGroups(cfg *City) error {
+	if cfg == nil {
+		return nil
+	}
+	for name, limit := range cfg.Workspace.CapacityGroups {
+		if name == "" || limit < 0 {
+			return fmt.Errorf("workspace.capacity_groups[%q]: capacity must be nonnegative and name nonempty", name)
+		}
+	}
+	for _, agent := range cfg.Agents {
+		if agent.CapacityGroup == "" {
+			continue
+		}
+		if _, ok := cfg.Workspace.CapacityGroups[agent.CapacityGroup]; !ok {
+			return fmt.Errorf("agent %q: unknown capacity_group %q", agent.QualifiedName(), agent.CapacityGroup)
+		}
+	}
+	return nil
+}
+
 // ValidateNamedSessions checks named session declarations after pack expansion.
 // It returns non-fatal warnings (e.g. a named session whose backing template
 // did not resolve) alongside any fatal structural error.
@@ -5249,6 +5276,9 @@ func Parse(data []byte) (*City, error) {
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
 	if err := validateStorageLayer(&cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateCapacityGroups(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

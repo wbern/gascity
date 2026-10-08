@@ -985,6 +985,7 @@ type AgentPatch struct {
 	AssignedWorkDeferLimit   *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                   *bool             `json:"Attach"`
 	AutoReclaimStaleClaims   *bool             `json:"AutoReclaimStaleClaims"`
+	CapacityGroup            *string           `json:"CapacityGroup,omitempty"`
 	ClaimHolderStallTimeout  *string           `json:"ClaimHolderStallTimeout"`
 	ContextAdvisory          ContextAdvisory   `json:"ContextAdvisory"`
 	DefaultSlingFormula      *string           `json:"DefaultSlingFormula"`

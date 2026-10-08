@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -764,6 +765,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate named session declarations after pack expansion and site
 	// binding resolution so stamped identities and deterministic runtime
 	// names reflect the effective workspace identity.
+	if err := ValidateCapacityGroups(root); err != nil {
+		return nil, nil, err
+	}
 	namedSessionWarnings, err := ValidateNamedSessions(root)
 	if err != nil {
 		return nil, nil, err
@@ -1478,6 +1482,16 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 // Uses IsDefined() which works correctly for regular tables (not
 // arrays-of-tables).
 func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+	if fragMeta.IsDefined("workspace", "capacity_groups") {
+		base.Workspace.CapacityGroups = maps.Clone(base.Workspace.CapacityGroups)
+		if base.Workspace.CapacityGroups == nil {
+			base.Workspace.CapacityGroups = make(map[string]int)
+		}
+		for name, limit := range fragment.Workspace.CapacityGroups {
+			base.Workspace.CapacityGroups[name] = limit
+		}
+		prov.Workspace["capacity_groups"] = fragPath
+	}
 	type wsField struct {
 		key string
 		get func() string
