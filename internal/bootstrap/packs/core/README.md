@@ -135,6 +135,9 @@ requires twice the current object-store size plus `GC_JSONL_PACK_MIN_FREE_MB`
 
 For an archive too large for full packing, set `GC_JSONL_PACK_MODE=bounded`
 and an interval such as `GC_JSONL_PACK_INTERVAL_SEC=900` on that city's order.
+Bounded mode requires Git 2.50 or newer because earlier versions ignore the
+loose-object batch-size setting; an older or unrecognized Git version fails
+closed before packing.
 This runs one `git maintenance run --task=loose-objects` batch under the same
 exporter lock, with `GC_JSONL_PACK_BATCH_SIZE` limited to 1–64 (default 64),
 twice the largest loose object's size per batch plus a 20 GiB free-space reserve

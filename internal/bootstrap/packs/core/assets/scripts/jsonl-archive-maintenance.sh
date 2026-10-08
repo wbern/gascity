@@ -30,12 +30,25 @@ archive_pack_bounded() { # <epoch> <refs> <gitdir> <timeout>
     local now="$1" refs="$2" gitdir="$3" timeout_bin="$4"
     local batch="${GC_JSONL_PACK_BATCH_SIZE:-64}" max_load="${GC_JSONL_PACK_MAX_LOAD:-0}"
     local load_file="${GC_JSONL_PACK_LOADAVG_FILE:-/proc/loadavg}" min_free="${GC_JSONL_PACK_MIN_FREE_MB:-20480}"
-    local load admission max_object_kib required_kib free pre post post_refs log rc start elapsed rss updated
+    local git_version git_major git_minor load admission max_object_kib required_kib free pre post post_refs log rc start elapsed rss updated
     local stats loose_before packs_before loose_after packs_after
     case "$batch" in ''|*[!0-9]*) echo 'jsonl-export: invalid bounded batch size' >&2; return 1 ;; esac
     batch=$((10#$batch))
     if [ "$batch" -lt 1 ] || [ "$batch" -gt 64 ]; then
         echo 'jsonl-export: bounded batch size must be 1..64' >&2
+        return 1
+    fi
+    # Git before 2.50 ignores maintenance.loose-objects.batchSize and may
+    # pack 50,000 objects, invalidating the batch headroom calculation.
+    git_version=$(git --version) || return 1
+    if ! [[ "$git_version" =~ ^git[[:space:]]version[[:space:]]([0-9]+)\.([0-9]+)(\.|$) ]]; then
+        echo 'jsonl-export: cannot determine Git version for bounded packing' >&2
+        return 1
+    fi
+    git_major=$((10#${BASH_REMATCH[1]}))
+    git_minor=$((10#${BASH_REMATCH[2]}))
+    if [ "$git_major" -lt 2 ] || { [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 50 ]; }; then
+        echo "jsonl-export: bounded packing requires Git >=2.50; found $git_version" >&2
         return 1
     fi
     case "$min_free" in ''|*[!0-9]*) echo 'jsonl-export: invalid packing free-space floor' >&2; return 1 ;; esac

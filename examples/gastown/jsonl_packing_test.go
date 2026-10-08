@@ -232,7 +232,7 @@ func TestJSONLBoundedPacking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"clean", "dirty", "low-free", "high-load", "missing-load", "pending-export", "bad-batch", "timeout"} {
+	for _, scenario := range []string{"clean", "minimum-git", "dirty", "low-free", "high-load", "missing-load", "pending-export", "bad-batch", "old-git", "unknown-git", "timeout"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			repo := filepath.Join(dir, "archive")
@@ -257,6 +257,10 @@ archive_pack_if_due
 `)
 			writeExecutable(t, filepath.Join(bin, "git"), `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GIT_LOG"
+if [ "$*" = --version ] && [ "${GIT_VERSION_OVERRIDE:-}" != "" ]; then
+    printf 'git version %s\n' "$GIT_VERSION_OVERRIDE"
+    exit 0
+fi
 exec "$REAL_GIT" "$@"
 `)
 			env := map[string]string{
@@ -270,6 +274,8 @@ exec "$REAL_GIT" "$@"
 				"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			}
 			switch scenario {
+			case "minimum-git":
+				env["GIT_VERSION_OVERRIDE"] = "2.50.0"
 			case "dirty":
 				if err := os.WriteFile(filepath.Join(repo, "uncommitted"), []byte("keep"), 0o644); err != nil {
 					t.Fatal(err)
@@ -288,6 +294,10 @@ exec "$REAL_GIT" "$@"
 				}
 			case "bad-batch":
 				env["GC_JSONL_PACK_BATCH_SIZE"] = "65"
+			case "old-git":
+				env["GIT_VERSION_OVERRIDE"] = "2.47.1"
+			case "unknown-git":
+				env["GIT_VERSION_OVERRIDE"] = "unknown"
 			case "timeout":
 				realTimeout, err := exec.LookPath("timeout")
 				if err != nil {
@@ -300,7 +310,7 @@ exec "$REAL_TIMEOUT" "$@"
 `)
 			}
 			out, err := runScriptResult(t, harness, env)
-			if scenario == "timeout" || scenario == "bad-batch" {
+			if scenario == "timeout" || scenario == "bad-batch" || scenario == "old-git" || scenario == "unknown-git" {
 				if err == nil {
 					t.Fatalf("%s must fail closed: %s", scenario, out)
 				}
@@ -312,7 +322,7 @@ exec "$REAL_TIMEOUT" "$@"
 			if err != nil {
 				t.Fatalf("%s: %v\n%s", scenario, err, out)
 			}
-			if scenario != "clean" {
+			if scenario != "clean" && scenario != "minimum-git" {
 				packs, err := filepath.Glob(filepath.Join(repo, ".git", "objects", "pack", "*.pack"))
 				if err != nil || len(packs) != 0 {
 					t.Fatalf("%s unexpectedly packed archive: %v %v", scenario, packs, err)
