@@ -44,6 +44,9 @@ permissions:
 
 jobs:
   bazel:
+    # This workflow requires the upstream Blacksmith runner image.
+    # Fork CI is provided separately; skipped here does not claim Bazel coverage.
+    if: github.repository == 'gastownhall/gascity'
     name: bazel test (side-by-side)
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 90
@@ -267,6 +270,9 @@ jobs:
           retention-days: 7
 
   sync-check:
+    # This workflow requires the upstream Blacksmith runner image.
+    # Fork CI is provided separately; skipped here does not claim Bazel coverage.
+    if: github.repository == 'gastownhall/gascity'
     name: BUILD files in sync
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
