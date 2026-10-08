@@ -428,6 +428,214 @@ func TestCheckGitHooksOwnerRejectsForeignHooksPath(t *testing.T) {
 	}
 }
 
+// composedHookV2Bodies pins exact small wrappers from the reviewed DevOps V2
+// snapshot bd024009; executable helper policy remains owned by the pack.
+var composedHookV2Bodies = map[string]string{
+	"post-checkout": `#!/bin/sh
+# Gas City post-checkout composition (installed by worktree-setup.sh; do not edit).
+[ -z "${GC_CANONICAL_GUARD:-}" ] || exit 0
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+"$hook_dir/gci-post-checkout-policy" "$@" || exit $?
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+if [ -x "$top/.githooks/post-checkout" ]; then
+    exec "$top/.githooks/post-checkout" "$@"
+fi
+exit 0
+`,
+	"post-merge": `#!/bin/sh
+# Gas City post-merge composition (installed by worktree-setup.sh; do not edit).
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+if [ -x "$top/.githooks/post-merge" ]; then
+    exec "$top/.githooks/post-merge" "$@"
+fi
+exit 0
+`,
+	"pre-commit": `#!/bin/sh
+# Gas City pre-commit composition (installed by worktree-setup.sh; do not edit).
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+"$hook_dir/gci-pre-commit-policy" "$@" || exit $?
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+if [ -x "$top/.githooks/pre-commit" ]; then
+    exec "$top/.githooks/pre-commit" "$@"
+fi
+exit 0
+`,
+	"pre-push": `#!/bin/sh
+# Gas City pre-push composition (installed by worktree-setup.sh; do not edit).
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+input=$(umask 077; mktemp "${TMPDIR:-/tmp}/gci-pre-push.XXXXXX") || exit 1
+trap 'rm -f "$input"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$input" || exit 1
+"$hook_dir/gci-pre-push-policy" "$@" < "$input" || exit $?
+if [ -x "$top/.githooks/pre-push" ]; then
+    "$top/.githooks/pre-push" "$@" < "$input" || exit $?
+fi
+exit 0
+`,
+	"prepare-commit-msg": `#!/bin/sh
+# Gas City prepare-commit-msg composition (installed by worktree-setup.sh; do not edit).
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+if [ -x "$top/.githooks/prepare-commit-msg" ]; then
+    exec "$top/.githooks/prepare-commit-msg" "$@"
+fi
+exit 0
+`,
+}
+
+// TestCheckGitHooksOwnerComposedHooks requires all five tracked hook forwards.
+// Fixtures are exact source-bound V2 wrappers, not installed-hook proof;
+// this test never executes an installed hook or a real production delegate.
+func TestCheckGitHooksOwnerComposedHooks(t *testing.T) {
+	for _, defect := range []string{"", "missing", "non-executable", "comment-only", "early-exit", "delegate-missing", "delegate-non-executable", "active-recursion-marker", "foreign-directory", "helper-missing", "helper-non-executable", "wrapper-directory", "helper-directory", "delegate-directory", "missing-installation", "subdirectory"} {
+		for _, hook := range beadsManagedGitHooks {
+			helper := map[string]string{"pre-commit": "gci-pre-commit-policy", "pre-push": "gci-pre-push-policy", "post-checkout": "gci-post-checkout-policy"}[hook]
+			if strings.HasPrefix(defect, "helper-") && helper == "" {
+				continue
+			}
+			t.Run(hook+"/"+defect, func(t *testing.T) {
+				repo := t.TempDir()
+				// Do not inherit Git's hook-exported GIT_DIR or the fleet's
+				// session/config variables into disposable repository commands.
+				env := []string{
+					"PATH=/usr/bin:/bin",
+					"HOME=" + t.TempDir(),
+					"TMPDIR=" + t.TempDir(),
+					"GIT_CONFIG_NOSYSTEM=1",
+					"GIT_CONFIG_GLOBAL=/dev/null",
+				}
+				git := func(args ...string) {
+					t.Helper()
+					cmd := testCommand("git", args...)
+					cmd.Dir, cmd.Env = repo, env
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("git %v: %v\n%s", args, err, out)
+					}
+				}
+				git("init", "-q")
+				git("config", "core.hooksPath", ".git/gci-hooks")
+				for _, dir := range []string{".githooks", ".git/gci-hooks"} {
+					if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// The checker verifies helper executability, not pack policy bodies.
+				for _, helper := range []string{"gci-pre-commit-policy", "gci-pre-push-policy", "gci-post-checkout-policy"} {
+					writeExecutable(t, filepath.Join(repo, ".git/gci-hooks", helper), "#!/bin/sh\nexit 0\n")
+				}
+				for _, name := range beadsManagedGitHooks {
+					writeExecutable(t, filepath.Join(repo, ".githooks", name), "#!/bin/sh\nexit 0\n")
+					body := composedHookV2Bodies[name]
+					path := filepath.Join(repo, ".git/gci-hooks", name)
+					if name == hook {
+						switch defect {
+						case "missing":
+							continue
+						case "comment-only":
+							body = "#!/bin/sh\n# exec \"$top/.githooks/" + name + "\" \"$@\"\nexit 0\n"
+						case "early-exit":
+							body = "#!/bin/sh\nexit 0\n" + body
+						}
+					}
+					writeExecutable(t, path, body)
+					if name == hook && defect == "non-executable" {
+						if err := os.Chmod(path, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				delegate := filepath.Join(repo, ".githooks", hook)
+				switch defect {
+				case "helper-missing":
+					if err := os.Remove(filepath.Join(repo, ".git/gci-hooks", helper)); err != nil {
+						t.Fatal(err)
+					}
+				case "helper-non-executable":
+					if err := os.Chmod(filepath.Join(repo, ".git/gci-hooks", helper), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "wrapper-directory", "helper-directory", "delegate-directory":
+					path := delegate
+					if defect == "wrapper-directory" {
+						path = filepath.Join(repo, ".git/gci-hooks", hook)
+					}
+					if defect == "helper-directory" {
+						path = filepath.Join(repo, ".git/gci-hooks", helper)
+					}
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				case "missing-installation":
+					if err := os.RemoveAll(filepath.Join(repo, ".git/gci-hooks")); err != nil {
+						t.Fatal(err)
+					}
+				case "delegate-missing":
+					if err := os.Remove(delegate); err != nil {
+						t.Fatal(err)
+					}
+				case "delegate-non-executable":
+					if err := os.Chmod(delegate, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "active-recursion-marker":
+					env = append(env, "GC_CANONICAL_GUARD=1")
+				case "foreign-directory":
+					foreign := t.TempDir()
+					for _, entry := range append(append([]string{}, beadsManagedGitHooks...), "gci-pre-commit-policy", "gci-pre-push-policy", "gci-post-checkout-policy") {
+						body, err := os.ReadFile(filepath.Join(repo, ".git/gci-hooks", entry))
+						if err != nil {
+							t.Fatal(err)
+						}
+						writeExecutable(t, filepath.Join(foreign, entry), string(body))
+					}
+					git("config", "core.hooksPath", foreign)
+				}
+				cmd := testCommand(filepath.Join(repoRoot(t), "scripts", "check-githooks-owner.sh"))
+				cmd.Dir, cmd.Env = repo, env
+				if defect == "subdirectory" {
+					cmd.Dir = filepath.Join(repo, "nested", "directory")
+					if err := os.MkdirAll(cmd.Dir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				out, err := cmd.CombinedOutput()
+				if (defect == "" || defect == "subdirectory") && err != nil {
+					t.Fatalf("complete composed hooks rejected: %v\n%s", err, out)
+				}
+				if defect != "" && defect != "subdirectory" && err == nil {
+					t.Fatalf("accepted %s %s wrapper\n%s", defect, hook, out)
+				}
+				if defect != "" && defect != "subdirectory" && defect != "foreign-directory" {
+					if !strings.Contains(string(out), "pack owner") || strings.Contains(string(out), "make setup") {
+						t.Fatalf("managed defect %s has unsafe remediation: %s", defect, out)
+					}
+					subject := "wrapper " + hook
+					if strings.HasPrefix(defect, "helper-") {
+						subject = "helper " + helper
+					}
+					if strings.HasPrefix(defect, "delegate-") {
+						subject = "tracked delegate " + hook
+					}
+					if defect == "active-recursion-marker" {
+						subject = "GC_CANONICAL_GUARD"
+					}
+					if defect == "missing-installation" {
+						subject = "installation is missing"
+					}
+					if !strings.Contains(string(out), subject) {
+						t.Fatalf("managed defect %s omitted %q: %s", defect, subject, out)
+					}
+
+				}
+			})
+		}
+	}
+}
+
 // TestMakeSetupInstallsAndVerifiesGitHooksOwner keeps the installer honest: it
 // must claim core.hooksPath for .githooks and then assert the claim stuck.
 func TestMakeSetupInstallsAndVerifiesGitHooksOwner(t *testing.T) {

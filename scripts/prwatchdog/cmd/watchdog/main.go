@@ -36,19 +36,21 @@ func run() error {
 		return fmt.Errorf("REPOSITORY, PR_HEAD_SHA, and GH_TOKEN must all be set")
 	}
 
+	contract := prwatchdog.Contract(os.Getenv("EVIDENCE_CONTRACT"))
+	names, err := prwatchdog.CheckNames(contract)
+	if err != nil {
+		return err
+	}
+
 	fetcher := &githubFetcher{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		repo:       repo,
 		token:      token,
-		checkNames: []string{
-			prwatchdog.CheckName,
-			prwatchdog.CIRequiredName,
-			prwatchdog.MacCheckName,
-			prwatchdog.ReviewFormulasCheckName,
-		},
+		checkNames: names,
 	}
 
 	eval := prwatchdog.Watch(context.Background(), fetcher, realClock{}, realSleeper{}, prwatchdog.PollOptions{
+		Contract:                 contract,
 		HeadSHA:                  headSHA,
 		NeedsMacLabel:            parseBoolEnv("NEEDS_MAC_LABEL"),
 		NeedsReviewFormulasLabel: parseBoolEnv("NEEDS_REVIEW_FORMULAS_LABEL"),
@@ -192,10 +194,17 @@ func renderSummary(eval prwatchdog.Evaluation) string {
 		b.WriteString("## PR evidence watchdog: FAIL\n\n")
 	}
 	fmt.Fprintf(&b, "**Reason:** %s\n\n", eval.Reason)
-	b.WriteString("| Check | State |\n")
-	b.WriteString("| --- | --- |\n")
-	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CheckName, eval.Summary.Check)
-	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CIRequiredName, eval.Summary.CIRequired)
+	if eval.Summary.Contract == prwatchdog.ContractFork {
+		b.WriteString("Scope: fork verify/lint and focused handoff/config proof; excludes comprehensive upstream CI coverage.\n\n")
+		b.WriteString("| Check | State |\n| --- | --- |\n")
+		fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.ForkVerifyName, eval.Summary.ForkVerify)
+		fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.ForkLintName, eval.Summary.ForkLint)
+		fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.ForkProofName, eval.Summary.ForkProof)
+	} else {
+		b.WriteString("| Check | State |\n| --- | --- |\n")
+		fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CheckName, eval.Summary.Check)
+		fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CIRequiredName, eval.Summary.CIRequired)
+	}
 	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.MacCheckName, eval.Summary.Mac)
 	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.ReviewFormulasCheckName, eval.Summary.ReviewFormulas)
 	return b.String()
