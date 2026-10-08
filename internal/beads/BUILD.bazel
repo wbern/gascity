@@ -105,6 +105,8 @@ go_test(
         "export_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
+        "filestore_ctime_test.go",
+        "filestore_freshness_test.go",
         "filestore_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",

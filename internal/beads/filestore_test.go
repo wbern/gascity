@@ -938,8 +938,10 @@ func TestFileStoreSkipsReadReloadWhenFileIsUnchanged(t *testing.T) {
 			readCalls++
 		}
 	}
-	if statCalls != 2 {
-		t.Fatalf("Stat(%s) calls = %d, want 2", path, statCalls)
+	// Cache warmup samples metadata around the loaded bytes; the next read
+	// needs only one Stat and still avoids another ReadFile.
+	if statCalls != 3 {
+		t.Fatalf("Stat(%s) calls = %d, want 3", path, statCalls)
 	}
 	if readCalls != 1 {
 		t.Fatalf("ReadFile(%s) calls = %d, want 1 after cache warmup", path, readCalls)

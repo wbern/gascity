@@ -239,7 +239,7 @@ func fileIdentityFromSys(sys any) (fileIdentity, bool) {
 	// Signed stat fields follow Go's direct int-to-uint conversion so the
 	// Fstat and Lstat paths agree on device identity across Unix variants.
 	stat := reflect.Indirect(reflect.ValueOf(sys))
-	if !stat.IsValid() {
+	if !stat.IsValid() || stat.Kind() != reflect.Struct {
 		return fileIdentity{}, false
 	}
 	dev := stat.FieldByName("Dev")
