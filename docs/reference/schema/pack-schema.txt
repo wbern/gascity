@@ -32,6 +32,10 @@
     },
     "Agent": {
       "properties": {
+        "capacity_group": {
+          "type": "string",
+          "description": "CapacityGroup names a shared workspace session capacity group."
+        },
         "name": {
           "type": "string",
           "description": "Name is the unique identifier for this agent."
@@ -434,6 +438,10 @@
     },
     "AgentPatch": {
       "properties": {
+        "capacity_group": {
+          "type": "string",
+          "description": "CapacityGroup overrides or clears membership in a workspace capacity group."
+        },
         "dir": {
           "type": "string",
           "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."

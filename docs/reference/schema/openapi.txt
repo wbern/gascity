@@ -235,6 +235,9 @@
               "null"
             ]
           },
+          "CapacityGroup": {
+            "type": "string"
+          },
           "ClaimHolderStallTimeout": {
             "type": [
               "string",

@@ -79,6 +79,7 @@ export type AgentPatch = {
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     AutoReclaimStaleClaims: boolean | null;
+    CapacityGroup?: string;
     ClaimHolderStallTimeout: string | null;
     ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;

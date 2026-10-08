@@ -339,6 +339,7 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 // don't affect the original.
 func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	dst := config.Agent{
+		CapacityGroup:     src.CapacityGroup,
 		Name:              name,
 		Description:       src.Description,
 		Dir:               dir,

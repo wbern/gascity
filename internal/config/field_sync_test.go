@@ -168,6 +168,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	patch := AgentPatch{
+		CapacityGroup:            strPtr("shared"),
 		Dir:                      "target-dir",
 		Rig:                      "target-rig",
 		Name:                     "target-name",
@@ -333,6 +334,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	override := AgentOverride{
+		CapacityGroup:            strPtr("shared"),
 		Agent:                    "target",
 		Dir:                      strVal("new-dir"),
 		WorkDir:                  strVal(".gc/agents/target"),

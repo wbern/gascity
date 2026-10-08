@@ -96,6 +96,7 @@ Agent defines a configured agent in the city.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `capacity_group` | string |  |  | CapacityGroup names a shared workspace session capacity group. |
 | `name` | string | **yes** |  | Name is the unique identifier for this agent. |
 | `description` | string |  |  | Description is a human-readable description shown in MC's session creation UI. |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped agents and the default working directory when WorkDir is not set. |
@@ -184,6 +185,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `capacity_group` | string |  |  | CapacityGroup names a shared workspace session capacity group. |
 | `agent` | string | **yes** |  | Agent is the name of the pack agent to override (required). |
 | `dir` | string |  |  | Dir overrides the stamped dir (default: rig name). |
 | `work_dir` | string |  |  | WorkDir overrides the agent's working directory without changing its qualified identity or rig association. |
@@ -250,6 +252,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `capacity_group` | string |  |  | CapacityGroup overrides or clears membership in a workspace capacity group. |
 | `dir` | string |  |  | Dir is the legacy targeting key for rig identity. Empty means city-scoped. New configs should set Rig instead; Dir remains the canonical resolved identity that both keys feed into. |
 | `rig` | string |  |  | Rig is new targeting key for rig identity (replaces Dir). "*" matches all rigs + city. Empty means city-scoped unless Dir is set. |
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing agent's name. |
@@ -1121,6 +1124,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `capacity_groups` | map[string]integer |  |  | CapacityGroups caps concurrent sessions across templates in each named group. Zero prevents new admissions. |
 | `name` | string |  |  | Name is the legacy checked-in city name. Runtime identity now resolves from site binding (.gc/site.toml workspace_name), declared config, and basename precedence instead; gc init writes the machine-local name to site.toml and omits it from city.toml. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived HQ bead ID prefix. When empty, the prefix is derived from the city Name via DeriveBeadsPrefix. |
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |

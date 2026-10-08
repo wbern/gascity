@@ -96,6 +96,7 @@ go_test(
         "agent_layout_test.go",
         "builtin_family_test.go",
         "bundled_import_test.go",
+        "capacity_group_test.go",
         "chain_test.go",
         "command_discovery_test.go",
         "compose_beads_test.go",
