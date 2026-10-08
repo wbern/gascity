@@ -404,7 +404,7 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 	observation.MailIDs = []string{b.ID}
 	observation.MessageCount = continuationInt(1)
 	observation.BodyBytes = continuationInt(len([]byte(b.Body)))
-	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
+	message := fmt.Sprintf("Auto handoff: saved mail %s; no restart requested.\n", b.ID)
 	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
 		observation.Outcome = continuationOutcomeFailed
 		observation.ErrorCode = continuationErrorHookOutput
