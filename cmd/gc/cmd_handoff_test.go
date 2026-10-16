@@ -312,7 +312,7 @@ func TestCmdHandoffAutoSendsMailWithoutBlocking(t *testing.T) {
 	if strings.Contains(stdout.String(), "requesting restart") {
 		t.Fatalf("stdout = %q, --auto must not request restart", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "auto") {
+	if !strings.Contains(stdout.String(), "Auto handoff: saved mail") {
 		t.Fatalf("stdout = %q, want auto handoff confirmation", stdout.String())
 	}
 }
@@ -345,7 +345,7 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	if err := dec.Decode(&payload); err != nil {
 		t.Fatalf("PreCompact output is not valid Codex universal-only JSON: %v\n%s", err, stdout.String())
 	}
-	if payload.SystemMessage == nil || !strings.Contains(*payload.SystemMessage, "Handoff: sent auto mail") {
+	if payload.SystemMessage == nil || !strings.Contains(*payload.SystemMessage, "Auto handoff: saved mail") {
 		t.Fatalf("systemMessage = %v, want handoff confirmation", payload.SystemMessage)
 	}
 	store, err := openCityStoreAt(cityDir)
@@ -356,7 +356,7 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("open beads = %d, want handoff mail", len(all))
 	}
-	if !strings.Contains(*payload.SystemMessage, all[0].ID) {
+	if want := "Auto handoff: saved mail " + all[0].ID + "; no restart requested."; *payload.SystemMessage != want {
 		t.Fatalf("systemMessage = %q, want handoff mail id %s", *payload.SystemMessage, all[0].ID)
 	}
 	recorded, err := events.ReadFiltered(
@@ -1192,7 +1192,7 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 	}
 }
 
-var handoffMailIDPattern = regexp.MustCompile(`sent auto mail (\S+)`)
+var handoffMailIDPattern = regexp.MustCompile(`Auto handoff: saved mail ([^;\s]+); no restart requested\.`)
 
 // TestHandoffMailWritesTheBindingOnAMigratedCity pins that the handoff message
 // bead follows the messaging class. It drives cmdHandoff rather than

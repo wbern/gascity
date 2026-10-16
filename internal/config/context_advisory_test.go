@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveContextAdvisoryPerAgentOverridesGlobal(t *testing.T) {
 	builtin := DefaultContextAdvisory()
@@ -75,5 +78,22 @@ message = "too late"
 `))
 	if err == nil {
 		t.Fatal("Parse accepted an invalid context_advisory threshold")
+	}
+}
+
+func TestDefaultContextAdvisoryRenderedContinuationGuidance(t *testing.T) {
+	builtin := DefaultContextAdvisory()
+	policy := ResolveContextAdvisory(&builtin)
+	for _, pct := range []float64{60, 81} {
+		tier, ok := policy.SelectTier(pct)
+		if !ok {
+			t.Fatalf("no default tier at %v%%", pct)
+		}
+		rendered := RenderTier(tier, ContextAdvisoryView{UsedK: "120k", WindowK: "200k", Pct: pct})
+		for _, want := range []string{"120k/200k", "full continuation body as separate arguments", "receipt does not prove that recycling has completed", "Honor any operator instruction to remain running"} {
+			if !strings.Contains(rendered, want) {
+				t.Errorf("tier %d guidance missing %q: %s", tier.Threshold, want, rendered)
+			}
+		}
 	}
 }
