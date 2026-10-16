@@ -979,7 +979,8 @@ func TestPollWatchRetainsGzipAcrossYieldsAndAppend(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	var got []uint64
 	removed := false
-	for len(got) < 3 && time.Now().Before(deadline) {
+	rotated := false
+	for len(got) < 6 && time.Now().Before(deadline) {
 		b, err := w.Poll(context.Background(), budget)
 		if err != nil {
 			t.Fatal(err)
@@ -998,9 +999,23 @@ func TestPollWatchRetainsGzipAcrossYieldsAndAppend(t *testing.T) {
 			}
 			removed = true
 		}
+		if len(got) >= 3 && !rotated {
+			rec, err := NewFileRecorder(path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = rec.Close() })
+			rec.Record(Event{Type: BeadCreated}) // seq 4 on the pinned old inode
+			if _, err := rec.ForceRotate(); err != nil {
+				t.Fatal(err)
+			} // seq 5 anchor
+			rec.Record(Event{Type: BeadClosed}) // seq 6 on the new inode
+			// Compression may be in flight while the scanner catches up.
+			rotated = true
+		}
 		<-ticker.C
 	}
-	if !reflect.DeepEqual(got, []uint64{1, 2, 3}) {
+	if !reflect.DeepEqual(got, []uint64{1, 2, 3, 4, 5, 6}) {
 		t.Fatalf("retained gzip/append delivery: %v", got)
 	}
 }
