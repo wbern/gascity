@@ -318,6 +318,12 @@ func TestWatch(t *testing.T) {
 	if e.Type != events.BeadCreated {
 		t.Errorf("Type = %q, want %q", e.Type, events.BeadCreated)
 	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("repeated Close: %v", err)
+	}
 }
 
 // --- ensure-running ---
@@ -539,3 +545,69 @@ esac
 
 // Compile-time interface check.
 var _ events.Provider = (*Provider)(nil)
+
+func TestPollWatchReplayAndOwnedShutdown(t *testing.T) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	script := writeScript(t, t.TempDir(), `
+case "$1" in
+ ensure-running) exit 2 ;;
+ watch) printf '{"seq":1,"type":"bead.created"}\n'; sleep 60 & wait ;;
+esac
+`)
+	p := NewProvider(script, nil)
+	w, err := p.BeginWatch(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+	deadline := time.Now().Add(20 * time.Second)
+	var got []events.Event
+	for len(got) == 0 && time.Now().Before(deadline) {
+		b, err := w.Poll(context.Background(), events.PollBudget{CompressedBytes: 16, RawBytes: 16, Records: 1, Segments: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, b.Events...)
+		<-ticker.C
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("replay: %v", got)
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Close did not release pipe/process/grant")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPollWatchCancelBlockedInitialization(t *testing.T) {
+	script := writeScript(t, t.TempDir(), `case "$1" in ensure-running) sleep 60 & wait ;; esac`)
+	ctx, cancel := context.WithCancel(context.Background())
+	w, err := NewProvider(script, nil).BeginWatch(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.Poll(ctx, events.PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 1, Segments: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("initialization did not join")
+	}
+}

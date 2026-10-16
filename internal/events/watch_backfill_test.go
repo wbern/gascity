@@ -2,11 +2,14 @@ package events
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -808,5 +811,261 @@ func TestWatchConclusionWindowRotationNotLost(t *testing.T) {
 	}
 	if fw.buf[0].Seq != 5 || fw.buf[1].Seq != 6 {
 		t.Fatalf("recovered window seqs = [%d, %d], want [5, 6]", fw.buf[0].Seq, fw.buf[1].Seq)
+	}
+}
+
+// TestPollWatchLargeRecordAcrossGrants catches framing deadlocks at batch ACK:
+// incomplete bytes must survive even when each individual grant is exhausted.
+func TestPollWatchLargeRecordAcrossGrants(t *testing.T) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	body := `{"seq":1,"type":"bead.created","message":"` + string(bytes.Repeat([]byte("x"), 2*1024*1024)) + `"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &FileRecorder{path: path}
+	w, err := r.BeginWatch(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+	budget := PollBudget{CompressedBytes: 4096, RawBytes: 4096, Records: 2, Segments: 2}
+	deadline := time.Now().Add(20 * time.Second)
+	var got []Event
+	acknowledgements := 0
+	for len(got) == 0 && time.Now().Before(deadline) {
+		b, err := w.Poll(context.Background(), budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, b.Events...)
+		if !b.Pending {
+			acknowledgements++
+		}
+		<-ticker.C
+	}
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("delivery: %v", got)
+	}
+	if acknowledgements < 500 {
+		t.Fatalf("large record bypassed grants: %d ACKs", acknowledgements)
+	}
+	if len(got[0].Message) != 2*1024*1024 {
+		t.Fatal("record truncated")
+	}
+}
+
+func TestPollWatchInvalidBudgetAndClose(t *testing.T) {
+	r := &FileRecorder{path: filepath.Join(t.TempDir(), "events.jsonl")}
+	w, err := r.BeginWatch(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Poll(context.Background(), PollBudget{}); err == nil {
+		t.Fatal("invalid budget accepted")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Poll(context.Background(), PollBudget{1, 1, 1, 1}); err == nil {
+		t.Fatal("closed poll accepted")
+	}
+}
+
+func TestPollWatchOneOutstandingGrant(t *testing.T) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	entered, release := make(chan struct{}), make(chan struct{})
+	w := newPollScanner(context.Background(), func(w *pollScanner) error {
+		close(entered)
+		select {
+		case <-release:
+		case <-w.ctx.Done():
+			return w.ctx.Err()
+		}
+		// The original grant has exactly two records, despite rapid polls supplying
+		// much larger budgets. All output precedes the exhausted-grant ACK.
+		for i := uint64(1); i <= 3; i++ {
+			if err := w.take(func(b *PollBudget) *int { return &b.Records }); err != nil {
+				return err
+			}
+			e := Event{Seq: i}
+			if err := w.send(pollOutput{event: &e}); err != nil {
+				return err
+			}
+		}
+		return w.boundary()
+	})
+	defer w.Close() //nolint:errcheck // test cleanup
+	first := PollBudget{1, 1, 2, 1}
+	if b, err := w.Poll(context.Background(), first); err != nil || !b.Pending {
+		t.Fatalf("first poll %v %v", b, err)
+	}
+	<-entered
+	for i := 0; i < 100; i++ {
+		b, err := w.Poll(context.Background(), PollBudget{999, 999, 999, 999})
+		if err != nil || !b.Pending || len(b.Events) != 0 {
+			t.Fatalf("stalled poll %v %v", b, err)
+		}
+	}
+	close(release)
+	var got []uint64
+	deadline := time.After(20 * time.Second)
+	for {
+		b, err := w.Poll(context.Background(), first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range b.Events {
+			got = append(got, e.Seq)
+		}
+		if !b.Pending {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("no ACK")
+		default:
+			<-ticker.C
+		}
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("credits accumulated or suffix lost: %v", got)
+	}
+	// Completion did not enqueue the next grant.
+	if len(w.grants) != 0 {
+		t.Fatal("completion regranted")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPollWatchRetainsGzipAcrossYieldsAndAppend(t *testing.T) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	archive := filepath.Join(dir, formatArchiveBasename(time.Now(), 1, 2))
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	for _, e := range []Event{{Seq: 1, Type: BeadCreated}, {Seq: 2, Type: BeadClosed, Message: string(bytes.Repeat([]byte("z"), 128*1024))}} {
+		if err := json.NewEncoder(gz).Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w, err := (&FileRecorder{path: path}).BeginWatch(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+	budget := PollBudget{CompressedBytes: 8, RawBytes: 4096, Records: 1, Segments: 1}
+	deadline := time.Now().Add(20 * time.Second)
+	var got []uint64
+	removed := false
+	rotated := false
+	for len(got) < 6 && time.Now().Before(deadline) {
+		b, err := w.Poll(context.Background(), budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range b.Events {
+			got = append(got, e.Seq)
+		}
+		if len(got) > 0 && !removed {
+			// The decoder must retain its open descriptor. Restarting at byte zero
+			// after a grant would now lose event 2 or fail to reopen the archive.
+			if err := os.Remove(archive); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{\"seq\":3,\"type\":\"bead.created\"}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			removed = true
+		}
+		if len(got) >= 3 && !rotated {
+			rec, err := NewFileRecorder(path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = rec.Close() })
+			rec.Record(Event{Type: BeadCreated}) // seq 4 on the pinned old inode
+			if _, err := rec.ForceRotate(); err != nil {
+				t.Fatal(err)
+			} // seq 5 anchor
+			rec.Record(Event{Type: BeadClosed}) // seq 6 on the new inode
+			// Compression may be in flight while the scanner catches up.
+			rotated = true
+		}
+		<-ticker.C
+	}
+	if !reflect.DeepEqual(got, []uint64{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("retained gzip/append delivery: %v", got)
+	}
+}
+
+func TestPollWatchUndrainedOutputDoesNotPinDecodeSlots(t *testing.T) {
+	budget := PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 4, Segments: 1}
+	var watchers []*pollScanner
+	defer func() {
+		for _, w := range watchers {
+			_ = w.Close()
+		}
+	}()
+	for i := 0; i < backfillConcurrency; i++ {
+		queued := make(chan struct{})
+		release := make(chan struct{})
+		w := newPollScanner(context.Background(), func(w *pollScanner) error {
+			select {
+			case <-release:
+			case <-w.ctx.Done():
+				return w.ctx.Err()
+			}
+			e := Event{Seq: 1}
+			if err := w.send(pollOutput{event: &e}); err != nil {
+				return err
+			}
+			close(queued)
+			// The consumer deliberately retains a gated match and stops draining.
+			// This send must relinquish decode capacity while the output is full.
+			return w.send(pollOutput{event: &e})
+		})
+		watchers = append(watchers, w)
+		if _, err := w.Poll(context.Background(), budget); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		select {
+		case <-queued:
+		case <-time.After(20 * time.Second):
+			t.Fatal("producer did not queue output")
+		}
+	}
+	entered := make(chan struct{})
+	later := newPollScanner(context.Background(), func(w *pollScanner) error { close(entered); return w.boundary() })
+	watchers = append(watchers, later)
+	if _, err := later.Poll(context.Background(), budget); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("undrained gated streams pinned all decode slots")
 	}
 }
