@@ -1988,6 +1988,44 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	}
 }
 
+func TestBootstrapPolicyOwnsBeadsVersionBashBoundary(t *testing.T) {
+	var owners []MediumOwner
+	for _, row := range bootstrapPolicy.Medium {
+		if row.PackageDir == "scripts" && row.PackageName == "scripts_test" && row.Owner == "TestCheckBeadsBDVersion" {
+			owners = append(owners, row)
+		}
+	}
+	if len(owners) != 1 || owners[0].OwnerBead != "gcw-gytyd" || owners[0].Expires != "2026-10-31" || len(owners[0].Resources) != 1 || owners[0].Resources[0] != ResourceSubprocess {
+		t.Fatalf("want one exact gcw-gytyd Bash subprocess owner expiring 2026-10-31, got %+v", owners)
+	}
+	for _, tc := range []struct {
+		name, body  string
+		removeOwner bool
+		wantSmall   int
+	}{
+		{"local runner", `func TestCheckBeadsBDVersion(t *testing.T) { run := func() { exec.Command("bash") }; run() }`, false, 0},
+		{"owner removed", `func TestCheckBeadsBDVersion(t *testing.T) { exec.Command("bash") }`, true, 1},
+		{"package helper", `func TestCheckBeadsBDVersion(t *testing.T) { run() }; func run() { exec.Command("bash") }`, false, 1},
+		{"sibling growth", `func TestCheckBeadsBDVersion(t *testing.T) { exec.Command("bash") }; func TestSibling(t *testing.T) { exec.Command("bash") }`, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			census, err := ScanFS(fstest.MapFS{"scripts/version_test.go": &fstest.MapFile{Data: []byte("package scripts_test\nimport (\"testing\"; \"os/exec\")\n" + tc.body)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			medium := owners
+			if tc.removeOwner {
+				medium = nil
+			}
+			assertSmallCount(t, census, medium, ScopeUntagged, ResourceSubprocess, tc.wantSmall, tc.wantSmall)
+			problems := validateSmallBaseline(Baseline{Scope: ScopeUntagged, Resource: ResourceSubprocess}, census, medium)
+			if (len(problems) > 0) != (tc.wantSmall > 0) {
+				t.Fatalf("Small zero ceiling findings: %v", problems)
+			}
+		})
+	}
+}
+
 func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
