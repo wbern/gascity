@@ -470,3 +470,40 @@ func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
 func updateValueFlags() map[string]bool {
 	return valueFlagsBySub["update"]
 }
+
+// TestScanUnknownFlagsGCWrapperRegressions keeps gc-owned flags distinct from
+// bare bd flags, including command substitutions used by the accepted prompt.
+func TestScanUnknownFlagsGCWrapperRegressions(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   []Finding
+	}{
+		{"plain scope", `gc bd show example --json --city "$GC_CITY" --rig crm`, nil},
+		{"trailing boolean", "gc bd show example --json --allow-unbounded", nil},
+		{"assignment scope", `BEAD_JSON="$(gc bd show example --json --city "$GC_CITY" --rig crm)"`, nil},
+		{"accepted bead prompt", `BEAD_JSON="$(gc bd show "$BEAD_ID" --json --allow-unbounded --city "$GC_CITY" --rig crm)"`, nil},
+		{"accepted molecule prompt", `    MOLECULE_JSON="$(gc bd show "$MOLECULE_ID" --json --allow-unbounded --city "$GC_CITY" --rig crm)"`, nil},
+		{"leading boolean", "gc bd --allow-unbounded show example --json", nil},
+		{"mixed leading flags", `BEAD_JSON="$(gc bd --city="$GC_CITY" --allow-unbounded --rig=crm show example --json)"`, nil},
+		{"boolean does not consume typo", "gc bd show example --allow-unbounded --asignee bob", []Finding{{1, "show", "--asignee"}}},
+		{"leading boolean retains typo", "gc bd --allow-unbounded --rig=crm update example --asignee bob", []Finding{{1, "update", "--asignee"}}},
+		{"assignment typo", `BEAD_JSON="$(gc bd update example --rig=crm --asignee bob)"`, []Finding{{1, "update", "--asignee"}}},
+		{"bare scope", `bd show example --city "$GC_CITY" --rig crm`, []Finding{{1, "show", "--city"}, {1, "show", "--rig"}}},
+		{"bare boolean", "bd show example --allow-unbounded", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"bare substitution", `BEAD_JSON="$(bd show example --allow-unbounded --rig=crm)"`, []Finding{{1, "show", "--allow-unbounded"}, {1, "show", "--rig"}}},
+		{"not gc suffix", `BEAD_JSON="$(othergc bd show example --rig=crm)"`, []Finding{{1, "show", "--rig"}}},
+		{"quoted separator", `gc bd list --allow-unbounded --title "a | b" --asignee bob`, []Finding{{1, "list", "--asignee"}}},
+		{"separator boundary", "gc bd show example --allow-unbounded | jq --not-bd; bd show example --rig=crm", []Finding{{1, "show", "--rig"}}},
+		{"termination", "gc bd show example --allow-unbounded -- --asignee", nil},
+		{"wrapper typo", "gc bd show example --allow-unboundedd", []Finding{{1, "show", "--allow-unboundedd"}}},
+		{"real typo", "gc bd update example --asignee bob", []Finding{{1, "update", "--asignee"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ScanUnknownFlags([]byte(tt.source)); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ScanUnknownFlags(%q) = %v, want %v", tt.source, got, tt.want)
+			}
+		})
+	}
+}

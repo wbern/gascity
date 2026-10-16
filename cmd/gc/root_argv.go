@@ -25,10 +25,10 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 }
 
 // rootCommandSkipsPackDiscovery identifies built-in helpers that remain
-// independent of pack config loading while the Beads provider is reloading.
+// independent of pack config loading, including deterministic CLI doc generation.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
-	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+	case "gen-doc", "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
 		return true
 	default:
 		return false

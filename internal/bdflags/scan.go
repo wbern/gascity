@@ -25,6 +25,11 @@ var gcScopeValueFlags = map[string]bool{
 	"--city": true, "--rig": true,
 }
 
+// gcWrapperBoolFlags are consumed by gc bd without a following value.
+var gcWrapperBoolFlags = map[string]bool{
+	"--allow-unbounded": true,
+}
+
 // ScanUnknownFlags scans raw template source text for bd and "gc bd"
 // invocations of subcommands known to this package, and reports any flag
 // token that is not a recognized value or boolean flag for that
@@ -139,13 +144,18 @@ func scanLineForUnknownFlags(tokens []string, lineNo int) []Finding {
 
 // skipLeadingScopeFlags advances past any gc-owned scope flags that a "gc bd"
 // invocation places before its subcommand ("--rig <name>", "--city <path>",
-// or their inline "--rig=<name>" forms), returning the index of the first
-// token that is not one. This lets "gc bd --rig <name> create ..." reach and
+// or their inline "--rig=<name>" forms) and wrapper boolean flags, returning
+// the index of the first token that is not one. This lets
+// "gc bd --rig <name> create ..." reach and
 // validate the subcommand after the scope flags instead of skipping the whole
 // invocation.
 func skipLeadingScopeFlags(tokens []string, i int) int {
 	for i < len(tokens) {
 		name, hasInlineValue := splitFlagToken(tokens[i])
+		if gcWrapperBoolFlags[name] {
+			i++
+			continue
+		}
 		if !gcScopeValueFlags[name] {
 			return i
 		}
@@ -172,6 +182,9 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 		// another invocation's or consumer's manifest.
 		for flag := range gcScopeValueFlags {
 			valueFlags[flag] = true
+		}
+		for flag := range gcWrapperBoolFlags {
+			boolFlags[flag] = true
 		}
 	}
 	j := flagStart
@@ -234,10 +247,17 @@ func classifyFlag(tok string, valueFlags, boolFlags map[string]bool) (name strin
 // (skipLeadingScopeFlags), so both "gc bd --rig <name> list" and the trailing
 // "gc bd list --rig <name>" flow through subcommand and flag validation.
 func bdSubcommandStart(tokens []string, i int) (start int, viaGC bool) {
+	// Whitespace tokenization keeps an assignment's substitution opener
+	// attached to the executable: BEAD_JSON="$(gc. Only accept the exact
+	// executable after "$(", so "$(othergc" cannot acquire gc-owned flags.
+	tok := tokens[i]
+	if pos := strings.LastIndex(tok, "$("); pos >= 0 {
+		tok = tok[pos+2:]
+	}
 	switch {
-	case tokens[i] == "bd":
+	case tok == "bd":
 		return i + 1, false
-	case tokens[i] == "gc" && i+1 < len(tokens) && tokens[i+1] == "bd":
+	case tok == "gc" && i+1 < len(tokens) && tokens[i+1] == "bd":
 		return i + 2, true
 	default:
 		return -1, false
