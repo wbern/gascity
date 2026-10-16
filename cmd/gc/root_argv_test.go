@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,8 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinFastPaths(t *testing.T) {
 		skip bool
 	}{
 		{name: "metrics", args: []string{"metrics"}, skip: true},
+		{name: "gen-doc", args: []string{"gen-doc"}, skip: true},
+		{name: "scoped gen-doc", args: []string{"--city=/tmp/city", "gen-doc"}, skip: true},
 		{name: "scoped metrics", args: []string{"--city", "/tmp/city", "--rig=tower", "metrics", "status"}, skip: true},
 		{name: "remote context metrics", args: []string{"--context=prod", "metrics", "status"}, skip: true},
 		{name: "remote URL metrics", args: []string{"--city-url", "https://city.example", "--city-name=remote", "metrics", "status"}, skip: true},
@@ -307,5 +310,48 @@ func TestNewRootCmdCompatibilityWrapperNeverConsultsAmbientArgs(t *testing.T) {
 	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	if findSubcommand(root, "backstage") == nil {
 		t.Fatal("compatibility root unexpectedly used ambient credential-helper argv to suppress discovery")
+	}
+}
+
+func TestGenDocUsesBuiltinTreeInPackCity(t *testing.T) {
+	oldCity, oldRig := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() { cityFlag, rigFlag = oldCity, oldRig })
+	cityPath := setupPackExitCity(t)
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"rig\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cityPath)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_CITY_PATH", cityPath)
+	if err := os.WriteFile("go.mod", []byte("module fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"gen-doc"}
+	options := rootCommandOptionsForArgs(args)
+	if code := runWithRootCommandOptions(args, &stdout, &stderr, options); code != 0 {
+		t.Fatalf("gen-doc exit %d: %s", code, stderr.String())
+	}
+	generated, err := os.ReadFile(filepath.Join("docs", "reference", "cli.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(generated), "## gc rig repo sync") {
+		t.Fatal("gen-doc included city-specific pack commands")
+	}
+	if !strings.Contains(string(generated), "## gc status") {
+		t.Fatal("gen-doc omitted built-in commands")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	args = []string{"rig", "repo", "sync"}
+	if code := runWithRootCommandOptions(args, &stdout, &stderr, rootCommandOptionsForArgs(args)); code != 0 {
+		t.Fatalf("pack command exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "nested-pack-command") {
+		t.Fatalf("pack did not execute: %s", stdout.String())
 	}
 }
