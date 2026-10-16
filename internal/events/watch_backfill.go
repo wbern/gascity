@@ -323,12 +323,26 @@ func (w *pollScanner) Poll(ctx context.Context, b PollBudget) (PollBatch, error)
 
 func (w *pollScanner) Close() error { w.cancel(); <-w.joined; return nil }
 func (w *pollScanner) send(out pollOutput) error {
+	// Backpressure belongs to the output queue, not the shared decode limiter.
+	// A latched/gated consumer may stop draining indefinitely; retaining its
+	// queued suffix must not pin the capacity every other scanner needs.
+	held := w.slotted
+	if held {
+		releaseBackfillSlot()
+		w.slotted = false
+	}
 	select {
 	case w.output <- out:
-		return nil
 	case <-w.ctx.Done():
 		return w.ctx.Err()
 	}
+	if held && out.event != nil {
+		if err := acquireBackfillSlot(w.ctx, w.ctx.Done()); err != nil {
+			return err
+		}
+		w.slotted = true
+	}
+	return nil
 }
 
 func (w *pollScanner) awaitGrant() error {

@@ -1004,3 +1004,53 @@ func TestPollWatchRetainsGzipAcrossYieldsAndAppend(t *testing.T) {
 		t.Fatalf("retained gzip/append delivery: %v", got)
 	}
 }
+
+func TestPollWatchUndrainedOutputDoesNotPinDecodeSlots(t *testing.T) {
+	budget := PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 4, Segments: 1}
+	var watchers []*pollScanner
+	defer func() {
+		for _, w := range watchers {
+			_ = w.Close()
+		}
+	}()
+	for i := 0; i < backfillConcurrency; i++ {
+		queued := make(chan struct{})
+		release := make(chan struct{})
+		w := newPollScanner(context.Background(), func(w *pollScanner) error {
+			select {
+			case <-release:
+			case <-w.ctx.Done():
+				return w.ctx.Err()
+			}
+			e := Event{Seq: 1}
+			if err := w.send(pollOutput{event: &e}); err != nil {
+				return err
+			}
+			close(queued)
+			// The consumer deliberately retains a gated match and stops draining.
+			// This send must relinquish decode capacity while the output is full.
+			return w.send(pollOutput{event: &e})
+		})
+		watchers = append(watchers, w)
+		if _, err := w.Poll(context.Background(), budget); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		select {
+		case <-queued:
+		case <-time.After(20 * time.Second):
+			t.Fatal("producer did not queue output")
+		}
+	}
+	entered := make(chan struct{})
+	later := newPollScanner(context.Background(), func(w *pollScanner) error { close(entered); return w.boundary() })
+	watchers = append(watchers, later)
+	if _, err := later.Poll(context.Background(), budget); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("undrained gated streams pinned all decode slots")
+	}
+}
