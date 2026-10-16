@@ -681,7 +681,12 @@ func (s *EventScanner) Check(ctx context.Context, cursor uint64, b events.PollBu
 		return TriggerResult{Reason: fmt.Sprintf("event: bounded read error: %v", s.terminal)}
 	}
 	batch, err := s.watcher.Poll(ctx, b)
-	s.terminal = err
+	// A per-check cancellation interrupts this call, not the retained scanner.
+	// Keep genuine stream/lifetime failures terminal, and still evaluate any
+	// events returned alongside the error before exposing that terminal state.
+	if callerErr := ctx.Err(); callerErr == nil || !errors.Is(err, callerErr) || s.ctx.Err() != nil {
+		s.terminal = err
+	}
 	var candidates []events.Event
 	needsDecode := false
 	for _, e := range batch.Events {

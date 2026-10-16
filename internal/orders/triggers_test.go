@@ -1326,3 +1326,80 @@ func TestEventScannerPayloadWorkNeverBlocksController(t *testing.T) {
 		t.Fatal("owned matcher did not join")
 	}
 }
+
+// cancelDuringPollWatcher cancels after Check's caller-context precheck.
+type cancelDuringPollWatcher struct {
+	calls    int
+	cancel   context.CancelFunc
+	terminal bool
+	batch    bool
+}
+
+func (w *cancelDuringPollWatcher) Poll(ctx context.Context, _ events.PollBudget) (events.PollBatch, error) {
+	w.calls++
+	if w.calls == 1 {
+		w.cancel()
+		var batch events.PollBatch
+		if w.batch {
+			batch.Events = []events.Event{{Seq: 1, Type: events.BeadCreated}}
+		}
+		if w.terminal {
+			return batch, fmt.Errorf("retained stream failed")
+		}
+		return batch, ctx.Err()
+	}
+	if w.calls == 2 {
+		return events.PollBatch{Events: []events.Event{{Seq: 2, Type: events.BeadCreated}}}, nil
+	}
+	return events.PollBatch{}, nil
+}
+func (w *cancelDuringPollWatcher) Close() error { return nil }
+
+type cancelDuringPollProvider struct {
+	*events.Fake
+	watcher events.PollWatcher
+}
+
+func (p *cancelDuringPollProvider) BeginWatch(context.Context, uint64) (events.PollWatcher, error) {
+	return p.watcher, nil
+}
+
+func TestEventScannerCancellationDuringPoll(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, batch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("terminal=%v/batch=%v", terminal, batch), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				w := &cancelDuringPollWatcher{cancel: cancel, terminal: terminal, batch: batch}
+				p := &cancelDuringPollProvider{Fake: events.NewFake(), watcher: w}
+				s, err := NewEventScanner(context.Background(), Order{Name: "cancel", On: events.BeadCreated}, p, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close() //nolint:errcheck // test cleanup
+				budget := events.PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 1, Segments: 1}
+				first := s.Check(ctx, 0, budget)
+				if first.Due != batch {
+					t.Fatalf("produced batch lost: %+v", first)
+				}
+				cursor := uint64(0)
+				if batch {
+					cursor = 1
+				}
+				next := s.Check(context.Background(), cursor, budget)
+				if terminal {
+					if next.Due || w.calls != 1 || !strings.Contains(next.Reason, "retained stream failed") {
+						t.Fatalf("terminal failure retried: %+v, calls=%d", next, w.calls)
+					}
+					return
+				}
+				if !next.Due || w.calls != 2 {
+					t.Fatalf("caller cancellation poisoned retained scanner: %+v, calls=%d", next, w.calls)
+				}
+				if s.Check(context.Background(), 2, budget).Due {
+					t.Fatal("consumed event delivered twice")
+				}
+			})
+		}
+	}
+}
