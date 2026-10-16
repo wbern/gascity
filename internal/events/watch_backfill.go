@@ -5,11 +5,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // backfillConcurrency bounds how many watchers may actively read archive/rotating
@@ -175,11 +177,12 @@ func openSegmentReader(src backfillSource) (*segmentReader, error) {
 }
 
 // activeSegmentReader wraps a captured active fd (0..size) as a segment reader.
-func activeSegmentReader(f *os.File, size int64) (*segmentReader, error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+func activeSegmentReader(f *os.File, size int64, afterSeq uint64) (*segmentReader, error) {
+	start := activeScanStart(f, size, afterSeq)
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		return nil, err
 	}
-	return &segmentReader{f: nil, br: bufio.NewReaderSize(&io.LimitedReader{R: f, N: size}, 64*1024)}, nil
+	return &segmentReader{f: nil, br: bufio.NewReaderSize(&io.LimitedReader{R: f, N: size - start}, 64*1024)}, nil
 }
 
 // readInto reads up to batch filter-matching events with Seq > *maxSeq from the
@@ -226,5 +229,220 @@ func (sr *segmentReader) close() {
 	// A nil f means the reader wraps a caller-owned active fd (closed elsewhere).
 	if sr.f != nil {
 		_ = sr.f.Close()
+	}
+}
+
+// pollOutput shares event and ACK ordering. An ACK cannot overtake a produced
+// suffix, including when the consumer drains only part of the bounded queue.
+type pollOutput struct {
+	event *Event
+	ack   bool
+	err   error
+}
+
+type pollScanner struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	joined    chan struct{}
+	grants    chan PollBudget
+	output    chan pollOutput
+	mu        sync.Mutex // consumer state only; never held by worker
+	active    bool
+	terminal  error
+	remaining PollBudget // worker-owned
+	slotted   bool       // worker-owned backfill concurrency slot
+}
+
+func newPollScanner(ctx context.Context, run func(*pollScanner) error) *pollScanner {
+	ctx, cancel := context.WithCancel(ctx)
+	w := &pollScanner{ctx: ctx, cancel: cancel, joined: make(chan struct{}), grants: make(chan PollBudget, 1), output: make(chan pollOutput, 1)}
+	go func() {
+		defer close(w.joined)
+		defer func() {
+			if w.slotted {
+				releaseBackfillSlot()
+			}
+		}()
+		err := w.awaitGrant()
+		if err == nil {
+			err = run(w)
+		}
+		if err != nil {
+			_ = w.send(pollOutput{err: err})
+		}
+	}()
+	return w
+}
+
+func validPollBudget(b PollBudget) bool {
+	// No arithmetic combines these independently consumed counters.
+	return b.CompressedBytes > 0 && b.RawBytes > 0 && b.Records > 0 && b.Segments > 0
+}
+
+func (w *pollScanner) Poll(ctx context.Context, b PollBudget) (PollBatch, error) {
+	if !validPollBudget(b) {
+		return PollBatch{}, fmt.Errorf("event poll: budgets must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return PollBatch{}, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.ctx.Err(); err != nil {
+		return PollBatch{}, err
+	}
+	if w.terminal != nil {
+		return PollBatch{}, w.terminal
+	}
+	if !w.active {
+		w.active = true
+		w.grants <- b
+	}
+	batch := PollBatch{Pending: true}
+	for i := 0; i < backfillBatch; i++ {
+		select {
+		case out := <-w.output:
+			if out.event != nil {
+				batch.Events = append(batch.Events, *out.event)
+			}
+			if out.err != nil {
+				w.terminal = out.err
+				return batch, out.err
+			}
+			if out.ack {
+				w.active = false
+				batch.Pending = false
+				return batch, nil
+			}
+		default:
+			return batch, nil
+		}
+	}
+	return batch, nil
+}
+
+func (w *pollScanner) Close() error { w.cancel(); <-w.joined; return nil }
+func (w *pollScanner) send(out pollOutput) error {
+	select {
+	case w.output <- out:
+		return nil
+	case <-w.ctx.Done():
+		return w.ctx.Err()
+	}
+}
+
+func (w *pollScanner) awaitGrant() error {
+	select {
+	case b := <-w.grants:
+		w.remaining = b
+		if err := acquireBackfillSlot(w.ctx, w.ctx.Done()); err != nil {
+			return err
+		}
+		w.slotted = true
+		return nil
+	case <-w.ctx.Done():
+		return w.ctx.Err()
+	}
+}
+
+func (w *pollScanner) boundary() error {
+	if w.slotted {
+		releaseBackfillSlot()
+		w.slotted = false
+	}
+	if err := w.send(pollOutput{ack: true}); err != nil {
+		return err
+	}
+	return w.awaitGrant()
+}
+
+// take suspends the worker's stack, not the decoder, at grant exhaustion.
+// Incomplete record and gzip framing survive the ACK to the next grant.
+func (w *pollScanner) take(field func(*PollBudget) *int) error {
+	for *field(&w.remaining) == 0 {
+		if err := w.boundary(); err != nil {
+			return err
+		}
+	}
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	*field(&w.remaining)--
+	return nil
+}
+
+func (w *pollScanner) record(line []byte, maxSeq *uint64) error {
+	if err := w.take(func(b *PollBudget) *int { return &b.Records }); err != nil {
+		return err
+	}
+	var e Event
+	if json.Unmarshal(trimLine(line), &e) == nil && e.Seq > *maxSeq {
+		*maxSeq = e.Seq
+		return w.send(pollOutput{event: &e})
+	}
+	return nil
+}
+
+// grantReader never returns synthetic EOF/errors on exhaustion: gzip retains
+// its decoder stack while this bounded input reader awaits the next grant.
+// The bufio reader above it owns at most one 4 KiB compressed fragment.
+type grantReader struct {
+	w *pollScanner
+	r io.Reader
+}
+
+func (r *grantReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	field := func(b *PollBudget) *int { return &b.CompressedBytes }
+	for *field(&r.w.remaining) == 0 {
+		if err := r.w.boundary(); err != nil {
+			return 0, err
+		}
+	}
+	if err := r.w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n := min(len(p), *field(&r.w.remaining), 4096)
+	// This reader has no nested grants; only the framing reader above it can
+	// suspend inside gzip. Charge actual input even for a short read.
+	n, err := r.r.Read(p[:n])
+	*field(&r.w.remaining) -= n
+	return n, err
+}
+
+func (r *grantReader) ReadByte() (byte, error) {
+	var b [1]byte
+	n, err := r.Read(b[:])
+	if n == 1 {
+		return b[0], nil
+	}
+	return 0, err
+}
+
+// scanPollLines incrementally frames arbitrary valid row sizes. Only partial
+// framing can grow to record size; produced-event buffering remains bounded.
+func (w *pollScanner) scanPollLines(r io.Reader, maxSeq *uint64, partial *[]byte) error {
+	var one [1]byte
+	for {
+		n, err := r.Read(one[:])
+		if n > 0 {
+			// Count admitted raw bytes after the underlying read: a gzip input grant
+			// may have exhausted while producing this single byte.
+			if takeErr := w.take(func(b *PollBudget) *int { return &b.RawBytes }); takeErr != nil {
+				return takeErr
+			}
+			*partial = append(*partial, one[0])
+			if one[0] == '\n' {
+				if e := w.record(*partial, maxSeq); e != nil {
+					return e
+				}
+				*partial = (*partial)[:0]
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 }

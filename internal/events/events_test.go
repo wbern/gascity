@@ -1398,8 +1398,10 @@ func TestFileRecorderWatchAfterLatestStartsAtEOF(t *testing.T) {
 	if !ok {
 		t.Fatalf("Watch returned %T, want *fileWatcher", w)
 	}
-	if fw.offset != info.Size() {
-		t.Fatalf("watch offset = %d, want EOF %d", fw.offset, info.Size())
+	// Construction pins only the active identity/size. The synchronous Next
+	// wrapper reaches EOF lazily without a cold LatestSeq scan in Watch.
+	if fw.offset != 0 || !fw.needsBackfill || fw.activeSize != info.Size() {
+		t.Fatalf("watch eagerly scanned history: offset=%d backfill=%v size=%d", fw.offset, fw.needsBackfill, fw.activeSize)
 	}
 
 	go func() {
