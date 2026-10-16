@@ -135,6 +135,17 @@ func scanLineForUnknownFlags(tokens []string, lineNo int) []Finding {
 			i = subStart
 			continue
 		}
+		// The wrapper consumes only bare boolean tokens. Still locate the
+		// subcommand after an invalid inline form so its flags are checked.
+		for j := subStart; j < verbStart; j++ {
+			name, inline := splitFlagToken(tokens[j])
+			if gcWrapperBoolFlags[name] && inline {
+				findings = append(findings, Finding{Line: lineNo, Subcommand: key, Flag: name})
+			}
+			if gcScopeValueFlags[name] && !inline {
+				j++
+			}
+		}
 		flagFindings, resume := scanInvocationFlags(tokens, verbStart+consumed, key, viaGC, lineNo)
 		findings = append(findings, flagFindings...)
 		i = resume
@@ -201,6 +212,9 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 			continue
 		}
 		name, advance, unknown := classifyFlag(tok, valueFlags, boolFlags)
+		if name, inline := splitFlagToken(tok); viaGC && gcWrapperBoolFlags[name] && inline {
+			unknown = true
+		}
 		if unknown {
 			findings = append(findings, Finding{Line: lineNo, Subcommand: key, Flag: name})
 		}

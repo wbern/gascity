@@ -480,6 +480,12 @@ func TestScanUnknownFlagsGCWrapperRegressions(t *testing.T) {
 		want   []Finding
 	}{
 		{"plain scope", `gc bd show example --json --city "$GC_CITY" --rig crm`, nil},
+		{"inline leading true", "gc bd --allow-unbounded=true show example", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"inline leading false", "gc bd --allow-unbounded=false show example", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"inline leading ", "gc bd --allow-unbounded= show example", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"inline trailing true", "gc bd show example --allow-unbounded=true", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"inline trailing false", "gc bd show example --allow-unbounded=false", []Finding{{1, "show", "--allow-unbounded"}}},
+		{"inline trailing ", "gc bd show example --allow-unbounded=", []Finding{{1, "show", "--allow-unbounded"}}},
 		{"trailing boolean", "gc bd show example --json --allow-unbounded", nil},
 		{"assignment scope", `BEAD_JSON="$(gc bd show example --json --city "$GC_CITY" --rig crm)"`, nil},
 		{"accepted bead prompt", `BEAD_JSON="$(gc bd show "$BEAD_ID" --json --allow-unbounded --city "$GC_CITY" --rig crm)"`, nil},
@@ -487,6 +493,8 @@ func TestScanUnknownFlagsGCWrapperRegressions(t *testing.T) {
 		{"leading boolean", "gc bd --allow-unbounded show example --json", nil},
 		{"mixed leading flags", `BEAD_JSON="$(gc bd --city="$GC_CITY" --allow-unbounded --rig=crm show example --json)"`, nil},
 		{"boolean does not consume typo", "gc bd show example --allow-unbounded --asignee bob", []Finding{{1, "show", "--asignee"}}},
+		{"inline leading retains typo", "gc bd --allow-unbounded=false --rig=crm update example --asignee bob", []Finding{{1, "update", "--allow-unbounded"}, {1, "update", "--asignee"}}},
+		{"scope value is not a boolean flag", "gc bd --rig --allow-unbounded=false show example --json", nil},
 		{"leading boolean retains typo", "gc bd --allow-unbounded --rig=crm update example --asignee bob", []Finding{{1, "update", "--asignee"}}},
 		{"assignment typo", `BEAD_JSON="$(gc bd update example --rig=crm --asignee bob)"`, []Finding{{1, "update", "--asignee"}}},
 		{"bare scope", `bd show example --city "$GC_CITY" --rig crm`, []Finding{{1, "show", "--city"}, {1, "show", "--rig"}}},
