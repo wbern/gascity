@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   746,
-			BaselineFiles:   220,
+			BaselineCalls:   747,
+			BaselineFiles:   221,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   504,
-			BaselineFiles:   147,
+			BaselineCalls:   505,
+			BaselineFiles:   148,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -321,6 +321,18 @@ var bootstrapPolicy = Ledger{
 		},
 	},
 	Medium: []MediumOwner{
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestCheckBeadsBDVersion",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "gcw-gytyd",
+			Invariant:       "version-skew exits and diagnostics exercise actual Bash parsing in an exact Medium owner",
+			ResourceOwner:   "the one lexical Bash launch uses test-owned HOME, PATH, go.mod and stub bd/go without network; all six version-skew scenarios retain their assertions",
+			MigrationTarget: "retain the Bash composition proof; keep parsing and exit assertions here and remove this row only when the script boundary is retired",
+			Expires:         "2026-10-31",
+		},
+
 		{
 			PackageDir:      "internal/api",
 			PackageName:     "api",
