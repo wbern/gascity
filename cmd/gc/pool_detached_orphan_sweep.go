@@ -204,6 +204,9 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return false // no work branch → not a completed-work handoff bead
 	}
+	if strings.TrimSpace(b.Metadata[beadmeta.PRNumberMetadataKey]) != "" || strings.TrimSpace(b.Metadata["pr_number"]) != "" {
+		return false // handed off to the PR pipeline, which owns it by PR number — not detached
+	}
 	// Accept either session back-reference. The claim path stamps gc.session_id
 	// whenever GC_SESSION_ID is set and adds gc.session_name only when
 	// GC_SESSION_NAME is also present (hookClaimIdentityPatch), so a valid

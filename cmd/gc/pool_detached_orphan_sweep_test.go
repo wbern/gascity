@@ -238,6 +238,60 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
+// A bead that recorded its pull request was handed off to the PR pipeline,
+// which owns it by PR number; open, unassigned and unrouted is its terminal
+// handoff shape, not a detached orphan. Restoring the route re-dispatched
+// already-submitted work every backstop pass (crm-27a8eh5 re-routed hourly).
+func TestDetachedHandoffOrphanCandidateRefusesPRHandedOffBead(t *testing.T) {
+	base := func() beads.Bead {
+		return beads.Bead{ID: "P-1", Status: "open", Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey: "polecat/crm-27a8eh5",
+			beadmeta.SessionIDMetadataKey:  "gc2-wisp-ei1hqb4",
+		}}
+	}
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the PR-less base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	for _, key := range []string{beadmeta.PRNumberMetadataKey, "pr_number"} {
+		b := base()
+		b.Metadata[key] = "2272"
+		if isDetachedHandoffOrphanCandidate(b) {
+			t.Errorf("a bead with %s=2272 is a detached-orphan candidate; the sweep would re-dispatch PR-pipeline-owned work", key)
+		}
+		b.Metadata[key] = "  "
+		if !isDetachedHandoffOrphanCandidate(b) {
+			t.Errorf("a blank %s must not hide a genuine detached orphan", key)
+		}
+	}
+}
+
+func TestSweepDetachedHandoffOrphans_SkipsPRHandedOffBead(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "handed-off bead",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/crm-27a8eh5",
+			beadmeta.SessionNameMetadataKey: "some-session",
+			"pr_number":                     "2272",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.candidates != 0 {
+		t.Fatalf("candidates=%d, want 0 for a PR-handed-off bead", result.candidates)
+	}
+	got, _ := store.Get(b.ID)
+	if route := got.Metadata[beadmeta.RoutedToMetadataKey]; route != "" {
+		t.Fatalf("gc.routed_to=%q restored on PR-pipeline-owned work", route)
+	}
+}
+
 // A bead with no branch set is not a completed-work bead and must be skipped.
 func TestSweepDetachedHandoffOrphans_SkipsNoBranch(t *testing.T) {
 	store := beads.NewMemStore()
