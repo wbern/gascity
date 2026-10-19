@@ -323,7 +323,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		store,
 		sp,
 		cfg,
-		"",
+		config.CanonicalSingletonSessionAlias(cfg, agentCfg),
 		explicitName,
 		agentCfg.QualifiedName(),
 		title,

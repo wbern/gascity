@@ -87,6 +87,24 @@ func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
 	return maxSessions != nil && *maxSessions == 1
 }
 
+// CanonicalSingletonSessionAlias returns the alias a canonical singleton
+// agent's session converges to: the agent's qualified name, which the
+// reconciler adopts onto singleton sessions created without one. Manual create
+// paths stamp it up front so the alias-derived runtime session name agrees
+// with the alias, instead of persisting the s-<beadID> fallback before the
+// alias arrives. It returns "" when a is not a canonical singleton or when a
+// configured named session owns that identity and decides its own alias.
+func CanonicalSingletonSessionAlias(cfg *City, a *Agent) string {
+	if !a.UsesCanonicalSingletonPoolIdentity() {
+		return ""
+	}
+	identity := a.QualifiedName()
+	if FindNamedSession(cfg, identity) != nil {
+		return ""
+	}
+	return identity
+}
+
 // SupportsExpandedSessionIdentities reports whether callers should expose or
 // discover concrete member identities instead of only the configured identity.
 func (a *Agent) SupportsExpandedSessionIdentities() bool {
