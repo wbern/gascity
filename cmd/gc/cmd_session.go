@@ -263,6 +263,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		alias = configuredOwner
 		explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, configuredOwner)
 	}
+	// A canonical singleton converges to its qualified name as alias; stamp it
+	// now so session_name is derived from it rather than the s-<beadID> fallback.
+	if configuredOwner == "" && requestedAlias == "" {
+		alias = config.CanonicalSingletonSessionAlias(cfg, &found)
+	}
 
 	reservationIDs := []string{alias, explicitName}
 	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""

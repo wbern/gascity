@@ -37,6 +37,11 @@ func (s *Server) resolveAgentCreateContext(template, alias string) (agentCreateC
 	if alias != "" && agentCfg.SupportsMultipleSessions() {
 		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, cfg.Rigs, alias, "")
 	}
+	// A canonical singleton converges to its qualified name as alias; stamp it
+	// now so session_name is derived from it rather than the s-<beadID> fallback.
+	if alias == "" {
+		alias = config.CanonicalSingletonSessionAlias(cfg, &agentCfg)
+	}
 	explicitName, err := sessionExplicitNameForCreate(agentCfg, alias)
 	if err != nil {
 		return agentCreateContext{}, err

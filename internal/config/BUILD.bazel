@@ -154,6 +154,7 @@ go_test(
         "revision_test.go",
         "rig_merge_strategy_test.go",
         "service_test.go",
+        "session_capacity_test.go",
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
         "session_sleep_test.go",
