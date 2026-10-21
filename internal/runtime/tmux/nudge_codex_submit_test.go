@@ -27,6 +27,7 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		{"inserted blank line is not token wrap", []string{"› nonce_abcdef", "  ", "  ghijkl", "", "GPT-6.1-Sol low"}, "nonce_abcdefghijkl", codexComposerOther, false},
 		{"wrapped token changed", []string{"› nonce_abcdef", "  ghijXl", "", "GPT-6.1-Sol low"}, "nonce_abcdefghijkl", codexComposerOther, false},
 		{"joined soft wrap", []string{"› first line with wrapping", "", "gpt-6 low"}, "first line with wrapping", codexComposerOwned, false},
+		{"unexpected trailing newline", []string{"› hello", "  ", "", "gpt-6 low"}, "hello", codexComposerOther, false},
 		{"trailing newline", []string{"› hello", "  ", "", "gpt-6 low"}, "hello\n", codexComposerOwned, false},
 		{"exact input spaces", []string{"› hello  world", "", "gpt-6 low"}, "hello world", codexComposerOther, false},
 		{"human prefix collision", []string{"› same prefix but human text", "", "gpt-6 low"}, "same prefix", codexComposerOther, false},

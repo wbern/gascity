@@ -151,7 +151,7 @@ func codexRenderedDraftMatches(lines []string, message string) bool {
 			remaining = remaining[1:]
 		case line != "" && strings.HasPrefix(remaining, " "):
 			remaining = remaining[1:]
-		case line == "":
+		case line == "" || remaining == "":
 			return false
 		default:
 			// The TUI also breaks long words and punctuation-delimited tokens
