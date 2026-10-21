@@ -220,9 +220,9 @@ type State interface {
 	AdapterRegistry() *extmsg.AdapterRegistry
 
 	// MaintenanceLoop returns the Dolt store-maintenance loop when
-	// [maintenance.dolt] enabled=true in city.toml, or nil otherwise.
-	// Handlers treat nil as "feature disabled" and respond with a typed
-	// 503 so the CLI can print a useful message.
+	// [maintenance.dolt] enabled=true and its history has loaded, or nil
+	// otherwise. Handlers distinguish initialization from disabled config
+	// when responding with a typed 503.
 	MaintenanceLoop() MaintenanceProvider
 }
 
