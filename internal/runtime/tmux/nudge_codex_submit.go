@@ -151,8 +151,12 @@ func codexRenderedDraftMatches(lines []string, message string) bool {
 			remaining = remaining[1:]
 		case line != "" && strings.HasPrefix(remaining, " "):
 			remaining = remaining[1:]
-		default:
+		case line == "" || remaining == "":
 			return false
+		default:
+			// The TUI also breaks long words and punctuation-delimited tokens
+			// without inserting whitespace. Leave remaining intact so the next
+			// rendered line must match its exact prefix.
 		}
 	}
 	return false
