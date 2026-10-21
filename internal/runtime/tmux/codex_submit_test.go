@@ -20,22 +20,9 @@ func nudgeKeystrokesForFamily(family string) []string {
 	return append(keys, nudgeSubmitKeySequenceForFamily(family)...)
 }
 
-// TestCodexNudgeSubmitsWithExactlyOneEscapeThenEnter is the #4706 fix and its
-// own guard rail. codex buffers a send-keys burst as a paste, so a lone trailing
-// Enter is swallowed as a composer newline and the agent's first turn never
-// starts. Escape-then-Enter submits it — but a SECOND Escape would be
-// backtrack/edit-previous, so the count matters as much as the keys.
-func TestCodexNudgeSubmitsWithExactlyOneEscapeThenEnter(t *testing.T) {
-	got := nudgeKeystrokesForFamily("codex")
-	want := []string{"Escape", "Enter"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("codex nudge keystrokes = %v, want %v", got, want)
-	}
-	if got := nudgeSubmitKeySequenceForFamily("codex"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("codex submit sequence = %v, want %v declared as one retryable unit", got, want)
-	}
-	if !providerEnvSkipsEscape("codex") {
-		t.Fatal("codex left providersSkippingEscapeBeforeEnter; combined with its submit entry that sends Escape twice, which codex binds to backtrack rather than submit")
+func TestCodexIdleSubmitNeverSendsEscape(t *testing.T) {
+	if got, want := nudgeKeystrokesForFamily("codex"), []string{"Enter"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("codex idle submit = %v, want %v", got, want)
 	}
 }
 

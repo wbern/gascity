@@ -288,8 +288,8 @@ func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
 			enters++
 		}
 	}
-	// Only the confirm window's submits; staged-draft recovery adds more.
-	if enters != submitEnterMaxSends {
-		t.Fatalf("submit Enter sends = %d, want %d (no staged-draft resubmit)", enters, submitEnterMaxSends)
+	// An anonymous pre-existing draft cannot authorize even a first submit.
+	if enters != 0 {
+		t.Fatalf("submit Enter sends = %d, want %d (no staged-draft resubmit)", enters, 0)
 	}
 }

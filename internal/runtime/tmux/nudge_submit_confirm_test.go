@@ -262,13 +262,12 @@ func TestRecoverStagedDraftBusyAtEntrySendsNothing(t *testing.T) {
 	got := recoverStagedDraft(
 		func() error { sends++; return nil },
 		func() {},
-		// Busy with the draft still on screen: busy wins, as it does in
-		// submitEnterAndConfirm.
+		// Existing work can be busy while the injected draft remains unsent.
 		func() (paneSubmitObservation, error) { return paneSubmitObservation{busy: true, drafted: true}, nil },
 		noSleep,
 	)
-	if got != stagedDraftSubmittedBusy {
-		t.Fatalf("outcome = %v, want stagedDraftSubmittedBusy", got)
+	if got != stagedDraftUnresolved {
+		t.Fatalf("outcome = %v, want stagedDraftUnresolved (draft still present)", got)
 	}
 	if sends != 0 {
 		t.Fatalf("sends = %d, want 0 (busy pane re-submitted)", sends)
