@@ -3,7 +3,6 @@
 package tmux
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,7 +32,7 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		t.Fatalf("resolving fake TUI: %v", err)
 	}
 
-	start := func(t *testing.T, socket string, swallow int, busyDelay time.Duration) (*Tmux, string) {
+	start := func(t *testing.T, socket string, swallow int, busyDelay time.Duration, alreadyBusy ...bool) (*Tmux, string) {
 		t.Helper()
 		logPath := filepath.Join(t.TempDir(), "tui.log")
 		tm := NewTmuxWithConfig(Config{
@@ -44,6 +43,9 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
 		cmd := fmt.Sprintf("python3 %s %s %d %.3f 30", shellQuote(script), shellQuote(logPath), swallow, busyDelay.Seconds())
+		if len(alreadyBusy) > 0 && alreadyBusy[0] {
+			cmd += " busy"
+		}
 		if _, err := tm.run("new-session", "-d", "-s", "draft", "-x", "120", "-y", "30", cmd); err != nil {
 			t.Skipf("cannot create tmux session (tmux unavailable?): %v", err)
 		}
@@ -101,30 +103,53 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		began := time.Now()
 		err := tm.NudgeSession("draft", largeNudge)
 		t.Logf("NudgeSession returned after %v: %v", time.Since(began), err)
-		if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
-			t.Fatalf("err = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
+		if err != nil {
+			t.Fatalf("err = %v, want draft-consumption proof even without busy rendering", err)
 		}
 		if got := count(t, logPath, "SUBMIT"); got != 1 {
 			t.Fatalf("TUI submits = %d, want exactly 1", got)
 		}
 	})
 
-	// CONTROL: the same eaten submits, but the draft is short enough to show
-	// inline, so no staged-draft marker is on screen. Recovery must not fire:
-	// exactly the ordinary window's submits reach the pane and the verdict
-	// stays unconfirmed, as before the fix.
-	t.Run("no staged-draft marker: no extra submits", func(t *testing.T) {
-		tm, logPath := start(t, "gcstageddraftnone", submitEnterMaxSends+2, 100*time.Millisecond)
-
-		err := tm.NudgeSession("draft", "gc-staged-draft-short-probe")
-		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-			t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	t.Run("raw draft also recovers swallowed submits", func(t *testing.T) {
+		tm, logPath := start(t, "gcstageddraftraw", submitEnterMaxSends+2, 100*time.Millisecond)
+		if err := tm.NudgeSession("draft", "gc-staged-draft-short-probe"); err != nil {
+			t.Fatalf("raw submit failed: %v", err)
 		}
-		if got := count(t, logPath, "SWALLOWED"); got != submitEnterMaxSends {
-			t.Fatalf("TUI saw %d submits, want exactly the ordinary window's %d", got, submitEnterMaxSends)
-		}
-		if got := count(t, logPath, "SUBMIT"); got != 0 {
-			t.Fatalf("TUI submits = %d, want 0", got)
+		if got := count(t, logPath, "SUBMIT"); got != 1 {
+			t.Fatalf("submits=%d want1", got)
 		}
 	})
+	t.Run("startup short multiline is one submission", func(t *testing.T) {
+		tm, logPath := start(t, "gccodexstartupmultiline", 0, 100*time.Millisecond)
+		message := "<system-reminder>\nwork the exact claimed bead\n</system-reminder>"
+		if err := tm.nudgeStartupSession("draft", message); err != nil {
+			lines, captureErr := tm.captureCodexComposer("draft")
+			t.Fatalf("startup failed: %v; capture=%q captureErr=%v", err, lines, captureErr)
+		}
+		if got := count(t, logPath, "SUBMIT"); got != 1 {
+			t.Fatalf("startup submits=%d want1", got)
+		}
+		if got := count(t, logPath, "ESCAPE"); got != 0 {
+			t.Fatalf("startup Escape sends=%d want0", got)
+		}
+	})
+	for _, message := range []string{"gc-busy-raw-injection", "<system-reminder>\nwork the exact claimed bead\n</system-reminder>", largeNudge} {
+		t.Run(fmt.Sprintf("busy queue %d chars", len(message)), func(t *testing.T) {
+			tm, logPath := start(t, fmt.Sprintf("gcbusyqueue%d", len(message)), 0, 0, true)
+			if err := tm.NudgeSession("draft", message); err != nil {
+				lines, captureErr := tm.captureCodexComposer("draft")
+				t.Fatalf("busy queue failed: %v; capture=%q captureErr=%v observation=%+v", err, lines, captureErr, readCodexComposer(lines, message))
+			}
+			if got := count(t, logPath, "QUEUE"); got != 1 {
+				t.Fatalf("queues=%d want1", got)
+			}
+			if got := count(t, logPath, "SUBMIT"); got != 0 {
+				t.Fatalf("busy received Enter submits=%d", got)
+			}
+			if got := count(t, logPath, "ESCAPE"); got != 0 {
+				t.Fatalf("busy received Escape=%d", got)
+			}
+		})
+	}
 }

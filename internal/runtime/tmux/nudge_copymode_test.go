@@ -88,7 +88,7 @@ func countCallsWithTokens(calls [][]string, tokens ...string) int {
 // copy-mode. After `send-keys -X cancel` the identical nudge landed.
 func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 	t.Run("parked pane cancels copy-mode before the literal send", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "1", provider: "codex", pane: "esc to interrupt"}
+		fe := &nudgeRoutingExecutor{inMode: "1", provider: "claude", pane: "esc to interrupt"}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 		if err := tm.NudgeSession("sess", "hello"); err != nil {
@@ -114,7 +114,7 @@ func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
 	})
 
 	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", pane: "esc to interrupt"}
+		fe := &nudgeRoutingExecutor{inMode: "0", provider: "claude", pane: "esc to interrupt"}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 		if err := tm.NudgeSession("sess", "hello"); err != nil {
@@ -254,9 +254,9 @@ func TestNudgeSessionConfirmsSubmitForCodex(t *testing.T) {
 	}
 
 	enters := countCallsWithTokens(fe.calls, "send-keys", "Enter")
-	if enters != submitEnterMaxSends {
-		t.Fatalf("Enter sends = %d, want %d (confirmation loop must re-send while the pane stays idle); calls=%v",
-			enters, submitEnterMaxSends, fe.calls)
+	if enters != 0 {
+		t.Fatalf("Enter sends = %d, want %d (unreadable composer must receive no submit); calls=%v",
+			enters, 0, fe.calls)
 	}
 	if busyProbes := countCallsWithTokens(fe.calls, "capture-pane"); busyProbes == 0 {
 		t.Fatalf("expected the busy indicator to be polled for codex; calls=%v", fe.calls)
@@ -272,11 +272,11 @@ func TestNudgeSessionDistinguishesCodexDraftFromDrainedComposer(t *testing.T) {
 		}
 	})
 
-	t.Run("drained composer proves delivery", func(t *testing.T) {
+	t.Run("empty composer without observing injection is ambiguous", func(t *testing.T) {
 		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", readyPrefix: "› ", pane: "› "}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
-		if err := tm.NudgeSession("sess", "continue the work"); !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
-			t.Fatalf("NudgeSession error = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
+		if err := tm.NudgeSession("sess", "continue the work"); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("NudgeSession error = %v, want ErrNudgeSubmitUnconfirmed", err)
 		}
 	})
 }

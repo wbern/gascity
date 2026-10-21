@@ -56,44 +56,11 @@ var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", 
 // still-correct behavior for every family this fork has verified.
 var defaultNudgeSubmitKeySequence = []string{"Enter"}
 
-// nudgeSubmitKeySequences declares, per provider family, the ordered tmux
-// key names sent (via sendNudgeSubmitSequence) to submit a pasted nudge —
-// the "declarative per-provider nudge submit-key sequence" design from
-// upstream gastownhall/gascity#4706. A family with no entry here gets
-// defaultNudgeSubmitKeySequence.
-//
-// #4706 was filed against a k8s codex agent whose first turn never started:
-// codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
-// is swallowed as a composer newline rather than treated as submit — codex's
-// actual submit sequence is Escape then Enter, which is the codex entry below.
-//
-// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
-// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
-// NudgeSession is skipped and this entry supplies the only one; sending both
-// would put Escape-Escape into the pane, which codex binds to
-// backtrack/edit-previous rather than to submit. Declaring it here (instead of
-// dropping codex from the skip list, which would produce the same two keystrokes
-// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
-// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
-// bare Enter would be swallowed exactly like the first one.
-//
-// This table does NOT yet contain an entry for the claude-specific stall
-// this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
-// "LIVE RESIDUAL": a claude TUI composer left with pasted-but-unsubmitted
-// text even after the unconfirmed-submit and clear-before-paste fixes
-// landed). Investigation (see ra-oudpha comments) could not identify a wrong
-// key as the cause — #4706 itself specifies claude's default submit
-// sequence as plain Enter, which is what this fork already sends, and the
-// live specimens showed text sitting visibly unsubmitted (not a
-// silently-succeeded-but-unconfirmed false negative), ruling out a busy-
-// indicator detection gap as the explanation too. Pinning the actual cause
-// needs a live trace this fork-patch pass does not have access to (the city
-// this bead is scoped against is live and read-only for this pass). Once
-// traced, the fix — whatever key sequence or timing claude's TUI turns out
-// to need — is a single entry in this table plus a test, not a rewrite of
-// NudgeSession.
+// nudgeSubmitKeySequences declares the idle submit keys for each family.
+// Codex uses Enter while idle and its visible Tab-to-queue action while busy;
+// its draft-consumption path never sends Escape into an active turn.
 var nudgeSubmitKeySequences = map[string][]string{
-	"codex": {"Escape", "Enter"},
+	"codex": {"Enter"},
 }
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
@@ -2142,6 +2109,19 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
 }
 
+func (t *Tmux) sendProviderKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
+	codex := sessionlog.ProviderFamily(provider) == "codex"
+	if provider == "" {
+		_, codex = t.stagedDraftMarkerFor(target)
+	}
+	// Preserve hard newlines as one paste rather than separate input keys.
+	// Codex can interpret unbracketed LF as an early submit.
+	if codex && strings.Contains(text, "\n") {
+		return t.sendTextWithRetry(target, text, timeout, t.pasteLiteralText)
+	}
+	return t.sendKeysLiteralWithRetry(target, text, timeout)
+}
+
 func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
 	if len(text) > copilotMaxPasteBytes && sessionlog.ProviderFamily(provider) == "copilot" {
 		chunks := splitPasteText(text, copilotMaxPasteBytes)
@@ -2169,7 +2149,7 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 			}
 		})
 	}
-	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+	return t.sendProviderKeysLiteralWithRetry(target, text, provider, timeout)
 }
 
 func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) error) error {
@@ -2401,6 +2381,8 @@ func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (pa
 		switch {
 		case err != nil:
 			return stagedDraftUnresolved
+		case obs.busy && obs.drafted:
+			return stagedDraftUnresolved
 		case obs.busy:
 			return stagedDraftSubmittedBusy
 		case !obs.drafted:
@@ -2513,24 +2495,18 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 	return nil
 }
 
-// NudgeSession sends a message to a Claude Code session reliably.
-// This is the canonical way to send messages to Claude sessions.
-// Uses: literal mode + 500ms debounce + separate Enter.
-// After sending, triggers SIGWINCH to wake Claude in detached sessions.
-// Verification is the Witness's job (AI), not this function.
-//
-// If the agent TUI hasn't initialized yet (cold startup), retries with backoff
-// up to NudgeReadyTimeout before giving up. See sendKeysLiteralWithRetry.
-//
-// IMPORTANT: Nudges to the same session are serialized to prevent interleaving.
-// If multiple goroutines try to nudge the same session concurrently, they will
-// queue up and execute one at a time. This prevents garbled input when
-// SessionStart hooks and nudges arrive simultaneously.
+// NudgeSession sends a message using the target provider's submit controls.
+// Delivery is serialized per session, with pane resolution, transient-error
+// retries, and detached-pane wakeups. Codex delivery requires observing the
+// owned draft leave the composer after submission; an existing busy turn alone
+// does not confirm delivery. Existing unrelated Codex input is preserved.
 func (t *Tmux) NudgeSession(session, message string) error {
 	return t.nudgeSession(
 		session,
 		message,
-		t.sendKeysLiteralWithRetry,
+		func(target, text string, timeout time.Duration) error {
+			return t.sendProviderKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
+		},
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 	)
@@ -2616,6 +2592,25 @@ func (t *Tmux) nudgeSession(
 		time.Sleep(midSessionDialogSettleDelay)
 	}
 
+	// Codex input ownership is established before pasting. Preserve any
+	// unrelated draft, including on attached panes; retries may resume only
+	// this exact raw payload, never an anonymous pre-existing paste.
+	_, codex := t.stagedDraftMarkerFor(target)
+	pasteCodex := true
+	if codex {
+		lines, err := t.captureCodexComposer(target)
+		if err != nil {
+			return fmt.Errorf("%w: reading Codex composer: %w", ErrNudgeSubmitUnconfirmed, err)
+		}
+		switch readCodexComposer(lines, message).composer {
+		case codexComposerEmpty:
+		case codexComposerOwned:
+			pasteCodex = false
+		default:
+			return fmt.Errorf("%w: Codex composer has existing or unreadable input", ErrNudgeSubmitUnconfirmed)
+		}
+	}
+
 	// 1. Clear any pending input already sitting on the line before pasting,
 	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
 	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
@@ -2627,7 +2622,7 @@ func (t *Tmux) nudgeSession(
 	// tell: a human may be mid-keystroke, and silently wiping their
 	// in-progress input is worse than the concatenation this clear otherwise
 	// prevents (#5192).
-	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
+	if attached, err := t.SessionAttachedWithError(session); !codex && err == nil && !attached {
 		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 			return err
 		}
@@ -2648,8 +2643,10 @@ func (t *Tmux) nudgeSession(
 	t.DismissFeedbackSurveyModalIfPresent(session)
 
 	// 2. Send text in literal mode with retry on transient errors
-	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
-		return err
+	if !codex || pasteCodex {
+		if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+			return err
+		}
 	}
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
@@ -2660,7 +2657,7 @@ func (t *Tmux) nudgeSession(
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
-	if shouldSendEscape(target) {
+	if !codex && shouldSendEscape(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", paneTarget(target), "Escape")
 		time.Sleep(100 * time.Millisecond)
@@ -2669,6 +2666,23 @@ func (t *Tmux) nudgeSession(
 	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
 	// detached but drop the submit key until a terminal resize wakes their loop.
 	t.WakePaneIfDetached(session)
+
+	if codex {
+		observe := func() (codexSubmitObservation, error) {
+			lines, err := t.captureCodexComposer(target)
+			if err != nil {
+				return codexSubmitObservation{}, err
+			}
+			return readCodexComposer(lines, message), nil
+		}
+		err := submitCodexDraft(pasteCodex, observe, func(key string) error {
+			err := t.sendNudgeSubmitSequence(target, []string{key})
+			t.WakePaneIfDetached(session)
+			return err
+		}, time.Sleep)
+		delivered = err == nil
+		return err
+	}
 
 	// 6. Send the provider's declared submit key sequence (see
 	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
