@@ -22,6 +22,10 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		{"anonymous marker collides with payload", []string{"› [Pasted Content 12 chars]", "", "GPT-6 low"}, "[Pasted Content 12 chars]", codexComposerPaste, false},
 		{"placeholder busy", []string{"› [Pasted Content 2048 chars]", "", "tab to queue message"}, "message", codexComposerPaste, true},
 		{"hard newline is not soft wrap", []string{"› first line with", "  wrapping", "", "gpt-6 low"}, "first line with wrapping", codexComposerWrapped, false},
+		{"TUI wraps after slash without whitespace", []string{"› Delivery diagnostic. Mail gas-city-wbern/", "  architect now.", "", "GPT-6.1-Sol low"}, "Delivery diagnostic. Mail gas-city-wbern/architect now.", codexComposerWrapped, false},
+		{"TUI wraps inside long token", []string{"› nonce_abcdef", "  ghijkl", "", "GPT-6.1-Sol low"}, "nonce_abcdefghijkl", codexComposerWrapped, false},
+		{"inserted blank line is not token wrap", []string{"› nonce_abcdef", "  ", "  ghijkl", "", "GPT-6.1-Sol low"}, "nonce_abcdefghijkl", codexComposerOther, false},
+		{"wrapped token changed", []string{"› nonce_abcdef", "  ghijXl", "", "GPT-6.1-Sol low"}, "nonce_abcdefghijkl", codexComposerOther, false},
 		{"joined soft wrap", []string{"› first line with wrapping", "", "gpt-6 low"}, "first line with wrapping", codexComposerOwned, false},
 		{"trailing newline", []string{"› hello", "  ", "", "gpt-6 low"}, "hello\n", codexComposerOwned, false},
 		{"exact input spaces", []string{"› hello  world", "", "gpt-6 low"}, "hello world", codexComposerOther, false},
@@ -209,34 +213,40 @@ func TestCodexComposerRecognizesLivePlainBusyStatus(t *testing.T) {
 }
 
 func TestCodexNudgeHandlesOnlyFreshlyPastedRenderedWraps(t *testing.T) {
-	for _, existing := range []bool{false, true} {
-		t.Run(fmt.Sprintf("existing=%v", existing), func(t *testing.T) {
-			empty := "Working (1s • esc to interrupt)\n› \x1b[2mAsk Codex to do anything\x1b[0m\n\ntab to queue message"
-			wrapped := "Working (1s • esc to interrupt)\n› first line with\n  wrapping\n\ntab to queue message"
-			fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: empty}
-			if existing {
-				fe.pane = wrapped
-			}
-			fe.errFor = func(args []string) error {
-				if callHasTokens(args, "send-keys", "Tab") {
-					fe.pane = empty
+	for _, tc := range []struct{ message, rendered string }{
+		{"first line with wrapping", "first line with\n  wrapping"},
+		{"mail gas-city-wbern/architect", "mail gas-city-wbern/\n  architect"},
+		{"nonce_abcdefghijkl", "nonce_abcdef\n  ghijkl"},
+	} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing=%v", tc.message, existing), func(t *testing.T) {
+				empty := "Working (1s • esc to interrupt)\n› \x1b[2mAsk Codex to do anything\x1b[0m\n\ntab to queue message"
+				wrapped := "Working (1s • esc to interrupt)\n› " + tc.rendered + "\n\ntab to queue message"
+				fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: empty}
+				if existing {
+					fe.pane = wrapped
 				}
-				return nil
-			}
-			tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
-			pastes := 0
-			err := tm.nudgeSession("sess", "first line with wrapping", func(string, string, time.Duration) error {
-				pastes++
-				fe.pane = wrapped
-				return nil
-			}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
-			if existing {
-				if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys") != 0 {
-					t.Fatalf("existing ambiguous input received keys: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
+				fe.errFor = func(args []string) error {
+					if callHasTokens(args, "send-keys", "Tab") {
+						fe.pane = empty
+					}
+					return nil
 				}
-			} else if err != nil || pastes != 1 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 1 {
-				t.Fatalf("own rendered draft not queued: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
-			}
-		})
+				tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+				pastes := 0
+				err := tm.nudgeSession("sess", tc.message, func(string, string, time.Duration) error {
+					pastes++
+					fe.pane = wrapped
+					return nil
+				}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+				if existing {
+					if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys") != 0 {
+						t.Fatalf("existing ambiguous input received keys: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
+					}
+				} else if err != nil || pastes != 1 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 1 {
+					t.Fatalf("own rendered draft not queued: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
+				}
+			})
+		}
 	}
 }
