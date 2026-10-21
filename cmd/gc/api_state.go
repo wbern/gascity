@@ -748,6 +748,7 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 	store := cs.cityBeadStore
 	cityPath := cs.cityPath
 	mailProv := cs.cityMailProv
+	eventProv := cs.eventProv
 	cs.mu.RUnlock()
 	if cfg == nil || !cfg.Maintenance.Dolt.Enabled {
 		return
@@ -756,26 +757,30 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		Cfg:               cfg.Maintenance.Dolt,
 		Store:             store,
 		CityPath:          cityPath,
-		Recorder:          cs.eventProv,
+		Recorder:          eventProv,
 		Stderr:            os.Stderr,
 		Mail:              mailProv,
-		LastRunAt:         supervisor.SeedLastRunAt(cs.eventProv),
 		DiskFreeBytes:     doltContainerFreeBytesFunc,
 		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
 		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),
 	}
-	active := deps.OpenDoltOps != nil && deps.OpenDoltBackup != nil
-	// Always log the loop's startup so operators can confirm initialization
-	// (and its mode) from the supervisor log, not just the observe-only case.
-	fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), active)) //nolint:errcheck // best-effort stderr
-	loop := supervisor.NewStoreMaintenanceLoop(deps)
-	// Retain the handle so the API layer can expose
-	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
-	// without a separate wiring path.
-	cs.mu.Lock()
-	cs.maintenanceLoop = loop
-	cs.mu.Unlock()
-	go loop.Run(ctx)
+	go func() {
+		// Retained event history can span large compressed archives. Keep that
+		// read off city startup, while still seeding before any maintenance run
+		// or manual trigger can be admitted.
+		deps.LastRunAt = supervisor.SeedLastRunAt(eventProv)
+		loop := supervisor.NewStoreMaintenanceLoop(deps)
+		cs.mu.Lock()
+		if ctx.Err() != nil {
+			cs.mu.Unlock()
+			return
+		}
+		cs.maintenanceLoop = loop
+		cs.mu.Unlock()
+		active := deps.OpenDoltOps != nil && deps.OpenDoltBackup != nil
+		fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), active)) //nolint:errcheck // best-effort stderr
+		loop.Run(ctx)
+	}()
 }
 
 // maintenanceStartupLine formats the one-line banner emitted when the Dolt
@@ -1507,7 +1512,7 @@ func configDropsBoundRigs(current, next *config.City) bool {
 // --- api.State implementation ---
 
 // MaintenanceLoop exposes the Dolt store maintenance loop to the API
-// layer, returning nil when [maintenance.dolt] is disabled. The
+// layer, returning nil when maintenance is disabled or still initializing. The
 // concrete *supervisor.StoreMaintenanceLoop satisfies
 // api.MaintenanceProvider directly.
 func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {

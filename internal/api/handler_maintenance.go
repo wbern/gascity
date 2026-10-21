@@ -18,6 +18,13 @@ func maintenanceDisabled() error {
 	return apierr.ServiceUnavailable.Msg("maintenance_disabled: [maintenance.dolt] enabled=false in city.toml")
 }
 
+func (s *Server) maintenanceUnavailable() error {
+	if cfg := s.state.Config(); cfg != nil && cfg.Maintenance.Dolt.Enabled {
+		return apierr.ServiceUnavailable.Msg("maintenance_initializing: maintenance history is still loading; retry shortly")
+	}
+	return maintenanceDisabled()
+}
+
 // humaHandleMaintenanceStatus is the GET /v0/city/{city}/maintenance/status
 // handler. It returns the configured enablement state, the bounded run
 // history ring buffer, the in-flight start time (when a cycle is
@@ -33,7 +40,7 @@ func maintenanceDisabled() error {
 func (s *Server) humaHandleMaintenanceStatus(_ context.Context, _ *MaintenanceStatusInput) (*MaintenanceStatusOutput, error) {
 	loop := s.state.MaintenanceLoop()
 	if loop == nil {
-		return nil, maintenanceDisabled()
+		return nil, s.maintenanceUnavailable()
 	}
 	cfg := s.state.Config()
 	intervalSec := int64(0)
@@ -90,7 +97,7 @@ func (s *Server) humaHandleMaintenanceStatus(_ context.Context, _ *MaintenanceSt
 func (s *Server) humaHandleMaintenanceTriggerDoltGC(ctx context.Context, input *MaintenanceTriggerInput) (*MaintenanceTriggerOutput, error) {
 	loop := s.state.MaintenanceLoop()
 	if loop == nil {
-		return nil, maintenanceDisabled()
+		return nil, s.maintenanceUnavailable()
 	}
 
 	if input.Wait {

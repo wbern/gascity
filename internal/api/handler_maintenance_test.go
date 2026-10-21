@@ -137,6 +137,28 @@ func TestHumaHandleMaintenanceStatus_Disabled(t *testing.T) {
 	}
 }
 
+func TestMaintenanceInitializingDoesNotReportDisabled(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			fs := maintenanceTestState(t, nil)
+			h := newTestCityHandler(t, fs)
+			path := "/maintenance/status"
+			if method == http.MethodPost {
+				path = "/maintenance/dolt-gc"
+			}
+			req := httptest.NewRequest(method, cityURL(fs, path), nil)
+			if method == http.MethodPost {
+				req = newPostRequest(cityURL(fs, path), nil)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "maintenance_initializing") || strings.Contains(rec.Body.String(), "maintenance_disabled") {
+				t.Fatalf("enabled maintenance reported incorrectly while history loads: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestHumaHandleMaintenanceTriggerDoltGC_WaitSuccess verifies ?wait=true
 // returns 202 with the full Run body when the cycle succeeds. The
 // handler registers DefaultStatus=202 so even the synchronous path uses
