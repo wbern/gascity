@@ -537,7 +537,7 @@ func TestDiscardDoesNothing(_ *testing.T) {
 
 func TestReadAllEmpty(t *testing.T) {
 	// Missing file → nil, nil.
-	events, err := ReadAll("/nonexistent/path/events.jsonl")
+	events, err := ReadAll(filepath.Join(t.TempDir(), "missing", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadAll(missing) error: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestReadLatestSeq(t *testing.T) {
 
 func TestReadLatestSeqEmpty(t *testing.T) {
 	// Missing file → (0, nil)
-	seq, err := ReadLatestSeq("/nonexistent/path/events.jsonl")
+	seq, err := ReadLatestSeq(filepath.Join(t.TempDir(), "missing", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadLatestSeq(missing) error: %v", err)
 	}
@@ -1120,7 +1120,7 @@ func TestReadFrom(t *testing.T) {
 }
 
 func TestReadFromMissingFile(t *testing.T) {
-	evts, off, err := ReadFrom("/nonexistent/path/events.jsonl", 0)
+	evts, off, err := ReadFrom(filepath.Join(t.TempDir(), "missing", "events.jsonl"), 0)
 	if err != nil {
 		t.Fatalf("ReadFrom(missing) error: %v", err)
 	}
@@ -1398,8 +1398,10 @@ func TestFileRecorderWatchAfterLatestStartsAtEOF(t *testing.T) {
 	if !ok {
 		t.Fatalf("Watch returned %T, want *fileWatcher", w)
 	}
-	if fw.offset != info.Size() {
-		t.Fatalf("watch offset = %d, want EOF %d", fw.offset, info.Size())
+	// Construction pins only the active identity/size. The synchronous Next
+	// wrapper reaches EOF lazily without a cold LatestSeq scan in Watch.
+	if fw.offset != 0 || !fw.needsBackfill || fw.activeSize != info.Size() {
+		t.Fatalf("watch eagerly scanned history: offset=%d backfill=%v size=%d", fw.offset, fw.needsBackfill, fw.activeSize)
 	}
 
 	go func() {
