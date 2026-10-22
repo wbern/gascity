@@ -204,6 +204,57 @@ func (g *Git) HasUncommittedOrIgnoredWork() bool {
 	return strings.TrimSpace(out) != ""
 }
 
+// WorkingTreeStatus splits `git status --ignored` into real dirt and ignored
+// paths. Dirty holds tracked changes and untracked files; Ignored holds ignored
+// paths as git reports them, which collapses a wholly-ignored directory to a
+// single "dir/" root. A collapsed root says nothing about what lies beneath
+// it, so callers that delete must inspect the tree themselves.
+type WorkingTreeStatus struct {
+	Dirty   []string
+	Ignored []string
+}
+
+// WorkingTreeStatus reports the working tree's dirt and ignored roots. A
+// probe failure is returned as an error so removal callers can fail closed.
+func (g *Git) WorkingTreeStatus() (WorkingTreeStatus, error) {
+	out, err := g.run("status", "--porcelain=v1", "-z", "--ignored")
+	if err != nil {
+		return WorkingTreeStatus{}, fmt.Errorf("checking working tree status: %w", err)
+	}
+	return parseWorkingTreeStatus(out), nil
+}
+
+// parseWorkingTreeStatus parses NUL-separated porcelain v1 records. Any record
+// it cannot parse is reported as dirt, so an unexpected line (for example a
+// warning interleaved by the combined-output runner) can only keep a tree,
+// never release it.
+func parseWorkingTreeStatus(out string) WorkingTreeStatus {
+	var st WorkingTreeStatus
+	records := strings.Split(out, "\x00")
+	for i := 0; i < len(records); i++ {
+		rec := records[i]
+		if rec == "" {
+			continue
+		}
+		if len(rec) < 4 || rec[2] != ' ' {
+			st.Dirty = append(st.Dirty, rec)
+			continue
+		}
+		code, path := rec[:2], rec[3:]
+		switch code {
+		case "!!":
+			st.Ignored = append(st.Ignored, path)
+		default:
+			st.Dirty = append(st.Dirty, path)
+			// Renames and copies carry their source path as the next record.
+			if code[0] == 'R' || code[0] == 'C' || code[1] == 'R' || code[1] == 'C' {
+				i++
+			}
+		}
+	}
+	return st
+}
+
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
 // any remote tracking branch. Used as a safety check before removing a
 // worktree — unpushed commits represent completed work that would be lost.

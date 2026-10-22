@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // fakeStrayProbe is a gitProbe whose answers are keyed by the directory it is
@@ -32,6 +34,16 @@ func (f fakeStrayProbe) HasUnlandedCommitsResult() (bool, error) { return f.unpu
 func (f fakeStrayProbe) HasUnpreservedCommitsResult() (bool, error) { return f.unpreserved, nil }
 func (f fakeStrayProbe) HasStashesResult() (bool, error)            { return f.stashes, nil }
 func (f fakeStrayProbe) WorktreeRemove(string, bool) error          { return nil }
+func (f fakeStrayProbe) WorkingTreeStatus() (git.WorkingTreeStatus, error) {
+	var st git.WorkingTreeStatus
+	if f.uncommitted {
+		st.Dirty = []string{"fake-dirty"}
+	}
+	if f.ignored {
+		st.Ignored = []string{"fake-ignored-missing"}
+	}
+	return st, nil
+}
 
 // mkCheckout creates dir/.git (a directory, mimicking an unregistered clone)
 // so the scan treats dir as a git checkout.

@@ -22,6 +22,7 @@ type gitProbe interface {
 	IsRepo() bool
 	CurrentBranch() (string, error)
 	HasUncommittedOrIgnoredWork() bool
+	WorkingTreeStatus() (git.WorkingTreeStatus, error)
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
 	HasUnpreservedCommitsResult() (bool, error)

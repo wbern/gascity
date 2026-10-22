@@ -56,6 +56,8 @@ type worktreeDecisionJSON struct {
 	Reason            string `json:"reason,omitempty"`
 	Warning           string `json:"warning,omitempty"`
 	HoldsUnlandedWork bool   `json:"holds_unlanded_work"`
+	// NonDisposableIgnored names the ignored paths that kept the tree.
+	NonDisposableIgnored []string `json:"non_disposable_ignored,omitempty"`
 }
 
 // newWorktreeReapJSON projects a reapReport onto its wire shape.
@@ -80,13 +82,14 @@ func worktreeDecisionsJSON(decisions []reapDecision) []worktreeDecisionJSON {
 	out := make([]worktreeDecisionJSON, 0, len(decisions))
 	for _, d := range decisions {
 		out = append(out, worktreeDecisionJSON{
-			BeadID:            d.BeadID,
-			Rig:               d.Rig,
-			Branch:            d.Branch,
-			Path:              d.Path,
-			Reason:            d.Reason,
-			Warning:           d.Warning,
-			HoldsUnlandedWork: d.HoldsUnlandedWork,
+			BeadID:               d.BeadID,
+			Rig:                  d.Rig,
+			Branch:               d.Branch,
+			Path:                 d.Path,
+			Reason:               d.Reason,
+			Warning:              d.Warning,
+			HoldsUnlandedWork:    d.HoldsUnlandedWork,
+			NonDisposableIgnored: d.NonDisposableIgnored,
 		})
 	}
 	return out

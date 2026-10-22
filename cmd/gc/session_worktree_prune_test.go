@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/git"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -39,6 +41,21 @@ func (f *fakeGitProbe) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
 }
 func (f *fakeGitProbe) HasUncommittedOrIgnoredWork() bool { return f.hasUncommitted || f.hasIgnored }
+
+// WorkingTreeStatus mirrors the boolean fixture fields. The ignored root names
+// no real path, so a caller that inspects it on disk finds nothing there and
+// keeps the tree, matching what hasIgnored has always meant to these tests.
+func (f *fakeGitProbe) WorkingTreeStatus() (git.WorkingTreeStatus, error) {
+	var st git.WorkingTreeStatus
+	if f.hasUncommitted {
+		st.Dirty = []string{"fake-dirty"}
+	}
+	if f.hasIgnored {
+		st.Ignored = []string{"fake-ignored-missing"}
+	}
+	return st, nil
+}
+
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
