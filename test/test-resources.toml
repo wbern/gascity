@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 746
-baseline_files = 220
+baseline_calls = 747
+baseline_files = 221
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 504
-baseline_files = 147
+baseline_calls = 505
+baseline_files = 148
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -208,6 +208,17 @@ expires = "2026-10-31"
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCheckBeadsBDVersion"
+resources = ["subprocess"]
+owner_bead = "gcw-gytyd"
+invariant = "version-skew exits and diagnostics exercise actual Bash parsing in an exact Medium owner"
+resource_owner = "the one lexical Bash launch uses test-owned HOME, PATH, go.mod and stub bd/go without network; all six version-skew scenarios retain their assertions"
+migration_target = "retain the Bash composition proof; keep parsing and exit assertions here and remove this row only when the script boundary is retired"
+expires = "2026-10-31"
+
 [[medium]]
 package_dir = "internal/api"
 package_name = "api"
