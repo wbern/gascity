@@ -545,8 +545,8 @@ func RecordBDShimDisposition(ctx context.Context, verb, disposition string) {
 		attribute.String("disposition", disposition),
 	))
 	emit(ctx, "bd.shim.call", otellog.SeverityInfo,
-		otellog.String("verb", verb),
-		otellog.String("disposition", disposition),
+		attribute.String("verb", verb),
+		attribute.String("disposition", disposition),
 	)
 }
 
