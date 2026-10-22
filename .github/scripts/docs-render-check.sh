@@ -80,8 +80,15 @@ BASE_OUT="$WORK_TMP/base-mint.txt"
 BASE_TREE="$WORK_TMP/base-docs"
 
 # --- HEAD check --------------------------------------------------------------
+# Materialize HEAD's docs tree the same way as BASE's below, so both runs see
+# only docs/. Running mint from the repo root also scans every Markdown file
+# outside docs/ (engdocs/, prompts, gate notes), whose links then read as
+# net-new because the docs-only BASE tree never contains them.
+HEAD_TREE="$WORK_TMP/head-docs"
+mkdir -p "$HEAD_TREE"
+cp -R "$DOCS_DIR" "$HEAD_TREE/"
 HEAD_EXIT=0
-run_mint "." "$HEAD_OUT" || HEAD_EXIT=$?
+run_mint "$HEAD_TREE" "$HEAD_OUT" || HEAD_EXIT=$?
 
 if [[ $HEAD_EXIT -eq 0 ]]; then
     echo "docs-render-check: no broken links in HEAD — PASS" >&2
