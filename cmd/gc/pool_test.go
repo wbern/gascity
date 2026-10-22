@@ -954,6 +954,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Admission:                    &config.AdmissionConfig{Check: "exit 0", Timeout: "10s", Interval: "30s", OnError: "deny"},
 		SkillInclude:                 []string{"include-skill"},
 		SkillExclude:                 []string{"exclude-skill"},
+		CapacityGroup:                "group-a",
 	}
 
 	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
@@ -1029,6 +1030,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.Admission.Check = "MUTATED"
 	newMin := 999
 	src.MinActiveSessions = &newMin
+	src.CapacityGroup = "MUTATED"
 
 	if dst.PreStart[0] == "MUTATED" {
 		t.Error("PreStart is not a deep copy")
@@ -1068,6 +1070,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	}
 	if dst.MinActiveSessions != nil && *dst.MinActiveSessions == 999 {
 		t.Error("MinActiveSessions is not a deep copy")
+	}
+	if dst.CapacityGroup == "MUTATED" {
+		t.Error("CapacityGroup is not a deep copy")
 	}
 }
 
