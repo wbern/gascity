@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// ErrNudgeInputNotReady means no input was injected because the live composer
+// did not expose a safe submit action. The caller may retry at a later boundary.
+var ErrNudgeInputNotReady = errors.New("nudge: composer is not ready; no input injected")
+
 type codexComposerState uint8
 
 const (

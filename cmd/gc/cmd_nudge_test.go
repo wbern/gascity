@@ -2774,66 +2774,96 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 // through failedQueuedNudge's attempt-counting/dead-letter path — which
 // would requeue it and re-inject the identical reminder on the next pass.
 func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	dir := t.TempDir()
-	now := time.Now().Add(-1 * time.Minute)
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
-		t.Fatalf("enqueueQueuedNudge: %v", err)
-	}
+	for _, tc := range []struct {
+		name     string
+		cause    error
+		notReady bool
+	}{
+		{"delivered_unobserved", tmux.ErrNudgeSubmitDeliveredUnobserved, false},
+		{"not_ready_no_input", fmt.Errorf("provider deferred: %w", tmux.ErrNudgeInputNotReady), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			now := time.Now().Add(-1 * time.Minute)
+			if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
 
-	store := openNudgeBeadStore(dir)
-	fake := runtime.NewFake()
-	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	idleSince := time.Now().Add(-10 * time.Second)
-	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
-	fake.NudgeErrors = map[string]error{info.SessionName: tmux.ErrNudgeSubmitDeliveredUnobserved}
+			store := openNudgeBeadStore(dir)
+			fake := runtime.NewFake()
+			mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			idleSince := time.Now().Add(-10 * time.Second)
+			fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+			fake.NudgeErrors = map[string]error{info.SessionName: tc.cause}
 
-	target := nudgeTarget{
-		cityPath:    dir,
-		agent:       config.Agent{Name: "worker"},
-		sessionID:   info.ID,
-		resolved:    &config.ResolvedProvider{Name: "codex"},
-		sessionName: info.SessionName,
-	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+			target := nudgeTarget{
+				cityPath:    dir,
+				agent:       config.Agent{Name: "worker"},
+				sessionID:   info.ID,
+				resolved:    &config.ResolvedProvider{Name: "codex"},
+				sessionName: info.SessionName,
+			}
+			obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
-	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
-	if err != nil {
-		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
-	}
-	if !delivered {
-		t.Fatal("delivered = false, want true: a drained-but-unobserved submit is proven delivery, not a failure")
-	}
+			delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+			if err != nil {
+				t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+			}
+			if tc.notReady {
+				pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if delivered || len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 || pending[0].Attempts != 0 || !pending[0].LastAttemptAt.IsZero() {
+					t.Fatalf("no-input refusal consumed queue item: delivered=%v pending=%+v inFlight=%+v dead=%+v", delivered, pending, inFlight, dead)
+				}
+				delete(fake.NudgeErrors, info.SessionName)
+				delivered, err = tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+				if err != nil || !delivered {
+					t.Fatalf("healthy next pass = %v, %v", delivered, err)
+				}
+				pending, inFlight, dead, err = listQueuedNudges(dir, "worker", time.Now())
+				if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+					t.Fatalf("healthy delivery left queue items: %v %+v %+v %+v", err, pending, inFlight, dead)
+				}
+				return
+			}
+			if !delivered {
+				t.Fatal("delivered = false, want true: a drained-but-unobserved submit is proven delivery, not a failure")
+			}
 
-	var nudgeCalls []runtime.Call
-	for _, call := range fake.Calls {
-		if call.Method == "Nudge" {
-			nudgeCalls = append(nudgeCalls, call)
-		}
-	}
-	if len(nudgeCalls) != 1 {
-		t.Fatalf("nudge calls = %d, want exactly 1 (injected once, never retried)", len(nudgeCalls))
-	}
+			var nudgeCalls []runtime.Call
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					nudgeCalls = append(nudgeCalls, call)
+				}
+			}
+			if len(nudgeCalls) != 1 {
+				t.Fatalf("nudge calls = %d, want exactly 1 (injected once, never retried)", len(nudgeCalls))
+			}
 
-	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
-	if err != nil {
-		t.Fatalf("listQueuedNudges: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending = %d, want 0: failedQueuedNudge must never be reached for ErrNudgeSubmitDeliveredUnobserved", len(pending))
-	}
-	if len(inFlight) != 0 {
-		t.Fatalf("inFlight = %d, want 0", len(inFlight))
-	}
-	if len(dead) != 0 {
-		t.Fatalf("dead = %d, want 0: a single delivered-unobserved attempt must not dead-letter", len(dead))
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != 0 {
+				t.Fatalf("pending = %d, want 0: failedQueuedNudge must never be reached for ErrNudgeSubmitDeliveredUnobserved", len(pending))
+			}
+			if len(inFlight) != 0 {
+				t.Fatalf("inFlight = %d, want 0", len(inFlight))
+			}
+			if len(dead) != 0 {
+				t.Fatalf("dead = %d, want 0: a single delivered-unobserved attempt must not dead-letter", len(dead))
+			}
+		})
 	}
 }
 

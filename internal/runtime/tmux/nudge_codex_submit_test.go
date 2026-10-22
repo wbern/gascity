@@ -251,3 +251,18 @@ func TestCodexNudgeHandlesOnlyFreshlyPastedRenderedWraps(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexBusyWithoutQueueActionDoesNotStageReminder(t *testing.T) {
+	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: "Working (18s • esc to interrupt)\n\n› \x1b[2mAsk Codex to do anything\x1b[0m\n\nGPT-6.1-Sol … Goal achieved (2m)    ⚠ 1 warning · f2 to view"}
+	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+	message := "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [session] narrow reminder\n\nHandle them after this turn.\n</system-reminder>\n"
+	pastes := 0
+	err := tm.nudgeSession("sess", message, func(_ string, text string, _ time.Duration) error {
+		pastes++
+		fe.pane = "Working (18s • esc to interrupt)\n\n› " + strings.ReplaceAll(text, "\n", "\n  ") + "\n\nGPT-6.1-Sol … Goal achieved (2m)    ⚠ 1 warning · f2 to view"
+		return nil
+	}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+	if !errors.Is(err, ErrNudgeInputNotReady) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys", "Enter") != 0 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 0 {
+		t.Fatalf("busy unsafe boundary mutated input: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
+	}
+}

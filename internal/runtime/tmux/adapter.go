@@ -1804,14 +1804,15 @@ var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second
 const startupNudgeRetryBudgetFraction = 0.5
 
 // sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
-// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
+// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed or
+// ErrNudgeInputNotReady, waits out a
 // backoff and calls send again — re-running the whole cycle re-pastes the
 // nudge text, which self-heals a draft the still-booting TUI cleared or
 // redrew. Any other error, or exhausting the backoffs, returns immediately so
 // a healthy fast boot never pays this cost.
 //
-// busy is checked once the backoff sleep has elapsed, right before the next
-// resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
+// For unconfirmed submissions, busy is checked once the backoff sleep has
+// elapsed, right before the next resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
 // for a couple of seconds per attempt and can still miss a pane that goes
 // busy a little later — an agent whose first turn started from a large argv
 // prompt can take several more seconds to render its busy indicator. If busy
@@ -1824,6 +1825,7 @@ const startupNudgeRetryBudgetFraction = 0.5
 // case this check is skipped and the ladder behaves as before. A busy
 // check's own error is treated the same as "not busy" — best-effort, never
 // a reason to fail the retry loop itself.
+// ErrNudgeInputNotReady skips this busy check because no input was injected.
 //
 // ctx is checked before each backoff sleep: if the start is already being
 // canceled elsewhere (e.g. the supervising startup_timeout deadline), this
@@ -1868,7 +1870,8 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = send()
-		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		notReady := errors.Is(err, ErrNudgeInputNotReady)
+		if err == nil || (!notReady && !errors.Is(err, ErrNudgeSubmitUnconfirmed)) {
 			return err
 		}
 		if attempt >= len(startupNudgeRetryBackoffs) {
@@ -1885,7 +1888,9 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 		if ctx.Err() != nil {
 			return err
 		}
-		if busy != nil {
+		// NotReady proves this attempt injected nothing; an unrelated busy turn
+		// cannot acknowledge it. Retry within the same bounded startup budget.
+		if busy != nil && !notReady {
 			if isBusy, _ := busy(); isBusy {
 				return nil
 			}

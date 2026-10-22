@@ -3576,3 +3576,25 @@ func TestDoStartSession_WarnsWhenTrustDialogLeftUnconfirmed(t *testing.T) {
 		t.Fatalf("warning %q does not name the session", warnings.String())
 	}
 }
+
+func TestStartupNudgeNotReadyCannotUseUnrelatedBusyState(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exhausted=%v", exhausted), func(t *testing.T) {
+			sends, busyReads := 0, 0
+			err := sendStartupNudgeWithRetry(context.Background(), func() error {
+				sends++
+				if !exhausted && sends == 2 {
+					return nil
+				}
+				return fmt.Errorf("composer: %w", ErrNudgeInputNotReady)
+			}, func(time.Duration) {}, func() (bool, error) { busyReads++; return true, nil })
+			wantSends := 2
+			if exhausted {
+				wantSends = len(startupNudgeRetryBackoffs) + 1
+			}
+			if sends != wantSends || busyReads != 0 || (!exhausted && err != nil) || (exhausted && !errors.Is(err, ErrNudgeInputNotReady)) {
+				t.Fatalf("not-ready startup: err=%v sends=%d want=%d busyReads=%d", err, sends, wantSends, busyReads)
+			}
+		})
+	}
+}
