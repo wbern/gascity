@@ -164,3 +164,21 @@ func TestWorktreeReapJSONDryRunByDefault(t *testing.T) {
 		t.Errorf("reap --json must report dry_run true by default; got %s", stdout)
 	}
 }
+
+// TestWorktreeReapJSON_NamesNonDisposableIgnored pins that a tree kept for
+// ignored content carries the offending paths on the wire, so an operator can
+// tell which file to delete or which pattern to configure.
+func TestWorktreeReapJSON_NamesNonDisposableIgnored(t *testing.T) {
+	payload := newWorktreeReapJSON(reapReport{DryRun: true, Protected: []reapDecision{{
+		BeadID: "b-1", Rig: "demo", Path: "/wt/1",
+		Reason:               "unsafe git state: non-disposable ignored: report/a.json",
+		NonDisposableIgnored: []string{"report/a.json"},
+	}}})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"non_disposable_ignored":["report/a.json"]`) {
+		t.Fatalf("payload = %s, want non_disposable_ignored naming report/a.json", raw)
+	}
+}

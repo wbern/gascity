@@ -2944,6 +2944,16 @@ type DaemonConfig struct {
 	// defaults to DefaultAutoReapClosedBeadWorktreesPaceMillis. Zero
 	// disables pacing.
 	AutoReapClosedBeadWorktreesPaceMillis *int `toml:"auto_reap_closed_bead_worktrees_pace_millis,omitempty" jsonschema:"default=150"`
+	// AutoReapDisposableIgnored lists extra worktree-relative paths whose
+	// ignored contents the closed-bead reaper may delete with the worktree,
+	// on top of the built-in set (files gc itself writes, plus node_modules/
+	// and __pycache__/ anywhere). A trailing "/" matches directories only; a
+	// leading "**/" matches at any depth; otherwise the pattern is anchored
+	// at the worktree root. Segments may use path.Match globs. Use it for
+	// rebuildable project output such as "report/", "dist/" or ".vercel/".
+	// Matched directories are still walked, and any nested .git keeps the
+	// worktree.
+	AutoReapDisposableIgnored []string `toml:"auto_reap_disposable_ignored,omitempty"`
 	// AutoReapClosedBeadWorktreesMaxLoadPercent skips a whole reap pass while
 	// the host's 1-minute load average exceeds this percentage of its CPU
 	// count, so reclamation yields to real work. Nil (unset) defaults to

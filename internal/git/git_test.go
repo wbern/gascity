@@ -617,6 +617,73 @@ func TestHasUncommittedOrIgnoredWork_IgnoredOnly(t *testing.T) {
 	}
 }
 
+// TestWorkingTreeStatus_SeparatesIgnoredRootsFromRealDirt pins the split the
+// worktree reaper relies on: tracked changes and untracked files are dirt,
+// while ignored paths are reported separately as collapsed roots for the
+// caller to classify.
+func TestWorkingTreeStatus_SeparatesIgnoredRootsFromRealDirt(t *testing.T) {
+	repo := initTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n.env.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", ".gitignore")
+	runGit(t, repo, "commit", "-m", "ignore deps")
+	if err := os.MkdirAll(filepath.Join(repo, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "node_modules", "pkg", "index.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env.local"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := New(repo).WorkingTreeStatus()
+	if err != nil {
+		t.Fatalf("WorkingTreeStatus: %v", err)
+	}
+	if len(st.Dirty) != 0 {
+		t.Errorf("Dirty = %q, want none for an ignored-only tree", st.Dirty)
+	}
+	want := map[string]bool{"node_modules/": true, ".env.local": true}
+	if len(st.Ignored) != len(want) {
+		t.Fatalf("Ignored = %q, want exactly %v", st.Ignored, want)
+	}
+	for _, p := range st.Ignored {
+		if !want[p] {
+			t.Errorf("unexpected ignored root %q (got %q)", p, st.Ignored)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = New(repo).WorkingTreeStatus()
+	if err != nil {
+		t.Fatalf("WorkingTreeStatus: %v", err)
+	}
+	if len(st.Dirty) != 1 || st.Dirty[0] != "new.txt" {
+		t.Errorf("Dirty = %q, want [new.txt]", st.Dirty)
+	}
+}
+
+func TestWorkingTreeStatus_ProbeErrorIsReturned(t *testing.T) {
+	if _, err := New(t.TempDir()).WorkingTreeStatus(); err == nil {
+		t.Error("WorkingTreeStatus outside a repository returned nil error, want failure")
+	}
+}
+
+func TestParseWorkingTreeStatus_FailsClosedOnUnparseableRecord(t *testing.T) {
+	st := parseWorkingTreeStatus("!! node_modules/\x00warning: something odd\x00")
+	if len(st.Dirty) == 0 {
+		t.Errorf("Dirty = %q, want the unparseable record treated as dirt", st.Dirty)
+	}
+	st = parseWorkingTreeStatus("R  new.go\x00old.go\x00")
+	if len(st.Dirty) != 1 || st.Dirty[0] != "new.go" {
+		t.Errorf("Dirty = %q, want the rename's source path consumed, not reported twice", st.Dirty)
+	}
+}
+
 func TestHasUnpushedCommits_NoneWhenClean(t *testing.T) {
 	// Create a bare remote and clone it so there's a tracking branch.
 	bare := t.TempDir()

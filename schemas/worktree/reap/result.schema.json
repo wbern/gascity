@@ -85,6 +85,13 @@
           "holds_unlanded_work": {
             "type": "boolean",
             "description": "The worktree carries commits whose content no remote carries."
+          },
+          "non_disposable_ignored": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ignored paths that kept the worktree because they are not provably rebuildable; configure daemon.auto_reap_disposable_ignored or remove them."
           }
         },
         "additionalProperties": true

@@ -126,7 +126,9 @@ func TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree(t *testing.T) {
 
 // TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree proves the removal
 // gate sees ignored files too. A credential file is normally ignored, but
-// removing this worktree would still destroy it.
+// removing this worktree would still destroy it. A regular (non-symlink)
+// .env.local is not in the disposable-ignored set, so it must keep the tree
+// and the reason must name it.
 func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	if err := os.WriteFile(filepath.Join(rigRoot, ".gitignore"), []byte(".env.local\n"), 0o644); err != nil {
@@ -148,8 +150,9 @@ func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for ignored-only worktree\nstderr:\n%s", report.Reaped, stderr.String())
 	}
-	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "uncommitted") {
-		t.Fatalf("Protected = %+v, want one uncommitted-work protection\nstderr:\n%s", report.Protected, stderr.String())
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "non-disposable ignored") ||
+		!strings.Contains(report.Protected[0].Reason, ".env.local") {
+		t.Fatalf("Protected = %+v, want one protection naming the non-disposable ignored .env.local\nstderr:\n%s", report.Protected, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(wt, ".env.local")); err != nil {
 		t.Fatalf("ignored file was removed or unstattable: %v", err)

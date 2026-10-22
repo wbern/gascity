@@ -35,6 +35,10 @@ type reapDecision struct {
 	// other reason describes a tree that can be rebuilt from the remote, so
 	// this is the only one whose accumulation silently risks losing work.
 	HoldsUnlandedWork bool
+	// NonDisposableIgnored lists the ignored paths that kept the worktree
+	// because they are not provably rebuildable (see nonDisposableIgnored).
+	// Empty unless that was the protection.
+	NonDisposableIgnored []string
 	// Warning records a non-blocking observation about a reaped worktree —
 	// a signal worth an operator's attention that does not endanger the
 	// removal. Empty when there is nothing to note.
@@ -81,7 +85,8 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted or ignored files and no unlanded commits that
+//  6. Git state: no uncommitted files, no ignored content outside the
+//     disposable set (see nonDisposableIgnored), and no unlanded commits that
 //     removing the worktree would orphan — commits reachable from no branch,
 //     tag, or remote-tracking ref. The test is deliberately reachability, not
 //     push state: `git worktree remove` deletes the checkout, not refs/heads,
@@ -361,18 +366,31 @@ func reapClosedBeadWorktrees(
 			wg := newGitProbe(worktreePath)
 			holdsUnlandedWork := false
 			unlandedButPreserved := ""
+			var nonDisposable []string
 			if reason == "" {
-				hasUncommitted := wg.HasUncommittedOrIgnoredWork()
+				status, statusErr := wg.WorkingTreeStatus()
+				hasUncommitted := len(status.Dirty) > 0
+				if statusErr == nil && !hasUncommitted && len(status.Ignored) > 0 {
+					nonDisposable = nonDisposableIgnored(worktreePath, status.Ignored, cfg.Daemon.AutoReapDisposableIgnored)
+				}
 				hasUnlanded, unlandedErr := wg.HasUnlandedCommitsResult()
 				hasUnpreserved, preservedErr := wg.HasUnpreservedCommitsResult()
 				holdsUnlandedWork = unlandedErr == nil && hasUnlanded
 				switch {
+				case statusErr != nil:
+					reason = fmt.Sprintf("unsafe git state: status git probe failed (failing closed): %v", statusErr)
 				case unlandedErr != nil:
 					reason = fmt.Sprintf("unsafe git state: unlanded git probe failed (failing closed): %v", unlandedErr)
 				case preservedErr != nil:
 					reason = fmt.Sprintf("unsafe git state: preservation git probe failed (failing closed): %v", preservedErr)
 				case hasUncommitted:
 					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unlanded=%v", hasUncommitted, hasUnlanded)
+				case len(nonDisposable) > 0:
+					// Ignored content that is not provably rebuildable: a
+					// non-force `git worktree remove` would delete it (nested
+					// worktrees and repositories included), so it keeps the
+					// tree, and the reason names it so an operator can act.
+					reason = fmt.Sprintf("unsafe git state: non-disposable ignored: %s", describeNonDisposable(nonDisposable))
 				case hasUnlanded && hasUnpreserved:
 					// The only shape removal actually destroys: commits no
 					// durable ref carries, so the worktree's own HEAD is their
@@ -435,6 +453,7 @@ func reapClosedBeadWorktrees(
 				report.Protected = append(report.Protected, reapDecision{
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
 					Reason: reason, HoldsUnlandedWork: holdsUnlandedWork,
+					NonDisposableIgnored: nonDisposable,
 				})
 				continue
 			}
