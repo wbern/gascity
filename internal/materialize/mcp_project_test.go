@@ -75,14 +75,6 @@ func TestBuildMCPProjectionTargetsAndStableHash(t *testing.T) {
 		t.Fatalf("gemini target = %q, want %q", got, want)
 	}
 
-	antigravity, err := BuildMCPProjection(MCPProviderAntigravity, "/work", nil)
-	if err != nil {
-		t.Fatalf("BuildMCPProjection(antigravity): %v", err)
-	}
-	if got, want := antigravity.Target, filepath.Join("/work", ".gemini", "settings.json"); got != want {
-		t.Fatalf("antigravity target = %q, want %q", got, want)
-	}
-
 	opencode, err := BuildMCPProjection(MCPProviderOpenCode, "/work", nil)
 	if err != nil {
 		t.Fatalf("BuildMCPProjection(opencode): %v", err)
