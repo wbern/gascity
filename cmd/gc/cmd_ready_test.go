@@ -1415,7 +1415,9 @@ func TestDrainAckReleaseLoadsCityConfigOnce(t *testing.T) {
 
 	var stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	releaseUnexecutedClaimsForSession(cityDir, "worker-drained", &stderr)
+	if err := releaseUnexecutedClaimsForSession(cityDir, "worker-drained", &stderr); err != nil {
+		t.Fatalf("release held claims: %v; stderr=%s", err, stderr.String())
+	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
 		t.Fatalf("drain-ack release loaded the city config %d times over %d bound rigs, want exactly 1; stderr=%s", grew, len(readyCountedRigNames), stderr.String())
 	}
