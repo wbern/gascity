@@ -273,8 +273,8 @@ func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
 	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 
 	err := tm.NudgeSession("worker-1", "hello world")
-	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-		t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)
+	if !preInjectionRefusal(err) {
+		t.Fatalf("NudgeSession = %v, want pre-injection ErrNudgeInputNotReady", err)
 	}
 	enters := 0
 	for _, c := range ex.calls {

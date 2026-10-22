@@ -3,6 +3,7 @@ package tmux
 import (
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -148,7 +149,7 @@ func TestCodexNudgePreservesAttachedHumanDraft(t *testing.T) {
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 	pasted := false
 	err := tm.nudgeSession("sess", "injected reminder", func(string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} })
-	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || pasted {
+	if !preInjectionRefusal(err) || pasted {
 		t.Fatalf("err=%v pasted=%v", err, pasted)
 	}
 	if got := countCallsWithTokens(fe.calls, "send-keys"); got != 0 {
@@ -195,7 +196,7 @@ func TestCodexComposerRejectsFooterLikeHumanDraft(t *testing.T) {
 			pasted = true
 			return nil
 		}, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} })
-		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || pasted || countCallsWithTokens(fe.calls, "send-keys") != 0 {
+		if !preInjectionRefusal(err) || pasted || countCallsWithTokens(fe.calls, "send-keys") != 0 {
 			t.Errorf("foreign draft received input: err=%v pasted=%v calls=%v", err, pasted, fe.calls)
 		}
 	}
@@ -244,7 +245,7 @@ func TestCodexNudgeHandlesOnlyFreshlyPastedRenderedWraps(t *testing.T) {
 					return nil
 				}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
 				if existing {
-					if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys") != 0 {
+					if !preInjectionRefusal(err) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys") != 0 {
 						t.Fatalf("existing ambiguous input received keys: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
 					}
 				} else if err != nil || pastes != 1 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 1 {
@@ -300,5 +301,56 @@ func TestCodexLiveReminderPaddedBlankRows(t *testing.T) {
 		if !ownPaste && (!errors.Is(err, ErrNudgeSubmitUnconfirmed) || sends != 0) {
 			t.Fatalf("unowned rendered draft submitted: err=%v sends=%d", err, sends)
 		}
+	}
+}
+
+// The post-deploy qualification reminder stayed staged in this exact busy
+// frame. The parser must own it as this paste and choose the queue action.
+func TestCodexLiveBusyQueueReminderFrame(t *testing.T) {
+	pane, err := os.ReadFile("testdata/codex_busy_queue_reminder.pane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := os.ReadFile("testdata/codex_busy_queue_reminder.msg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := readCodexComposer(strings.Split(string(pane), "\n"), string(message))
+	if obs.composer != codexComposerWrapped || !obs.busy || !obs.queue {
+		t.Fatalf("live busy reminder frame unreadable: %+v", obs)
+	}
+}
+
+// preInjectionRefusal reports a refusal made before any input reached the
+// composer: the queue may retry it later, and it must not read as a lost submit.
+func preInjectionRefusal(err error) bool {
+	return errors.Is(err, ErrNudgeInputNotReady) && !errors.Is(err, ErrNudgeSubmitUnconfirmed)
+}
+
+func TestCodexNudgeUnreadableComposerIsNotReady(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pane       string
+		captureErr bool
+	}{
+		"no composer":     {pane: "Folder access\n  Trust this folder?\n  1. Trust and continue\n  2. Quit"},
+		"capture failure": {pane: "› \x1b[2mAsk Codex to do anything\x1b[0m\n\nGPT-6 low", captureErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "0", pane: tc.pane}
+			if tc.captureErr {
+				fe.errFor = func(args []string) error {
+					if callHasTokens(args, "capture-pane", "-e", "-J") {
+						return errors.New("capture failed")
+					}
+					return nil
+				}
+			}
+			tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+			pasted := false
+			err := tm.nudgeSession("sess", "injected reminder", func(string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+			if !preInjectionRefusal(err) || pasted || countCallsWithTokens(fe.calls, "send-keys") != 0 {
+				t.Fatalf("unreadable composer mutated input: err=%v pasted=%v calls=%v", err, pasted, fe.calls)
+			}
+		})
 	}
 }
