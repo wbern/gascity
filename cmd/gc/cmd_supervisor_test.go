@@ -5166,10 +5166,13 @@ func (hangingListProvider) ListRunning(string) ([]string, error) {
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	// "file" (not an exec: spy script) deliberately: this test measures the
+	// in-process channel/timer bound on a hanging CityRuntime.shutdown(), and
+	// never asserts on a provider op log. An exec provider would add a real
+	// subprocess spawn to shutdownBeadsProvider's unconditional trailing
+	// call — wall-clock noise unrelated to the regression under test that,
+	// under host load, can by itself exceed the tight bound below.
+	t.Setenv("GC_BEADS", "file")
 
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
