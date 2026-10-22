@@ -1522,8 +1522,13 @@ reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and
 live-resolution errors (ambiguous listeners, discovery failures) fail
 closed before cleanup stages run; only a clean live-resolution miss can
-reach the legacy default. The legacy default is a connection fallback
-only; it does not protect port 3307 from orphan-process reaping.
+reach the legacy default. Nothing proves the city's server listens on
+the legacy default, so a run that reaches it opens no SQL connection,
+drops and purges nothing, and records a legacy-fallback-port force
+blocker (--force then exits nonzero). Start the city's managed dolt;
+for an external server, pass --port or pin it with
+"gc beads city use-external". The legacy default does not protect port
+3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -2392,6 +2397,7 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
 | `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
@@ -4728,6 +4734,7 @@ gc supervisor run
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |

@@ -184,14 +184,28 @@ func isSQLiteBusy(err error) bool {
 // a SQLITE_BUSY error, backing off by sqliteBusyBackoff between attempts.
 // The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
 // each application-level retry is an additional 5 s+ window for the lock.
+// fn must be one transaction: a busy error that outlasts the retries is
+// marked ErrSQLiteBusyExhausted, a write that committed nothing.
 func retryOnBusy(fn func() error) error {
 	err := fn()
 	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
 		sqliteBusySleep(sqliteBusyBackoff(attempt))
 		err = fn()
 	}
+	if isSQLiteBusy(err) {
+		return sqliteBusyExhaustedError{err: err}
+	}
 	return err
 }
+
+// sqliteBusyExhaustedError is a busy error that outlasted retryOnBusy. It
+// keeps the driver's message, unwraps to it, and matches
+// ErrSQLiteBusyExhausted.
+type sqliteBusyExhaustedError struct{ err error }
+
+func (e sqliteBusyExhaustedError) Error() string        { return e.err.Error() }
+func (e sqliteBusyExhaustedError) Unwrap() error        { return e.err }
+func (e sqliteBusyExhaustedError) Is(target error) bool { return target == ErrSQLiteBusyExhausted }
 
 // sqliteBusyBackoff is the jittered exponential delay before busy retry
 // number attempt (0-based): uniformly in [d/2, d] for
@@ -1802,6 +1816,14 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // Tx executes fn in one SQLite transaction. Every write is rolled back when
 // the callback returns an error, so callers can safely compose Create, Update,
 // metadata updates, and Close as one all-or-nothing operation.
+//
+// Except on read-only and private-recovery stores, which keep a deferred
+// begin, the transaction takes the write lock as it begins (BEGIN IMMEDIATE,
+// see sqliteStoreWriterDSN), so write contention surfaces there, before fn
+// runs, and a contended begin is retried like every other write. fn itself
+// runs at most once: an error from fn or from the commit is returned without
+// running fn again. Under contention fn can start well after Tx is called, so
+// state read before Tx may have changed by the time fn runs.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1810,9 +1832,15 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite tx: begin: %w", err)
+	var tx *sql.Tx
+	if err := retryOnBusy(func() error {
+		var err error
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+			return fmt.Errorf("sqlite tx: begin: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
