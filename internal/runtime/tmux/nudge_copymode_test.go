@@ -249,8 +249,8 @@ func TestNudgeSessionConfirmsSubmitForCodex(t *testing.T) {
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
 	err := tm.NudgeSession("sess", "hello")
-	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-		t.Fatalf("NudgeSession err = %v, want ErrNudgeSubmitUnconfirmed (an unconfirmed submit must not report success)", err)
+	if !preInjectionRefusal(err) {
+		t.Fatalf("NudgeSession err = %v, want pre-injection ErrNudgeInputNotReady (an unreadable composer must not report success)", err)
 	}
 
 	enters := countCallsWithTokens(fe.calls, "send-keys", "Enter")

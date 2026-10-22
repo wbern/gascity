@@ -2594,13 +2594,14 @@ func (t *Tmux) nudgeSession(
 
 	// Codex input ownership is established before pasting. Preserve any
 	// unrelated draft, including on attached panes; retries may resume only
-	// this exact raw payload, never an anonymous pre-existing paste.
+	// this exact raw payload, never an anonymous pre-existing paste. Every
+	// refusal here precedes injection, so the durable queue keeps the items.
 	_, codex := t.stagedDraftMarkerFor(target)
 	pasteCodex := true
 	if codex {
 		lines, err := t.captureCodexComposer(target)
 		if err != nil {
-			return fmt.Errorf("%w: reading Codex composer: %w", ErrNudgeSubmitUnconfirmed, err)
+			return fmt.Errorf("%w: reading Codex composer: %w", ErrNudgeInputNotReady, err)
 		}
 		observation := readCodexComposer(lines, message)
 		switch observation.composer {
@@ -2608,7 +2609,7 @@ func (t *Tmux) nudgeSession(
 		case codexComposerOwned:
 			pasteCodex = false
 		default:
-			return fmt.Errorf("%w: Codex composer has existing or unreadable input", ErrNudgeSubmitUnconfirmed)
+			return fmt.Errorf("%w: Codex composer has existing or unreadable input", ErrNudgeInputNotReady)
 		}
 		// Do not stage a draft when this busy TUI exposes no queue action.
 		// Nothing has been injected, so the durable queue can retry safely.
