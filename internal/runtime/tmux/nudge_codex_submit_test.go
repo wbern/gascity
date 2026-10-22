@@ -30,6 +30,9 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		{"unexpected trailing newline", []string{"› hello", "  ", "", "gpt-6 low"}, "hello", codexComposerOther, false},
 		{"trailing newline", []string{"› hello", "  ", "", "gpt-6 low"}, "hello\n", codexComposerOwned, false},
 		{"exact input spaces", []string{"› hello  world", "", "gpt-6 low"}, "hello world", codexComposerOther, false},
+		{"padded blank paragraph", []string{"› first", " ", "  last", "", "GPT-6 low"}, "first\n\nlast", codexComposerWrapped, false},
+		{"literal space-only input row", []string{"› first", "   ", "  last", "", "GPT-6 low"}, "first\n \nlast", codexComposerOwned, false},
+		{"literal input space is not blank padding", []string{"› first", "   ", "  last", "", "GPT-6 low"}, "first\n\nlast", codexComposerOther, false},
 		{"human prefix collision", []string{"› same prefix but human text", "", "gpt-6 low"}, "same prefix", codexComposerOther, false},
 		{"placeholder with human suffix", []string{"› [Pasted Content 12 chars] human addition"}, "message", codexComposerOther, false},
 		{"empty busy", []string{"• Working (esc to interrupt)", "› ", "", "tab to queue message"}, "message", codexComposerEmpty, true},
@@ -248,6 +251,54 @@ func TestCodexNudgeHandlesOnlyFreshlyPastedRenderedWraps(t *testing.T) {
 					t.Fatalf("own rendered draft not queued: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
 				}
 			})
+		}
+	}
+}
+
+func TestCodexBusyWithoutQueueActionDoesNotStageReminder(t *testing.T) {
+	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: "Working (18s • esc to interrupt)\n\n› \x1b[2mAsk Codex to do anything\x1b[0m\n\nGPT-6.1-Sol … Goal achieved (2m)    ⚠ 1 warning · f2 to view"}
+	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
+	message := "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [session] narrow reminder\n\nHandle them after this turn.\n</system-reminder>\n"
+	pastes := 0
+	err := tm.nudgeSession("sess", message, func(_ string, text string, _ time.Duration) error {
+		pastes++
+		fe.pane = "Working (18s • esc to interrupt)\n\n› " + strings.ReplaceAll(text, "\n", "\n  ") + "\n\nGPT-6.1-Sol … Goal achieved (2m)    ⚠ 1 warning · f2 to view"
+		return nil
+	}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+	if !errors.Is(err, ErrNudgeInputNotReady) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys", "Enter") != 0 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 0 {
+		t.Fatalf("busy unsafe boundary mutated input: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
+	}
+}
+
+// The live reminder capture used one-space rows for blank input paragraphs.
+// Keep the actual styled/joined frame so a plain-text capture cannot hide it.
+func TestCodexLiveReminderPaddedBlankRows(t *testing.T) {
+	message := "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [session] v0qiqz actual finite SOURCE availability ACK gc2-wisp-d03gyo through05:50Z for existing Enter regression reproduction/tests/hooks. No runtime/restart/manualkeys/holds. Read durable ACK; actual release required.\n\nHandle them after this turn.\n</system-reminder>\n"
+	lines := strings.Split("Working \u001b[2m(23m 28s • \u001b[0;1mesc\u001b[0;2m to interrupt) · 1 background terminal r…\n\u001b[0m \n \n\u001b[1m›\u001b[0m <system-reminder>\n  You have a deferred reminder that was queued until a safe\n  boundary:\n \n  - [session] v0qiqz actual finite SOURCE availability ACK\n  gc2-wisp-d03gyo through05:50Z for existing Enter regression\n  reproduction/tests/hooks. No runtime/restart/manualkeys/\n  holds. Read durable ACK; actual release required.\n \n  Handle them after this turn.\n  </system-reminder>\n \n \n  \u001b[1mtab\u001b[0m to queue message                       34% context left\n", "\n")
+	obs := readCodexComposer(lines, message)
+	if obs.composer != codexComposerWrapped || !obs.busy || !obs.queue {
+		t.Fatalf("live reminder unreadable: %+v", obs)
+	}
+	for _, ownPaste := range []bool{false, true} {
+		reads, sends := 0, 0
+		err := submitCodexDraft(ownPaste, func() (codexSubmitObservation, error) {
+			reads++
+			if reads == 1 {
+				return obs, nil
+			}
+			return codexSubmitObservation{composer: codexComposerEmpty, busy: true, queue: true}, nil
+		}, func(key string) error {
+			if key != "Tab" {
+				t.Fatalf("key=%q, want Tab", key)
+			}
+			sends++
+			return nil
+		}, noSleep)
+		if ownPaste && (err != nil || sends != 1) {
+			t.Fatalf("own reminder not queued: err=%v sends=%d", err, sends)
+		}
+		if !ownPaste && (!errors.Is(err, ErrNudgeSubmitUnconfirmed) || sends != 0) {
+			t.Fatalf("unowned rendered draft submitted: err=%v sends=%d", err, sends)
 		}
 	}
 }

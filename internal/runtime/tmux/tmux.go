@@ -2602,12 +2602,18 @@ func (t *Tmux) nudgeSession(
 		if err != nil {
 			return fmt.Errorf("%w: reading Codex composer: %w", ErrNudgeSubmitUnconfirmed, err)
 		}
-		switch readCodexComposer(lines, message).composer {
+		observation := readCodexComposer(lines, message)
+		switch observation.composer {
 		case codexComposerEmpty:
 		case codexComposerOwned:
 			pasteCodex = false
 		default:
 			return fmt.Errorf("%w: Codex composer has existing or unreadable input", ErrNudgeSubmitUnconfirmed)
+		}
+		// Do not stage a draft when this busy TUI exposes no queue action.
+		// Nothing has been injected, so the durable queue can retry safely.
+		if observation.busy && !observation.queue {
+			return ErrNudgeInputNotReady
 		}
 	}
 

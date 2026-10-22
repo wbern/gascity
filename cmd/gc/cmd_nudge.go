@@ -1949,7 +1949,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if errors.Is(err, runtime.ErrSessionNotFound) {
+		if errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, tmux.ErrNudgeInputNotReady) {
+			// A pre-injection refusal is not a failed delivery attempt. Keep the
+			// same durable items eligible for the next safe boundary.
 			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}

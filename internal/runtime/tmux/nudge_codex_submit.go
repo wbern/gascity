@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// ErrNudgeInputNotReady means no input was injected because the live composer
+// did not expose a safe submit action. The caller may retry at a later boundary.
+var ErrNudgeInputNotReady = errors.New("nudge: composer is not ready; no input injected")
+
 type codexComposerState uint8
 
 const (
@@ -108,7 +112,15 @@ func readCodexComposer(lines []string, message string) codexSubmitObservation {
 		first = ""
 	}
 	text = append(text, first)
+	renderedBlankRows := false
 	for _, line := range lines[start+1 : end] {
+		if line == " " {
+			// Styled joined captures render an empty input row with one padding
+			// space. This is ambiguous, so only the current paste may own it.
+			text = append(text, "")
+			renderedBlankRows = true
+			continue
+		}
 		if !strings.HasPrefix(line, "  ") && line != "" {
 			return obs
 		}
@@ -123,7 +135,7 @@ func readCodexComposer(lines []string, message string) codexSubmitObservation {
 		obs.composer = codexComposerEmpty
 	case codexPastePlaceholder(content):
 		obs.composer = codexComposerPaste
-	case expected != "" && content == expected:
+	case expected != "" && content == expected && !renderedBlankRows:
 		obs.composer = codexComposerOwned
 	case codexRenderedDraftMatches(text, expected):
 		obs.composer = codexComposerWrapped
