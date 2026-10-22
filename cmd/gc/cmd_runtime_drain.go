@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -37,9 +38,81 @@ type drainOps interface {
 	clearDriftRestart(sessionName string) error
 }
 
+const drainAdmissionAttemptKey = "GC_DRAIN_ADMISSION_ATTEMPT"
+
 // providerDrainOps implements drainOps using runtime.Provider metadata.
 type providerDrainOps struct {
-	sp runtime.Provider
+	sp        runtime.Provider
+	admission *drainAckAdmission
+}
+
+type drainAckAdmission struct {
+	front   *session.Store
+	id      string
+	fence   session.ExecutionFence
+	attempt string
+}
+
+// bindDrainAckAdmission captures this operation's census before an asynchronous
+// provider setter can outlive cancellation and a replacement census.
+func bindDrainAckAdmission(dops drainOps, cityPath, sessionName string) (drainOps, error) {
+	provider, ok := dops.(*providerDrainOps)
+	if !ok {
+		return dops, nil
+	}
+	// Resolve from the runtime name, just as the release census does. The
+	// no-argument command deliberately does not trust GC_SESSION_ID.
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return dops, nil
+		}
+		return nil, err
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, err
+	}
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	live := beads.HandlesFor(sessStore).Live
+	if live == nil {
+		return nil, beads.ErrConditionalWriteUnsupported
+	}
+	sessionID, err := resolveSessionID(sessStore, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	front := sessionFrontDoor(sessStore)
+	current, cell, enrolled, err := front.ExecutionEvidence(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !enrolled {
+		return dops, nil
+	}
+	if current.SessionNameMetadata != sessionName {
+		return nil, session.ErrExecutionIncarnationChanged
+	}
+	if cell.Drain == nil {
+		return nil, session.ErrDrainAdmissionChanged
+	}
+	fence := session.ExecutionFence{InstanceToken: os.Getenv("GC_INSTANCE_TOKEN"), Generation: os.Getenv("GC_RUNTIME_EPOCH")}
+	gate, err := front.InspectDrainAdmission(sessionID, fence, cell.Drain.Attempt)
+	if err != nil {
+		return nil, err
+	}
+	if !gate.Committed {
+		return nil, session.ErrDrainAdmissionChanged
+	}
+	// Freeze the authoritative generation even when the caller omitted its
+	// optional epoch hint; the published frame must never have an empty epoch.
+	fence.Generation = current.Generation
+	bound := *provider
+	bound.admission = &drainAckAdmission{front: front, id: sessionID, fence: fence, attempt: gate.Attempt}
+	return &bound, nil
 }
 
 type runtimeDrainCheckJSON struct {
@@ -68,6 +141,7 @@ func (o *providerDrainOps) setDrain(sessionName string) error {
 func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
+		o.sp.RemoveMeta(sessionName, drainAdmissionAttemptKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
 		// The incarnation stamp has exactly the acknowledgement's lifetime. Left
 		// behind, it outlives every drain it described and waits on the pane to be
@@ -103,6 +177,26 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	if o.admission != nil {
+		a := o.admission
+		gate, err := a.front.InspectDrainAdmission(a.id, a.fence, a.attempt)
+		if err != nil {
+			return err
+		}
+		if !gate.Committed {
+			return session.ErrDrainAdmissionChanged
+		}
+		if err := o.sp.SetMeta(sessionName, drainAdmissionAttemptKey, a.attempt); err != nil {
+			return err
+		}
+	} else if err := o.sp.RemoveMeta(sessionName, drainAdmissionAttemptKey); err != nil {
+		return err
+	}
+	if o.admission == nil {
+		if err := o.sp.RemoveMeta(sessionName, drainAckFrameKey); err != nil {
+			return err
+		}
+	}
 	// The acknowledging agent records which incarnation it was. Readers bind
 	// against this rather than trusting a bare source value that a recycled
 	// chair carries over from whoever sat there last.
@@ -117,13 +211,26 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 	// accident. Stamp-first, the only stamp state a source-keyed reader can
 	// observe is this ack's own: its digest, or empty and therefore unprovable.
 	requesterInstanceToken := drainAckRequesterInstanceToken(sessionName)
-	return joinDrainAckMutationErrors(
+	err := joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
+	if err != nil {
+		return err
+	}
+	if o.admission != nil {
+		a := o.admission
+		info := session.Info{ID: a.id, InstanceToken: a.fence.InstanceToken, Generation: a.fence.Generation, SessionNameMetadata: sessionName}
+		if err := publishDrainAckFrame(o.sp, sessionName, info, drainAckSourceAgentValue, "", a.attempt); err != nil {
+			return err
+		}
+		_, err := a.front.InspectDrainAdmission(a.id, a.fence, a.attempt)
+		return err
+	}
+	return nil
 }
 
 // drainAckRequesterInstanceToken returns the binding stamp for the acking pane's
@@ -372,12 +479,64 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
-	return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr, target)
+}
+
+// cancelRuntimeUndrainAdmission retains the resolved session identity while
+// capturing the provider incarnation and exact native attempt once.
+func cancelRuntimeUndrainAdmission(sp runtime.Provider, target sessionRuntimeTarget) error {
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(target.cityPath, io.Discard)
+	if err != nil {
+		return err
+	}
+	store, err := openCityStoreAtWithConfig(target.cityPath, cfg)
+	if err != nil {
+		return err
+	}
+	front := sessionFrontDoor(cliSessionStore(store, cfg, target.cityPath))
+	// OFF sessions without native evidence keep the legacy path, including
+	// stores that do not expose conditional-write handles.
+	row, err := front.Store().Get(target.sessionID)
+	if err != nil {
+		return err
+	}
+	if !executionProtocolEnabled(front, strings.TrimSpace(row.Metadata[session.WorkStartedKey]) != "") {
+		return nil
+	}
+	current, cell, _, err := front.ExecutionEvidence(target.sessionID)
+	if err != nil {
+		return err
+	}
+	if current.SessionNameMetadata != target.sessionName {
+		return session.ErrExecutionIncarnationChanged
+	}
+	runtimeID, err := sp.GetMeta(target.sessionName, "GC_SESSION_ID")
+	if err != nil {
+		return err
+	}
+	token, err := sp.GetMeta(target.sessionName, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return err
+	}
+	if runtimeID != target.sessionID || token == "" {
+		return session.ErrExecutionIncarnationChanged
+	}
+	fence := session.ExecutionFence{InstanceToken: token, Generation: current.Generation}
+	if cell.Drain == nil {
+		// An absent census is a captured state too: CAS validates absence,
+		// and refuses a replacement that arrives before cleanup.
+		return front.CancelDrainAdmission(target.sessionID, fence, "")
+	}
+	gate, err := front.InspectDrainAdmission(target.sessionID, fence, cell.Drain.Attempt)
+	if err != nil {
+		return err
+	}
+	return front.CancelDrainAdmission(target.sessionID, fence, gate.Attempt)
 }
 
 // doRuntimeUndrain clears the drain signal on a session.
 func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
-	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer, targets ...sessionRuntimeTarget,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
 	if err != nil {
@@ -387,6 +546,12 @@ func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	if !running {
 		fmt.Fprintf(stderr, "gc runtime undrain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if len(targets) > 0 {
+		if err := cancelRuntimeUndrainAdmission(sp, targets[0]); err != nil {
+			fmt.Fprintf(stderr, "gc runtime undrain: canceling native admission: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if err := dops.clearDrain(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -538,34 +703,39 @@ current work in response to a drain signal.`,
 }
 
 func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	code, _ := cmdRuntimeDrainAckResult(args, jsonOutput, stdout, stderr)
+	return code
+}
+
+func cmdRuntimeDrainAckResult(args []string, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
 	if len(args) > 0 {
 		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return 1, err
 		}
 		sp, err := newSessionProvider()
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return 1, err
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAckResult(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, err
 	}
 	sp, err := newSessionProvider()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return 1, err
 	}
 	dops := newDrainOps(sp)
 	// Name-only key: the env-derived GC_SESSION_ID can be stale.
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
+	return doRuntimeDrainAckResult(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -774,17 +944,16 @@ var drainAckPokeController = enqueueController
 var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
 
 // releaseUnexecutedClaimsForSession resolves this city's residency-correct work
-// legs and gives back every in_progress claim the draining session still holds.
+// legs and gives back only assignments the session has not started executing.
 //
 // The leg set mirrors `gc session close`, which leads with the WORK store and
 // hands in the relocated graph binding as a class leg: a claim that claim-time
 // routing left in the binding is invisible to a work-led scan, and would be
-// released by nothing. Best-effort throughout — a city that cannot be resolved
-// or a store that cannot be opened must never block the ack itself, which is the
-// signal the controller is waiting on.
-func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
+// released by nothing. Store and census failures refuse acknowledgement so an
+// unreadable claim cannot be mistaken for completed work.
+func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) error {
 	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(sessionName) == "" {
-		return
+		return nil
 	}
 	// Only read a real city. A city is a directory holding city.toml, and
 	// opening a store somewhere that is not one does not find claims — it
@@ -805,16 +974,20 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		if _, gcErr := os.Stat(filepath.Join(cityPath, ".gc")); gcErr == nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %s has .gc/ but no city.toml; skipping the held-claim release for this legacy runtime root (run `gc doctor` to check the layout)\n", cityPath) //nolint:errcheck
 		}
-		return
+		return nil
 	}
-	// One load serves every open below: drain-ack is a one-shot command, so
-	// the config it just read is current. The saving applies only when this
-	// load succeeds: a failed load leaves cfg nil, the city open then loads
-	// again on its own, and the rig legs are skipped as before.
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	// One current config load serves every open. A failed load refuses
+	// acknowledgement rather than silently omitting rig legs.
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return err
+	}
 	store, err := openCityStoreAtWithConfig(cityPath, cfg)
-	if err != nil || store == nil {
-		return
+	if err != nil {
+		return err
+	}
+	if store == nil {
+		return errors.New("drain acknowledgement has no city store")
 	}
 	rigStores := func() map[string]beads.Store {
 		if cfg == nil {
@@ -822,7 +995,7 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
-	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+	return releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
 }
 
 // releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
@@ -843,26 +1016,36 @@ func releaseUnexecutedClaimsForSessionStore(
 	sessionName string,
 	budget time.Duration,
 	stderr io.Writer,
-) {
+) error {
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sessionID, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
-		// A session that cannot be resolved holds nothing this pass can find, so
-		// there is nothing to report. The ack is the signal the controller is
-		// waiting on, and a release that could not begin must not decorate a
-		// successful ack with a warning an operator can do nothing about. A claim
-		// genuinely left behind here is still caught by the dead-assignee lane.
-		return
+		return err
 	}
-	sessionBead, err := sessStore.Get(sessionID)
+	live := beads.HandlesFor(sessStore).Live
+	if live == nil {
+		return errors.New("drain acknowledgement has no live session reader")
+	}
+	sessionBead, err := live.Get(sessionID)
 	if err != nil {
-		return
+		return err
+	}
+	strict, err := hookExecutionEvidenceEnabled(cfg)
+	if err != nil {
+		return err
+	}
+	if strict || strings.TrimSpace(sessionBead.Metadata[session.WorkStartedKey]) != "" {
+		fence := hookExecutionFenceOf(os.Environ())
+		if fence.InstanceToken == "" || fence.InstanceToken != sessionBead.Metadata["instance_token"] ||
+			fence.Generation != "" && fence.Generation != sessionBead.Metadata["generation"] {
+			return session.ErrExecutionIncarnationChanged
+		}
 	}
 	var rigs map[string]beads.Store
 	if rigStores != nil {
 		rigs = rigStores()
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
+	return releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.
@@ -871,9 +1054,9 @@ func releaseUnexecutedClaimsForSessionStore(
 // stop this session, and it fans out over every work leg × every identity with
 // only per-command ceilings underneath it. A slow or contended store would
 // therefore make drain-ack hang for the product of those, turning a safety net
-// into a stall on the exact path a draining worker needs to be fast. Releasing
-// SOME claims and acking is strictly better than releasing all of them late:
-// whatever this budget leaves behind is the dead-assignee lane's to collect.
+// into a stall on the exact path a draining worker needs to be fast. An
+// incomplete census refuses acknowledgement and preserves its evidence for
+// the next attempt.
 const drainAckReleaseBudget = 15 * time.Second
 
 // drainAckMutationTimeout bounds the drain-ack metadata write so a stalled
@@ -913,18 +1096,33 @@ func setDrainAckBounded(dops drainOps, sn string) error {
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, stderr)
+	code, _ := doRuntimeDrainAckResult(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	return code
+}
+
+func doRuntimeDrainAckResult(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
+	if err := drainAckReleaseHeldClaims(cityPath, sn, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort diagnostic
+		return 1, err
+	}
+	bound, err := bindDrainAckAdmission(dops, cityPath, sn)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: qualifying acknowledgement: %v\n", err) //nolint:errcheck // best-effort diagnostic
+		return 1, err
+	}
+	dops = bound
 	timedOut := false
+	var ackOutcomeErr error
 	if err := setDrainAckBounded(dops, sn); err != nil {
 		if errors.Is(err, errDrainAckTimeout) {
-			// Best-effort: a stalled store must not wedge the hook. Leave the ack
-			// unset, warn, and fall through to poke — the controller re-drives the
-			// drain on its next tick since GC_DRAIN_ACK was not written (NDI).
+			// The write can still land after this timeout. Preserve the CLI's
+			// deferred result, but never report acknowledgement to the hook.
 			timedOut = true
+			ackOutcomeErr = err
 			fmt.Fprintf(stderr, "gc runtime drain-ack: timed out after %s writing drain-ack for %s; controller will re-drive on its next tick\n", drainAckMutationTimeout, sn) //nolint:errcheck // best-effort stderr
 		} else {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return 1, err
 		}
 	}
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
@@ -945,14 +1143,14 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 			Status:        status,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return 1, err
 		}
-		return 0
+		return 0, ackOutcomeErr
 	}
 	if timedOut {
 		fmt.Fprintln(stdout, "Drain-ack deferred (store slow); controller poked to re-drive.") //nolint:errcheck // best-effort stdout
 	} else {
 		fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	}
-	return 0
+	return 0, ackOutcomeErr
 }

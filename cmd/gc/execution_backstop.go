@@ -66,6 +66,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Session-bead metadata keys for the execution backstop. Persisted for the same
@@ -98,6 +99,7 @@ const (
 const (
 	executionHoldMultiClaim = "multi_claim"
 	executionHoldNotQuiet   = "not_quiet"
+	executionHoldExecuting  = "executing"
 )
 
 // executionStalledLatchRetryAfter bounds how long a latch silences
@@ -262,13 +264,33 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		return backstopTarget{}, backstopResolutionHold
 	}
 	claim := claims[0]
-	return backstopTarget{
+	cell, err := session.DecodeWorkStarted(s.Metadata[session.WorkStartedKey])
+	if err != nil {
+		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
+	}
+	started := false
+	for _, entry := range cell.Claims {
+		if entry.Bead == claim.BeadID && (entry.Store == "" || normalizeIdleClaimStoreRef(entry.Store) == claim.StoreRef) &&
+			strconv.FormatInt(entry.Gen, 10) == strings.TrimSpace(s.Metadata["generation"]) {
+			started = true
+		}
+	}
+	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
 		StoreRef: claim.StoreRef,
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	}
+	if started {
+		same, attempts, last := p.state(s, target)
+		if same && decideBackstopAction(attempts, last, p.now) == backstopActionExhausted || strings.TrimSpace(p.content(s)) == "" {
+			p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
+			return backstopTarget{}, backstopResolutionHold
+		}
+	}
+	return target, backstopResolutionOutstanding
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
@@ -536,6 +558,6 @@ func (cr *CityRuntime) requestExecutionStalledDrain(sessionBead beads.Bead) erro
 	if err != nil {
 		return fmt.Errorf("reading session %q before draining: %w", sessionBead.ID, err)
 	}
-	beginSessionDrainInfo(info, cr.sp, cr.sessionDrains, executionStalledDrainReason, clock.Real{}, defaultDrainTimeout)
-	return nil
+	_, err = beginSessionDrainInfoResult(info, cr.sp, cr.sessionDrains, executionStalledDrainReason, clock.Real{}, defaultDrainTimeout, sessionFrontDoor(cr.sessionsBeadStore()))
+	return err
 }

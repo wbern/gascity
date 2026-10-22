@@ -133,7 +133,7 @@ if [ "$1" = "show" ] && [ -f %q ]; then
 fi
 printf '[]'
 `, logPath, ownerPath, beadID, ownerPath, beadID, ownerPath)
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(withLegacySessionBeadRead(script)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))

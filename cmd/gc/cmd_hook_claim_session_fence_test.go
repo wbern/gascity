@@ -59,6 +59,49 @@ dir = "aoa"
 	return cityDir
 }
 
+// usePATHHookClaimFixtureRunner keeps argument-contract fixtures on their
+// explicit fake bd, independently of the city pack's pinned managed executable.
+func usePATHHookClaimFixtureRunner(t *testing.T) {
+	t.Helper()
+	previous := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = previous })
+	hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, env map[string]string) beads.CommandRunner {
+		fixtureEnv := make(map[string]string, len(env))
+		for key, value := range env {
+			fixtureEnv[key] = value
+		}
+		delete(fixtureEnv, "BD_BIN")
+		fixtureEnv["PATH"] = os.Getenv("PATH")
+		return beads.ExecCommandRunnerWithExactEnvContext(ctx, fixtureEnv)
+	}
+}
+
+// seedPATHHookClaimSessionFixture gives the argument-contract fixtures a real,
+// readable legacy session row while their work commands use the explicit stub.
+func seedPATHHookClaimSessionFixture(t *testing.T, cityDir, id, name string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy, ok := store.(*beadPolicyStore); ok {
+		store = policy.Store
+	}
+	file, ok := store.(*beads.FileStore)
+	if !ok {
+		t.Fatalf("fixture store = %T, want file", store)
+	}
+	file.HonorExplicitIDs = true
+	row, err := file.Create(beads.Bead{ID: id, Title: name, Type: session.BeadType, Labels: []string{"gc:session"}, Metadata: map[string]string{"session_name": name, "template": "worker", "agent_name": name, "state": "active", "generation": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ID != id {
+		t.Fatalf("fixture ID=%q want %q", row.ID, id)
+	}
+}
+
 // newFenceSessionBead creates a session bead in the city store with the given
 // runtime state and instance token, returning its id.
 func newFenceSessionBead(t *testing.T, cityDir string, state session.State, instanceToken string) string {
@@ -276,6 +319,7 @@ esac
 // warm session can select a template's strict query while retaining its own
 // concrete runtime identity as claim owner and bypassing a stale trigger.
 func TestHookCommandClaimQueryTargetUsesConfiguredWorkQuery(t *testing.T) {
+	usePATHHookClaimFixtureRunner(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -361,6 +405,7 @@ esac
 }
 
 func TestHookCommandClaimNamedSessionClaimsLegacyGraphV2RoutedStep(t *testing.T) {
+	usePATHHookClaimFixtureRunner(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -403,6 +448,8 @@ esac
 	t.Setenv("GC_SESSION_NAME", "named-worker")
 	t.Setenv("GC_SESSION_ORIGIN", "named")
 
+	seedPATHHookClaimSessionFixture(t, cityDir, "named-session", "named-worker")
+
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--city", cityDir, "hook", "--query-target", "worker", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
 	if code != 0 {
@@ -424,6 +471,7 @@ esac
 // the same query-only behavior for legacy runtimes, which obtain trigger data
 // directly from GC_TRIGGER_WORK_* rather than a session projection.
 func TestHookCommandClaimSkipTriggerIgnoresTokenlessEnvironmentTrigger(t *testing.T) {
+	usePATHHookClaimFixtureRunner(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -464,6 +512,8 @@ esac
 	t.Setenv("GC_SESSION_ID", "legacy-session")
 	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "env-trigger")
 	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "city:test-city")
+
+	seedPATHHookClaimSessionFixture(t, cityDir, "legacy-session", "worker-1")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--city", cityDir, "hook", "--claim", "--skip-trigger", "--json"}, &stdout, &stderr)
@@ -783,14 +833,9 @@ func TestHookClaimSessionFenceReusesLoadedConfig(t *testing.T) {
 	}
 }
 
-// TestHookCommandClaimFailsOpenOnSessionStoreError proves a GENUINE session-store
-// fault — here a corrupt/unreadable store file, so the fence's store open itself
-// fails — is NOT mislabeled as a stale session: the fence fails open and lets the
-// normal claim path run, which surfaces and escalates its own store errors. This
-// is the counterpart to the absent-bead case above: a confirmed-missing bead
-// drains stale, but an infrastructure fault must never refuse a possibly-healthy
-// worker.
-func TestHookCommandClaimFailsOpenOnSessionStoreError(t *testing.T) {
+// TestHookCommandClaimRefusesUnknownEnrollmentOnSessionStoreError verifies
+// that an unreadable session store cannot establish legacy non-enrollment.
+func TestHookCommandClaimRefusesUnknownEnrollmentOnSessionStoreError(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -807,8 +852,11 @@ func TestHookCommandClaimFailsOpenOnSessionStoreError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
 
-	if _, err := os.Stat(queryMarker); err != nil {
-		t.Fatalf("fail-open did not reach the work query: %v; stderr=%s", err, stderr.String())
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("unknown enrollment reached work query: err=%v; stderr=%s", err, stderr.String())
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "execution evidence unavailable") {
+		t.Fatalf("unexpected evidence failure result: stdout=%q stderr=%s", stdout.String(), stderr.String())
 	}
 	if strings.Contains(stderr.String(), "refusing stale session") {
 		t.Fatalf("store fault was mislabeled as a stale session: %s", stderr.String())
@@ -817,7 +865,7 @@ func TestHookCommandClaimFailsOpenOnSessionStoreError(t *testing.T) {
 		t.Fatalf("stderr = %q, want fence-unavailable diagnostic", stderr.String())
 	}
 	if code != 1 {
-		t.Fatalf("code = %d, want 1 (JSON no-work drain without --drain-ack)", code)
+		t.Fatalf("code = %d, want 1 (execution evidence unavailable)", code)
 	}
 }
 
@@ -1471,4 +1519,20 @@ suspended = true
 	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
 		t.Fatalf("work query ran before suspended-agent claim refusal; stat error = %v", err)
 	}
+}
+
+// withLegacySessionBeadRead gives identity-only hook fixtures an authoritative
+// legacy session row without execution evidence. Work reads retain their own
+// fixture behavior; an unrelated identifier is never answered as this session.
+func withLegacySessionBeadRead(script string) string {
+	sessionRead := `if [ "$1" = "show" ] && [ -n "$GC_SESSION_ID" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "$GC_SESSION_ID" ]; then
+      printf '[{"id":"%s","title":"legacy test session","issue_type":"session","status":"open","metadata":{"session_name":"%s","template":"%s","state":"active"}}]' "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_TEMPLATE"
+      exit 0
+    fi
+  done
+fi
+`
+	return strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\n"+sessionRead, 1)
 }

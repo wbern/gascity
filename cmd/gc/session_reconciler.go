@@ -193,6 +193,93 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
 }
 
+// inspectQualifiedDrainAck distinguishes proven stale publication from an
+// unavailable read. Only the former permits clearing obsolete provider flags.
+func inspectQualifiedDrainAck(info sessionpkg.Info, front *sessionpkg.Store, sp runtime.Provider, name string, accept bool, expected ...drainAckFrame) (bool, error) {
+	if front == nil {
+		return false, errors.New("session execution reader unavailable")
+	}
+	current, cell, enrolled, err := front.ExecutionEvidence(info.ID)
+	if err != nil {
+		return false, err
+	}
+	if !executionProtocolEnabled(front, enrolled) {
+		return true, nil
+	}
+	if current.InstanceToken != info.InstanceToken || current.Generation != info.Generation {
+		return false, sessionpkg.ErrExecutionIncarnationChanged
+	}
+	frame, err := readDrainAckFrame(info, sp, name)
+	if errors.Is(err, sessionpkg.ErrDrainAdmissionChanged) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if len(expected) > 0 && expected[0].V != 0 && frame != expected[0] {
+		return false, nil
+	}
+	controller := frame.Source == reconcilerDrainAckSourceValue
+	attempt := frame.Attempt
+	if cell.Drain == nil || cell.Drain.Attempt != attempt {
+		return false, nil
+	}
+	fence := sessionpkg.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}
+	gate, err := front.InspectDrainAdmission(info.ID, fence, attempt)
+	if errors.Is(err, sessionpkg.ErrDrainAdmissionChanged) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !controller && !gate.Committed {
+		return false, nil
+	}
+	if accept {
+		var err error
+		if controller {
+			err = front.AcceptControllerDrainStop(info.ID, fence, attempt)
+		} else {
+			err = front.AcceptDrainStop(info.ID, fence, attempt)
+		}
+		if errors.Is(err, sessionpkg.ErrDrainAdmissionChanged) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	return true, nil
+}
+
+func qualifiedDrainAck(info sessionpkg.Info, front *sessionpkg.Store, sp runtime.Provider, name string, accept bool, expected ...drainAckFrame) bool {
+	ok, err := inspectQualifiedDrainAck(info, front, sp, name, accept, expected...)
+	return ok && err == nil
+}
+
+// currentDrainAck removes authoritatively obsolete ACK metadata so normal
+// reconciliation can continue. Unavailable evidence leaves it untouched.
+func currentDrainAck(info sessionpkg.Info, front *sessionpkg.Store, sp runtime.Provider, dops drainOps, name string) (bool, drainAckFrame, error) {
+	var frame drainAckFrame
+	_, _, enrolled, err := front.ExecutionEvidence(info.ID)
+	if err != nil {
+		return false, frame, err
+	}
+	if executionProtocolEnabled(front, enrolled) {
+		// The immutable frame is the publication commit. ACK may precede it or
+		// compatibility metadata cleanup may remove that bit afterwards.
+		frame, err = readDrainAckFrame(info, sp, name)
+		if errors.Is(err, sessionpkg.ErrDrainAdmissionChanged) {
+			return false, frame, nil
+		}
+		if err != nil {
+			return false, frame, err
+		}
+		current, err := inspectQualifiedDrainAck(info, front, sp, name, false, frame)
+		return current, frame, err
+	}
+	acked, err := dops.isDrainAcked(name)
+	return acked, frame, err
+}
+
 // markDrainAckStopPending persists the drain-ack stop-pending transition through
 // the session front door and returns the refreshed Info as a LOCAL fold
 // (write-returns-Info, Step 6d): ApplyPatchInfo emits DrainAckStopPendingPatch and
@@ -210,7 +297,24 @@ func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, 
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	updated, err := sessFront.ApplyPatchInfo(info, sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
+	patch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
+	_, _, enrolled, readErr := sessFront.ExecutionEvidence(info.ID)
+	if readErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: reading drain stop state %s: %v\n", info.ID, readErr) //nolint:errcheck // best-effort diagnostic
+		return info, false
+	}
+	var updated sessionpkg.Info
+	var err error
+	if executionProtocolEnabled(sessFront, enrolled) {
+		var applied bool
+		applied, err = sessFront.ApplyPatchIfLifecycleUnchanged(info, patch)
+		if err == nil && !applied {
+			return info, false
+		}
+		updated = info.ApplyPatch(patch)
+	} else {
+		updated, err = sessFront.ApplyPatchInfo(info, patch)
+	}
 	if err != nil {
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		if name == "" {
@@ -290,6 +394,7 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 	dt *drainTracker,
 	template, name, id string,
 	stderr io.Writer,
+	fronts ...*sessionpkg.Store,
 ) bool {
 	if dops == nil || cfg == nil || sp == nil || name == "" || id == "" {
 		return false
@@ -297,10 +402,27 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 	if _, ok := infoByID[id]; !ok {
 		return false
 	}
-	// Agent-sourced acks only; anything else keeps its existing semantics.
-	source, sourceErr := sp.GetMeta(name, reconcilerDrainAckSourceKey)
-	if sourceErr != nil || strings.TrimSpace(source) != drainAckSourceAgentValue {
-		return false
+	// Preserve the initially captured source/attempt through every policy
+	// check. A newer frame cannot turn an old floor decision into cancellation.
+	var captured *drainAckFrame
+	if len(fronts) > 0 && fronts[0] != nil {
+		_, _, enrolled, err := fronts[0].ExecutionEvidence(id)
+		if err != nil {
+			return false
+		}
+		if executionProtocolEnabled(fronts[0], enrolled) {
+			frame, err := readDrainAckFrame(infoByID[id], sp, name)
+			if err != nil || frame.Source != drainAckSourceAgentValue {
+				return false
+			}
+			captured = &frame
+		}
+	}
+	if captured == nil {
+		source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+		if err != nil || strings.TrimSpace(source) != drainAckSourceAgentValue {
+			return false
+		}
 	}
 	// An outstanding drain request outranks the floor — and an unreadable one
 	// is treated as outstanding.
@@ -314,7 +436,17 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 	if !isMinFloorProtectedDrainAckSession(infoByID, cfg, template, id) {
 		return false
 	}
-	if err := dops.clearDrain(name); err != nil {
+	var clearErr error
+	if captured != nil {
+		if err := cancelSessionExecutionAdmissionAttempt(infoByID[id], captured.Attempt, fronts...); err != nil {
+			return false
+		}
+		// GC_DRAIN was absent at our policy check. Do not erase a later request.
+		clearErr = clearReconcilerDrainAckMetadata(sp, name)
+	} else {
+		clearErr = dops.clearDrain(name)
+	}
+	if err := clearErr; err != nil {
 		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
 		return false
 	}
@@ -1748,6 +1880,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// residual. Same underlying store, so every session bead write is
 	// byte-identical.
 	sessFront := sessionpkg.NewStore(sessStore)
+	// A Phase 1 observation failure must also defer Phase 2 timeout stops.
+	deferredDrainAdvance := make(map[string]bool)
 	// Every tick counts as a cycle, including ticks aborted by context
 	// cancellation after real work (e.g. starts) already executed — the
 	// counter means "cycles", not "cycles that ran to completion". started
@@ -2357,7 +2491,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				continue
 			default:
 				if dops != nil {
-					if acked, _ := dops.isDrainAcked(name); acked {
+					acked, ackFrame, ackErr := currentDrainAck(infoByID[id], sessFront, sp, dops, name)
+					if ackErr != nil {
+						deferredDrainAdvance[id] = true
+						fmt.Fprintf(stderr, "session reconciler: reading drain acknowledgement for %s: %v\n", name, ackErr) //nolint:errcheck // best-effort diagnostic
+						continue
+					}
+					if acked {
 						// gc-hz0nu: every drain-acked decision below depends on the
 						// store-derived desired-state / assigned-work view. During a
 						// partial store query (transient Dolt failure) that view is
@@ -2394,7 +2534,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if providerAlive && !hasAssignedWork && orphanedDrainInFlightInfo(infoPostHeal, sp, dt, name) &&
 							liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
 							if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, "orphaned", stdout, stderr); vetoed &&
-								cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name) {
+								cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name, sessFront) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 								if template == "" {
@@ -2410,8 +2550,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 						}
 						if providerAlive && hasAssignedWork {
-							if cancelSessionDrainForAssignedWorkInfo(infoPostHeal, sp, dt) ||
-								cancelRecoveredDrainForAssignedWorkInfo(infoPostHeal, sp, name) {
+							if cancelSessionDrainForAssignedWorkInfo(infoPostHeal, sp, dt, sessFront) ||
+								cancelRecoveredDrainForAssignedWorkInfo(infoPostHeal, sp, name, sessFront) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 								if template == "" {
@@ -2433,11 +2573,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// honoring a self-initiated ack here would drop the template
 							// below min_active_sessions, and min_fill would immediately boot
 							// a replacement that acks again. Keep the floor seat warm instead.
-							if cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, template, name, id, stderr) {
+							if cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, template, name, id, stderr, sessFront) {
 								fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (min_active_sessions floor)\n", name) //nolint:errcheck
 								if trace != nil {
 									trace.RecordDecision(TraceSiteDrainCancel, TraceReasonMinFloorIdleWorker, TraceOutcomeCancelMinFloor, template, name, nil)
 								}
+								continue
+							}
+							if !qualifiedDrainAck(infoByID[id], sessFront, sp, name, true, ackFrame) {
 								continue
 							}
 							if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
@@ -2534,7 +2677,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// (liveClaimVetoApplies).
 					if reason == "orphaned" && liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
 						if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, reason, stdout, stderr); vetoed {
-							drainCanceled := cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name)
+							drainCanceled := cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name, sessFront)
 							if trace != nil {
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 								if template == "" {
@@ -2577,7 +2720,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
-					if beginSessionDrainInfo(infoPostHeal, sp, dt, reason, clk, defaultDrainTimeout) {
+					if beginSessionDrainInfo(infoPostHeal, sp, dt, reason, clk, defaultDrainTimeout, sessFront) {
 						if trace != nil {
 							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 							if template == "" {
@@ -2873,7 +3016,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the session falls through to orphan handling and can block the next
 		// worker wave until the stale awake bead ages out.
 		if dops != nil {
-			if acked, _ := dops.isDrainAcked(name); acked {
+			acked, ackFrame, ackErr := currentDrainAck(infoByID[id], sessFront, sp, dops, name)
+			if ackErr != nil {
+				deferredDrainAdvance[id] = true
+				fmt.Fprintf(stderr, "session reconciler: reading drain acknowledgement for %s: %v\n", name, ackErr) //nolint:errcheck // best-effort diagnostic
+				continue
+			}
+			if acked {
 				if !alive && staleOrLegacyDrainAckBeforeStartInfo(infoByID[id], sp, name) {
 					_ = clearReconcilerDrainAckMetadata(sp, name)
 				} else {
@@ -2941,7 +3090,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							hasAssignedWork, _ = liveClaimVeto(cityPath, cfg, store, rigStores, infoByID[id], dt, name, ackReason, stdout, stderr)
 						}
 						if alive && hasAssignedWork &&
-							(cancelSessionDrainForAssignedWorkInfo(infoByID[id], sp, dt) || cancelRecoveredDrainForAssignedWorkInfo(infoByID[id], sp, name)) {
+							(cancelSessionDrainForAssignedWorkInfo(infoByID[id], sp, dt, sessFront) || cancelRecoveredDrainForAssignedWorkInfo(infoByID[id], sp, name, sessFront)) {
 							_ = dops.clearDrain(name)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, tp.TemplateName, name, nil)
@@ -2959,6 +3108,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						driftKey := sessionConfigDriftKey(infoByID[id], cfg, tp)
 						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
+							deferredDrainAdvance[id] = true
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
 							if errors.Is(attachErr, runtime.ErrRuntimeUnavailable) {
 								if trace != nil {
@@ -2968,10 +3118,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
-							if !drainCancelled {
-								_ = clearReconcilerDrainAckMetadata(sp, name)
-							}
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt, sessFront)
+
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttachmentError, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
@@ -2986,10 +3134,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 								}
 							}
-							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
-							if !drainCancelled {
-								_ = clearReconcilerDrainAckMetadata(sp, name)
-							}
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt, sessFront)
+
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftAttached, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
@@ -2998,10 +3144,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						if driftKey != "" && recentlyDeferredSessionAttachedConfigDrift(infoByID[id], clk, driftKey) {
-							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
-							if !drainCancelled {
-								_ = clearReconcilerDrainAckMetadata(sp, name)
-							}
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt, sessFront)
+
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDriftRecentlyAttached, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
 									"drain_canceled": drainCancelled,
@@ -3014,7 +3158,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// target's failed probe must not cancel the drain it acked.
 					if alive {
 						if hold := pendingInteractionHoldInfo(infoByID[id], sp, name, clk); hold != pendingInteractionNo &&
-							(cancelReconcilerAckedDrainInfo(infoByID[id], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[id], sp, name)) {
+							(cancelReconcilerAckedDrainInfo(infoByID[id], sp, dt, sessFront) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[id], sp, name, sessFront)) {
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, pendingHoldTraceReason(hold), TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
 							}
@@ -3026,7 +3170,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// "acknowledged", outcome stop_pending, once per boot. It sits after
 					// the config-drift and pending-interaction arms so a drain that must
 					// be honored has already been handled and returned.
-					if alive && cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, tp.TemplateName, name, id, stderr) {
+					if alive && cancelSelfInitiatedDrainAckAtMinFloor(infoByID, cfg, dops, sp, dt, tp.TemplateName, name, id, stderr, sessFront) {
 						fmt.Fprintf(stdout, "Canceled drain-acked session '%s' (min_active_sessions floor)\n", name) //nolint:errcheck
 						if trace != nil {
 							trace.RecordDecision(TraceSiteDrainCancel, TraceReasonMinFloorIdleWorker, TraceOutcomeCancelMinFloor, tp.TemplateName, name, nil)
@@ -3034,6 +3178,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
+						if !qualifiedDrainAck(infoByID[id], sessFront, sp, name, true, ackFrame) {
+							continue
+						}
 						if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
@@ -3586,6 +3733,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						driftKey := storedHash + ":" + currentHash
 						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
+							deferredDrainAdvance[id] = true
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
 							if attached {
 								// Attached or attach unknown: keep the false-negative guard
@@ -3601,7 +3749,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if err := recordSessionAttachedConfigDriftDeferral(infoByID[id], sessFront, clk, driftKey); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
 							}
-							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
+							drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt, sessFront)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredAttached, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 									"active_reason":  "attached",
@@ -3685,7 +3833,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if hold := pendingInteractionHoldInfo(infoByID[id], sp, name, clk); hold != pendingInteractionNo {
 								drainCancelled := false
 								if dt != nil {
-									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[id], sp, dt)
+									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[id], sp, dt, sessFront)
 								}
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, pendingHoldTraceReason(hold), TraceOutcomeDeferredPending, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
@@ -3744,7 +3892,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if ddt <= 0 {
 								ddt = defaultDrainTimeout
 							}
-							if beginSessionDrainInfo(infoByID[id], sp, dt, "config-drift", clk, ddt) {
+							if beginSessionDrainInfo(infoByID[id], sp, dt, "config-drift", clk, ddt, sessFront) {
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDrain, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
@@ -4088,7 +4236,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if dec.CancelDrain {
 					drainCancelled := false
 					if dt != nil {
-						drainCancelled = cancelSessionDrainInfo(infoByID[id], sp, dt)
+						drainCancelled = cancelSessionDrainInfo(infoByID[id], sp, dt, sessFront)
 					}
 					payload = traceRecordPayload{"drain_canceled": drainCancelled}
 				}
@@ -4557,7 +4705,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// Only an idle-respawn drain already in flight is left to run to
 				// completion (sleep-and-respawn); cancelSessionDrainInfo would
 				// no-op for it anyway because the reason is non-cancelable.
-				cancelSessionDrainInfo(info, sp, dt)
+				cancelSessionDrainInfo(info, sp, dt, sessFront)
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if info.SleepIntent == "idle-stop-pending" {
@@ -4619,7 +4767,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: stopping suspended %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 					}
 				}
-				cancelSessionDrainInfo(info, sp, dt)
+				cancelSessionDrainInfo(info, sp, dt, sessFront)
 				continue
 			}
 			// Keep-alive hold: a live session held only by `held_until` in the
@@ -4637,7 +4785,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// touching suspend, config-drift, or orphan drains. See #3994 and
 			// TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout.
 			if intent == "" && lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
-				cancelSessionDrainInfo(info, sp, dt)
+				cancelSessionDrainInfo(info, sp, dt, sessFront)
 				continue
 			}
 			var reason string
@@ -4704,7 +4852,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 			}
-			if beginSessionDrainInfo(info, sp, dt, reason, clk, defaultDrainTimeout) {
+			if beginSessionDrainInfo(info, sp, dt, reason, clk, defaultDrainTimeout, sessFront) {
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeDrain, target.tp.TemplateName, name, traceRecordPayload{
@@ -4842,7 +4990,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace, deferredDrainAdvance)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
 	// session this pass saw without a skip is re-armed here.
@@ -6921,7 +7069,8 @@ func beginIdleRespawnDrainIfIdle(
 	if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
 		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
 	}
-	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
+	begun, err := beginSessionDrainInfoResult(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout, sessFront)
+	return begun, patch, err
 }
 
 func selectIdleProbeTargets(

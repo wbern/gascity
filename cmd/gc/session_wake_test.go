@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -1822,4 +1825,437 @@ func TestClearMissingIdleProbes(t *testing.T) {
 	// Nil-tracker fast path: the reconciler may run without a drain tracker in
 	// reduced configurations, so the call must be a safe no-op.
 	clearMissingIdleProbes(nil, infoByID)
+}
+
+type s1AckBeforeWriteFailureOps struct{ drainOps }
+
+func (o s1AckBeforeWriteFailureOps) setDrainAck(string) error {
+	return errors.New("provider refused ACK before writing")
+}
+
+// Canonical cancellation keeps the same runtime alive, so admission must reopen
+// for that runtime after a successful cancellation, including failed ACK writes.
+func TestS1CanonicalDrainCancellationReopensAdmission(t *testing.T) {
+	for _, failAck := range []bool{false, true} {
+		t.Run(map[bool]string{false: "successful-ack", true: "failed-before-write"}[failAck], func(t *testing.T) {
+			fixture := newS1FileAdmissionFixture(t, "open", "")
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			tracker := newDrainTracker()
+			tracker.set(fixture.seat.ID, &drainState{startedAt: now.Add(-10 * time.Second), deadline: now.Add(20 * time.Second), reason: "wait-hold", generation: 7})
+			oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
+			t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = oldRelease, oldPoke })
+			drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
+				return releaseUnexecutedClaimsOnDrainAck(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, io.Discard)
+			}
+			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
+			ops := newDrainOps(sp)
+			if failAck {
+				ops = s1AckBeforeWriteFailureOps{ops}
+			}
+			code, err := doRuntimeDrainAckResult(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, true, io.Discard, io.Discard)
+			if (err != nil) != failAck || (code != 0) != failAck {
+				t.Fatalf("wrong ACK stage: code=%d err=%v", code, err)
+			}
+			_, cell, _, readErr := sessionFrontDoor(fixture.store).ExecutionEvidence(fixture.seat.ID)
+			if readErr != nil || cell.Drain == nil {
+				t.Fatalf("ACK did not establish drain gate: %v", readErr)
+			}
+			tracker.get(fixture.seat.ID).admissionAttempt = cell.Drain.Attempt
+			advanceSessionDrainsWithSessionsTraced(tracker, sp, fixture.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+				row, err := fixture.store.Get(id)
+				if err != nil {
+					return nil
+				}
+				return &row
+			}), map[string]wakeEvaluation{fixture.seat.ID: {Reasons: []WakeReason{WakeWait}}}, fixture.cfg, &clock.Fake{Time: now}, nil)
+			if tracker.get(fixture.seat.ID) != nil {
+				t.Fatal("canonical cancellation did not remove tracker")
+			}
+			row, err := fixture.store.Get(fixture.seat.ID)
+			if err != nil || row.Status == "closed" || !sp.IsRunning("worker-1") {
+				t.Fatalf("cancellation did not preserve runtime: status=%s running=%v err=%v", row.Status, sp.IsRunning("worker-1"), err)
+			}
+			writer, _, err := beads.ResolveConditionalWriter(fixture.store)
+			if err != nil || writer == nil {
+				t.Fatalf("work writer unavailable: %v", err)
+			}
+			status, owner := "in_progress", "worker-1"
+			if err := writer.UpdateIfMatch(fixture.work.ID, fixture.work.Revision, beads.UpdateOpts{Status: &status, Assignee: &owner}); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := fixture.store.Get(fixture.work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code, output := s1AdmissionResult(t, fixture, fresh, hookRecordStartedClaim); code != 0 || !bytes.Contains([]byte(output), []byte(`"action":"work"`)) {
+				t.Fatalf("same-incarnation work stayed refused after canonical cancellation: code=%d output=%s", code, output)
+			}
+		})
+	}
+}
+
+func TestS1ControllerDrainIssueAndTimeoutUseCapturedAttempt(t *testing.T) {
+	for _, scenario := range []string{"current-ack", "timeout", "cancel-before-timeout", "failed-timeout-retry", "unreadable-token"} {
+		t.Run(scenario, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			mem := beads.NewMemStore()
+			if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			interleaved := &s1ControllerStopInterleaveStore{MemStore: mem, beforeAccept: true}
+			env.store = interleaved
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
+			if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			seat := env.createSessionBead("worker", "worker")
+			env.markSessionActive(&seat)
+			for k, v := range map[string]string{"GC_INSTANCE_TOKEN": "test-token", "GC_SESSION_ID": seat.ID} {
+				if err := env.sp.SetMeta("worker", k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			front := sessionFrontDoor(interleaved)
+			baseFront := sessionFrontDoor(mem)
+			info := env.sessionInfo(seat.ID)
+			if !beginSessionDrainInfo(info, env.sp, env.dt, "wait-hold", env.clk, time.Second, front) {
+				t.Fatal("qualified controller issue failed")
+			}
+			ds := env.dt.get(seat.ID)
+			_, cell, enrolled, err := front.ExecutionEvidence(seat.ID)
+			if err != nil || !enrolled || ds.admissionAttempt == "" || cell.Drain == nil || cell.Drain.Attempt != ds.admissionAttempt || cell.Drain.Committed {
+				t.Fatalf("issue did not close distinct controller intent: ds=%+v cell=%+v err=%v", ds, cell, err)
+			}
+			fence := sessionpkg.ExecutionFence{InstanceToken: "test-token", Generation: "1"}
+			var admissionErr error
+			interleaved.intervene = func() {
+				if err := baseFront.CancelDrainAdmission(seat.ID, fence, ds.admissionAttempt); err != nil {
+					t.Errorf("cancellation-before-timeout: %v", err)
+				}
+				admissionErr = baseFront.RecordStartedClaim(seat.ID, fence, sessionpkg.WorkStartedEntry{Bead: "fresh-work"})
+			}
+			if scenario != "cancel-before-timeout" {
+				interleaved.fired = true
+			}
+			if scenario == "failed-timeout-retry" {
+				env.sp.StopErrors["worker"] = errors.New("provider unavailable")
+			}
+			if scenario == "unreadable-token" {
+				env.sp.GetMetaErrors["worker"] = map[string]error{"GC_INSTANCE_TOKEN": errors.New("token read unavailable")}
+			}
+			if scenario != "current-ack" {
+				env.clk.Time = env.clk.Time.Add(2 * time.Second)
+			}
+			lookup := infoLookupFromBeadLookup(func(id string) *beads.Bead {
+				row, err := mem.Get(id)
+				if err != nil {
+					return nil
+				}
+				return &row
+			})
+			advance := func(wake map[string]wakeEvaluation) {
+				advanceSessionDrainsWithSessionsTraced(env.dt, env.sp, interleaved, lookup, wake, env.cfg, env.clk, nil)
+			}
+			advance(nil)
+			if scenario == "cancel-before-timeout" {
+				if !interleaved.fired || admissionErr != nil || !env.sp.IsRunning("worker") {
+					t.Fatalf("cancellation winner stopped or could not resume: fired=%v err=%v running=%v", interleaved.fired, admissionErr, env.sp.IsRunning("worker"))
+				}
+				return
+			}
+			if scenario == "current-ack" {
+				nonce, err := env.sp.GetMeta("worker", drainAdmissionAttemptKey)
+				if err != nil || nonce != ds.admissionAttempt {
+					t.Fatalf("controller publication unbound: %q %v", nonce, err)
+				}
+				seat, err = mem.Get(seat.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconcileS1StopCompletion(t, env, []beads.Bead{seat}, map[string]int{"worker": 0}, newDrainOps(env.sp))
+				if env.sp.IsRunning("worker") {
+					t.Fatalf("valid controller ACK did not finish: %s", env.stderr.String())
+				}
+				return
+			}
+			if scenario == "failed-timeout-retry" || scenario == "unreadable-token" {
+				if !env.sp.IsRunning("worker") {
+					t.Fatal("failed/unreadable stop killed runtime")
+				}
+				if err := baseFront.CancelDrainAdmission(seat.ID, fence, ds.admissionAttempt); !errors.Is(err, sessionpkg.ErrDrainStopAccepted) {
+					t.Fatalf("accepted failed timeout reopened: %v", err)
+				}
+				if err := baseFront.RecordStartedClaim(seat.ID, fence, sessionpkg.WorkStartedEntry{Bead: "new-work"}); !errors.Is(err, sessionpkg.ErrExecutionDraining) {
+					t.Fatalf("failed timeout admitted work: %v", err)
+				}
+				delete(env.sp.StopErrors, "worker")
+				delete(env.sp.GetMetaErrors, "worker")
+				advance(map[string]wakeEvaluation{seat.ID: {Reasons: []WakeReason{WakeWait}}})
+			}
+			if env.sp.IsRunning("worker") {
+				t.Fatal("accepted timeout did not complete or retry")
+			}
+		})
+	}
+}
+
+func TestS1DelayedControllerPublicationCannotAdoptReplacementDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	mem := beads.NewMemStore()
+	env.store = mem
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	seat := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&seat)
+	for k, v := range map[string]string{"GC_INSTANCE_TOKEN": "test-token", "GC_SESSION_ID": seat.ID} {
+		if err := env.sp.SetMeta("worker", k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	front := sessionFrontDoor(mem)
+	info := env.sessionInfo(seat.ID)
+	fence := sessionpkg.ExecutionFence{InstanceToken: "test-token", Generation: "1"}
+	if !beginSessionDrainInfo(info, env.sp, env.dt, "wait-hold", env.clk, time.Second, front) {
+		t.Fatal("first issue failed")
+	}
+	old := env.dt.get(seat.ID)
+	env.clk.Time = env.clk.Time.Add(2 * time.Second)
+	paused := &s1PausedAckProvider{Provider: env.sp, paused: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() {
+		select {
+		case <-paused.release:
+		default:
+			close(paused.release)
+		}
+	})
+	lookup := infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		row, err := mem.Get(id)
+		if err != nil {
+			return nil
+		}
+		return &row
+	})
+	done := make(chan struct{})
+	go func() {
+		advanceSessionDrainsWithSessionsTraced(env.dt, paused, mem, lookup, nil, env.cfg, env.clk, nil)
+		close(done)
+	}()
+	select {
+	case <-paused.paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("controller publication barrier not reached")
+	}
+	if !cancelSessionDrainInfo(info, env.sp, env.dt, front) {
+		t.Fatal("canonical cancellation did not win")
+	}
+	if err := front.RecordStartedClaim(seat.ID, fence, sessionpkg.WorkStartedEntry{Bead: "fresh-work"}); err != nil {
+		t.Fatal(err)
+	}
+	if !beginSessionDrainInfo(info, env.sp, env.dt, "wait-hold", env.clk, time.Minute, front) {
+		t.Fatal("replacement issue failed")
+	}
+	replacement := env.dt.get(seat.ID)
+	if replacement.admissionAttempt == old.admissionAttempt {
+		t.Fatal("replacement reused canceled identity")
+	}
+	close(paused.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old publication did not finish")
+	}
+	if old.ackSet || env.dt.get(seat.ID) != replacement || !env.sp.IsRunning("worker") {
+		t.Fatal("old publication adopted/deleted replacement intent or timed out resumed runtime")
+	}
+	_, cell, _, err := front.ExecutionEvidence(seat.ID)
+	if err != nil || cell.Drain == nil || cell.Drain.Attempt != replacement.admissionAttempt || cell.Drain.Accepted || cell.Drain.Committed || !cell.Names("", "fresh-work") {
+		t.Fatalf("replacement or active evidence changed: %+v %v", cell, err)
+	}
+	seat, err = mem.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{seat}, map[string]int{"worker": 0}, newDrainOps(env.sp))
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("stale controller ACK stopped replacement before its own acceptance")
+	}
+}
+
+func TestS1RecoveredCancellationRejectsStalePublishedAttempt(t *testing.T) {
+	for _, assigned := range []bool{false, true} {
+		for _, stale := range []bool{false, true} {
+			t.Run(fmt.Sprintf("assigned-%v/stale-%v", assigned, stale), func(t *testing.T) {
+				env := newReconcilerTestEnv()
+				if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				seat := env.createSessionBead("worker", "worker")
+				env.markSessionActive(&seat)
+				front := sessionFrontDoor(env.store)
+				info, _, _, err := front.ExecutionEvidence(seat.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fence := sessionpkg.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}
+				published, err := front.BeginControllerDrainAdmission(seat.ID, fence)
+				if err != nil {
+					t.Fatal(err)
+				}
+				current := published
+				if stale {
+					current, err = front.BeginControllerDrainAdmission(seat.ID, fence)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				for k, v := range map[string]string{reconcilerDrainAckSourceKey: reconcilerDrainAckSourceValue, reconcilerDrainAckReasonKey: "no-wake-reason", reconcilerDrainAckGenerationKey: info.Generation, drainAdmissionAttemptKey: published, "GC_DRAIN_ACK": "1", "GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": info.InstanceToken} {
+					if err := env.sp.SetMeta("worker", k, v); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := publishDrainAckFrame(env.sp, "worker", info, reconcilerDrainAckSourceValue, "no-wake-reason", published); err != nil {
+					t.Fatal(err)
+				}
+				var canceled bool
+				if assigned {
+					canceled = cancelRecoveredDrainForAssignedWorkInfo(info, env.sp, "worker", front)
+				} else {
+					canceled = cancelRecoveredReconcilerAckedDrainInfo(info, env.sp, "worker", front)
+				}
+				_, cell, _, err := front.ExecutionEvidence(seat.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ack, err := env.sp.GetMeta("worker", "GC_DRAIN_ACK")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stale {
+					if canceled || cell.Drain == nil || cell.Drain.Attempt != current || ack != "1" {
+						t.Fatalf("stale provider proof canceled replacement: canceled=%v gate=%+v ack=%q", canceled, cell.Drain, ack)
+					}
+				} else if !canceled || cell.Drain != nil || ack != "" {
+					t.Fatalf("exact recovered intent did not cancel: canceled=%v gate=%+v ack=%q", canceled, cell.Drain, ack)
+				}
+			})
+		}
+	}
+}
+
+type s1RecoveryPublicationInterleave struct {
+	*runtime.Fake
+	onRead         func()
+	blockedAttempt string
+	written        chan struct{}
+	resume         chan struct{}
+	blocked        atomic.Bool
+}
+
+func (p *s1RecoveryPublicationInterleave) GetMeta(name, key string) (string, error) {
+	value, err := p.Fake.GetMeta(name, key)
+	if err == nil && (key == reconcilerDrainAckReasonKey || key == "GC_DRAIN_ADMISSION_FRAME") && p.onRead != nil {
+		callback := p.onRead
+		p.onRead = nil
+		callback()
+	}
+	return value, err
+}
+
+func (p *s1RecoveryPublicationInterleave) SetMeta(name, key, value string) error {
+	if err := p.Fake.SetMeta(name, key, value); err != nil {
+		return err
+	}
+	if key == drainAdmissionAttemptKey && value == p.blockedAttempt && p.blocked.CompareAndSwap(false, true) {
+		close(p.written)
+		<-p.resume
+	}
+	return nil
+}
+
+func TestS1RecoveredCancellationCannotMixReasonAndReplacementAttempt(t *testing.T) {
+	for _, reason := range []string{"config-drift", "no-wake-reason"} {
+		t.Run(reason, func(t *testing.T) {
+			env := newReconcilerTestEnv()
+			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			seat := env.createSessionBead("worker", "worker")
+			env.markSessionActive(&seat)
+			front := sessionFrontDoor(env.store)
+			info, _, _, err := front.ExecutionEvidence(seat.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fence := sessionpkg.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}
+			original, err := front.BeginControllerDrainAdmission(seat.ID, fence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := &s1RecoveryPublicationInterleave{Fake: env.sp, written: make(chan struct{}), resume: make(chan struct{})}
+			for k, v := range map[string]string{"GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": info.InstanceToken} {
+				if err := p.SetMeta("worker", k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := setReconcilerDrainAckMetadata(p, "worker", &drainState{reason: reason, generation: 1, admissionAttempt: original}, front); err != nil {
+				t.Fatal(err)
+			}
+			replacement := ""
+			published := make(chan error, 1)
+			p.onRead = func() {
+				var err error
+				replacement, err = front.BeginControllerDrainAdmission(seat.ID, fence)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.blockedAttempt = replacement
+				go func() {
+					published <- setReconcilerDrainAckMetadata(p, "worker", &drainState{reason: "orphaned", generation: 1, admissionAttempt: replacement}, front)
+				}()
+				select {
+				case <-p.written:
+				case <-time.After(3 * time.Second):
+					t.Fatal("replacement publisher did not reach attempt barrier")
+				}
+			}
+			defer func() {
+				select {
+				case <-p.resume:
+				default:
+					close(p.resume)
+				}
+			}()
+			var canceled bool
+			if reason == "config-drift" {
+				canceled, err = cancelConfigDriftDrainInfoResult(info, p, newDrainTracker(), front)
+			} else {
+				canceled = cancelRecoveredReconcilerAckedDrainInfo(info, p, "worker", front)
+			}
+			close(p.resume)
+			select {
+			case <-published:
+			case <-time.After(3 * time.Second):
+				t.Fatal("replacement publisher did not terminate")
+			}
+			if replacement == "" {
+				t.Fatal("recovery did not exercise replacement interleave")
+			}
+			_, cell, _, readErr := front.ExecutionEvidence(seat.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if canceled || cell.Drain == nil || cell.Drain.Attempt != replacement {
+				t.Fatalf("mixed old reason/new attempt canceled unrelated replacement: canceled=%v gate=%+v err=%v", canceled, cell.Drain, err)
+			}
+		})
+	}
 }
