@@ -426,7 +426,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	opts.tracef("scope-check bead=%s begin root=%s scope=%s", bead.ID, rootID, scopeRef)
 
 	subjectID, err := tracePhase(opts, bead.ID, "resolve-subject-id", func() (string, error) {
-		return resolveBlockingSubjectID(store, bead.ID)
+		return resolveScopeCheckSubjectID(store, bead.ID)
 	})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving subject: %w", bead.ID, err)
@@ -1016,10 +1016,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// store and nothing crosses the store boundary, leaving the parent
 		// indistinguishable from never-run. Stamp the failing step's
 		// diagnostics onto the still-open parent so it is visibly failed.
-		// Stamped here, in the pass-path preflight's slot, for the same
-		// reason the preflight exists: an error past this point strands the
-		// finalizer closed-as-skipped by the subtree close below. The stamp
-		// is metadata-only and idempotent, so re-running it on retry is safe.
+		// Stamped here, in the pass-path preflight's slot, so the parent is
+		// marked before the root settles. The stamp is metadata-only and
+		// idempotent, so re-running it on retry is safe.
 		//
 		// The parent outlives every DAG launched from it, so the stamp is a
 		// whole-value contract rather than a set of independent keys: each
@@ -1063,10 +1062,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
+	// The finalizer is itself a root member, but it must not sweep itself: it
+	// is the bead that re-drives this function, so it closes last, after the
+	// source chain. Swept here it would close as skipped before the sources
+	// and a crash in between would strand them open with nothing to retry.
+	excludeFromSweep := func(member beads.Bead) bool {
+		return member.ID == bead.ID || excludeTeardown(member)
+	}
 	if _, err := molecule.CloseSubtreeWithMetadataExcept(store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	}, excludeTeardown); err != nil {
+	}, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
@@ -1616,6 +1622,41 @@ func resolveBlockingSubjectID(store beads.Store, beadID string) (string, error) 
 		}
 	}
 	return "", fmt.Errorf("no blocking dependency")
+}
+
+// resolveScopeCheckSubjectID returns the step a scope-check finalizes. A
+// scope-check for an on_complete source blocks on both the source and its
+// <source>-fanout control; the fanout edge is a readiness gate only, so the
+// subject is the first blocker that is not a fanout control, independent of
+// dependency order.
+func resolveScopeCheckSubjectID(store beads.Store, beadID string) (string, error) {
+	deps, err := store.DepList(beadID, "down")
+	if err != nil {
+		return "", err
+	}
+	var blockers []string
+	for _, dep := range deps {
+		if dep.Type == "blocks" {
+			blockers = append(blockers, dep.DependsOnID)
+		}
+	}
+	switch len(blockers) {
+	case 0:
+		return "", fmt.Errorf("no blocking dependency")
+	case 1:
+		return blockers[0], nil
+	}
+	for _, id := range blockers {
+		blocker, err := store.Get(id)
+		if err != nil {
+			return "", fmt.Errorf("loading blocker %s: %w", id, err)
+		}
+		if blocker.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindFanout {
+			continue
+		}
+		return id, nil
+	}
+	return "", fmt.Errorf("no non-fanout blocking dependency among %v", blockers)
 }
 
 func resolveScopeBody(store beads.Store, rootID, scopeRef, traceID string, opts ProcessOptions) (beads.Bead, error) {
