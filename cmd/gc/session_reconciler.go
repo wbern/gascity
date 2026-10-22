@@ -258,6 +258,23 @@ func qualifiedDrainAck(info sessionpkg.Info, front *sessionpkg.Store, sp runtime
 // currentDrainAck removes authoritatively obsolete ACK metadata so normal
 // reconciliation can continue. Unavailable evidence leaves it untouched.
 func currentDrainAck(info sessionpkg.Info, front *sessionpkg.Store, sp runtime.Provider, dops drainOps, name string) (bool, drainAckFrame, error) {
+	acked, frame, err := currentDrainAckRaw(info, front, sp, dops, name)
+	// A runtime that no longer exists cannot carry a drain acknowledgement:
+	// its metadata went with it. That is a definite "not acked", not an
+	// observation uncertainty. Before #243 the reconciler ignored this error
+	// outright; returning it makes both reconciler call sites `continue`,
+	// which parks every exited session forever (never woken, never
+	// orphan-handled) and logs "reading GC_DRAIN_ACK ... session not found"
+	// each tick. Genuine read failures still surface as errors.
+	// Store-side lookups share the "session not found" text, so exclude the
+	// session-bead sentinel: only a vanished runtime is a definite answer.
+	if err != nil && runtime.IsSessionGone(err) && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		return false, frame, nil
+	}
+	return acked, frame, err
+}
+
+func currentDrainAckRaw(info sessionpkg.Info, front *sessionpkg.Store, sp runtime.Provider, dops drainOps, name string) (bool, drainAckFrame, error) {
 	var frame drainAckFrame
 	_, _, enrolled, err := front.ExecutionEvidence(info.ID)
 	if err != nil {
