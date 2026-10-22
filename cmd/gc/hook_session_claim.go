@@ -6,8 +6,28 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+// hookExecutionFenceOf reads incarnation evidence before the runtime's
+// inherited-secret filter constructs any child-process environment.
+func hookExecutionFenceOf(env []string) session.ExecutionFence {
+	return session.ExecutionFence{
+		InstanceToken: hookClaimEnvValue(env, "GC_INSTANCE_TOKEN"),
+		Generation:    hookClaimEnvValue(env, "GC_RUNTIME_EPOCH"),
+	}
+}
+
+func hookRecordStartedClaim(id string, fence session.ExecutionFence, entry session.WorkStartedEntry) error {
+	front, err := sessionCurrentClaimFrontDoor()
+	if err != nil {
+		return err
+	}
+	return front.RecordStartedClaim(id, fence, entry)
+}
 
 // sessionCurrentClaimFrontDoor opens the routed session-class write front door
 // for the city this process is running in. It is the shared root for the two
@@ -155,4 +175,18 @@ func sessionStampableWorkDir(info session.Info) string {
 		return ""
 	}
 	return strings.TrimSpace(info.WorkDir)
+}
+
+// hookExecutionEvidenceEnabled uses the same resolved mode as store opening,
+// including the supported per-process override.
+func hookExecutionEvidenceEnabled(cfg *config.City) (bool, error) {
+	if cfg == nil {
+		return false, nil
+	}
+	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{})
+	if err != nil {
+		return false, err
+	}
+	mode := flags.BeadsConditionalWrites()
+	return mode == gate.Auto || mode == gate.Require, nil
 }

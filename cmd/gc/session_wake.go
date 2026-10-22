@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessions "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -251,35 +253,70 @@ func validateWorkDir(dir string) error {
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
 //
 // It reads only session_name, generation, and id — all carried verbatim on Info.
-func beginSessionDrainInfo(
+func executionProtocolEnabled(front *sessions.Store, enrolled bool) bool {
+	if enrolled {
+		return true
+	}
+	mode := beads.InspectConditionalWrites(front.Store().Store).Mode
+	return mode == gate.Auto || mode == gate.Require
+}
+
+func beginSessionDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, reason string, clk clock.Clock, timeout time.Duration, fronts ...*sessions.Store) bool {
+	begun, err := beginSessionDrainInfoResult(info, sp, dt, reason, clk, timeout, fronts...)
+	if err != nil {
+		log.Printf("session drain: issuing %s for %s: %v", reason, info.ID, err)
+	}
+	return begun
+}
+
+func beginSessionDrainInfoResult(
 	info sessions.Info,
 	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrainsWithSessionsTraced
 	dt *drainTracker,
 	reason string,
 	clk clock.Clock,
 	timeout time.Duration,
-) bool {
+	fronts ...*sessions.Store,
+) (bool, error) {
 	name := info.SessionNameMetadata
 	if dt.get(info.ID) != nil {
 		if os.Getenv("GC_TMUX_TRACE") == "1" {
 			log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s noop=already-draining", name, reason)
 		}
-		return false
+		return false, nil
+	}
+	attempt := ""
+	if len(fronts) > 0 && fronts[0] != nil {
+		front := fronts[0]
+		current, _, enrolled, err := front.ExecutionEvidence(info.ID)
+		if err != nil {
+			return false, err
+		}
+		if current.InstanceToken != info.InstanceToken || current.Generation != info.Generation {
+			return false, sessions.ErrExecutionIncarnationChanged
+		}
+		if executionProtocolEnabled(front, enrolled) {
+			attempt, err = front.BeginControllerDrainAdmission(info.ID, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation})
+			if err != nil {
+				return false, err
+			}
+		}
 	}
 	gen, _ := strconv.Atoi(info.Generation)
 
 	dt.set(info.ID, &drainState{
-		startedAt:  clk.Now(),
-		deadline:   clk.Now().Add(timeout),
-		reason:     reason,
-		generation: gen,
+		admissionAttempt: attempt,
+		startedAt:        clk.Now(),
+		deadline:         clk.Now().Add(timeout),
+		reason:           reason,
+		generation:       gen,
 	})
 
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
 		log.Printf("[DRAIN-TRACE] beginSessionDrain session=%s reason=%s", name, reason)
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
-	return true
+	return true, nil
 }
 
 // executionStalledDrainReason drains a pool seat that claimed work and then
@@ -340,16 +377,13 @@ func orphanedDrainInFlightInfo(info sessions.Info, sp runtime.Provider, dt *drai
 // "orphaned" drain — the tracked drain and/or its published drain ack — once the
 // session is known to hold a live claim. It reports whether anything was
 // canceled.
-func cancelOrphanedDrainForLiveClaimInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string) bool {
-	canceled := dt != nil && cancelSessionDrainIfInfo(info, sp, dt, liveClaimDrainReasonCancelable)
-	if reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ok && liveClaimDrainReasonCancelable(reason) {
-		_ = clearReconcilerDrainAckMetadata(sp, name)
-		if !canceled {
-			telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
-		}
-		canceled = true
+func cancelOrphanedDrainForLiveClaimInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string, fronts ...*sessions.Store) bool {
+	canceled := dt != nil && cancelSessionDrainIfInfo(info, sp, dt, liveClaimDrainReasonCancelable, fronts...)
+	recovered, err := cancelRecoveredSessionDrainInfoResult(info, sp, name, liveClaimDrainReasonCancelable, fronts...)
+	if err != nil {
+		log.Printf("session drain: recovering live-claim cancellation for %s: %v", info.ID, err)
 	}
-	return canceled
+	return canceled || recovered && err == nil
 }
 
 const (
@@ -365,9 +399,92 @@ const (
 	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
-func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
+const drainAckFrameKey = "GC_DRAIN_ADMISSION_FRAME"
+
+// drainAckFrame is one provider value: policy reason and operation identity
+// cannot be assembled from separate publications. It is committed last.
+type drainAckFrame struct {
+	V           int    `json:"v"`
+	Source      string `json:"source"`
+	Reason      string `json:"reason,omitempty"`
+	Generation  string `json:"generation"`
+	SessionID   string `json:"session_id"`
+	RuntimeName string `json:"runtime_name"`
+	Incarnation string `json:"incarnation"`
+	Attempt     string `json:"attempt"`
+}
+
+func publishDrainAckFrame(sp runtime.Provider, name string, info sessions.Info, source, reason, attempt string) error {
+	frame := drainAckFrame{V: 1, Source: source, Reason: reason, Generation: info.Generation, SessionID: info.ID, RuntimeName: name, Incarnation: drainAckInstanceTokenDigest(info.InstanceToken), Attempt: attempt}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	return sp.SetMeta(name, drainAckFrameKey, string(raw))
+}
+
+func readDrainAckFrame(info sessions.Info, sp runtime.Provider, name string) (drainAckFrame, error) {
+	var frame drainAckFrame
+	raw, err := sp.GetMeta(name, drainAckFrameKey)
+	if err != nil {
+		return frame, err
+	}
+	if raw == "" {
+		return frame, sessions.ErrDrainAdmissionChanged
+	}
+	if len(raw) > 4096 {
+		return frame, errors.New("drain acknowledgement frame exceeds limit")
+	}
+	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+		return frame, fmt.Errorf("reading drain acknowledgement frame: %w", err)
+	}
+	if frame.V != 1 || frame.SessionID != info.ID || frame.RuntimeName != name || frame.RuntimeName != info.SessionNameMetadata || frame.Generation != info.Generation || frame.Incarnation != drainAckInstanceTokenDigest(info.InstanceToken) || frame.Attempt == "" || (frame.Source != reconcilerDrainAckSourceValue && frame.Source != drainAckSourceAgentValue) || (frame.Source == reconcilerDrainAckSourceValue && frame.Reason == "") {
+		return frame, sessions.ErrDrainAdmissionChanged
+	}
+	runtimeID, err := sp.GetMeta(name, "GC_SESSION_ID")
+	if err != nil {
+		return frame, err
+	}
+	token, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return frame, err
+	}
+	if runtimeID != info.ID || token != info.InstanceToken {
+		return frame, sessions.ErrExecutionIncarnationChanged
+	}
+	return frame, nil
+}
+
+func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState, fronts ...*sessions.Store) error {
 	if ds == nil {
 		return nil
+	}
+	var front *sessions.Store
+	var info sessions.Info
+	if len(fronts) > 0 && fronts[0] != nil {
+		front = fronts[0]
+		id, err := resolveSessionID(front.Store().Store, name)
+		if err != nil {
+			return err
+		}
+		current, _, enrolled, err := front.ExecutionEvidence(id)
+		if err != nil {
+			return err
+		}
+		info = current
+		if executionProtocolEnabled(front, enrolled) {
+			if ds.admissionAttempt == "" {
+				return sessions.ErrDrainAdmissionChanged
+			}
+			if _, err := front.InspectDrainAdmission(id, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, ds.admissionAttempt); err != nil {
+				return err
+			}
+		} else {
+			front = nil
+		}
+	}
+	if err := sp.SetMeta(name, drainAdmissionAttemptKey, ds.admissionAttempt); err != nil {
+		return err
 	}
 	if err := sp.SetMeta(name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue); err != nil {
 		return err
@@ -384,6 +501,17 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
+	if front != nil {
+		if err := publishDrainAckFrame(sp, name, info, reconcilerDrainAckSourceValue, ds.reason, ds.admissionAttempt); err != nil {
+			return err
+		}
+	} else if err := sp.RemoveMeta(name, drainAckFrameKey); err != nil {
+		return err
+	}
+	if front != nil {
+		_, err := front.InspectDrainAdmission(info.ID, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, ds.admissionAttempt)
+		return err
+	}
 	return nil
 }
 
@@ -394,6 +522,9 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	var errs []error
 	for _, key := range []string{
 		"GC_DRAIN_ACK",
+		// Frames are bounded retained receipts. Native exact-attempt validation
+		// makes old receipts inert; deleting here could erase a concurrent commit.
+		drainAdmissionAttemptKey,
 		reconcilerDrainAckSourceKey,
 		// Cleared with the source it belongs to: a requester stamp that outlives
 		// its acknowledgement is residue waiting for a later source to make it
@@ -414,20 +545,20 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 // for the same generation. If GC_DRAIN_ACK was already set by the reconciler
 // (deferred drain signal), it is cleared so the Phase 1 drain-ack check doesn't
 // kill the session. It reads the session id/generation/name off the Info snapshot.
-func cancelSessionDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
-	return cancelSessionDrainIfInfo(info, sp, dt, drainReasonCancelable)
+func cancelSessionDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, drainReasonCancelable, fronts...)
 }
 
 // cancelSessionDrainForPendingInfo cancels a pending-drain-cancelable drain for
 // the reconciler's Phase-2 drain scan, working off the Info snapshot.
-func cancelSessionDrainForPendingInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
-	return cancelSessionDrainIfInfo(info, sp, dt, pendingDrainReasonCancelable)
+func cancelSessionDrainForPendingInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, pendingDrainReasonCancelable, fronts...)
 }
 
 // cancelSessionDrainForAssignedWorkInfo cancels an assigned-work-cancelable drain
 // for the reconciler's Phase-2 drain scan, working off the Info snapshot.
-func cancelSessionDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
-	return cancelSessionDrainIfInfo(info, sp, dt, assignedWorkDrainReasonCancelable)
+func cancelSessionDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) bool {
+	return cancelSessionDrainIfInfo(info, sp, dt, assignedWorkDrainReasonCancelable, fronts...)
 }
 
 func assignedWorkDrainReasonCancelable(reason string) bool {
@@ -441,47 +572,102 @@ func assignedWorkDrainReasonCancelable(reason string) bool {
 
 // cancelSessionConfigDriftDrainInfo cancels a config-drift drain off the Info
 // snapshot, threading Info straight into the typed drain-cancel core.
-func cancelSessionConfigDriftDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
-	if dt == nil {
-		return false
+func cancelSessionConfigDriftDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) bool {
+	canceled, err := cancelConfigDriftDrainInfoResult(info, sp, dt, fronts...)
+	if err != nil {
+		log.Printf("session drain: recovering config-drift cancellation for %s: %v", info.ID, err)
 	}
-	return cancelSessionDrainIfInfo(info, sp, dt, func(reason string) bool {
-		return reason == "config-drift"
-	})
+	return canceled
+}
+
+func cancelConfigDriftDrainInfoResult(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) (bool, error) {
+	return cancelConfigDriftDrainAttemptInfoResult(info, sp, dt, nil, fronts...)
+}
+
+func cancelConfigDriftDrainAttemptInfoResult(info sessions.Info, sp runtime.Provider, dt *drainTracker, expected *string, fronts ...*sessions.Store) (bool, error) {
+	if dt != nil {
+		if ds := dt.get(info.ID); ds != nil {
+			if expected != nil && ds.admissionAttempt != *expected {
+				return false, sessions.ErrDrainAdmissionChanged
+			}
+			return cancelSessionDrainIfInfoResult(info, sp, dt, func(reason string) bool { return reason == "config-drift" }, fronts...)
+		}
+	}
+	return cancelRecoveredSessionDrainAttemptInfoResult(info, sp, info.SessionNameMetadata, func(reason string) bool { return reason == "config-drift" }, expected, fronts...)
+}
+
+// cancelSessionExecutionAdmission linearizes reopening before provider cleanup.
+
+func cancelSessionExecutionAdmissionAttempt(info sessions.Info, expected string, fronts ...*sessions.Store) error {
+	if len(fronts) == 0 || fronts[0] == nil {
+		return nil
+	}
+	front := fronts[0]
+	current, cell, enrolled, err := front.ExecutionEvidence(info.ID)
+	if err != nil {
+		return err
+	}
+	if !enrolled {
+		return nil
+	}
+	if current.InstanceToken != info.InstanceToken || current.Generation != info.Generation {
+		return sessions.ErrExecutionIncarnationChanged
+	}
+	attempt := ""
+	if cell.Drain != nil {
+		if cell.Drain.Generation == info.Generation && cell.Drain.Incarnation == drainAckInstanceTokenDigest(info.InstanceToken) && (expected == "" || cell.Drain.Attempt != expected) {
+			return sessions.ErrDrainAdmissionChanged
+		}
+		attempt = cell.Drain.Attempt
+	}
+	return front.CancelDrainAdmission(info.ID, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, attempt)
 }
 
 // cancelSessionDrainIfInfo is the typed core of the drain-cancel helpers. It
-// reads only the session id, generation, and session_name — all carried raw and
-// verbatim on Info — so it is byte-identical to the raw-bead form it backs.
-func cancelSessionDrainIfInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool) bool {
+// preserves the existing reason/generation policy while canceling the exact
+// durable intent before removing the tracker or provider acknowledgement.
+func cancelSessionDrainIfInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool, fronts ...*sessions.Store) bool {
+	ok, err := cancelSessionDrainIfInfoResult(info, sp, dt, canCancel, fronts...)
+	if err != nil && !errors.Is(err, sessions.ErrDrainStopAccepted) && !errors.Is(err, sessions.ErrDrainAdmissionChanged) {
+		log.Printf("session drain: canceling %s: %v", info.ID, err)
+	}
+	return ok
+}
+
+func cancelSessionDrainIfInfoResult(info sessions.Info, sp runtime.Provider, dt *drainTracker, canCancel func(string) bool, fronts ...*sessions.Store) (bool, error) {
 	ds := dt.get(info.ID)
 	if ds == nil {
-		return false
+		return false, nil
 	}
 	if !canCancel(ds.reason) {
-		return false
+		return false, nil
 	}
 	gen, _ := strconv.Atoi(info.Generation)
 	if gen == ds.generation {
-		dt.clearIdleProbe(info.ID)
-		dt.remove(info.ID)
+		if err := cancelSessionExecutionAdmissionAttempt(info, ds.admissionAttempt, fronts...); err != nil {
+			return false, err
+		}
 		name := info.SessionNameMetadata
 		// Clear GC_DRAIN_ACK if it was set — prevents stale ack from
 		// killing the session on the next Phase 1 drain-ack check.
 		if ds.ackSet {
-			_ = clearReconcilerDrainAckMetadata(sp, name)
+			if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
+				return false, err
+			}
 		}
+		dt.clearIdleProbe(info.ID)
+		dt.removeIfCurrent(info.ID, ds)
 		telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // cancelReconcilerAckedDrainInfo cancels a reconciler-owned drain ack off the
 // Info snapshot: it reads the session_name (Info.SessionNameMetadata), generation
 // (via reconcilerDrainAckMatchesSessionInfo) and id (dt keying) — all carried
 // verbatim on Info — and routes the cancel through the typed drain-cancel core.
-func cancelReconcilerAckedDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker) bool {
+func cancelReconcilerAckedDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, fronts ...*sessions.Store) bool {
 	if dt == nil {
 		return false
 	}
@@ -494,7 +680,7 @@ func cancelReconcilerAckedDrainInfo(info sessions.Info, sp runtime.Provider, dt 
 	if ds == nil || !ds.ackSet {
 		return false
 	}
-	return cancelSessionDrainForPendingInfo(info, sp, dt)
+	return cancelSessionDrainForPendingInfo(info, sp, dt, fronts...)
 }
 
 func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, name string) (string, bool) {
@@ -528,6 +714,14 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 func reconcilerDrainAckMatchesSessionInfo(info sessions.Info, sp runtime.Provider, name string) (string, bool) {
 	if sp == nil || name == "" {
 		return "", false
+	}
+	raw, err := sp.GetMeta(name, drainAckFrameKey)
+	if err != nil {
+		return "", false
+	}
+	if raw != "" {
+		frame, err := readDrainAckFrame(info, sp, name)
+		return frame.Reason, err == nil && frame.Source == reconcilerDrainAckSourceValue
 	}
 	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
 	if err != nil || source != reconcilerDrainAckSourceValue {
@@ -622,26 +816,88 @@ func staleOrLegacyDrainAckBeforeStartInfo(info sessions.Info, sp runtime.Provide
 // whose in-memory tracker entry did not survive (recovered from provider
 // metadata alone). Off the Info snapshot: the only session-bead read is the
 // generation via reconcilerDrainAckMatchesSessionInfo.
-func cancelRecoveredReconcilerAckedDrainInfo(info sessions.Info, sp runtime.Provider, name string) bool {
-	reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name)
-	if !ok || !pendingDrainReasonCancelable(reason) {
-		return false
+func cancelRecoveredReconcilerAckedDrainInfo(info sessions.Info, sp runtime.Provider, name string, fronts ...*sessions.Store) bool {
+	canceled, err := cancelRecoveredSessionDrainInfoResult(info, sp, name, pendingDrainReasonCancelable, fronts...)
+	if err != nil {
+		log.Printf("session drain: recovering pending cancellation for %s: %v", info.ID, err)
 	}
-	_ = clearReconcilerDrainAckMetadata(sp, name)
-	telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
-	return true
+	return canceled && err == nil
 }
 
-// cancelRecoveredDrainForAssignedWorkInfo is the assigned-work counterpart of
-// cancelRecoveredReconcilerAckedDrainInfo, off the Info snapshot.
-func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Provider, name string) bool {
-	reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name)
-	if !ok || !assignedWorkDrainReasonCancelable(reason) {
-		return false
+// cancelRecoveredDrainForAssignedWorkInfo binds recovered cancellation to the
+// published intent rather than whichever newer attempt the native row contains.
+func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Provider, name string, fronts ...*sessions.Store) bool {
+	canceled, err := cancelRecoveredSessionDrainInfoResult(info, sp, name, assignedWorkDrainReasonCancelable, fronts...)
+	if err != nil {
+		log.Printf("session drain: recovering assigned-work cancellation for %s: %v", info.ID, err)
 	}
-	_ = clearReconcilerDrainAckMetadata(sp, name)
+	return canceled && err == nil
+}
+
+func cancelRecoveredSessionDrainInfoResult(info sessions.Info, sp runtime.Provider, name string, canCancel func(string) bool, fronts ...*sessions.Store) (bool, error) {
+	return cancelRecoveredSessionDrainAttemptInfoResult(info, sp, name, canCancel, nil, fronts...)
+}
+
+func cancelRecoveredSessionDrainAttemptInfoResult(info sessions.Info, sp runtime.Provider, name string, canCancel func(string) bool, expected *string, fronts ...*sessions.Store) (bool, error) {
+	strict, active := false, false
+	captured := ""
+	if len(fronts) > 0 && fronts[0] != nil {
+		current, cell, enrolled, err := fronts[0].ExecutionEvidence(info.ID)
+		if err != nil {
+			return false, err
+		}
+		if current.InstanceToken != info.InstanceToken || current.Generation != info.Generation {
+			return false, sessions.ErrExecutionIncarnationChanged
+		}
+		strict = executionProtocolEnabled(fronts[0], enrolled)
+		active = cell.Drain != nil && cell.Drain.Generation == info.Generation && cell.Drain.Incarnation == drainAckInstanceTokenDigest(info.InstanceToken)
+		if active {
+			captured = cell.Drain.Attempt
+		}
+	}
+	if sp == nil || name == "" {
+		if strict && active {
+			return false, sessions.ErrDrainAdmissionChanged
+		}
+		return false, nil
+	}
+	reason := ""
+	if strict {
+		frame, err := readDrainAckFrame(info, sp, name)
+		if err != nil {
+			if !active && errors.Is(err, sessions.ErrDrainAdmissionChanged) {
+				return false, nil
+			}
+			return false, err
+		}
+		if frame.Source != reconcilerDrainAckSourceValue {
+			return false, sessions.ErrDrainAdmissionChanged
+		}
+		if active && frame.Attempt != captured {
+			return false, sessions.ErrDrainAdmissionChanged
+		}
+		if expected != nil && active && frame.Attempt != *expected {
+			return false, sessions.ErrDrainAdmissionChanged
+		}
+		if !canCancel(frame.Reason) {
+			return false, nil
+		}
+		reason = frame.Reason
+		if err := cancelSessionExecutionAdmissionAttempt(info, frame.Attempt, fronts...); err != nil {
+			return false, err
+		}
+	} else {
+		var ok bool
+		reason, ok = reconcilerDrainAckMatchesSessionInfo(info, sp, name)
+		if !ok || !canCancel(reason) {
+			return false, nil
+		}
+	}
+	if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
+		return true, err
+	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
-	return true
+	return true, nil
 }
 
 func advanceSessionDrainsWithSessionsTraced(
@@ -653,6 +909,7 @@ func advanceSessionDrainsWithSessionsTraced(
 	cfg *config.City,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
+	deferred ...map[string]bool,
 ) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
 	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
@@ -666,10 +923,13 @@ func advanceSessionDrainsWithSessionsTraced(
 		sessFront = nil
 	}
 	for id, ds := range dt.all() {
+		if len(deferred) > 0 && deferred[0][id] {
+			continue
+		}
 		info, ok := infoLookup(id)
 		if !ok {
 			dt.clearIdleProbe(id)
-			dt.remove(id)
+			dt.removeIfCurrent(id, ds)
 			continue
 		}
 		// The whole scan runs off the typed Info: decision reads (session_name,
@@ -685,7 +945,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			if ds.ackSet {
 				_ = clearReconcilerDrainAckMetadata(sp, name)
 			}
-			dt.remove(id)
+			dt.removeIfCurrent(id, ds)
 			if trace != nil {
 				trace.RecordDecision(TraceSiteDrainStale, TraceReasonStaleGeneration, TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
 					"drain_reason":       ds.reason,
@@ -710,7 +970,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			// Process exited — drain complete.
 			completeDrain(info, sessFront, ds, clk)
 			dt.clearIdleProbe(id)
-			dt.remove(id)
+			dt.removeIfCurrent(id, ds)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
 			if trace != nil {
 				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeComplete, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
@@ -729,27 +989,37 @@ func advanceSessionDrainsWithSessionsTraced(
 			eval, exists := wakeEvals[info.ID]
 			lastActivity, activityErr := workerSessionTargetLastActivityWithConfig("", store, sp, cfg, name)
 			if !exists || !idleRespawnEligible(info, eval, clk.Now()) || activityErr != nil || lastActivity.After(ds.startedAt) {
-				dt.clearIdleProbe(id)
-				if ds.ackSet {
-					_ = clearReconcilerDrainAckMetadata(sp, name)
+				canceled, err := cancelSessionDrainIfInfoResult(info, sp, dt, func(reason string) bool { return reason == idleRespawnDrainReason }, sessFront)
+				if err != nil && !errors.Is(err, sessions.ErrDrainStopAccepted) {
+					continue
 				}
-				dt.remove(id)
-				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
-				if trace != nil {
-					fields := traceRecordPayload{"activity_resumed": lastActivity.After(ds.startedAt)}
-					if activityErr != nil {
-						fields["activity_error"] = activityErr.Error()
+				if canceled {
+					if trace != nil {
+						fields := traceRecordPayload{"activity_resumed": lastActivity.After(ds.startedAt)}
+						if activityErr != nil {
+							fields["activity_error"] = activityErr.Error()
+						}
+						trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, fields)
 					}
-					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, fields)
+					continue
 				}
-				continue
+				if err == nil {
+					continue
+				}
 			}
 		}
 
 		if eval, ok := wakeEvals[info.ID]; ok &&
 			containsWakeReason(eval.Reasons, WakePending) &&
 			pendingDrainReasonCancelable(ds.reason) {
-			if cancelSessionDrainForPendingInfo(info, sp, dt) {
+			canceled, cancelErr := cancelSessionDrainIfInfoResult(info, sp, dt, pendingDrainReasonCancelable, sessFront)
+			if cancelErr != nil && !errors.Is(cancelErr, sessions.ErrDrainStopAccepted) {
+				continue
+			}
+			if !canceled && cancelErr == nil {
+				continue
+			}
+			if canceled {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancelPending, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
@@ -761,7 +1031,14 @@ func advanceSessionDrainsWithSessionsTraced(
 			eval.Reason == "assigned-work" &&
 			containsWakeReason(eval.Reasons, WakeWork) &&
 			assignedWorkDrainReasonCancelable(ds.reason) {
-			if cancelSessionDrainForAssignedWorkInfo(info, sp, dt) {
+			canceled, cancelErr := cancelSessionDrainIfInfoResult(info, sp, dt, assignedWorkDrainReasonCancelable, sessFront)
+			if cancelErr != nil && !errors.Is(cancelErr, sessions.ErrDrainStopAccepted) {
+				continue
+			}
+			if !canceled && cancelErr == nil {
+				continue
+			}
+			if canceled {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancelAssignedWork, normalizedSessionTemplateInfo(info, cfg), name, nil)
 				}
@@ -774,17 +1051,19 @@ func advanceSessionDrainsWithSessionsTraced(
 		// canceled here.
 		if drainReasonCancelable(ds.reason) {
 			if eval, ok := wakeEvals[info.ID]; ok && len(eval.Reasons) > 0 {
-				dt.clearIdleProbe(id)
-				// Clear GC_DRAIN_ACK if it was set — prevents stale ack
-				// from killing the session on the next Phase 1 check.
-				if ds.ackSet {
-					_ = clearReconcilerDrainAckMetadata(sp, name)
+				canceled, err := cancelSessionDrainIfInfoResult(info, sp, dt, drainReasonCancelable, sessFront)
+				if err != nil && !errors.Is(err, sessions.ErrDrainStopAccepted) {
+					continue
 				}
-				dt.remove(id)
-				if trace != nil {
-					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
+				if canceled {
+					if trace != nil {
+						trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
+					}
+					continue
 				}
-				continue
+				if err == nil {
+					continue
+				}
 			}
 		}
 
@@ -798,11 +1077,17 @@ func advanceSessionDrainsWithSessionsTraced(
 		// `gc runtime drain-ack`. The reconciler's Phase 1 drain-ack check
 		// sees it on the next tick and calls sp.Stop() for a clean
 		// SIGTERM/SIGKILL — no Ctrl-C keystroke injection into the pane.
+		if ds.ackSet && ds.admissionAttempt != "" {
+			frame, err := readDrainAckFrame(info, sp, name)
+			if err != nil || frame.Attempt != ds.admissionAttempt || frame.Source != reconcilerDrainAckSourceValue || frame.Reason != ds.reason {
+				ds.ackSet = false
+			}
+		}
 		if !ds.ackSet {
 			if os.Getenv("GC_TMUX_TRACE") == "1" {
 				log.Printf("[DRAIN-TRACE] advanceSessionDrainsWithSessionsTraced: setting GC_DRAIN_ACK session=%s reason=%s", name, ds.reason)
 			}
-			err := setReconcilerDrainAckMetadata(sp, name, ds)
+			err := setReconcilerDrainAckMetadata(sp, name, ds, sessFront)
 			if err == nil {
 				ds.ackSet = true
 				ds.followUp = true
@@ -825,16 +1110,40 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 		}
 
+		if ds.admissionAttempt != "" && sessFront != nil {
+			_, err := sessFront.InspectDrainAdmission(info.ID, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, ds.admissionAttempt)
+			if err != nil {
+				if errors.Is(err, sessions.ErrDrainAdmissionChanged) {
+					dt.removeIfCurrent(id, ds)
+				}
+				continue
+			}
+		}
+
 		// Pending-interaction guards and wake-based cancellation run before this
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop.
+			if sessFront != nil {
+				_, _, enrolled, err := sessFront.ExecutionEvidence(info.ID)
+				if err != nil {
+					continue
+				}
+				if executionProtocolEnabled(sessFront, enrolled) {
+					if ds.admissionAttempt == "" {
+						continue
+					}
+					if err := sessFront.AcceptControllerDrainStop(info.ID, sessions.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, ds.admissionAttempt); err != nil {
+						continue
+					}
+				}
+			}
 			if err := verifiedStop(info, store, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
 					dt.clearIdleProbe(id)
-					dt.remove(id)
+					dt.removeIfCurrent(id, ds)
 				}
 				// Other errors (transient stop failure, unverifiable token): keep drain
 				// active for retry on next tick.
@@ -861,7 +1170,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			if !running {
 				completeDrain(info, sessFront, ds, clk)
 				dt.clearIdleProbe(id)
-				dt.remove(id)
+				dt.removeIfCurrent(id, ds)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
 				if trace != nil {
 					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeComplete, normalizedSessionTemplateInfo(info, cfg), name, nil)

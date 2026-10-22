@@ -2166,6 +2166,7 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 }
 
 func TestHookCommandClaimUsesCanonicalActorAndPreassignsContinuation(t *testing.T) {
+	usePATHHookClaimFixtureRunner(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -2221,6 +2222,8 @@ esac
 	t.Setenv("GC_SESSION_ID", "session-id-1")
 	t.Setenv("GC_SESSION_NAME", "test-city--worker-1")
 	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	seedPATHHookClaimSessionFixture(t, cityDir, "session-id-1", "test-city--worker-1")
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
@@ -2323,7 +2326,7 @@ case "$*" in
     printf '[]' ;;
 esac
 `, logPath, triggerClaimedMarker, triggerClaimedMarker, unrelatedMarker, readyMarker)
-	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(fakeBD, []byte(withLegacySessionBeadRead(script)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2561,7 +2564,7 @@ case "$*" in
     printf '[]' ;;
 esac
 `, triggerMarker, callerClaimedMarker, callerClaimedMarker)
-	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(fakeBD, []byte(withLegacySessionBeadRead(script)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2793,7 +2796,7 @@ mode = "on_demand"
 printf '%%s\n' "$*" >> %q
 printf '[]'
 `, logPath)
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(withLegacySessionBeadRead(script)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2866,7 +2869,7 @@ mode = "on_demand"
 	}
 
 	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(withLegacySessionBeadRead("#!/bin/sh\nprintf '[]'\n")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

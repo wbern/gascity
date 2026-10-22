@@ -130,12 +130,7 @@ func acceptConfigDriftAcrossSessions(
 		if storedHash == currentHash {
 			continue
 		}
-		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
-			result.Failed++
-			result.FailedSessions = append(result.FailedSessions, name)
-			fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
+
 		metadata, err := softReloadAcceptedHashMetadata(agentCfg, currentHash)
 		if err != nil {
 			result.Failed++
@@ -143,14 +138,39 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
+		expectedAttempt, strict, err := softReloadExecutionAttempt(info, sessFront)
+		if err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: reading execution fence for %s: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+			continue
+		}
+		var canceled bool
+		if strict {
+			canceled, err = cancelSoftReloadConfigDriftDrainInfo(info, sp, dt, sessFront, expectedAttempt)
+		} else {
+			canceled, err = cancelSoftReloadConfigDriftDrainInfo(info, sp, dt, sessFront)
+		}
+		if canceled {
+			result.CanceledDrains++
+			expectedAttempt = ""
+		}
+		if err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: canceling config-drift drain for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort diagnostic
+			continue
+		}
+		if strict {
+			err = sessFront.ApplyPatchWithExecutionFence(info.ID, session.ExecutionFence{InstanceToken: info.InstanceToken, Generation: info.Generation}, expectedAttempt, metadata)
+		} else {
+			err = sessFront.ApplyPatch(info.ID, metadata)
+		}
+		if err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
-		}
-		if cancelSoftReloadConfigDriftDrainInfo(info, sp, dt) {
-			result.CanceledDrains++
 		}
 		result.Updated++
 	}
@@ -174,29 +194,27 @@ func softReloadAcceptedHashMetadata(agentCfg runtime.Config, currentHash string)
 	}, nil
 }
 
-func cancelSoftReloadConfigDriftDrainInfo(info session.Info, sp runtime.Provider, dt *drainTracker) bool {
-	if dt == nil {
-		return false
+func cancelSoftReloadConfigDriftDrainInfo(info session.Info, sp runtime.Provider, dt *drainTracker, front *session.Store, expected ...string) (bool, error) {
+	if len(expected) > 0 {
+		return cancelConfigDriftDrainAttemptInfoResult(info, sp, dt, &expected[0], front)
 	}
-	ds := dt.get(info.ID)
-	if ds == nil || ds.reason != "config-drift" {
-		return false
-	}
-	return cancelSessionConfigDriftDrainInfo(info, sp, dt)
+	return cancelConfigDriftDrainInfoResult(info, sp, dt, front)
 }
 
-func clearSoftReloadConfigDriftDrainAckInfo(info session.Info, sp runtime.Provider, dt *drainTracker) error {
-	if dt == nil {
-		return nil
+func softReloadExecutionAttempt(info session.Info, front *session.Store) (string, bool, error) {
+	current, cell, enrolled, err := front.ExecutionEvidence(info.ID)
+	if err != nil {
+		return "", false, err
 	}
-	ds := dt.get(info.ID)
-	if ds == nil || ds.reason != "config-drift" || !ds.ackSet {
-		return nil
+	if !executionProtocolEnabled(front, enrolled) {
+		return "", false, nil
 	}
-	name := strings.TrimSpace(info.SessionNameMetadata)
-	if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
-		return err
+	if current.InstanceToken != info.InstanceToken || current.Generation != info.Generation {
+		return "", true, session.ErrExecutionIncarnationChanged
 	}
-	ds.ackSet = false
-	return nil
+	attempt := ""
+	if cell.Drain != nil && cell.Drain.Generation == info.Generation && cell.Drain.Incarnation == drainAckInstanceTokenDigest(info.InstanceToken) {
+		attempt = cell.Drain.Attempt
+	}
+	return attempt, true, nil
 }

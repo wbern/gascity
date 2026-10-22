@@ -93,7 +93,9 @@ func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	if sessionBead.ID == runtimeName {
 		t.Fatalf("fixture session ID %q unexpectedly equals runtime name", sessionBead.ID)
@@ -128,7 +130,9 @@ func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	status, assignee := drainAckBeadStatus(t, store, held.ID)
 	if status != "open" || assignee != "" {
@@ -161,7 +165,9 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(cityPath, nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck(cityPath, nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		name  string
@@ -190,7 +196,9 @@ func TestDrainAckLeavesForeignClaimsAlone(t *testing.T) {
 	}, "in_progress", "worker-2")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	status, assignee := drainAckBeadStatus(t, work, foreign.ID)
 	if status != "in_progress" || assignee != "worker-2" {
@@ -209,7 +217,9 @@ func TestDrainAckLeavesPreassignedOpenSiblingsAlone(t *testing.T) {
 	}, "open", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	status, assignee := drainAckBeadStatus(t, work, sibling.ID)
 	if status != "open" || assignee != "worker-1" {
@@ -230,7 +240,9 @@ func TestDrainAckLeavesClosedWorkAlone(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	if status, _ := drainAckBeadStatus(t, work, done.ID); status != "closed" {
 		t.Fatalf("closed bead %s became status=%q after drain-ack, want it left closed", done.ID, status)
@@ -252,7 +264,9 @@ func TestDrainAckLeavesSessionAndMailBeadsAlone(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, id := range []string{sessionRow.ID, message.ID} {
 		status, assignee := drainAckBeadStatus(t, work, id)
@@ -278,7 +292,9 @@ func TestDrainAckReleaseHonorsItsBudget(t *testing.T) {
 
 	var stderr bytes.Buffer
 	// A budget that cannot admit even the first leg.
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), -time.Second, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), -time.Second, &stderr); err == nil {
+		t.Fatal("spent drain budget unexpectedly succeeded")
+	}
 
 	status, assignee := drainAckBeadStatus(t, work, held.ID)
 	if status != "in_progress" || assignee != "worker-1" {
@@ -299,7 +315,9 @@ func TestDrainAckReleaseWithinBudgetStillReleases(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), time.Minute, &stderr)
+	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), time.Minute, &stderr); err != nil {
+		t.Fatal(err)
+	}
 
 	status, assignee := drainAckBeadStatus(t, work, held.ID)
 	if status != "open" || assignee != "" {
@@ -322,13 +340,14 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 	dops := newFakeDrainOps()
 	releaseRan := false
 	ackedWhenReleaseRan := true
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) {
+	drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
 		releaseRan = true
 		acked, err := dops.isDrainAcked("worker-1")
 		if err != nil {
 			t.Errorf("isDrainAcked during release: %v", err)
 		}
 		ackedWhenReleaseRan = acked
+		return nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -354,7 +373,7 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 	originalRelease := drainAckReleaseHeldClaims
 	t.Cleanup(func() { drainAckReleaseHeldClaims = originalRelease })
 	released := false
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) { released = true }
+	drainAckReleaseHeldClaims = func(string, string, io.Writer) error { released = true; return nil }
 
 	var stdout, stderr bytes.Buffer
 	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,

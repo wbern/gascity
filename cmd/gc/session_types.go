@@ -52,12 +52,13 @@ type ExecSpec struct {
 // drainState tracks an in-progress async drain. Ephemeral (in-memory only).
 // Lost on controller crash — safe because NDI reconverges.
 type drainState struct {
-	startedAt  time.Time
-	deadline   time.Time
-	reason     string // "idle", "pool-excess", "config-drift", "user"
-	generation int    // generation at drain start — fence for Stop
-	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
-	followUp   bool   // true when the controller should trigger one more immediate tick
+	admissionAttempt string // captured controller issue identity; not a work claim generation
+	startedAt        time.Time
+	deadline         time.Time
+	reason           string // "idle", "pool-excess", "config-drift", "user"
+	generation       int    // generation at drain start — fence for Stop
+	ackSet           bool   // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp         bool   // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
@@ -109,6 +110,17 @@ func (dt *drainTracker) set(beadID string, ds *drainState) {
 func (dt *drainTracker) remove(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
+	delete(dt.drains, beadID)
+	delete(dt.suspendDeferrals, beadID)
+}
+
+// removeIfCurrent prevents an old drain scan from deleting a replacement intent.
+func (dt *drainTracker) removeIfCurrent(beadID string, expected *drainState) {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.drains[beadID] != expected {
+		return
+	}
 	delete(dt.drains, beadID)
 	delete(dt.suspendDeferrals, beadID)
 }

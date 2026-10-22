@@ -1069,6 +1069,12 @@ type classStoreCandidate struct {
 // a result, by unclaimResult.Failed; that is what stops the stranded-repair
 // path from calling a repair clean.
 func sweepAssignedWorkLegs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, stderr io.Writer, visit func(index int, s beads.Store)) bool {
+	return sweepAssignedWorkLegsWithRefs(cityPath, cfg, store, rigStores, identifiers, stderr, func(index int, s beads.Store, _ string) {
+		visit(index, s)
+	})
+}
+
+func sweepAssignedWorkLegsWithRefs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, stderr io.Writer, visit func(index int, s beads.Store, ref string)) bool {
 	if store == nil {
 		return false
 	}
@@ -1083,7 +1089,7 @@ func sweepAssignedWorkLegs(cityPath string, cfg *config.City, store beads.Store,
 	}
 	index := 0
 	res, walkErr := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		visit(index, leg.Store)
+		visit(index, leg.Store, string(leg.Ref))
 		index++
 		return false, nil
 	})
@@ -1179,31 +1185,23 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	})
 }
 
-// releaseUnexecutedClaimsOnDrainAck gives back every in_progress WORK bead this
-// session still holds when it acknowledges drain.
-//
-// Drain-ack means "I am done and I hold nothing." A session that reaches it
-// still holding an in_progress claim never executed that claim — the correct
-// worker contract orders drain-ack strictly after `gc bd close` — so the claim is
-// parked work no one will run. Releasing it here makes "a session ends its last
-// turn holding an unexecuted claim" structurally unrepresentable at the one place
-// every ephemeral worker already terminates.
-//
-// It differs from unclaimWorkAssignedToRetiredSessionBead in exactly one way,
-// and the difference is load-bearing: only in_progress is swept. Continuation
-// preassignment writes an assignee onto OPEN siblings so they stay with the live
-// context, and sweeping those would undo the preassignment the session's own
-// claim just made. Everything else — the residency-correct leg set, the CAS,
-// the session/mail exclusions — is deliberately the same machinery, because a
-// second implementation of "release this session's work" is a second chance to
-// disagree with the first.
-//
-// The leg set is sweepAssignedWorkLegs' — the same one the retired-session
-// sweep reads, which is the point: "demand and sweep read the same stores" holds
-// by construction, and a graph-resident claim is released here by the same leg
-// that would have released it there. budget bounds the whole pass; see
-// drainAckReleaseBudget for why drain-ack in particular must not wait on a slow
-// store.
+// startedClaimHeldError carries work a drain must leave with its current owner.
+// The hook serves it through the existing-assignment result contract.
+type startedClaimHeldError struct {
+	Claim beads.Bead
+	// A non-nil empty reference identifies the canonical city work store.
+	// Nil is reserved for callers without census residence provenance.
+	StoreRef *string
+}
+
+func (e *startedClaimHeldError) Error() string {
+	return fmt.Sprintf("session still holds started claim %s", e.Claim.ID)
+}
+
+// releaseUnexecutedClaimsOnDrainAck retains started work and gives back only
+// unexecuted assignments. Under the conditional-write rollout every release is
+// fenced on the observed work-row revision, including same-owner reacquisition.
+// A partial read, unavailable fence, or retained claim refuses acknowledgement.
 func releaseUnexecutedClaimsOnDrainAck(
 	cityPath string,
 	cfg *config.City,
@@ -1212,36 +1210,67 @@ func releaseUnexecutedClaimsOnDrainAck(
 	sessionBead beads.Bead,
 	budget time.Duration,
 	stderr io.Writer,
-) {
+) (resultErr error) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
-		return
+		return errors.New("drain acknowledgement has no session store or identity")
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	cell, err := session.DecodeWorkStarted(sessionBead.Metadata[session.WorkStartedKey])
+	if err != nil {
+		return err
+	}
+	strict, err := hookExecutionEvidenceEnabled(cfg)
+	if err != nil {
+		return err
+	}
+	strict = strict || strings.TrimSpace(sessionBead.Metadata[session.WorkStartedKey]) != ""
+	var drainAttempt string
+	if strict {
+		front := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+		fence := session.ExecutionFence{InstanceToken: sessionBead.Metadata["instance_token"], Generation: sessionBead.Metadata["generation"]}
+		attempt, beginErr := front.BeginDrainAdmission(sessionBead.ID, fence)
+		if beginErr != nil {
+			return beginErr
+		}
+		admission, inspectErr := front.InspectDrainAdmission(sessionBead.ID, fence, attempt)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if admission.Committed {
+			// A retry must not re-census or release assignments acquired after
+			// the completed census. Admission remains closed for this attempt.
+			return nil
+		}
+		drainAttempt = attempt
+		defer func() {
+			finishErr := front.FinishDrainAdmission(sessionBead.ID, fence, attempt, resultErr == nil)
+			if finishErr != nil {
+				resultErr = errors.Join(resultErr, finishErr)
+			}
+		}()
+	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
 	deadline := time.Now().Add(budget)
-	expired := false
-	sweepAssignedWorkLegs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store) {
-		if expired {
-			return
-		}
+	var failures []error
+	complete := sweepAssignedWorkLegsWithRefs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store, storeRef string) {
 		if time.Now().After(deadline) {
-			expired = true
-			fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining legs are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+			fmt.Fprintln(stderr, "session beads: drain claim census exceeded its budget") //nolint:errcheck // best-effort diagnostic
+			failures = append(failures, errors.New("drain claim census exceeded its budget"))
 			return
 		}
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, assignee := range identifiers {
 			if time.Now().After(deadline) {
-				expired = true
-				fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining identities are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+				fmt.Fprintln(stderr, "session beads: drain claim census exceeded its budget") //nolint:errcheck // best-effort diagnostic
+				failures = append(failures, errors.New("drain claim census exceeded its budget"))
 				return
 			}
 			work, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
 			if err != nil {
-				fmt.Fprintf(stderr, "session beads: listing in-progress work held by draining session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
+				failures = append(failures, err)
 				continue
 			}
 			for _, item := range work {
@@ -1253,16 +1282,88 @@ func releaseUnexecutedClaimsOnDrainAck(
 					continue
 				}
 				seen[key] = struct{}{}
-				// No fallback route: a bead released here keeps whatever routing
-				// it already carried, exactly as the close-release path does.
-				// ReleaseWorkBead is compare-and-swap on the assignee, so a bead
-				// that legitimately changed hands since the list is left alone.
-				if err := wa.ReleaseWorkBead(item, ""); err != nil {
-					fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by draining session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+				started := cell.Names("", item.ID) ||
+					strings.TrimSpace(sessionBead.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]) == item.ID ||
+					strings.TrimSpace(sessionBead.Metadata[session.CurrentBeadIDKey]) == item.ID
+				dispatchHeld := slices.Contains(item.Labels, beadmeta.HoldMayorLabel) || slices.Contains(item.Labels, beadmeta.HoldExternalLabel)
+				if started && !dispatchHeld {
+					failures = append(failures, &startedClaimHeldError{Claim: item, StoreRef: &storeRef})
+					continue
+				}
+				if !strict {
+					if err := wa.ReleaseWorkBead(item, ""); err != nil {
+						failures = append(failures, err)
+					}
+					continue
+				}
+				sessionStore := cliSessionStore(store, cfg, cityPath)
+				live := beads.HandlesFor(sessionStore).Live
+				if live == nil {
+					failures = append(failures, beads.ErrConditionalWriteUnsupported)
+					continue
+				}
+				current, err := live.Get(sessionBead.ID)
+				if err != nil {
+					failures = append(failures, err)
+					continue
+				}
+				if current.Status == "closed" || current.Metadata["instance_token"] != sessionBead.Metadata["instance_token"] ||
+					current.Metadata["generation"] != sessionBead.Metadata["generation"] {
+					failures = append(failures, session.ErrExecutionIncarnationChanged)
+					continue
+				}
+				writer, _, err := beads.ResolveConditionalWriter(ownerStore)
+				if err != nil {
+					failures = append(failures, err)
+					continue
+				}
+				if writer == nil {
+					failures = append(failures, beads.ErrConditionalWriteUnsupported)
+					continue
+				}
+				if item.Revision == 0 {
+					failures = append(failures, session.ErrExecutionRevisionMissing)
+					continue
+				}
+				// WorkRef is canonically empty. Give that physical work leg an
+				// explicit reservation namespace; preserve rig/class refs verbatim.
+				releaseStoreRef := storeRef
+				if releaseStoreRef == string(storeref.WorkRef) {
+					releaseStoreRef = "work"
+				}
+				front := sessionFrontDoor(sessionStore)
+				fence := session.ExecutionFence{InstanceToken: sessionBead.Metadata["instance_token"], Generation: sessionBead.Metadata["generation"]}
+				reservation, err := front.ReserveDrainClaimRelease(sessionBead.ID, fence, drainAttempt, session.ClaimRelease{Store: releaseStoreRef, Bead: item.ID, Revision: item.Revision}, item.Labels...)
+				if errors.Is(err, session.ErrClaimAlreadyStarted) {
+					failures = append(failures, &startedClaimHeldError{Claim: item, StoreRef: &storeRef})
+					continue
+				}
+				if err != nil {
+					failures = append(failures, err)
+					continue
+				}
+				open, empty := "open", ""
+				err = writer.UpdateIfMatch(item.ID, reservation.Revision, beads.UpdateOpts{
+					Status: &open, Assignee: &empty, Metadata: clearedSessionAffinityMetadata(),
+				})
+				if err == nil || beads.IsPreconditionFailed(err) {
+					if clearErr := front.CompleteClaimRelease(sessionBead.ID, fence, reservation); clearErr != nil {
+						failures = append(failures, clearErr)
+					}
+				}
+				if err != nil {
+					failures = append(failures, err)
 				}
 			}
 		}
 	})
+	if !complete {
+		failures = append(failures, errors.New("drain claim census is incomplete"))
+	}
+	if len(failures) == 1 {
+		return failures[0]
+	}
+	return errors.Join(failures...)
 }
 
 func reassignWorkAssignedToRetiredSessionBead(

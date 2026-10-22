@@ -955,6 +955,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	}
 	want := []string{
 		"GC_DRAIN_ACK",
+		drainAdmissionAttemptKey,
 		reconcilerDrainAckSourceKey,
 		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
@@ -967,9 +968,10 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 }
 
 func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) {
-	sp := &recordingMetaProvider{
-		Fake:      runtime.NewFake(),
-		removeErr: errors.New("metadata removal unavailable"),
+	sp := &recordingMetaProvider{Fake: runtime.NewFake()}
+	sp.RemoveMetaErrors["worker"] = map[string]error{
+		reconcilerDrainAckReasonKey:     errors.New("reason cleanup unavailable"),
+		reconcilerDrainAckGenerationKey: errors.New("generation cleanup unavailable"),
 	}
 	dops := newDrainOps(sp)
 
@@ -977,6 +979,8 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 		t.Fatal("setDrainAck should report metadata cleanup errors")
 	}
 	wantRemove := []string{
+		drainAdmissionAttemptKey,
+		drainAckFrameKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 	}
@@ -996,6 +1000,29 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	}
 	if !slices.Equal(sp.setKeys, wantSet) {
 		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckRefusesUnsafeProtocolCleanup(t *testing.T) {
+	for _, key := range []string{drainAdmissionAttemptKey, drainAckFrameKey} {
+		t.Run(key, func(t *testing.T) {
+			sp := &recordingMetaProvider{Fake: runtime.NewFake()}
+			unavailable := errors.New("protocol cleanup unavailable")
+			sp.RemoveMetaErrors["worker"] = map[string]error{key: unavailable}
+			if err := newDrainOps(sp).setDrainAck("worker"); !errors.Is(err, unavailable) {
+				t.Fatalf("unsafe protocol cleanup was not refused: %v", err)
+			}
+			if len(sp.setKeys) != 0 {
+				t.Fatalf("unsafe cleanup published acknowledgement metadata: %v", sp.setKeys)
+			}
+			want := []string{drainAdmissionAttemptKey}
+			if key == drainAckFrameKey {
+				want = append(want, drainAckFrameKey)
+			}
+			if !slices.Equal(sp.removeKeys, want) {
+				t.Fatalf("protocol guard removals=%v want=%v", sp.removeKeys, want)
+			}
+		})
 	}
 }
 

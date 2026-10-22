@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -13,8 +14,33 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
+
+func TestExecutionBackstopNudgesStartedWorkWithoutDrainingIt(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	raw, err := json.Marshal(sessionpkg.WorkStarted{V: 1, Claims: []sessionpkg.WorkStartedEntry{{Bead: f.work.ID, Gen: 7}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"generation": "7", sessionpkg.WorkStartedKey: string(raw)}); err != nil {
+		t.Fatal(err)
+	}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if f.nudgeCount() != idleClaimNudgeMaxAttempts {
+		t.Fatalf("started work lost continuation nudges: got %d", f.nudgeCount())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("started work was drained: %v", f.drained)
+	}
+}
 
 // The execution-backstop rows. A claim that never becomes execution is the
 // residual failure after the trigger handoff is deterministic: the agent ends

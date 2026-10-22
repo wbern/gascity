@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -472,10 +473,30 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		overrides["GC_SESSION_ORIGIN"] = ""
 		overrides["GC_TEMPLATE"] = ""
 	}
+	executionFence := hookExecutionFenceOf(os.Environ())
+	// Incarnation inputs belong to the calling runtime, never query children.
+	overrides["GC_INSTANCE_TOKEN"] = ""
+	overrides["GC_RUNTIME_EPOCH"] = ""
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0 || queryTarget != "", sessionTemplateContext, a.QualifiedName())
 
 	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	// Federated legs rebuild their environments independently. Scrub the
+	// resulting environments as well as the primary query environment.
+	withoutIncarnation := func(env []string) []string {
+		clean := make([]string, 0, len(env))
+		for _, value := range env {
+			if strings.HasPrefix(value, "GC_INSTANCE_TOKEN=") || strings.HasPrefix(value, "GC_RUNTIME_EPOCH=") {
+				continue
+			}
+			clean = append(clean, value)
+		}
+		return clean
+	}
+	queryEnv = withoutIncarnation(queryEnv)
+	for i := range stores {
+		stores[i].env = withoutIncarnation(stores[i].env)
+	}
 	// On a split city the ready tiers of workQuery are already city-wide, so
 	// running the whole query once per store re-asks the same question R+1 times
 	// and re-opens every leg each time. Pin the city-wide read to the primary
@@ -483,6 +504,8 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 	// swap, which still covers the per-store crash-recovery and ephemeral tiers
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
+	// Claim handback still needs every physical residence after query scoping.
+	workStores := slices.Clone(stores)
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
@@ -559,7 +582,30 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 			TriggerBeadID:      triggerBeadID,
 			TriggerStoreDir:    triggerStoreDir,
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		requiresEvidence, evidenceErr := hookExecutionEvidenceEnabled(cfg)
+		if evidenceErr != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: resolving execution evidence: %v\n", evidenceErr) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		if !requiresEvidence && sessionID != "" {
+			front, err := sessionCurrentClaimFrontDoor()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: execution evidence unavailable: %v\n", err) //nolint:errcheck // best-effort diagnostic
+				return 1
+			}
+			// OFF cannot erase prior enrollment. Only an authoritative read
+			// can establish that this session has no execution evidence.
+			_, _, enrolled, err := front.ExecutionEvidence(sessionID)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: execution evidence unavailable: %v\n", err) //nolint:errcheck // best-effort diagnostic
+				return 1
+			}
+			requiresEvidence = enrolled
+		}
+		if requiresEvidence && sessionID != "" {
+			claimOpts.StartedFence = &executionFence
+		}
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, workStores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -754,12 +800,11 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 	if storedToken == "" || storedToken != strings.TrimSpace(instanceToken) {
 		return hookClaimSessionStale, "runtime instance token does not match the session bead"
 	}
-	switch state := session.State(strings.TrimSpace(info.MetadataState)); state {
-	case session.StateNone, session.StateActive, session.StateAwake, session.StateCreating, session.StateStartPending:
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	if session.ExecutionClaimStateEligible(state) {
 		return hookClaimSessionEligible, ""
-	default:
-		return hookClaimSessionStale, fmt.Sprintf("session state %q is not claim-eligible", state)
 	}
+	return hookClaimSessionStale, fmt.Sprintf("session state %q is not claim-eligible", state)
 }
 
 // claimHookWork claims routed work for gc hook --claim from the federated store
@@ -771,7 +816,7 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores, workStores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -783,7 +828,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	ops := classRoutedHookClaimOps(hookClaimOps{WorkStores: workStores}, route)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
@@ -812,7 +857,15 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 // relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
-	ops.ClassRoute.observeWorkLegs(stores)
+	workStores := ops.WorkStores
+	if workStores == nil {
+		workStores = stores
+	}
+	ops.WorkStores = slices.Clone(workStores)
+	for i := range ops.WorkStores {
+		ops.WorkStores[i].env = slices.Clone(ops.WorkStores[i].env)
+	}
+	ops.ClassRoute.observeWorkLegs(ops.WorkStores)
 	claimsErrored := false
 	if strings.TrimSpace(claimOpts.TriggerBeadID) != "" {
 		claimOpts.Env = queryEnv

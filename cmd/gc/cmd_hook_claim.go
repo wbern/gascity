@@ -19,9 +19,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const hookClaimCommandName = "hook"
@@ -205,6 +208,10 @@ type hookClaimOptions struct {
 	// TriggerStoreDir is the working dir for the trigger bead's owning store.
 	// Empty falls back to the store dir already being queried.
 	TriggerStoreDir string
+	// StartedFence activates strict execution recording under the existing
+	// conditional-write rollout. It is captured from the process environment,
+	// before inherited secrets are removed from subprocess environments.
+	StartedFence *session.ExecutionFence
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -237,12 +244,15 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
+	// WorkStores preserves each queried physical residence and its execution environment.
+	WorkStores         []hookStore
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
 	ResolveBead        hookResolveBeadFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
+	RecordStartedClaim func(string, session.ExecutionFence, session.WorkStartedEntry) error
 	// DrainPending reports whether the session bead named by sessionID is
 	// already draining, i.e. whether this seat has been told to stop. It is the
 	// F-D fence's only input and is read from the SESSION row rather than from
@@ -593,6 +603,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 // callers (and tests) only override the seams they care about. Runner has no
 // default — a missing work-query runner is a caller error handled in doHookClaim.
 func (ops *hookClaimOps) applyDefaults() {
+	if ops.RecordStartedClaim == nil {
+		ops.RecordStartedClaim = hookRecordStartedClaim
+	}
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
 	}
@@ -1616,6 +1629,82 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
+	if opts.StartedFence != nil && opts.SessionID != "" {
+		// Capture ownership before recording execution. A completed release or
+		// same-owner reacquisition during that recording must invalidate delivery.
+		city, err := resolveCity()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: resolving execution store: %v\n", err) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: resolving execution config: %v\n", err) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		var workStore beads.Store
+		if ops.ClassRoute != nil {
+			// Use the claim router's existing work-before-class decision. A
+			// relocated binding is not represented by the query working dir.
+			ctx := opts.Context
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			if _, err := ops.ReadWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee); err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: resolving execution residence: %v\n", err) //nolint:errcheck // best-effort diagnostic
+				return 1
+			}
+			if ops.ClassRoute.knownResident(bead.ID) {
+				workStore = ops.ClassRoute.class
+			}
+		}
+		if workStore == nil {
+			workStore, err = openStoreAtForCityWithConfig(dir, city, cfg)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: opening execution store: %v\n", err) //nolint:errcheck // best-effort diagnostic
+				return 1
+			}
+		}
+		current, err := workStore.Get(bead.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: reading execution claim: %v\n", err) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		if current.Status != "in_progress" || current.Assignee != bead.Assignee ||
+			!hookClaimHasIdentity(current.Assignee, opts.IdentityCandidates) && current.Assignee != opts.Assignee ||
+			slices.Contains(current.Labels, beadmeta.HoldMayorLabel) || slices.Contains(current.Labels, beadmeta.HoldExternalLabel) {
+			fmt.Fprintln(stderr, "gc hook --claim: refusing execution after ownership changed or work was held") //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		writer, _, err := beads.ResolveConditionalWriter(workStore)
+		if err == nil && writer == nil {
+			err = beads.ErrConditionalWriteUnsupported
+		}
+		if err == nil && current.Revision == 0 {
+			err = session.ErrExecutionRevisionMissing
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: resolving execution work fence: %v\n", err) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		via := "adopt"
+		if minted {
+			via = "claim"
+		}
+		if err := ops.RecordStartedClaim(opts.SessionID, *opts.StartedFence, session.WorkStartedEntry{Bead: bead.ID, Via: via}); err != nil {
+			// Preserve custody on a failed execution fence. Giving the claim to
+			// the turn, or blindly unclaiming it, could cross a replacement's
+			// ownership boundary. The error is an explicit recovery obligation.
+			fmt.Fprintf(stderr, "gc hook --claim: refusing execution of %s: %v\n", bead.ID, err) //nolint:errcheck
+			return 1
+		}
+		if err := writer.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{Status: &current.Status, Assignee: &current.Assignee}); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing execution after claim revision changed: %v\n", err) //nolint:errcheck // best-effort diagnostic
+			return 1
+		}
+		bead = current
+		result.Assignee, result.Route = current.Assignee, hookClaimRoute(current)
+	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
@@ -1735,6 +1824,40 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
+// retainedHookClaimContext keeps a census-selected physical residence through
+// execution validation, identity stamping, and continuation assignment.
+func retainedHookClaimContext(ref *string, originalDir string, originalEnv []string, ops hookClaimOps) (string, []string, error) {
+	if ref == nil {
+		return originalDir, originalEnv, nil
+	}
+	if storeref.IsClassRef(*ref) {
+		if ops.ClassRoute == nil {
+			return "", nil, fmt.Errorf("retained class store %q has no claim route", *ref)
+		}
+		return originalDir, originalEnv, nil
+	}
+	city, err := resolveCity()
+	if err != nil {
+		return "", nil, err
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city, io.Discard)
+	if err != nil {
+		return "", nil, err
+	}
+	dir := city
+	if *ref != string(storeref.WorkRef) {
+		dir, err = hookTriggerStoreDir(city, cfg, &config.Agent{}, *ref)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	env, ok := hookStoreEnvForDir(ops.WorkStores, dir)
+	if !ok || len(env) == 0 {
+		return "", nil, fmt.Errorf("retained store %q has no captured query environment", *ref)
+	}
+	return dir, slices.Clone(env), nil
+}
+
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
 // nothing. The reason is "no_work" for a genuinely idle store; it is
 // "claims_errored" when claimsErrored is set — ready work existed but every
@@ -1750,7 +1873,24 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}
-	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	ack := ops.DrainAck
+	if reason == hookClaimReasonNoWork && opts.DrainAck && ack != nil && opts.StartedFence != nil && opts.SessionID != "" {
+		ackErr := ack(stderr)
+		// Only a sole retained-claim result may resume work; joined census errors
+		// must remain failures even when one leg also retained a claim.
+		if held, ok := ackErr.(*startedClaimHeldError); ok { //nolint:errorlint // errors.As would accept joined census failures
+			retainedDir, retainedEnv, err := retainedHookClaimContext(held.StoreRef, dir, opts.Env, ops)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: resolving retained execution residence: %v\n", err) //nolint:errcheck // best-effort diagnostic
+				return 1
+			}
+			dir, opts.Env = retainedDir, retainedEnv
+			result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: hookClaimCommandName, Action: "work", Reason: "existing_assignment", BeadID: held.Claim.ID, Assignee: held.Claim.Assignee, Route: hookClaimRoute(held.Claim)}
+			return writeHookClaimWorkResultForBead(result, held.Claim, opts, ops, dir, false, stdout, stderr)
+		}
+		ack = func(io.Writer) error { return ackErr }
+	}
+	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, ack, stdout, stderr)
 	// Strictly after the result: the drain is already written and its exit code
 	// is already decided, so nothing below can influence either.
 	if reason == hookClaimReasonNoWork {
@@ -1874,6 +2014,7 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	ackFailed := false
 	if drainAck {
 		if err := drainAckFn(stderr); err != nil {
+
 			fmt.Fprintf(stderr, "%s: drain-ack failed: %v\n", label, err) //nolint:errcheck
 			ackFailed = true
 		} else {
@@ -3373,7 +3514,11 @@ func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []stri
 }
 
 func hookRuntimeDrainAck(stderr io.Writer) error {
-	if code := cmdRuntimeDrainAck(nil, false, io.Discard, stderr); code != 0 {
+	code, err := cmdRuntimeDrainAckResult(nil, false, io.Discard, stderr)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
 		return errors.New("runtime drain-ack returned non-zero")
 	}
 	return nil
