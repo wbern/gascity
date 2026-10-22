@@ -15692,3 +15692,42 @@ func TestS1RecoveredConfigDriftAttachmentCancelsExactAttempt(t *testing.T) {
 		})
 	}
 }
+
+// A session whose runtime has vanished cannot carry a drain ack. Reading it
+// must be a definite "not acked", not an error: an error makes the reconciler
+// `continue` past the session every tick, so it is never woken again
+// (regression from #243, observed live on gc2 2026-10-22).
+func TestCurrentDrainAckTreatsVanishedRuntimeAsNotAcked(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	session := env.createSessionBead("worker", "worker")
+	info, err := sessionFrontDoor(env.store).Get(session.ID)
+	if err != nil {
+		t.Fatalf("front-door Get: %v", err)
+	}
+	gone := fmt.Errorf("tmux: %w", runtime.ErrSessionNotFound)
+	env.sp.GetMetaErrors["worker"] = map[string]error{
+		"GC_DRAIN_ACK":      gone,
+		drainAckFrameKey:    gone,
+		"GC_SESSION_ID":     gone,
+		"GC_INSTANCE_TOKEN": gone,
+	}
+	acked, _, err := currentDrainAck(info, sessionFrontDoor(env.store), env.sp, newDrainOps(env.sp), "worker")
+	if err != nil {
+		t.Fatalf("currentDrainAck on vanished runtime: err = %v, want nil", err)
+	}
+	if acked {
+		t.Fatal("currentDrainAck on vanished runtime: acked = true, want false")
+	}
+
+	// A genuine read failure is still an observation uncertainty.
+	env.sp.GetMetaErrors["worker"] = map[string]error{
+		"GC_DRAIN_ACK":      errors.New("tmux server unreachable"),
+		drainAckFrameKey:    errors.New("tmux server unreachable"),
+		"GC_SESSION_ID":     errors.New("tmux server unreachable"),
+		"GC_INSTANCE_TOKEN": errors.New("tmux server unreachable"),
+	}
+	if _, _, err := currentDrainAck(info, sessionFrontDoor(env.store), env.sp, newDrainOps(env.sp), "worker"); err == nil {
+		t.Fatal("currentDrainAck on unreachable runtime: err = nil, want error")
+	}
+}
