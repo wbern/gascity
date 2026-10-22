@@ -23,6 +23,7 @@ var managedMCPGitignoreEntries = []string{
 	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
 	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
 	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
+	filepath.ToSlash(filepath.Join(".agents", "mcp_config.json")),
 	"opencode.json",
 	"mimocode.json",
 }
@@ -49,10 +50,10 @@ var mcpProviderKinds = []string{
 	materialize.MCPProviderClaude,
 	materialize.MCPProviderCodex,
 	materialize.MCPProviderGemini,
-	materialize.MCPProviderAntigravity,
 	materialize.MCPProviderOpenCode,
 	materialize.MCPProviderMimoCode,
 	materialize.MCPProviderCursor,
+	materialize.MCPProviderAntigravity,
 }
 
 func supportsMCPProviderKind(kind string) bool {
@@ -214,29 +215,10 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 		if agent.Implicit && len(view.Catalog.Servers) == 0 {
 			continue
 		}
-		if view.Projection.Provider == materialize.MCPProviderAntigravity && len(view.Catalog.Servers) == 0 {
-			continue
-		}
 		key := view.Projection.Provider + "|" + view.Projection.Target
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				if view.Projection.Provider == materialize.MCPProviderAntigravity {
-					if conflict := materialize.FindMCPServerConflict(existing.Projection.Servers, view.Projection.Servers); conflict != "" {
-						return nil, fmt.Errorf(
-							"MCP server conflict at %s (%s): %s",
-							view.Projection.Target,
-							view.Projection.Provider,
-							conflict,
-						)
-					}
-					mergedServers := materialize.MergeMCPServers(existing.Projection.Servers, view.Projection.Servers)
-					existing.Projection.Servers = mergedServers
-					existing.Agents = append(existing.Agents, agent.QualifiedName())
-					sort.Strings(existing.Agents)
-					byKey[key] = existing
-					continue
-				}
 				return nil, fmt.Errorf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
@@ -558,9 +540,6 @@ func validateStage2TargetClaimants(
 	if cfg == nil || want.Provider == "" {
 		return nil
 	}
-	if want.Provider == materialize.MCPProviderAntigravity && len(want.Servers) == 0 {
-		return nil
-	}
 	callerName := ""
 	if caller != nil {
 		callerName = caller.QualifiedName()
@@ -618,11 +597,8 @@ func validateStage2TargetClaimants(
 		if otherTarget.Target != want.Target {
 			continue
 		}
-		otherCatalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, other, identity, otherWorkDir, otherKind)
+		_, projection, err := resolveAgentMCPProjection(cityPath, cfg, other, identity, otherWorkDir, otherKind)
 		if err != nil {
-			continue
-		}
-		if otherKind == materialize.MCPProviderAntigravity && len(otherCatalog.Servers) == 0 {
 			continue
 		}
 		if projection.Provider != want.Provider || projection.Target != want.Target {
@@ -632,19 +608,6 @@ func validateStage2TargetClaimants(
 			continue
 		}
 		if projection.Hash() != wantHash {
-			if want.Provider == materialize.MCPProviderAntigravity {
-				if conflict := materialize.FindMCPServerConflict(want.Servers, projection.Servers); conflict != "" {
-					return fmt.Errorf(
-						"MCP server conflict at %s (%s): %s between agent %q and agent %q",
-						want.Target,
-						want.Provider,
-						conflict,
-						callerName,
-						other.QualifiedName(),
-					)
-				}
-				continue
-			}
 			return fmt.Errorf(
 				"MCP target conflict at %s (%s): agent %q projects %s but agent %q projects %s",
 				want.Target,

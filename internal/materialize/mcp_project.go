@@ -24,8 +24,6 @@ const (
 	MCPProviderCodex = "codex"
 	// MCPProviderGemini projects to Gemini CLI's project-native settings file.
 	MCPProviderGemini = "gemini"
-	// MCPProviderAntigravity projects to Antigravity CLI's native MCP config file.
-	MCPProviderAntigravity = "antigravity"
 	// MCPProviderOpenCode projects to OpenCode's project-native JSON config.
 	MCPProviderOpenCode = "opencode"
 	// MCPProviderMimoCode projects to MiMo Code's project-native JSON config.
@@ -35,16 +33,11 @@ const (
 	MCPProviderMimoCode = "mimocode"
 	// MCPProviderCursor projects to Cursor Agent's project-native MCP file.
 	MCPProviderCursor = "cursor"
+	// MCPProviderAntigravity projects to the Antigravity CLI's workspace
+	// customization root (<workdir>/.agents/mcp_config.json), which agy loads
+	// alongside, and in preference to, the user-level ~/.gemini/config file.
+	MCPProviderAntigravity = "antigravity"
 )
-
-var userHomeDir = os.UserHomeDir
-
-// SetUserHomeDirForTest overrides the home directory resolver during tests.
-func SetUserHomeDirForTest(fn func() (string, error)) (restore func()) {
-	prev := userHomeDir
-	userHomeDir = fn
-	return func() { userHomeDir = prev }
-}
 
 // MCPProjection is one provider-native MCP payload for a single target file.
 type MCPProjection struct {
@@ -63,10 +56,10 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderClaude:
 	case MCPProviderCodex:
 	case MCPProviderGemini:
-	case MCPProviderAntigravity:
 	case MCPProviderOpenCode:
 	case MCPProviderMimoCode:
 	case MCPProviderCursor:
+	case MCPProviderAntigravity:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
@@ -85,18 +78,14 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, ".codex", "config.toml")
 	case MCPProviderGemini:
 		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
-	case MCPProviderAntigravity:
-		home, err := userHomeDir()
-		if err != nil {
-			return MCPProjection{}, fmt.Errorf("resolving user home for antigravity MCP: %w", err)
-		}
-		out.Target = filepath.Join(home, ".gemini", "config", "mcp_config.json")
 	case MCPProviderOpenCode:
 		out.Target = filepath.Join(workdir, "opencode.json")
 	case MCPProviderMimoCode:
 		out.Target = filepath.Join(workdir, "mimocode.json")
 	case MCPProviderCursor:
 		out.Target = filepath.Join(workdir, ".cursor", "mcp.json")
+	case MCPProviderAntigravity:
+		out.Target = filepath.Join(workdir, ".agents", "mcp_config.json")
 	}
 	return out, nil
 }
@@ -115,8 +104,8 @@ func (p MCPProjection) Hash() string {
 // managed marker gates later cleanup when the effective catalog becomes
 // empty so GC does not remove an unmanaged file it never adopted.
 //
-// Claude owns the whole file; Gemini, Codex, Cursor, OpenCode, and MiMo Code
-// preserve unrelated config while replacing the MCP subtree.
+// Claude owns the whole file; Gemini, Codex, Cursor, Antigravity, OpenCode,
+// and MiMo Code preserve unrelated config while replacing the MCP subtree.
 //
 // Apply is safe against concurrent writers for the same target: when the
 // backing FS is the real OS filesystem, the read-validate-write sequence
@@ -173,8 +162,6 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			return p.applyCodex(fs)
 		case MCPProviderGemini:
 			return p.applyGemini(fs)
-		case MCPProviderAntigravity:
-			return p.applyAntigravity(fs)
 		case MCPProviderOpenCode:
 			return p.applyOpenCode(fs)
 		case MCPProviderMimoCode:
@@ -182,7 +169,9 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			// schema; only the target file name differs (set at build time).
 			return p.applyOpenCode(fs)
 		case MCPProviderCursor:
-			return p.applyCursor(fs)
+			return p.applyMCPServersJSON(fs, p.cursorServersDoc())
+		case MCPProviderAntigravity:
+			return p.applyMCPServersJSON(fs, p.antigravityServersDoc())
 		default:
 			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
 		}
@@ -261,89 +250,6 @@ func (p MCPProjection) applyGemini(fs fsys.FS) error {
 	return p.writeManagedMarker(fs)
 }
 
-func (p MCPProjection) applyAntigravity(fs fsys.FS) error {
-	managed := p.isManaged(fs)
-	if len(p.Servers) == 0 && !managed {
-		return nil
-	}
-	doc, err := readJSONDoc(fs, p.Target)
-	if err != nil {
-		return err
-	}
-	mcpServers, _ := doc["mcpServers"].(map[string]any)
-	if mcpServers == nil {
-		mcpServers = make(map[string]any)
-	}
-
-	previouslyManaged := p.readManagedServers(fs)
-	currentNames := make(map[string]bool, len(p.Servers))
-	for _, s := range p.Servers {
-		currentNames[s.Name] = true
-	}
-	for _, name := range previouslyManaged {
-		if !currentNames[name] {
-			delete(mcpServers, name)
-		}
-	}
-
-	if len(p.Servers) == 0 {
-		doc["mcpServers"] = mcpServers
-		data, err := marshalJSONDoc(doc)
-		if err != nil {
-			return err
-		}
-		if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-			return err
-		}
-		return removeManagedMCPFile(fs, p.markerPath())
-	}
-
-	newServers := p.antigravityServersDoc()
-	for name, serverDoc := range newServers {
-		mcpServers[name] = serverDoc
-	}
-	doc["mcpServers"] = mcpServers
-
-	data, err := marshalJSONDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-
-	serverNames := make([]string, 0, len(p.Servers))
-	for _, s := range p.Servers {
-		serverNames = append(serverNames, s.Name)
-	}
-	sort.Strings(serverNames)
-	return p.writeManagedMarkerWithServers(fs, serverNames)
-}
-
-func (p MCPProjection) antigravityServersDoc() map[string]any {
-	out := make(map[string]any, len(p.Servers))
-	for _, server := range p.Servers {
-		entry := map[string]any{}
-		switch server.Transport {
-		case MCPTransportStdio:
-			entry["command"] = server.Command
-			if len(server.Args) > 0 {
-				entry["args"] = append([]string(nil), server.Args...)
-			}
-			if len(server.Env) > 0 {
-				entry["env"] = cloneStringMap(server.Env)
-			}
-		case MCPTransportHTTP, MCPTransportSSE:
-			entry["serverUrl"] = server.URL
-			if len(server.Headers) > 0 {
-				entry["headers"] = cloneStringMap(server.Headers)
-			}
-		}
-		out[server.Name] = entry
-	}
-	return out
-}
-
 func (p MCPProjection) applyCodex(fs fsys.FS) error {
 	managed := p.isManaged(fs)
 	if len(p.Servers) == 0 && !managed {
@@ -410,7 +316,9 @@ func (p MCPProjection) applyOpenCode(fs fsys.FS) error {
 	return p.writeManagedMarker(fs)
 }
 
-func (p MCPProjection) applyCursor(fs fsys.FS) error {
+// applyMCPServersJSON reconciles a JSON target whose MCP catalog lives under
+// a top-level "mcpServers" object, preserving every other key.
+func (p MCPProjection) applyMCPServersJSON(fs fsys.FS, servers map[string]any) error {
 	managed := p.isManaged(fs)
 	if len(p.Servers) == 0 && !managed {
 		return nil
@@ -428,7 +336,7 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 			return removeManagedMCPFile(fs, p.markerPath())
 		}
 	} else {
-		doc["mcpServers"] = p.cursorServersDoc()
+		doc["mcpServers"] = servers
 	}
 	data, err := marshalJSONDoc(doc)
 	if err != nil {
@@ -444,9 +352,30 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 }
 
 func (p MCPProjection) validateProviderContract() error {
-	if p.Provider != MCPProviderCursor {
-		return nil
+	switch p.Provider {
+	case MCPProviderCursor:
+		return p.validateCursorContract()
+	case MCPProviderAntigravity:
+		return p.validateAntigravityContract()
 	}
+	return nil
+}
+
+// validateAntigravityContract rejects legacy HTTP+SSE servers: agy speaks
+// stdio and Streamable HTTP only.
+func (p MCPProjection) validateAntigravityContract() error {
+	for _, server := range p.Servers {
+		if server.Transport == MCPTransportSSE {
+			return fmt.Errorf(
+				"antigravity MCP projection does not support sse server %q: Antigravity supports only stdio and Streamable HTTP; point the server at its Streamable HTTP endpoint or bridge it over stdio",
+				server.Name,
+			)
+		}
+	}
+	return nil
+}
+
+func (p MCPProjection) validateCursorContract() error {
 	for _, server := range p.Servers {
 		switch server.Transport {
 		case MCPTransportStdio:
@@ -497,6 +426,33 @@ func (p MCPProjection) cursorServersDoc() map[string]any {
 			}
 			if len(server.Env) > 0 {
 				entry["env"] = cloneStringMap(server.Env)
+			}
+		}
+		out[server.Name] = entry
+	}
+	return out
+}
+
+// antigravityServersDoc renders the catalog in the shape agy's own
+// `agy mcp add` writes: command/args/env for stdio, serverUrl/headers for
+// Streamable HTTP.
+func (p MCPProjection) antigravityServersDoc() map[string]any {
+	out := make(map[string]any, len(p.Servers))
+	for _, server := range p.Servers {
+		entry := map[string]any{}
+		switch server.Transport {
+		case MCPTransportStdio:
+			entry["command"] = server.Command
+			if len(server.Args) > 0 {
+				entry["args"] = append([]string(nil), server.Args...)
+			}
+			if len(server.Env) > 0 {
+				entry["env"] = cloneStringMap(server.Env)
+			}
+		case MCPTransportHTTP:
+			entry["serverUrl"] = server.URL
+			if len(server.Headers) > 0 {
+				entry["headers"] = cloneStringMap(server.Headers)
 			}
 		}
 		out[server.Name] = entry
@@ -665,36 +621,13 @@ func (p MCPProjection) isManaged(fs fsys.FS) bool {
 	return err == nil
 }
 
-type managedMarkerPayload struct {
-	ManagedBy string   `json:"managed_by"`
-	Provider  string   `json:"provider"`
-	Servers   []string `json:"servers,omitempty"`
-}
-
-func (p MCPProjection) readManagedServers(fs fsys.FS) []string {
-	data, err := fs.ReadFile(p.markerPath())
-	if err != nil {
-		return nil
-	}
-	var marker managedMarkerPayload
-	if err := json.Unmarshal(data, &marker); err != nil {
-		return nil
-	}
-	return marker.Servers
-}
-
 func (p MCPProjection) writeManagedMarker(fs fsys.FS) error {
-	return p.writeManagedMarkerWithServers(fs, nil)
-}
-
-func (p MCPProjection) writeManagedMarkerWithServers(fs fsys.FS, serverNames []string) error {
 	if err := fs.MkdirAll(filepath.Dir(p.markerPath()), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(p.markerPath()), err)
 	}
-	data, err := json.Marshal(managedMarkerPayload{
-		ManagedBy: "gc",
-		Provider:  p.Provider,
-		Servers:   serverNames,
+	data, err := json.Marshal(map[string]string{
+		"managed_by": "gc",
+		"provider":   p.Provider,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", p.markerPath(), err)
@@ -708,45 +641,4 @@ func (p MCPProjection) writeManagedMarkerWithServers(fs fsys.FS, serverNames []s
 
 func errorsIsNotExist(err error) bool {
 	return err != nil && (os.IsNotExist(err) || errors.Is(err, iofs.ErrNotExist))
-}
-
-// FindMCPServerConflict checks whether any server with the same name in a and b
-// has differing behavioral definitions. Returns an error message describing the
-// conflict, or "" if there is no conflict.
-func FindMCPServerConflict(a, b []MCPServer) string {
-	aByName := make(map[string]MCPServer, len(a))
-	for _, s := range a {
-		aByName[s.Name] = s
-	}
-	for _, sB := range b {
-		sA, ok := aByName[sB.Name]
-		if !ok {
-			continue
-		}
-		normA := NormalizeMCPServer(sA)
-		normB := NormalizeMCPServer(sB)
-		dataA, _ := json.Marshal(normA)
-		dataB, _ := json.Marshal(normB)
-		if string(dataA) != string(dataB) {
-			return fmt.Sprintf("server %q has conflicting definitions", sB.Name)
-		}
-	}
-	return ""
-}
-
-// MergeMCPServers merges two server slices by server name, sorting the result.
-func MergeMCPServers(a, b []MCPServer) []MCPServer {
-	byName := make(map[string]MCPServer, len(a)+len(b))
-	for _, s := range a {
-		byName[s.Name] = s
-	}
-	for _, s := range b {
-		byName[s.Name] = s
-	}
-	out := make([]MCPServer, 0, len(byName))
-	for _, s := range byName {
-		out = append(out, s)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
 }
