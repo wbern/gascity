@@ -1,0 +1,575 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+func TestCustodyCommandRegistered(t *testing.T) {
+	root := newBeadsCmd(io.Discard, io.Discard)
+	command, _, err := root.Find([]string{"adopt-custody"})
+	if err != nil || command.Name() != "adopt-custody" {
+		t.Fatalf("exact-source custody command absent: command=%s error=%v", command.Name(), err)
+	}
+}
+
+func custodyFixture(t *testing.T) (*beads.MemStore, custodyOperation, custodyChecks) {
+	t.Helper()
+	city := custodyTestDir(t)
+	now := time.Date(2026, 10, 25, 3, 0, 0, 0, time.UTC)
+	empty := ""
+	o := custodyOperation{Schema: "existing-source-custody.v1", Purpose: "adopt-existing-source-custody", City: city, StoreRef: "rig:product", Source: "work-1", Status: "open", Assignee: &empty, PriorSession: "session-old", PriorOwner: "original-instance", ClaimedAt: "2026-10-23T07:45:48Z", Branch: "existing/branch", Base: strings.Repeat("1", 40), Head: strings.Repeat("2", 40), Workspace: filepath.Join(city, "tasks", "work-1"), Successor: custodySession{ID: "session-new", Name: "runtime-new", Agent: "session-new", Claim: "session-new"}, Dependencies: []beads.Dep{}, Admission: custodyAdmission{Custodian: "operator-evidence", PredecessorDead: true, SoleWriter: true, Scheduling: "custody-only-no-entry", NotBefore: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}}
+	s := beads.NewMemStore()
+	s.HonorExplicitIDs = true
+	b, e := s.Create(beads.Bead{ID: o.Source, Title: "Existing source", Status: "open", Labels: []string{"hold:external"}, Metadata: beads.StringMap{"gc.session_id": o.PriorSession, "gc.workspace_owner": o.PriorOwner, "gc.claimed_at": o.ClaimedAt, "branch": o.Branch, "gc.work_branch": o.Branch, "gc.base_sha": o.Base, "gc.task_worktree": o.Workspace, "gc.workspace_mode": "task", "preserve": "yes"}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	o.Revision = b.Revision
+	c := custodyChecks{now: func() time.Time { return now }, physical: func(custodyOperation) error { return nil }, runtime: func(custodyOperation) error { return nil }}
+	return s, o, c
+}
+
+func TestCustodyExactTransitionPreservesHold(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	_, e := s.Create(beads.Bead{ID: "prerequisite", Title: "Still blocked", Status: "in_progress"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = s.DepAdd(o.Source, "prerequisite", "blocks"); e != nil {
+		t.Fatal(e)
+	}
+	o.Dependencies, e = s.DepList(o.Source, "down")
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, _ := s.Get(o.Source)
+	o.Revision = b.Revision
+	r, e := applyCustodyOperation(s, o, "signed-hash", c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !r.Committed || r.WorkerEntry || r.Outcome != "custody-recorded-no-entry" {
+		t.Fatalf("bad result %+v", r)
+	}
+	after, _ := s.Get(o.Source)
+	if after.Metadata["gc.claimed_at"] != o.ClaimedAt || after.Metadata["preserve"] != "yes" || after.Assignee != o.Successor.Claim || after.Metadata["gc.workspace_owner"] != o.Successor.Agent || !reflect.DeepEqual(after.Labels, []string{"hold:external"}) {
+		t.Fatalf("custody or preservation failed %+v", after)
+	}
+	deps, _ := s.DepList(o.Source, "down")
+	if custodyDeps(deps) != custodyDeps(o.Dependencies) {
+		t.Fatal("prerequisite changed")
+	}
+	r, e = applyCustodyOperation(s, o, "signed-hash", c)
+	if e == nil || r.Committed {
+		t.Fatal("replay admitted")
+	}
+}
+
+func TestCustodyRefusesPrewriteAndPostwriteDrift(t *testing.T) {
+	for _, phase := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint(phase), func(t *testing.T) {
+			s, o, c := custodyFixture(t)
+			calls := 0
+			c.physical = func(custodyOperation) error {
+				calls++
+				if calls == phase {
+					return errors.New("physical drift")
+				}
+				return nil
+			}
+			r, e := applyCustodyOperation(s, o, "hash", c)
+			if e == nil || !strings.Contains(e.Error(), "physical drift") || r.WorkerEntry {
+				t.Fatalf("drift not refused %+v %v", r, e)
+			}
+			if r.Committed != (phase == 3) {
+				t.Fatalf("wrong commit outcome %+v", r)
+			}
+			b, _ := s.Get(o.Source)
+			if phase == 3 {
+				if b.Assignee != o.Successor.Claim || r.Outcome != "committed-unadmitted" {
+					t.Fatal("postwrite auto rollback/entry")
+				}
+			} else if b.Assignee != "" {
+				t.Fatal("prewrite mutated")
+			}
+		})
+	}
+}
+
+func TestCustodyMandatoryBindingNegatives(t *testing.T) {
+	cases := map[string]func(*custodyOperation){"purpose": func(o *custodyOperation) { o.Purpose = "source-implementation" }, "city": func(o *custodyOperation) { o.City = "/elsewhere" }, "revision": func(o *custodyOperation) { o.Revision++ }, "owner": func(o *custodyOperation) { o.PriorOwner = "forged" }, "session": func(o *custodyOperation) { o.PriorSession = "forged" }, "head prefix": func(o *custodyOperation) { o.Head = o.Head[:8] }, "base": func(o *custodyOperation) { o.Base = strings.Repeat("3", 40) }, "workspace": func(o *custodyOperation) { o.Workspace = "/other" }, "branch": func(o *custodyOperation) { o.Branch = "other" }, "claim": func(o *custodyOperation) { o.ClaimedAt = "2026-10-24T00:00:00Z" }, "missing assignee": func(o *custodyOperation) { o.Assignee = nil }, "not sole": func(o *custodyOperation) { o.Admission.SoleWriter = false }, "predecessor live": func(o *custodyOperation) { o.Admission.PredecessorDead = false }, "missing admission": func(o *custodyOperation) { o.Admission.Custodian = "" }, "entry allowed": func(o *custodyOperation) { o.Admission.Scheduling = "start-now" }, "expired": func(o *custodyOperation) { o.Admission.ExpiresAt = o.Admission.NotBefore }, "dependencies missing": func(o *custodyOperation) { o.Dependencies = nil }}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, o, c := custodyFixture(t)
+			mutate(&o)
+			if name == "city" {
+				c.runtime = func(custodyOperation) error { return errors.New("wrong target runtime") }
+			}
+			r, e := applyCustodyOperation(s, o, "hash", c)
+			if e == nil || r.Committed {
+				t.Fatalf("invalid binding accepted %+v", r)
+			}
+		})
+	}
+}
+
+func TestCustodyRuntimeAndExpiryRechecked(t *testing.T) {
+	for _, post := range []bool{false, true} {
+		t.Run(fmt.Sprint(post), func(t *testing.T) {
+			s, o, c := custodyFixture(t)
+			calls := 0
+			c.runtime = func(custodyOperation) error {
+				calls++
+				if (!post && calls == 2) || (post && calls == 3) {
+					return errors.New("successor gone")
+				}
+				return nil
+			}
+			r, e := applyCustodyOperation(s, o, "hash", c)
+			if e == nil || r.Committed != post || r.WorkerEntry {
+				t.Fatalf("runtime drift ignored %+v %v", r, e)
+			}
+		})
+	}
+	s, o, c := custodyFixture(t)
+	calls := 0
+	now := c.now()
+	c.now = func() time.Time {
+		calls++
+		if calls >= 3 {
+			return o.Admission.ExpiresAt
+		}
+		return now
+	}
+	r, e := applyCustodyOperation(s, o, "hash", c)
+	if e == nil || r.WorkerEntry || r.Committed {
+		t.Fatalf("expiry before CAS must not write %+v %v", r, e)
+	}
+}
+
+func TestCustodyDuplicateJSONRefused(t *testing.T) {
+	for _, data := range []string{`{"custody_operation":{"source_id":"a","source_id":"b"}}`, `{} {}`, `{"approval":{},"approval":{}}`} {
+		var v any
+		if custodyJSON([]byte(data), &v) == nil {
+			t.Fatal("ambiguous JSON accepted", data)
+		}
+	}
+}
+
+type custodyRaceStore struct {
+	*beads.MemStore
+	beforeCAS func()
+	afterCAS  func()
+}
+
+func (s *custodyRaceStore) UpdateIfMatch(id string, rev int64, o beads.UpdateOpts) error {
+	if s.beforeCAS != nil {
+		s.beforeCAS()
+	}
+	err := s.MemStore.UpdateIfMatch(id, rev, o)
+	if err == nil && s.afterCAS != nil {
+		s.afterCAS()
+	}
+	return err
+}
+
+func TestCustodyNativeCASRace(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	race := &custodyRaceStore{MemStore: s}
+	race.beforeCAS = func() {
+		note := "concurrent change"
+		if e := s.Update(o.Source, beads.UpdateOpts{Description: &note}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	r, e := applyCustodyOperation(race, o, "hash", c)
+	if e == nil || !beads.IsPreconditionFailed(e) || r.Committed || r.CommitUncertain {
+		t.Fatalf("lost revision race admitted %+v %v", r, e)
+	}
+	b, _ := s.Get(o.Source)
+	if b.Assignee != "" {
+		t.Fatal("race lost but custody changed")
+	}
+}
+
+func TestCustodyPostwriteNativeDrift(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	race := &custodyRaceStore{MemStore: s}
+	race.afterCAS = func() {
+		if e := s.Update(o.Source, beads.UpdateOpts{Metadata: map[string]string{"gc.claimed_at": "forged"}}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	r, e := applyCustodyOperation(race, o, "hash", c)
+	if e == nil || !strings.Contains(e.Error(), "postcommit native readback differs") || !r.Committed || r.WorkerEntry || r.Outcome != "committed-unadmitted" {
+		t.Fatalf("native drift not fenced %+v %v", r, e)
+	}
+}
+
+func TestCustodyDependencyDrift(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	_, e := s.Create(beads.Bead{ID: "new-prerequisite", Title: "external"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	calls := 0
+	c.physical = func(custodyOperation) error {
+		calls++
+		if calls == 2 {
+			if e := s.DepAdd(o.Source, "new-prerequisite", "blocks"); e != nil {
+				t.Fatal(e)
+			}
+		}
+		return nil
+	}
+	r, e := applyCustodyOperation(s, o, "hash", c)
+	if e == nil || !strings.Contains(e.Error(), "dependency snapshot differs") || r.Committed {
+		t.Fatalf("new dependency ignored %+v %v", r, e)
+	}
+}
+
+func TestCustodySourceGrantCannotAdopt(t *testing.T) {
+	for _, key := range []string{"source_only", "no_adoption_execution", "no_runtime_apply"} {
+		t.Run(key, func(t *testing.T) {
+			p := filepath.Join(custodyTestDir(t), "source.json")
+			data := `{"approval":{"mode":"direct_chat_preapproval"},"execution_constraints":{"custody_adoption_authorized":true,"` + key + `":true}}`
+			if e := os.WriteFile(p, []byte(data), 0o600); e != nil {
+				t.Fatal(e)
+			}
+			_, _, e := verifyCustodyPacket("/city", p, "/absent-verifier")
+			if e == nil || !strings.Contains(e.Error(), "source-only authority cannot adopt custody") {
+				t.Fatalf("source grant not rejected before verifier: %v", e)
+			}
+		})
+	}
+}
+
+func TestCustodyMalformedInputs(t *testing.T) {
+	p := filepath.Join(custodyTestDir(t), "manifest.json")
+	if e := os.WriteFile(p, []byte(`{"approval":{},"approval":{}}`), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	_, _, e := verifyCustodyPacket("/city", p, "/absent-verifier")
+	if e == nil || !strings.Contains(e.Error(), "duplicate JSON") {
+		t.Fatal(e)
+	}
+	if _, e = readCustodyFile(p, 2); e == nil {
+		t.Fatal("size bound ignored")
+	}
+}
+
+func TestCustodyRegisteredRuntimeQualification(t *testing.T) {
+	_, o, _ := custodyFixture(t)
+	live := func(string) bool { return true }
+	good := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: o.Workspace, State: "active"}
+	if e := checkCustodyRuntime([]worker.SessionInfo{good}, live, o); e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"absent", "asleep", "wrong-name", "closed", "spoofed-claim", "not-running", "predecessor", "competing-writer"} {
+		t.Run(name, func(t *testing.T) {
+			s := good
+			infos := []worker.SessionInfo{s}
+			running := live
+			switch name {
+			case "absent":
+				infos = nil
+			case "asleep":
+				infos[0].State = "asleep"
+			case "wrong-name":
+				infos[0].SessionName = "other"
+			case "closed":
+				infos[0].Closed = true
+			case "spoofed-claim":
+				infos[0].Alias = "other"
+			case "not-running":
+				running = func(string) bool { return false }
+			case "predecessor":
+				infos = append(infos, worker.SessionInfo{ID: o.PriorSession, SessionName: "old"})
+			case "competing-writer":
+				infos = append(infos, worker.SessionInfo{ID: "another", SessionName: "another", WorkDir: o.Workspace})
+			}
+			if checkCustodyRuntime(infos, running, o) == nil {
+				t.Fatal("invalid runtime accepted")
+			}
+		})
+	}
+}
+
+func TestCustodyTargetCityBinding(t *testing.T) {
+	_, o, c := custodyFixture(t)
+	o.City = "/different-city"
+	if validateCustodyOperation(o, "/city", c.now()) == nil {
+		t.Fatal("wrong actual target city admitted")
+	}
+}
+
+func TestCustodyUntrustedVerifierRefused(t *testing.T) {
+	_, o, _ := custodyFixture(t)
+	o.Admission.NotBefore = time.Now().Add(-time.Minute)
+	o.Admission.ExpiresAt = time.Now().Add(time.Minute)
+	dir := custodyTestDir(t)
+	packet := filepath.Join(dir, "packet.json")
+	verifier := filepath.Join(dir, "helper.py")
+	envelope := struct {
+		Approval    map[string]string `json:"approval"`
+		Constraints map[string]bool   `json:"execution_constraints"`
+		Operation   custodyOperation  `json:"custody_operation"`
+	}{map[string]string{"mode": "direct_chat_preapproval"}, map[string]bool{"custody_adoption_authorized": true}, o}
+	data, e := json.Marshal(envelope)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(packet, data, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(verifier, []byte("raise Exception('must never execute')"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	_, _, e = verifyCustodyPacket(o.City, packet, verifier)
+	if e == nil || !strings.Contains(e.Error(), "accepted verifier content differs") {
+		t.Fatalf("untrusted verifier reached execution: %v", e)
+	}
+}
+
+func TestCustodyCompetingRuntimeWorkspaceAlias(t *testing.T) {
+	_, o, _ := custodyFixture(t)
+	dir := custodyTestDir(t)
+	actual := filepath.Join(dir, "source")
+	if e := os.Mkdir(actual, 0o700); e != nil {
+		t.Fatal(e)
+	}
+	resolved, e := filepath.EvalSymlinks(actual)
+	if e != nil {
+		t.Fatal(e)
+	}
+	alias := filepath.Join(dir, "alias")
+	if e = os.Symlink(actual, alias); e != nil {
+		t.Fatal(e)
+	}
+	o.Workspace = resolved
+	good := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: resolved, State: "active"}
+	other := worker.SessionInfo{ID: "competitor", SessionName: "other", WorkDir: alias, State: "active"}
+	if e = checkCustodyRuntime([]worker.SessionInfo{good, other}, func(string) bool { return true }, o); e == nil || !strings.Contains(e.Error(), "another runtime occupies") {
+		t.Fatalf("aliased writer not refused: %v", e)
+	}
+}
+
+func custodyTestDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCustodyPostcommitExpiryUnadmitted(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	now := c.now()
+	calls := 0
+	c.now = func() time.Time {
+		calls++
+		if calls >= 4 {
+			return o.Admission.ExpiresAt
+		}
+		return now
+	}
+	r, e := applyCustodyOperation(s, o, "hash", c)
+	if e == nil || !r.Committed || r.WorkerEntry || r.Outcome != "committed-unadmitted" {
+		t.Fatalf("postcommit expiry admitted or rolled back %+v %v", r, e)
+	}
+}
+
+func TestCustodyCanonicalRuntimeClaim(t *testing.T) {
+	for _, variant := range []string{"alias", "trimmed-alias", "configured-name", "stored-runtime-name", "pool-id"} {
+		t.Run(variant, func(t *testing.T) {
+			_, o, _ := custodyFixture(t)
+			s := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: o.Workspace, State: "active"}
+			claim := ""
+			switch variant {
+			case "alias":
+				s.Alias = "public-instance"
+				claim = s.Alias
+			case "trimmed-alias":
+				s.Alias = " public-instance "
+				claim = "public-instance"
+			case "configured-name":
+				s.ConfiguredNamedIdentity = "configured-instance"
+				claim = s.ConfiguredNamedIdentity
+			case "stored-runtime-name":
+				s.SessionNameMetadata = s.SessionName
+				claim = s.SessionName
+			case "pool-id":
+				s.PoolManaged = true
+				claim = s.ID
+			}
+			o.Successor.Claim = claim
+			o.Successor.Agent = claim
+			if e := checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o); e != nil {
+				t.Fatalf("canonical runtime claim refused: %v", e)
+			}
+			if claim != s.ID {
+				o.Successor.Claim = s.ID
+				o.Successor.Agent = s.ID
+				if checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o) == nil {
+					t.Fatal("noncanonical claimant accepted")
+				}
+			}
+		})
+	}
+}
+
+type custodyLostAckStore struct{ *beads.MemStore }
+
+func (s *custodyLostAckStore) UpdateIfMatch(id string, revision int64, o beads.UpdateOpts) error {
+	if e := s.MemStore.UpdateIfMatch(id, revision, o); e != nil {
+		return e
+	}
+	return errors.New("write acknowledgement lost")
+}
+
+func TestCustodyLostWriteAcknowledgement(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	r, e := applyCustodyOperation(&custodyLostAckStore{s}, o, "hash", c)
+	b, _ := s.Get(o.Source)
+	if b.Assignee != o.Successor.Claim {
+		t.Fatal("fixture did not actually commit")
+	}
+	if e == nil || r.WorkerEntry || r.Outcome != "commit-uncertain-unadmitted" || !r.CommitUncertain {
+		t.Fatalf("lost acknowledgement reported as definite no-write: %+v %v", r, e)
+	}
+}
+
+func TestCustodyUnsupportedCASDefiniteNoWrite(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	s.DisableConditionalWrites = true
+	r, e := applyCustodyOperation(s, o, "hash", c)
+	if e == nil || !beads.IsConditionalWriteUnsupported(e) || r.Committed || r.CommitUncertain || r.WorkerEntry {
+		t.Fatalf("unsupported CAS not definite no-write %+v %v", r, e)
+	}
+	b, _ := s.Get(o.Source)
+	if b.Assignee != "" {
+		t.Fatal("unsupported backend mutated custody")
+	}
+}
+
+func TestCustodySuccessorBeforeManagedWorkspaceEntry(t *testing.T) {
+	_, o, _ := custodyFixture(t)
+	s := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: filepath.Join(o.City, "session-launch"), State: "active"}
+	if e := checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o); e != nil {
+		t.Fatalf("registered successor requires premature workspace entry: %v", e)
+	}
+}
+
+func TestCustodyWorkspaceDisablesExecutableGitHelpers(t *testing.T) {
+	dir := custodyTestDir(t)
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("/usr/bin/git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s: %v", args, b, err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	run("init", "-b", "existing")
+	run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
+	marker := filepath.Join(custodyTestDir(t), "executed")
+	helper := filepath.Join(custodyTestDir(t), "fsmonitor")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+marker+"'\nprintf 'token\\0'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run("config", "core.fsmonitor", helper)
+	head := run("rev-parse", "HEAD")
+	o := custodyOperation{Workspace: dir, Head: head, Base: head, Branch: "existing"}
+	if err := checkCustodyWorkspace(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("workspace probe executed repository-local fsmonitor: %v", err)
+	}
+}
+
+func TestCustodyInputFIFORefusedWithoutBlocking(t *testing.T) {
+	path := filepath.Join(custodyTestDir(t), "packet")
+	if out, err := exec.Command("/usr/bin/mkfifo", path).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %s: %v", out, err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readCustodyFile(path, 1024); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular input required") {
+			t.Fatalf("FIFO input not refused: %v", err)
+		}
+	case <-time.After(time.Second):
+		// Release the old blocking reader before reporting the regression.
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("FIFO input blocked before regular-file validation")
+	}
+}
+
+func TestCustodyWorkspaceRefusesExecutableFilters(t *testing.T) {
+	for _, kind := range []string{"clean", "process"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := custodyTestDir(t)
+			run := func(args ...string) string {
+				t.Helper()
+				cmd := exec.Command("/usr/bin/git", append([]string{"-C", dir}, args...)...)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %s: %v", args, out, err)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			run("init", "-b", "existing")
+			if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("tracked filter=local\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("original\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			run("add", ".")
+			run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+			head := run("rev-parse", "HEAD")
+			marker := filepath.Join(custodyTestDir(t), "executed")
+			helper := filepath.Join(custodyTestDir(t), "filter")
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+marker+"'\ncat\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			run("config", "filter.local."+kind, helper)
+			if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("modified\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := checkCustodyWorkspace(custodyOperation{Workspace: dir, Branch: "existing", Base: head, Head: head})
+			if _, e := os.Stat(marker); !os.IsNotExist(e) {
+				t.Fatalf("workspace probe executed configured %s filter: %v", kind, e)
+			}
+			if err == nil || !strings.Contains(err.Error(), "configured filter") {
+				t.Fatalf("configured filter not explicitly refused: %v", err)
+			}
+		})
+	}
+}

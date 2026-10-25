@@ -393,11 +393,25 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads adopt-custody](#gc-beads-adopt-custody) | Record separately authorized custody while retaining dependencies and entry holds |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+
+## gc beads adopt-custody
+
+Record separately authorized custody while retaining dependencies and entry holds
+
+```
+gc beads adopt-custody <bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--manifest` | string |  | separately signed operation manifest (required) |
+| `--verifier` | string |  | absolute accepted verifier path (required, content pinned) |
 
 ## gc beads city
 
