@@ -195,7 +195,7 @@ func TestCustodyNativeCASRace(t *testing.T) {
 		}
 	}
 	r, e := applyCustodyOperation(race, o, "hash", c)
-	if e == nil || !beads.IsPreconditionFailed(e) || r.Committed {
+	if e == nil || !beads.IsPreconditionFailed(e) || r.Committed || r.CommitUncertain {
 		t.Fatalf("lost revision race admitted %+v %v", r, e)
 	}
 	b, _ := s.Get(o.Source)
@@ -430,5 +430,39 @@ func TestCustodyCanonicalRuntimeClaim(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type custodyLostAckStore struct{ *beads.MemStore }
+
+func (s *custodyLostAckStore) UpdateIfMatch(id string, revision int64, o beads.UpdateOpts) error {
+	if e := s.MemStore.UpdateIfMatch(id, revision, o); e != nil {
+		return e
+	}
+	return errors.New("write acknowledgement lost")
+}
+
+func TestCustodyLostWriteAcknowledgement(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	r, e := applyCustodyOperation(&custodyLostAckStore{s}, o, "hash", c)
+	b, _ := s.Get(o.Source)
+	if b.Assignee != o.Successor.Claim {
+		t.Fatal("fixture did not actually commit")
+	}
+	if e == nil || r.WorkerEntry || r.Outcome != "commit-uncertain-unadmitted" || !r.CommitUncertain {
+		t.Fatalf("lost acknowledgement reported as definite no-write: %+v %v", r, e)
+	}
+}
+
+func TestCustodyUnsupportedCASDefiniteNoWrite(t *testing.T) {
+	s, o, c := custodyFixture(t)
+	s.DisableConditionalWrites = true
+	r, e := applyCustodyOperation(s, o, "hash", c)
+	if e == nil || !beads.IsConditionalWriteUnsupported(e) || r.Committed || r.CommitUncertain || r.WorkerEntry {
+		t.Fatalf("unsupported CAS not definite no-write %+v %v", r, e)
+	}
+	b, _ := s.Get(o.Source)
+	if b.Assignee != "" {
+		t.Fatal("unsupported backend mutated custody")
 	}
 }

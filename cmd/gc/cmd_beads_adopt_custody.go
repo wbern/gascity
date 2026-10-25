@@ -66,13 +66,16 @@ type custodyOperation struct {
 	Admission    custodyAdmission `json:"admission"`
 }
 type custodyResult struct {
-	Schema      string `json:"schema_version"`
-	Outcome     string `json:"outcome"`
-	Source      string `json:"source_id"`
-	Manifest    string `json:"manifest_sha256"`
-	Committed   bool   `json:"committed"`
-	WorkerEntry bool   `json:"worker_entry"`
-	Error       string `json:"error,omitempty"`
+	Schema   string `json:"schema_version"`
+	Outcome  string `json:"outcome"`
+	Source   string `json:"source_id"`
+	Manifest string `json:"manifest_sha256"`
+	// Committed means acknowledged persistence; CommitUncertain distinguishes
+	// an error/lost acknowledgement from definite no-write.
+	Committed       bool   `json:"committed"`
+	CommitUncertain bool   `json:"commit_uncertain,omitempty"`
+	WorkerEntry     bool   `json:"worker_entry"`
+	Error           string `json:"error,omitempty"`
 }
 type custodyChecks struct {
 	now      func() time.Time
@@ -517,6 +520,12 @@ func applyCustodyOperation(store beads.Store, o custodyOperation, hash string, c
 	claim := o.Successor.Claim
 	patch := map[string]string{"gc.session_id": o.Successor.ID, "gc.session_name": o.Successor.Name, "gc.workspace_owner": o.Successor.Agent, "gc.workspace_owner_prior": o.PriorOwner, "gc.custody_manifest_sha256": hash, "gc.custody_transferred_at": transitionTime.UTC().Format(time.RFC3339Nano)}
 	if e := writer.UpdateIfMatch(o.Source, o.Revision, beads.UpdateOpts{Status: &status, Assignee: &claim, Metadata: patch}); e != nil {
+		// A transport error can lose the acknowledgement after persistence.
+		// Only typed stale/unsupported responses establish definite no-write.
+		if !beads.IsPreconditionFailed(e) && !beads.IsConditionalWriteUnsupported(e) {
+			result.Outcome = "commit-uncertain-unadmitted"
+			result.CommitUncertain = true
+		}
 		return result, e
 	}
 	result.Committed = true
