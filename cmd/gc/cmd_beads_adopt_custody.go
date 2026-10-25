@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -569,10 +570,7 @@ func checkCustodyRuntime(infos []worker.SessionInfo, running func(string) bool, 
 			return fmt.Errorf("predecessor is still running")
 		}
 		if s.ID == o.Successor.ID {
-			claim := s.Alias
-			if claim == "" {
-				claim = s.ID
-			}
+			claim := session.AssigneeIdentifier(s)
 			if s.Closed || string(s.State) != "active" || !live || s.WorkDir != o.Workspace || s.SessionName != o.Successor.Name || claim != o.Successor.Claim || claim != o.Successor.Agent {
 				return fmt.Errorf("successor runtime identity is not admitted")
 			}

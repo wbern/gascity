@@ -393,3 +393,42 @@ func TestCustodyPostcommitExpiryUnadmitted(t *testing.T) {
 		t.Fatalf("postcommit expiry admitted or rolled back %+v %v", r, e)
 	}
 }
+
+func TestCustodyCanonicalRuntimeClaim(t *testing.T) {
+	for _, variant := range []string{"alias", "trimmed-alias", "configured-name", "stored-runtime-name", "pool-id"} {
+		t.Run(variant, func(t *testing.T) {
+			_, o, _ := custodyFixture(t)
+			s := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: o.Workspace, State: "active"}
+			claim := ""
+			switch variant {
+			case "alias":
+				s.Alias = "public-instance"
+				claim = s.Alias
+			case "trimmed-alias":
+				s.Alias = " public-instance "
+				claim = "public-instance"
+			case "configured-name":
+				s.ConfiguredNamedIdentity = "configured-instance"
+				claim = s.ConfiguredNamedIdentity
+			case "stored-runtime-name":
+				s.SessionNameMetadata = s.SessionName
+				claim = s.SessionName
+			case "pool-id":
+				s.PoolManaged = true
+				claim = s.ID
+			}
+			o.Successor.Claim = claim
+			o.Successor.Agent = claim
+			if e := checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o); e != nil {
+				t.Fatalf("canonical runtime claim refused: %v", e)
+			}
+			if claim != s.ID {
+				o.Successor.Claim = s.ID
+				o.Successor.Agent = s.ID
+				if checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o) == nil {
+					t.Fatal("noncanonical claimant accepted")
+				}
+			}
+		})
+	}
+}
