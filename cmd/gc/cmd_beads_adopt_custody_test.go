@@ -573,3 +573,126 @@ func TestCustodyWorkspaceRefusesExecutableFilters(t *testing.T) {
 		})
 	}
 }
+
+// TestCustodyAuthoritativePolicyStore exercises the production opener against
+// a disposable managed Dolt server. Both lanes retain the policy wrapper;
+// native performs a real revision-fenced write and unsupported bd refuses safely.
+// Like the other managed-bd process proofs, run with GC_FAST_UNIT=0.
+func TestCustodyAuthoritativePolicyStore(t *testing.T) {
+	city, rig := setupManagedBdWaitTestCity(t)
+	for _, lane := range []string{"bd", "native"} {
+		t.Run(lane, func(t *testing.T) {
+			fallback := ""
+			if lane == "bd" {
+				fallback = "1"
+			}
+			t.Setenv("GC_BEADS_FORCE_FALLBACK", fallback)
+			store, err := openAuthoritativeStoreAtForCity(rig, city)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := closeBeadStoreHandle(store); err != nil {
+					t.Error(err)
+				}
+			})
+			backing, _, wrapped := unwrapBeadPolicyStore(store)
+			if !wrapped {
+				t.Fatalf("authoritative opener lost policy wrapper: %T", store)
+			}
+			if lane == "bd" {
+				if _, ok := backing.(*beads.BdStore); !ok {
+					t.Fatalf("fallback leaf = %T, want BdStore", backing)
+				}
+			} else if _, ok := backing.(*beads.NativeDoltStore); !ok {
+				t.Fatalf("native leaf = %T, want NativeDoltStore (fallback is not qualification)", backing)
+			}
+			t.Logf("actual authoritative opener: outer=%T backing=%T", store, backing)
+			for _, refuse := range []bool{false, true} {
+				t.Run(fmt.Sprintf("runtime_refusal=%v", refuse), func(t *testing.T) {
+					template, op, checks := custodyFixture(t)
+					seed, err := template.Get(op.Source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					seed.ID = ""
+					created, err := store.Create(seed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					op.City, op.StoreRef, op.Source = city, "rig:frontend", created.ID
+					prerequisite, err := store.Create(beads.Bead{Title: "Retained custody prerequisite", Type: "task", Status: "in_progress"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = store.DepAdd(op.Source, prerequisite.ID, "blocks"); err != nil {
+						t.Fatal(err)
+					}
+					op.Dependencies, err = store.DepList(op.Source, "down")
+					if err != nil {
+						t.Fatal(err)
+					}
+					before, err := store.Get(op.Source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					op.Revision = before.Revision
+					if len(op.Dependencies) != 1 || !reflect.DeepEqual(before.Labels, []string{"hold:external"}) || before.Metadata["gc.claimed_at"] != op.ClaimedAt {
+						t.Fatalf("real backend did not retain fixture bindings: %+v deps=%+v", before, op.Dependencies)
+					}
+					if refuse {
+						checks.runtime = func(custodyOperation) error { return errors.New("runtime qualification refused") }
+					}
+					result, applyErr := applyCustodyOperation(store, op, "authenticated-fixture-hash", checks)
+					after, err := store.Get(op.Source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					switch {
+					case refuse:
+						if applyErr == nil || !strings.Contains(applyErr.Error(), "runtime qualification refused") || result.Committed || result.WorkerEntry || !reflect.DeepEqual(before, after) {
+							t.Fatalf("runtime refusal wrote or bypassed checks: result=%+v err=%v before=%+v after=%+v", result, applyErr, before, after)
+						}
+					case lane == "bd":
+						if !errors.Is(applyErr, beads.ErrConditionalWriteUnsupported) || result.Committed || result.CommitUncertain || result.WorkerEntry || result.Outcome != "refused" || !reflect.DeepEqual(before, after) {
+							t.Fatalf("unsupported bd must refuse without mutation: result=%+v err=%v before=%+v after=%+v", result, applyErr, before, after)
+						}
+					default:
+						if applyErr != nil || !result.Committed || result.WorkerEntry || result.Outcome != "custody-recorded-no-entry" {
+							t.Fatalf("real policy-wrapped custody failed: result=%+v err=%v", result, applyErr)
+						}
+						if after.Revision == before.Revision || after.Assignee != op.Successor.Claim || after.Metadata["gc.workspace_owner"] != op.Successor.Agent || after.Metadata["gc.claimed_at"] != op.ClaimedAt || !reflect.DeepEqual(after.Labels, before.Labels) {
+							t.Fatalf("custody/preservation mismatch: before=%+v after=%+v", before, after)
+						}
+					}
+					deps, err := store.DepList(op.Source, "down")
+					if err != nil || custodyDeps(deps) != custodyDeps(op.Dependencies) {
+						t.Fatalf("dependency hold changed: deps=%+v err=%v", deps, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Keep a fast owning proof for the wrapper seam, including the plain policy
+// wrapper (no graph capability) and the graph-enabled production shape.
+func TestCustodyPolicyWrapper(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		t.Run(fmt.Sprint(graph), func(t *testing.T) {
+			store, op, checks := custodyFixture(t)
+			var wrapped beads.Store = &beadPolicyStore{Store: store}
+			if graph {
+				wrapped = wrapStoreWithBeadPolicies(store, nil)
+			}
+			result, err := applyCustodyOperation(wrapped, op, "authenticated-fixture-hash", checks)
+			if err != nil || !result.Committed || result.WorkerEntry || result.Outcome != "custody-recorded-no-entry" {
+				t.Fatalf("policy-wrapped custody: %+v err=%v", result, err)
+			}
+			after, err := wrapped.Get(op.Source)
+			if err != nil || after.Metadata["gc.claimed_at"] != op.ClaimedAt || !reflect.DeepEqual(after.Labels, []string{"hold:external"}) {
+				t.Fatalf("policy read/preservation: %+v err=%v", after, err)
+			}
+		})
+	}
+}
