@@ -277,7 +277,7 @@ func TestCustodyRegisteredRuntimeQualification(t *testing.T) {
 	if e := checkCustodyRuntime([]worker.SessionInfo{good}, live, o); e != nil {
 		t.Fatal(e)
 	}
-	for _, name := range []string{"absent", "asleep", "wrong-name", "wrong-workspace", "closed", "spoofed-claim", "not-running", "predecessor", "competing-writer"} {
+	for _, name := range []string{"absent", "asleep", "wrong-name", "closed", "spoofed-claim", "not-running", "predecessor", "competing-writer"} {
 		t.Run(name, func(t *testing.T) {
 			s := good
 			infos := []worker.SessionInfo{s}
@@ -289,8 +289,6 @@ func TestCustodyRegisteredRuntimeQualification(t *testing.T) {
 				infos[0].State = "asleep"
 			case "wrong-name":
 				infos[0].SessionName = "other"
-			case "wrong-workspace":
-				infos[0].WorkDir = "/other"
 			case "closed":
 				infos[0].Closed = true
 			case "spoofed-claim":
@@ -464,5 +462,13 @@ func TestCustodyUnsupportedCASDefiniteNoWrite(t *testing.T) {
 	b, _ := s.Get(o.Source)
 	if b.Assignee != "" {
 		t.Fatal("unsupported backend mutated custody")
+	}
+}
+
+func TestCustodySuccessorBeforeManagedWorkspaceEntry(t *testing.T) {
+	_, o, _ := custodyFixture(t)
+	s := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: filepath.Join(o.City, "session-launch"), State: "active"}
+	if e := checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o); e != nil {
+		t.Fatalf("registered successor requires premature workspace entry: %v", e)
 	}
 }

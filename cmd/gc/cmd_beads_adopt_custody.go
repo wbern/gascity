@@ -580,7 +580,7 @@ func checkCustodyRuntime(infos []worker.SessionInfo, running func(string) bool, 
 		}
 		if s.ID == o.Successor.ID {
 			claim := session.AssigneeIdentifier(s)
-			if s.Closed || string(s.State) != "active" || !live || s.WorkDir != o.Workspace || s.SessionName != o.Successor.Name || claim != o.Successor.Claim || claim != o.Successor.Agent {
+			if s.Closed || string(s.State) != "active" || !live || s.SessionName != o.Successor.Name || claim != o.Successor.Claim || claim != o.Successor.Agent {
 				return fmt.Errorf("successor runtime identity is not admitted")
 			}
 			found = true
