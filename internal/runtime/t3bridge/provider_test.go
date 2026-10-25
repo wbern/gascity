@@ -1304,8 +1304,13 @@ func TestCopyTo_UsesThreadWorkDir(t *testing.T) {
 		recentStarts: make(map[string]time.Time),
 	}
 
-	if err := p.CopyTo("t3code--crew", srcFile, "nested/copied.txt"); err != nil {
-		t.Fatalf("CopyTo: %v", err)
+	place := &t3Place{p: p, name: "t3code--crew"}
+	if err := place.Stage(context.Background(), []runtime.CopyEntry{{Src: srcFile, RelDst: "worker/nested/copied.txt", LocalRelDst: "nested/copied.txt"}}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	same := filepath.Join(workDir, "nested", "copied.txt")
+	if err := place.Stage(context.Background(), []runtime.CopyEntry{{Src: same, RelDst: "worker/nested/copied.txt", LocalRelDst: "nested/copied.txt"}}); err != nil {
+		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(workDir, "nested", "copied.txt"))
 	if err != nil {

@@ -199,3 +199,12 @@ func TestStripBeaconPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigHash_LocalCopyDestination(t *testing.T) {
+	params := TemplateParams{Hints: agent.StartupHints{CopyFiles: []runtime.CopyEntry{{Src: "/city/worker/hook", RelDst: "worker/hook"}}}}
+	before := canonicalConfigHash(params, nil)
+	params.Hints.CopyFiles[0].LocalRelDst = "hook"
+	if canonicalConfigHash(params, nil) == before {
+		t.Fatal("local copy destination omitted from config hash")
+	}
+}

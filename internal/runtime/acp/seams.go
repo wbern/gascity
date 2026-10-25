@@ -104,7 +104,7 @@ func (pl *acpPlace) Exec(context.Context, runtime.ExecRequest) (runtime.ExecResu
 // Stage copies entries into the session workdir via CopyTo (←CopyTo). Best-effort.
 func (pl *acpPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
 	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
+		if err := pl.p.CopyTo(pl.name, f.Src, f.LocalDestination()); err != nil {
 			return err
 		}
 	}

@@ -1367,7 +1367,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 				continue
 			}
 			copyFiles = append(copyFiles, runtime.CopyEntry{
-				Src: abs, RelDst: path.Join(relWorkDir, rel),
+				Src: abs, RelDst: path.Join(relWorkDir, rel), LocalRelDst: rel,
 				Probed:      true,
 				ContentHash: hookFileContentHash(overlayDirs, hookProviders, rel, abs),
 			})

@@ -113,7 +113,7 @@ func (pl *t3Place) Exec(context.Context, runtime.ExecRequest) (runtime.ExecResul
 // non-nil CopyTo would abort the batch at that entry.
 func (pl *t3Place) Stage(_ context.Context, files []runtime.CopyEntry) error {
 	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
+		if err := pl.p.CopyTo(pl.name, f.Src, f.LocalDestination()); err != nil {
 			return err
 		}
 	}

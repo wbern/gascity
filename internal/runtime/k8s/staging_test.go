@@ -460,3 +460,22 @@ func (o *execReadyOps) execInPod(_ context.Context, _, _ string, cmd []string, _
 	}
 	return "", nil
 }
+
+func TestStageFilesKeepsWorkspaceHookDestination(t *testing.T) {
+	work := t.TempDir()
+	src := filepath.Join(work, "hooks.json")
+	if err := os.WriteFile(src, []byte(`{"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := ".gc/worktrees/example/crew/worker/.codex/hooks.json"
+	ops := newCapturingStageOps()
+	if err := stageFiles(context.Background(), ops, "hook-test", runtime.Config{CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: remote, LocalRelDst: ".codex/hooks.json"}}}, "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := ops.files["/workspace/"+remote]; got != `{"hooks":{}}` {
+		t.Fatalf("workspace hook=%q", got)
+	}
+	if _, ok := ops.files["/workspace/.codex/hooks.json"]; ok {
+		t.Fatal("local override applied to container workspace")
+	}
+}

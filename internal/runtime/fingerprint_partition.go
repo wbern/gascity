@@ -80,6 +80,7 @@ func hashProvisionFields(h hash.Hash, cfg Config) {
 	hashOverlayProviders(h, OverlayProviderNames(cfg))
 
 	for _, cf := range cfg.CopyFiles {
+		hashOptionalString(h, "local_rel_dst", cf.LocalRelDst)
 		if cf.Probed {
 			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors

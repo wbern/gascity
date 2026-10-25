@@ -116,3 +116,18 @@ func TestMarshalStartConfig_doesNotLeakSessionFields(t *testing.T) {
 		}
 	}
 }
+
+func TestMarshalStartConfigKeepsBothHookDestinations(t *testing.T) {
+	cfg := runtime.Config{CopyFiles: []runtime.CopyEntry{{Src: "/city/worker/.codex/hooks.json", RelDst: "worker/.codex/hooks.json", LocalRelDst: ".codex/hooks.json"}}}
+	raw, err := marshalStartConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got startConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.CopyFiles) != 1 || got.CopyFiles[0].RelDst != "worker/.codex/hooks.json" || got.CopyFiles[0].LocalRelDst != ".codex/hooks.json" {
+		t.Fatalf("wire entries=%+v", got.CopyFiles)
+	}
+}

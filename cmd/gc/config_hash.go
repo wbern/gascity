@@ -117,7 +117,11 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 		h.Write([]byte(cf.Src))    //nolint:errcheck
 		h.Write([]byte{0})         //nolint:errcheck
 		h.Write([]byte(cf.RelDst)) //nolint:errcheck
-		h.Write([]byte{0})         //nolint:errcheck
+		if cf.LocalRelDst != "" {
+			h.Write([]byte("\x00local_rel_dst\x00")) //nolint:errcheck
+			h.Write([]byte(cf.LocalRelDst))          //nolint:errcheck
+		}
+		h.Write([]byte{0}) //nolint:errcheck
 	}
 
 	// FPExtra (pool config, etc.). Unlike runtime.CoreFingerprint's

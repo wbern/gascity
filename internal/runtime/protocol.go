@@ -15,6 +15,9 @@ const ProtocolVersion0 = 0
 // Capability strings an executable may declare in its `protocol`
 // handshake. Unknown strings are ignored for forward compatibility.
 const (
+	// ProtocolCapabilityLocalCopyDestination declares support for the optional
+	// workdir-relative fifth argument to copy-to. Older scripts keep their arity.
+	ProtocolCapabilityLocalCopyDestination = "copy-to-local-destination"
 	// ProtocolCapabilityReportAttachment declares that the executable
 	// implements `is-attached <name>` with meaningful results, enabling
 	// ProviderCapabilities.CanReportAttachment.

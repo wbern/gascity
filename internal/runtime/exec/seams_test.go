@@ -238,12 +238,24 @@ func TestSeamsStageAndTeardown(t *testing.T) {
 	script := writeScript(t, dir, `
 op="$1"
 case "$op" in
+  protocol) echo '{"version":0,"capabilities":["copy-to-local-destination"]}' ;;
   start)   cat > /dev/null ;;
-  copy-to) if [ "$4" = "boom" ]; then echo "copy failed" >&2; exit 1; fi; echo "copy $3 $4" >> "`+logFile+`" ;;
+  copy-to) if [ "$4" = "boom" ]; then echo "copy failed" >&2; exit 1; fi; echo "copy $3 $4 ${5:-}" >> "`+logFile+`" ;;
   stop)    echo "stop $2" >> "`+logFile+`" ;;
   *) exit 2 ;;
 esac
 `)
+	legacy := writeScript(t, t.TempDir(), `
+case "$1" in
+ protocol) exit 2 ;;
+ copy-to) [ "$#" -eq 4 ] || exit 1 ;;
+ *) exit 2 ;;
+esac
+`)
+	legacyPlace := &execPlace{p: NewProvider(legacy), name: "legacy"}
+	if err := legacyPlace.Stage(context.Background(), []runtime.CopyEntry{{Src: "/hook", RelDst: "worker/hook", LocalRelDst: ".codex/hooks.json"}}); err != nil {
+		t.Fatalf("legacy copy-to arity changed: %v", err)
+	}
 	p := NewProvider(script)
 	rt, _ := p.Seams()
 	ctx := context.Background()
@@ -253,7 +265,7 @@ esac
 		t.Fatalf("provision: %v", err)
 	}
 
-	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: "/a", RelDst: "x"}, {Src: "/b", RelDst: "y"}}); err != nil {
+	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: "/a", RelDst: "x"}, {Src: "/b", RelDst: "y"}, {Src: "/hook", RelDst: "worker/hook", LocalRelDst: ".codex/hooks.json"}}); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: "/a", RelDst: "boom"}}); err == nil {
@@ -265,7 +277,7 @@ esac
 
 	data, _ := os.ReadFile(logFile)
 	got := string(data)
-	for _, want := range []string{"copy /a x", "copy /b y", "stop sess"} {
+	for _, want := range []string{"copy /a x", "copy /b y", "copy /hook worker/hook .codex/hooks.json", "stop sess"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ops log = %q; want it to contain %q", got, want)
 		}

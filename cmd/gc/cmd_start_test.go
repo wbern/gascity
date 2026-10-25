@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -2240,5 +2241,64 @@ func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T
 	}
 	if gotCityPath != cityPath {
 		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
+	}
+}
+
+// Hook entries must compose with local staging without recreating the city path.
+func TestStageHookFilesLocalDestination(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprint(external), func(t *testing.T) {
+			root := t.TempDir()
+			city := filepath.Join(root, "city")
+			work := filepath.Join(city, ".gc", "worktrees", "example", "crew", "worker")
+			if external {
+				work = filepath.Join(root, "external")
+			}
+			hook := filepath.Join(work, ".codex", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			content := []byte(`{"hooks":{},"custom":"preserved"}`)
+			if err := os.WriteFile(hook, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entries := stageHookFiles(nil, city, work, []string{"codex"}, nil)
+			if len(entries) != 1 {
+				t.Fatalf("entries = %+v", entries)
+			}
+			relWork, err := filepath.Rel(city, work)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entries[0].RelDst != path.Join(relWork, ".codex/hooks.json") || entries[0].LocalRelDst != ".codex/hooks.json" {
+				t.Fatalf("provider destinations = %+v", entries[0])
+			}
+			before := runtime.CoreFingerprint(runtime.Config{WorkDir: work, CopyFiles: entries})
+			if err := runtime.StageSessionWorkDir(runtime.Config{WorkDir: work, CopyFiles: entries}); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(hook); err != nil || !bytes.Equal(got, content) {
+				t.Fatalf("hook changed: %q %v", got, err)
+			}
+			count := 0
+			if err := filepath.WalkDir(work, func(_ string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.Name() == "hooks.json" {
+					count++
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("staging created %d hook files; want only original", count)
+			}
+			after := runtime.CoreFingerprint(runtime.Config{WorkDir: work, CopyFiles: stageHookFiles(nil, city, work, []string{"codex"}, nil)})
+			if before != after {
+				t.Fatal("staging changed hook fingerprint")
+			}
+		})
 	}
 }
