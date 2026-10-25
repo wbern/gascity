@@ -152,6 +152,7 @@ Capabilities:
 
 | Capability | Effect |
 |------------|--------|
+| `copy-to-local-destination` | `copy-to` accepts an optional fifth argument for a local workdir-relative destination; without it, the original argument list is preserved. |
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
@@ -178,6 +179,21 @@ The `start` operation receives a JSON object on stdin:
 ```
 
 All fields are optional (omitted when empty).
+
+`copy_files` entries contain `src` and `rel_dst`. Entries shared between local
+and container providers may also contain `local_rel_dst`: scripts staging into
+`work_dir` use that override when present, falling back to `rel_dst`. Scripts
+staging into the container workspace root continue to use `rel_dst`. This keeps
+city-relative container hook paths from becoming nested city paths inside a
+local worktree. Existing entries without the override retain their destination.
+
+Scripts declaring `copy-to-local-destination` in their protocol handshake
+receive incremental staging as `copy-to <name> <src> <rel_dst> [local_rel_dst]`.
+The optional fifth argument carries the same local override. Local scripts use
+it when non-empty; workspace-rooted scripts keep using the fourth argument.
+Scripts without that capability keep the original four-argument call and
+their previous behavior until they adopt the override.
+
 
 ### Startup Hints
 

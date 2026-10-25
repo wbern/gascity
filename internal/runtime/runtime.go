@@ -696,9 +696,15 @@ type ServerLifecycleProvider interface {
 type CopyEntry struct {
 	// Src is the host-side source path (file or directory).
 	Src string
-	// RelDst is the destination relative to session workDir.
-	// Empty means the workDir root.
+	// RelDst is the legacy provider-relative destination: session workDir
+	// for local providers, or workspace root for K8s. Empty means that root.
+	// LocalRelDst disambiguates entries shared by both kinds of provider.
 	RelDst string
+	// LocalRelDst overrides RelDst for providers that stage directly in the
+	// host workDir. Hook destinations also carry a workspace-rooted RelDst
+	// for container providers; using that path locally would nest the city
+	// worktree path inside itself. Empty preserves the legacy destination.
+	LocalRelDst string
 	// Probed indicates this entry was discovered via filesystem probing
 	// (os.Stat) rather than derived from config. Probed entries use
 	// content-based fingerprinting to avoid spurious config-drift when
@@ -721,6 +727,14 @@ type CopyEntry struct {
 	// ContentHash, and drift diagnostics that print the two together are
 	// showing related but distinct files.
 	ContentHash string
+}
+
+// LocalDestination returns the workdir-relative destination for host staging.
+func (e CopyEntry) LocalDestination() string {
+	if e.LocalRelDst != "" {
+		return e.LocalRelDst
+	}
+	return e.RelDst
 }
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.

@@ -52,6 +52,9 @@ STATE_DIR="${GC_EXEC_STATE_DIR:-${TMPDIR:-/tmp}/gc-session-screen}"
 mkdir -p "$STATE_DIR"
 
 case "$op" in
+  protocol)
+    printf '%s\n' '{"version":0,"capabilities":["copy-to-local-destination"]}'
+    ;;
   start)
     # Read JSON config from stdin.
     config=$(cat)
@@ -103,7 +106,7 @@ case "$op" in
     echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null | while IFS= read -r entry; do
       [ -z "$entry" ] && continue
       src=$(echo "$entry" | jq -r '.src')
-      rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
+      rel_dst=$(echo "$entry" | jq -r '.local_rel_dst // .rel_dst // ""')
       dst="${work_dir:-.}"
       [ -n "$rel_dst" ] && dst="$dst/$rel_dst"
       if [ -d "$src" ]; then
@@ -251,7 +254,7 @@ case "$op" in
     # Copy a file or directory into the session's working directory.
     # Screen runs locally, so this is a host-side copy.
     src="${3:-}"
-    rel_dst="${4:-}"
+    rel_dst="${5:-${4:-}}"
     if [ -z "$name" ] || [ -z "$src" ]; then exit 0; fi
     # Read work_dir from the wrapper script (first cd line).
     wrapper="$STATE_DIR/${name}.wrapper.sh"

@@ -170,8 +170,12 @@ func TestSeamsStage(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = place.Teardown(ctx) })
 
-	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: src, RelDst: "copied.txt"}}); err != nil {
+	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: src, RelDst: "worker/copied.txt", LocalRelDst: "copied.txt"}}); err != nil {
 		t.Fatalf("Stage: %v", err)
+	}
+	same := filepath.Join(work, "copied.txt")
+	if err := place.Stage(ctx, []runtime.CopyEntry{{Src: same, RelDst: "worker/copied.txt", LocalRelDst: "copied.txt"}}); err != nil {
+		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(work, "copied.txt")); err != nil || string(got) != "hello" {
 		t.Fatalf("staged file = %q, %v; want hello", got, err)

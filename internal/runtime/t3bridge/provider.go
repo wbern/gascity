@@ -677,6 +677,18 @@ func copyFileToPath(src, dstRoot, relDst string) error {
 	if err != nil {
 		return err
 	}
+	// Validate once, then accept exact identity before comparing inode snapshots:
+	// a hook writer can atomically replace this path between the two probes.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if src == dst {
+		return nil
+	}
+	if dstInfo, err := os.Stat(dst); err == nil && os.SameFile(srcInfo, dstInfo) {
+		return nil
+	}
 
 	in, err := os.Open(src)
 	if err != nil {

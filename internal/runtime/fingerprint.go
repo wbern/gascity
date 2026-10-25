@@ -27,6 +27,7 @@ type BreakdownV1 struct {
 // so the reconciler can render a per-entry diff at drift time.
 type BreakdownCopyEntry struct {
 	RelDst      string `json:"rel_dst"`
+	LocalRelDst string `json:"local_rel_dst,omitempty"`
 	Src         string `json:"src,omitempty"`
 	Probed      bool   `json:"probed"`
 	ContentHash string `json:"content_hash,omitempty"`
@@ -66,7 +67,9 @@ type BreakdownCopyEntry struct {
 // FingerprintExtra keyspace). The merged inputs match neither v6, so the bump
 // rebaselines either v6 silently instead of draining the fleet once on
 // rollout.
-const FingerprintVersion = "v7"
+// v8 includes the explicit local CopyFiles destination. Existing versions
+// rebaseline silently when upgrading to the provider-rooted hook fix.
+const FingerprintVersion = "v8"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
@@ -289,6 +292,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	// (transient I/O error), a stable sentinel is used instead of falling
 	// back to path-based hashing, which would flip fingerprint modes.
 	for _, cf := range cfg.CopyFiles {
+		hashOptionalString(h, "local_rel_dst", cf.LocalRelDst)
 		if cf.Probed {
 			h.Write([]byte(cf.RelDst)) //nolint:errcheck // hash.Write never errors
 			h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
@@ -549,6 +553,7 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
+				hashOptionalString(h, "local_rel_dst", cf.LocalRelDst)
 				if cf.Probed {
 					h.Write([]byte(cf.RelDst))
 					h.Write([]byte{0})
@@ -573,6 +578,7 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		for _, cf := range cfg.CopyFiles {
 			copyEntries = append(copyEntries, BreakdownCopyEntry{
 				RelDst:      cf.RelDst,
+				LocalRelDst: cf.LocalRelDst,
 				Src:         cf.Src,
 				Probed:      cf.Probed,
 				ContentHash: cf.ContentHash,
@@ -785,7 +791,7 @@ func logCopyFilesEntryDiff(w io.Writer, stored, current []BreakdownCopyEntry) {
 // copyEntryEqual reports whether two entries have identical render-
 // affecting fields.
 func copyEntryEqual(a, b BreakdownCopyEntry) bool {
-	return a.Probed == b.Probed && a.ContentHash == b.ContentHash && a.Src == b.Src
+	return a.LocalRelDst == b.LocalRelDst && a.Probed == b.Probed && a.ContentHash == b.ContentHash && a.Src == b.Src
 }
 
 // renderCopyEntry formats one side of a CopyFiles entry diff. Probed
@@ -793,6 +799,11 @@ func copyEntryEqual(a, b BreakdownCopyEntry) bool {
 // `HASH_UNAVAILABLE (probed)` when ContentHash is empty); non-probed
 // entries render as `src=<src>`.
 func renderCopyEntry(e BreakdownCopyEntry) string {
+	suffix := ""
+	if e.LocalRelDst != "" {
+		suffix = fmt.Sprintf(" local_dst=%q", e.LocalRelDst)
+	}
+
 	if e.Probed {
 		hash := e.ContentHash
 		if hash == "" {
@@ -800,9 +811,9 @@ func renderCopyEntry(e BreakdownCopyEntry) string {
 		} else if len(hash) > 8 {
 			hash = hash[:8]
 		}
-		return fmt.Sprintf("%s (probed)", hash)
+		return fmt.Sprintf("%s (probed)%s", hash, suffix)
 	}
-	return fmt.Sprintf("src=%s", e.Src)
+	return fmt.Sprintf("src=%s%s", e.Src, suffix)
 }
 
 // filteredEnv returns only the allow-listed env keys for diagnostic output.

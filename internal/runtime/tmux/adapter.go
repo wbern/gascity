@@ -138,8 +138,8 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	}
 	for _, cf := range cfg.CopyFiles {
 		dst := cfg.WorkDir
-		if cf.RelDst != "" {
-			dst = filepath.Join(cfg.WorkDir, cf.RelDst)
+		if rel := cf.LocalDestination(); rel != "" {
+			dst = filepath.Join(cfg.WorkDir, rel)
 		}
 		// Skip if src and dst are the same path.
 		if absSrc, err := filepath.Abs(cf.Src); err == nil {
@@ -923,7 +923,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if relDst != "" {
 		dst = filepath.Join(wd, relDst)
 	}
-	return overlay.CopyFileOrDir(src, dst, io.Discard)
+	return runtime.StagePath(src, dst)
 }
 
 // Attach connects the user's terminal to the named tmux session.

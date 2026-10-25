@@ -145,14 +145,14 @@ func overlayProviderDirExists(cfg Config, providerName string) bool {
 func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 	for _, cf := range copyFiles {
 		dst := workDir
-		if cf.RelDst != "" {
-			dst = filepath.Join(workDir, cf.RelDst)
+		if rel := cf.LocalDestination(); rel != "" {
+			dst = filepath.Join(workDir, rel)
 		}
-		effectiveDst, err := effectiveStageDestination(cf.Src, dst)
+		effectiveDst, sourceInfo, err := effectiveStageDestination(cf.Src, dst)
 		if err != nil {
 			return fmt.Errorf("resolving copy destination %q -> %q: %w", cf.Src, dst, err)
 		}
-		if sameFile(cf.Src, effectiveDst) {
+		if sameFile(cf.Src, effectiveDst, sourceInfo) {
 			continue
 		}
 		if err := StagePath(cf.Src, dst); err != nil {
@@ -334,6 +334,18 @@ func StageDir(srcDir, dstDir string) error {
 // StagePath copies a file or directory and returns any per-file warnings as an
 // error so callers can fail fast instead of ignoring partial staging.
 func StagePath(src, dst string) error {
+	effectiveDst, sourceInfo, err := effectiveStageDestination(src, dst)
+	if err != nil {
+		return err
+	}
+	return stagePathAfterProbe(src, dst, effectiveDst, sourceInfo)
+}
+
+// stagePathAfterProbe keeps the identity decision tied to the source snapshot.
+func stagePathAfterProbe(src, dst, effectiveDst string, sourceInfo os.FileInfo) error {
+	if sameFile(src, effectiveDst, sourceInfo) {
+		return nil
+	}
 	var stderr bytes.Buffer
 	if err := overlay.CopyFileOrDir(src, dst, &stderr); err != nil {
 		return err
@@ -344,33 +356,39 @@ func StagePath(src, dst string) error {
 	return nil
 }
 
-func effectiveStageDestination(src, dst string) (string, error) {
+func effectiveStageDestination(src, dst string) (string, os.FileInfo, error) {
 	info, err := os.Stat(src)
 	if os.IsNotExist(err) {
-		return dst, nil
+		return dst, nil, nil
 	}
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if info.IsDir() {
-		return dst, nil
+	// Exact inputs need no destination probe; an atomic writer may replace
+	// the inode after the source snapshot without changing path identity.
+	if src == dst || info.IsDir() {
+		return dst, info, nil
 	}
 	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.IsDir() {
-		return filepath.Join(dst, filepath.Base(src)), nil
+		return filepath.Join(dst, filepath.Base(src)), info, nil
 	} else if err != nil && !os.IsNotExist(err) {
-		return "", err
+		return "", nil, err
 	}
-	return dst, nil
+	return dst, info, nil
 }
 
-func sameFile(src, dst string) bool {
-	srcInfo, err := os.Stat(src)
-	if err != nil {
+func sameFile(src, dst string, sourceInfo os.FileInfo) bool {
+	// Raw identity is stable across atomic inode replacement. Do not Clean or
+	// Abs these paths: a symlink followed by ".." has different OS semantics.
+	if src == dst {
+		return true
+	}
+	if sourceInfo == nil {
 		return false
 	}
 	dstInfo, err := os.Stat(dst)
 	if err != nil {
 		return false
 	}
-	return os.SameFile(srcInfo, dstInfo)
+	return os.SameFile(sourceInfo, dstInfo)
 }

@@ -120,7 +120,13 @@ func (pl *execPlace) Exec(ctx context.Context, req runtime.ExecRequest) (runtime
 // returns an error and aborts the batch at that entry.
 func (pl *execPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
 	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
+		if f.LocalRelDst != "" && pl.p.handshakeCapability(runtime.ProtocolCapabilityLocalCopyDestination) {
+			// Workspace-rooted scripts retain the fourth argument. Local
+			// scripts may select the optional workdir-relative fifth argument.
+			if _, err := pl.p.run(nil, "copy-to", pl.name, f.Src, f.RelDst, f.LocalRelDst); err != nil {
+				return err
+			}
+		} else if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
 			return err
 		}
 	}

@@ -105,7 +105,7 @@ func (pl *subprocessPlace) Exec(context.Context, runtime.ExecRequest) (runtime.E
 // batch at that entry.
 func (pl *subprocessPlace) Stage(_ context.Context, files []runtime.CopyEntry) error {
 	for _, f := range files {
-		if err := pl.p.CopyTo(pl.name, f.Src, f.RelDst); err != nil {
+		if err := pl.p.CopyTo(pl.name, f.Src, f.LocalDestination()); err != nil {
 			return err
 		}
 	}

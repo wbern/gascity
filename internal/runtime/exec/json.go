@@ -15,8 +15,9 @@ import (
 
 // copyEntry is the JSON wire format for [runtime.CopyEntry].
 type copyEntry struct {
-	Src    string `json:"src"`
-	RelDst string `json:"rel_dst,omitempty"`
+	Src         string `json:"src"`
+	RelDst      string `json:"rel_dst,omitempty"`
+	LocalRelDst string `json:"local_rel_dst,omitempty"`
 }
 
 // startConfig is the JSON wire format sent to the script's stdin on Start.
@@ -45,7 +46,7 @@ type startConfig struct {
 func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 	var cfs []copyEntry
 	for _, ce := range cfg.CopyFiles {
-		cfs = append(cfs, copyEntry{Src: ce.Src, RelDst: ce.RelDst})
+		cfs = append(cfs, copyEntry{Src: ce.Src, RelDst: ce.RelDst, LocalRelDst: ce.LocalRelDst})
 	}
 	sc := startConfig{
 		WorkDir:            cfg.WorkDir,

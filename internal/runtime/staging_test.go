@@ -244,3 +244,111 @@ type failingWriter struct{}
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("writer unavailable")
 }
+
+func TestStagePathPreservesSameFile(t *testing.T) {
+	for _, viaDirectory := range []bool{false, true} {
+		work := t.TempDir()
+		src := filepath.Join(work, "hooks.json")
+		if err := os.WriteFile(src, []byte("preserve-hook"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dst := src
+		if viaDirectory {
+			dst = work
+		}
+		if err := StagePath(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(src); err != nil || string(got) != "preserve-hook" {
+			t.Fatalf("self-stage truncated hook: %q %v", got, err)
+		}
+	}
+}
+
+func TestStagePathPreservesAtomicReplacementAfterProbe(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(src, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, sourceInfo, err := effectiveStageDestination(src, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, []byte("new hook"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, src); err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(sourceInfo, current) {
+		t.Fatal("fixture did not replace the inode")
+	}
+	if err := stagePathAfterProbe(src, src, src, sourceInfo); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(src); err != nil || string(got) != "new hook" {
+		t.Fatalf("atomic replacement self-copy lost hook: %q %v", got, err)
+	}
+}
+
+func TestStagePathRespectsSymlinkDotDot(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.MkdirAll(filepath.Join(realDir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(realDir, "sub"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "target"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "target")
+	if err := os.WriteFile(dst, []byte("destination"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Join/Clean would erase this meaningful traversal through a symlink.
+	src := dir + "/link/../target"
+	if err := StagePath(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || string(got) != "source" {
+		t.Fatalf("non-equivalent OS paths treated as same: %q %v", got, err)
+	}
+}
+
+func TestStagePathPreservesHardlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source")
+	dst := filepath.Join(dir, "alias")
+	if err := os.WriteFile(src, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := StagePath(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(src); err != nil || string(got) != "preserve" {
+		t.Fatalf("hardlink copy clobbered source: %q %v", got, err)
+	}
+}
+
+func TestStagePathMissingSourcePreservesNoOp(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "missing")
+	for _, dst := range []string{src, src + "-other"} {
+		if err := StagePath(src, dst); err != nil {
+			t.Fatalf("missing source changed best-effort contract: %v", err)
+		}
+		if _, err := os.Stat(dst); !os.IsNotExist(err) {
+			t.Fatalf("missing-source stage created destination: %v", err)
+		}
+	}
+}

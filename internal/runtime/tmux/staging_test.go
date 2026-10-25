@@ -144,3 +144,25 @@ func writeTmuxScaffoldFixture(t *testing.T, path, content string) {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
+
+func TestStageStartFilesUsesLocalHookDestination(t *testing.T) {
+	work := t.TempDir()
+	src := filepath.Join(work, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte(`{"hooks":{},"custom":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := ".gc/worktrees/example/crew/worker/.codex/hooks.json"
+	if err := stageStartFiles(runtime.Config{WorkDir: work, CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: remote, LocalRelDst: ".codex/hooks.json"}}}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(work, remote)); !os.IsNotExist(err) {
+		t.Fatalf("nested hook created: %v", err)
+	}
+	got, err := os.ReadFile(src)
+	if err != nil || string(got) != `{"hooks":{},"custom":true}` {
+		t.Fatalf("original hook changed: %q %v", got, err)
+	}
+}

@@ -967,8 +967,8 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v6 prefix (prior mismatched version)", "v6:" + bareHex, true},
-		{"v8 prefix (future mismatched version)", "v8:" + bareHex, true},
+		{"v7 prefix (prior mismatched version)", "v7:" + bareHex, true},
+		{"v9 prefix (future mismatched version)", "v9:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},
@@ -1000,5 +1000,31 @@ func TestCoreFingerprintDriftFields(t *testing.T) {
 
 	if got := CoreFingerprintDriftFields(BreakdownV1{}, current); len(got) != 0 {
 		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
+	}
+}
+
+func TestCopyFilesLocalDestinationFingerprint(t *testing.T) {
+	for _, probed := range []bool{false, true} {
+		cfg := Config{CopyFiles: []CopyEntry{{Src: "/city/worker/.codex/hooks.json", RelDst: "worker/.codex/hooks.json", Probed: probed, ContentHash: "abc"}}}
+		old := CoreFingerprint(cfg)
+		provision, launch := ProvisionFingerprint(cfg), LaunchFingerprint(cfg)
+		before := CoreFingerprintBreakdown(cfg)
+		cfg.CopyFiles[0].LocalRelDst = ".codex/hooks.json"
+		if old == CoreFingerprint(cfg) {
+			t.Fatal("local destination missing from fingerprint")
+		}
+		if ProvisionFingerprint(cfg) == provision {
+			t.Fatal("local destination missing from provision fingerprint")
+		}
+		if LaunchFingerprint(cfg) != launch {
+			t.Fatal("staging destination affected agent launch fingerprint")
+		}
+		fields := CoreFingerprintDriftFields(before, cfg)
+		if len(fields) != 1 || fields[0] != "CopyFiles" {
+			t.Fatalf("drift fields=%v", fields)
+		}
+		if got := CoreFingerprintBreakdown(cfg).CopyFiles[0].LocalRelDst; got != ".codex/hooks.json" {
+			t.Fatalf("local diagnostic=%q", got)
+		}
 	}
 }
