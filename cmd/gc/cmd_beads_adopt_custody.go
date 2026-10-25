@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -397,7 +398,8 @@ func readCustodyFile(path string, limit int64) (contents []byte, returnErr error
 			break
 		}
 	}
-	f, err := os.Open(path)
+	// Nonblocking open prevents a FIFO from stalling before descriptor validation.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +430,7 @@ func checkCustodyWorkspace(o custodyOperation) error {
 	run := func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "/usr/bin/git", append([]string{"-C", o.Workspace}, args...)...)
+		cmd := exec.CommandContext(ctx, "/usr/bin/git", append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-C", o.Workspace}, args...)...)
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0"}
 		var b custodyOutput
 		cmd.Stdout = &b

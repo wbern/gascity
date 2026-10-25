@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -470,5 +471,61 @@ func TestCustodySuccessorBeforeManagedWorkspaceEntry(t *testing.T) {
 	s := worker.SessionInfo{ID: o.Successor.ID, SessionName: o.Successor.Name, WorkDir: filepath.Join(o.City, "session-launch"), State: "active"}
 	if e := checkCustodyRuntime([]worker.SessionInfo{s}, func(string) bool { return true }, o); e != nil {
 		t.Fatalf("registered successor requires premature workspace entry: %v", e)
+	}
+}
+
+func TestCustodyWorkspaceDisablesExecutableGitHelpers(t *testing.T) {
+	dir := custodyTestDir(t)
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("/usr/bin/git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s: %v", args, b, err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	run("init", "-b", "existing")
+	run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
+	marker := filepath.Join(custodyTestDir(t), "executed")
+	helper := filepath.Join(custodyTestDir(t), "fsmonitor")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+marker+"'\nprintf 'token\\0'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run("config", "core.fsmonitor", helper)
+	head := run("rev-parse", "HEAD")
+	o := custodyOperation{Workspace: dir, Head: head, Base: head, Branch: "existing"}
+	if err := checkCustodyWorkspace(o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("workspace probe executed repository-local fsmonitor: %v", err)
+	}
+}
+
+func TestCustodyInputFIFORefusedWithoutBlocking(t *testing.T) {
+	path := filepath.Join(custodyTestDir(t), "packet")
+	if out, err := exec.Command("/usr/bin/mkfifo", path).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %s: %v", out, err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readCustodyFile(path, 1024); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular input required") {
+			t.Fatalf("FIFO input not refused: %v", err)
+		}
+	case <-time.After(time.Second):
+		// Release the old blocking reader before reporting the regression.
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("FIFO input blocked before regular-file validation")
 	}
 }
