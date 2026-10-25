@@ -438,6 +438,19 @@ func checkCustodyWorkspace(o custodyOperation) error {
 		err := cmd.Run()
 		return strings.TrimSpace(b.String()), err
 	}
+	// Status can execute clean/process filters even when reporting dirty files.
+	// Refuse configured filters rather than changing content normalization or
+	// running task-owned commands. The signed external sole-writer admission
+	// remains the precondition against concurrent repository/config mutation.
+	keys, err := run("config", "--null", "--name-only", "--list")
+	if err != nil {
+		return fmt.Errorf("cannot qualify workspace Git configuration")
+	}
+	for _, key := range strings.Split(keys, "\x00") {
+		if strings.HasPrefix(strings.ToLower(key), "filter.") {
+			return fmt.Errorf("workspace configured filter refused")
+		}
+	}
 	for _, c := range []struct {
 		args []string
 		want string

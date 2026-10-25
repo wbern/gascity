@@ -529,3 +529,47 @@ func TestCustodyInputFIFORefusedWithoutBlocking(t *testing.T) {
 		t.Fatal("FIFO input blocked before regular-file validation")
 	}
 }
+
+func TestCustodyWorkspaceRefusesExecutableFilters(t *testing.T) {
+	for _, kind := range []string{"clean", "process"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := custodyTestDir(t)
+			run := func(args ...string) string {
+				t.Helper()
+				cmd := exec.Command("/usr/bin/git", append([]string{"-C", dir}, args...)...)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %s: %v", args, out, err)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			run("init", "-b", "existing")
+			if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("tracked filter=local\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("original\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			run("add", ".")
+			run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+			head := run("rev-parse", "HEAD")
+			marker := filepath.Join(custodyTestDir(t), "executed")
+			helper := filepath.Join(custodyTestDir(t), "filter")
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+marker+"'\ncat\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			run("config", "filter.local."+kind, helper)
+			if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("modified\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := checkCustodyWorkspace(custodyOperation{Workspace: dir, Branch: "existing", Base: head, Head: head})
+			if _, e := os.Stat(marker); !os.IsNotExist(e) {
+				t.Fatalf("workspace probe executed configured %s filter: %v", kind, e)
+			}
+			if err == nil || !strings.Contains(err.Error(), "configured filter") {
+				t.Fatalf("configured filter not explicitly refused: %v", err)
+			}
+		})
+	}
+}
