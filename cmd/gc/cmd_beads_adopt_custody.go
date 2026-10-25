@@ -489,7 +489,8 @@ func checkCustodyBead(b beads.Bead, o custodyOperation) error {
 
 func applyCustodyOperation(store beads.Store, o custodyOperation, hash string, c custodyChecks) (custodyResult, error) {
 	result := custodyResult{Schema: "existing-source-custody-result.v1", Outcome: "refused", Source: o.Source, Manifest: hash}
-	writer, ok := beads.ConditionalWriterFor(store)
+	backing, _, _ := unwrapBeadPolicyStore(store)
+	writer, ok := beads.ConditionalWriterFor(backing)
 	if !ok {
 		return result, fmt.Errorf("conditional store unavailable")
 	}
