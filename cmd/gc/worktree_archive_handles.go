@@ -81,6 +81,10 @@ func archiveProcessIDs(ctx context.Context) (map[int]bool, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseArchiveProcessIDs(data, uint32(os.Geteuid()), os.Getpid())
+}
+
+func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int) (map[int]bool, error) {
 	ids := make(map[int]bool)
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
@@ -91,15 +95,18 @@ func archiveProcessIDs(ctx context.Context) (map[int]bool, error) {
 			return nil, fmt.Errorf("invalid process ownership inventory")
 		}
 		pid, e1 := strconv.Atoi(fields[0])
-		uid, e2 := strconv.Atoi(fields[1])
-		if e1 != nil || e2 != nil || pid < 0 || uid < 0 {
+		uid, e2 := strconv.ParseInt(fields[1], 10, 64)
+		// BSD ps can render unsigned uid_t through signed int32 (nobody is
+		// -2). Bound both representations before conversion so wider malformed
+		// values cannot wrap into the current user's ownership cohort.
+		if e1 != nil || e2 != nil || pid < 0 || uid < -(1<<31) || uid > (1<<32)-1 {
 			return nil, fmt.Errorf("invalid process ownership record")
 		}
-		if uid == os.Geteuid() {
+		if uint32(uid) == ownUID {
 			ids[pid] = true
 		}
 	}
-	if !ids[os.Getpid()] {
+	if !ids[ownPID] {
 		return nil, fmt.Errorf("process ownership inventory omitted current process")
 	}
 	return ids, nil

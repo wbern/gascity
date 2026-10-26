@@ -70,3 +70,45 @@ func TestArchiveHandleFailureCompleteness(t *testing.T) {
 		t.Fatalf("unknown=%+v", unknown)
 	}
 }
+
+func TestArchiveProcessUIDRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		uid  uint32
+		data string
+		want []int
+	}{
+		{"normal", 501, "42 501\n43 501\n77 0\n", []int{42, 43}},
+		{"foreign_nobody_forms", 501, "77 -2\n78 4294967294\n42 501\n", []int{42}},
+		{"current_nobody_forms", 4294967294, "42 -2\n43 4294967294\n77 501\n", []int{42, 43}},
+		{"signed_boundary", 2147483648, "42 -2147483648\n43 2147483648\n", []int{42, 43}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids, err := parseArchiveProcessIDs([]byte(tc.data), tc.uid, 42)
+			if err != nil || len(ids) != len(tc.want) {
+				t.Fatalf("valid UID rendering refused or cohort changed: %v %v", ids, err)
+			}
+			for _, pid := range tc.want {
+				if !ids[pid] {
+					t.Fatalf("current-user PID %d omitted: %v", pid, ids)
+				}
+			}
+		})
+	}
+}
+
+func TestArchiveProcessUIDMalformedInventoryRefused(t *testing.T) {
+	for _, row := range []string{
+		"77 nobody", "77 ?", "77 -2147483649", "77 4294967296",
+		"77 9223372036854775808", "-1 501", "unknown 501", "77 501 extra",
+	} {
+		t.Run(row, func(t *testing.T) {
+			if ids, err := parseArchiveProcessIDs([]byte("42 501\n"+row+"\n"), 501, 42); err == nil {
+				t.Fatalf("malformed foreign/current row was silently accepted: %v", ids)
+			}
+		})
+	}
+	if _, err := parseArchiveProcessIDs([]byte("77 -2\n"), 501, 42); err == nil {
+		t.Fatal("inventory omitting current process accepted")
+	}
+}
