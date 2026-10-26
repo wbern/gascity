@@ -21,7 +21,11 @@ func (OSFS) ReadRegularFile(name string) ([]byte, error) {
 // readRegularFileSnapshot reads name without following a final symlink and
 // returns the opened file identity for post-read stability checks.
 func (OSFS) readRegularFileSnapshot(name string) (regularFileSnapshot, error) {
-	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	return (OSFS{}).readRegularFileSnapshotLimit(name, -1)
+}
+
+func (OSFS) readRegularFileSnapshotLimit(name string, limit int64) (regularFileSnapshot, error) {
+	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return regularFileSnapshot{}, &os.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -41,9 +45,19 @@ func (OSFS) readRegularFileSnapshot(name string) (regularFileSnapshot, error) {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return regularFileSnapshot{}, &os.PathError{Op: "open", Path: name, Err: os.ErrInvalid}
 	}
-	data, err := io.ReadAll(file)
+	var reader io.Reader = file
+	if limit >= 0 {
+		if stat.Size > limit {
+			return regularFileSnapshot{}, &os.PathError{Op: "read", Path: name, Err: os.ErrInvalid}
+		}
+		reader = io.LimitReader(file, limit+1)
+	}
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return regularFileSnapshot{}, &os.PathError{Op: "read", Path: name, Err: err}
+	}
+	if limit >= 0 && int64(len(data)) > limit {
+		return regularFileSnapshot{}, &os.PathError{Op: "read", Path: name, Err: os.ErrInvalid}
 	}
 	return regularFileSnapshot{
 		data:  data,

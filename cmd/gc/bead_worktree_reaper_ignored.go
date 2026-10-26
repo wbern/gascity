@@ -100,13 +100,16 @@ func firstNonDisposable(worktreePath, rel string, patterns []string, matchedDirs
 	if err != nil {
 		return rel
 	}
+	if strings.EqualFold(path.Base(rel), ".git") {
+		return rel
+	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		return ""
 	}
-	if path.Base(rel) == ".git" {
+	isDir := info.IsDir()
+	if isDir && looksLikeBareRepository(abs) {
 		return rel
 	}
-	isDir := info.IsDir()
 	if matchesDisposable(rel, isDir, patterns) {
 		if isDir {
 			*matchedDirs = append(*matchedDirs, rel)
@@ -150,7 +153,7 @@ func firstNestedGit(absDir, relDir string) string {
 			found = relPath
 			return walkErr
 		}
-		if d.Name() == ".git" {
+		if strings.EqualFold(d.Name(), ".git") || (d.IsDir() && looksLikeBareRepository(p)) {
 			found = relPath
 			return errNestedGit
 		}
@@ -197,4 +200,13 @@ func describeNonDisposable(kept []string) string {
 		return strings.Join(kept, ", ")
 	}
 	return strings.Join(kept[:shown], ", ") + " (+" + strconv.Itoa(len(kept)-shown) + " more)"
+}
+
+// looksLikeBareRepository conservatively protects Git object/ref storage even
+// when a nested repository has no .git marker.
+func looksLikeBareRepository(dir string) bool {
+	head, e1 := os.Lstat(filepath.Join(dir, "HEAD"))
+	objects, e2 := os.Lstat(filepath.Join(dir, "objects"))
+	cfg, e3 := os.Lstat(filepath.Join(dir, "config"))
+	return e1 == nil && e2 == nil && e3 == nil && head.Mode().IsRegular() && objects.IsDir() && cfg.Mode().IsRegular()
 }

@@ -114,7 +114,7 @@ func TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // scanned, but no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-idle01" {
 		t.Fatalf("Reaped = %+v, want exactly ga-idle01\nstderr:\n%s", report.Reaped, stderr.String())
@@ -145,7 +145,7 @@ func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for ignored-only worktree\nstderr:\n%s", report.Reaped, stderr.String())
@@ -176,7 +176,7 @@ func TestReapClosedBeadWorktrees_ProtectsLiveWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(wt)}})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a live worktree\nstderr:\n%s", report.Reaped, stderr.String())
@@ -200,7 +200,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaActiveSessionDir(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, []string{wt}, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), []string{wt}, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when an active session claims the worktree", report.Reaped)
@@ -224,7 +224,7 @@ func TestReapClosedBeadWorktrees_FailsClosedWhenLivenessUnavailable(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: false}) // liveness indeterminate
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when liveness scan is unavailable (fail closed)", report.Reaped)
@@ -248,7 +248,7 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, true, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, true, events.Discard, nil, &stderr)
 
 	if !report.DryRun {
 		t.Fatal("report.DryRun = false, want true")
@@ -284,7 +284,7 @@ func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testin
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(foreign)}})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("reaper acted on or reported a worktree outside its owned root: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
@@ -304,12 +304,49 @@ func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("open bead touched: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
 	}
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree for open bead %s was removed: %v", wt, err)
+	}
+}
+
+// A repository-local core.worktree setting can make Git report another clean
+// directory while the registered removal candidate still contains user edits.
+func TestReapClosedBeadWorktrees_RejectsRedirectedGitRoot(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		t.Run(map[bool]string{true: "dry_run", false: "execute"}[dryRun], func(t *testing.T) {
+			city, rig := initReapRig(t)
+			wt := addClosedWorktree(t, rig, city, "builder", "ga-redir01")
+			outside, err := normalizeReapBorrowPath(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFileAt(t, outside, "README.md", "seed\n")
+			writeFileAt(t, wt, "README.md", "USER WIP\n")
+			mustGit(t, rig, "config", "extensions.worktreeConfig", "true")
+			mustGit(t, wt, "config", "--worktree", "core.worktree", outside)
+			if got := productionLifecycleGitOutput(t, wt, "rev-parse", "--show-toplevel"); got != outside {
+				t.Fatalf("fixture root = %q", got)
+			}
+			if got := productionLifecycleGitOutput(t, wt, "status", "--porcelain"); got != "" {
+				t.Fatalf("fixture is not falsely clean: %q", got)
+			}
+			backdateWorktreeGitFile(t, wt, 24*time.Hour)
+			store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-redir01", Status: "closed"}}, nil)
+			injectLiveness(t, liveWorktreeState{scanned: true})
+			var stderr bytes.Buffer
+			report := reapClosedBeadWorktrees(city, reapTestConfig(rig), reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, dryRun, events.Discard, nil, &stderr)
+			if len(report.Reaped) != 0 || len(report.Protected) != 1 {
+				t.Errorf("redirected candidate was not protected: %+v; %s", report, &stderr)
+			}
+			data, err := os.ReadFile(filepath.Join(wt, "README.md"))
+			if err != nil || string(data) != "USER WIP\n" {
+				t.Fatalf("source changed: %q %v", data, err)
+			}
+		})
 	}
 }

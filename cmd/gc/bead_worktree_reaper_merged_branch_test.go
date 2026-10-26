@@ -50,7 +50,7 @@ func TestReapClosedBeadWorktrees_ReapsWorktreeWhoseMergedBranchWasDeleted(t *tes
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want exactly 1: a merged bead's worktree whose branch origin no longer carries must be reaped\nProtected: %+v\nstderr:\n%s",
@@ -80,7 +80,7 @@ func TestReapClosedBeadWorktrees_ProtectsDetachedHEADWithOrphanCommits(t *testin
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: a detached HEAD holding commits no ref reaches must be protected", report.Reaped)
@@ -115,7 +115,7 @@ func TestReapClosedBeadWorktrees_ReapsWorktreeNestedUnderBeadNamedParent(t *test
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want exactly 1: the bead ID must resolve from the parent directory when the leaf carries none\nProtected: %+v\nstderr:\n%s",
@@ -147,7 +147,7 @@ func TestReapClosedBeadWorktrees_IgnoresWorktreeWithNoResolvableBead(t *testing.
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: a worktree under a non-bead parent resolves to no bead", report.Reaped)
@@ -179,7 +179,7 @@ func TestReapClosedBeadWorktrees_ProtectsOnGitProbeError(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: an errored git probe must not read as a clean tree", report.Reaped)
@@ -187,7 +187,7 @@ func TestReapClosedBeadWorktrees_ProtectsOnGitProbeError(t *testing.T) {
 	if len(report.Protected) != 1 {
 		t.Fatalf("Protected = %+v, want exactly 1 entry", report.Protected)
 	}
-	if !strings.Contains(report.Protected[0].Reason, "git probe failed") {
+	if !strings.Contains(report.Protected[0].Reason, "probe failed") {
 		t.Errorf("Reason = %q, want it to name the probe failure", report.Protected[0].Reason)
 	}
 	if _, err := os.Stat(wt); err != nil {

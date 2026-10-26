@@ -79,7 +79,7 @@ func TestReapSkipTracker_SuppressesUnchangedRepeats(t *testing.T) {
 
 	var stderr bytes.Buffer
 	for pass := 1; pass <= 3; pass++ {
-		report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+		report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 		// Suppression is an emission concern only — the report stays complete
 		// on every pass so callers still see everything that was protected.
 		if len(report.Protected) != 1 {
@@ -117,8 +117,8 @@ func TestReapSkipTracker_ReemitsWhenReasonChanges(t *testing.T) {
 
 	// Pass 1 + 2: protected because a live process sits in the tree.
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{canonicalTestPath(wt)}})
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 
 	// Pass 3: the process is gone, but the tree now has uncommitted work — a
 	// different reason, and therefore a transition worth reporting.
@@ -126,7 +126,7 @@ func TestReapSkipTracker_ReemitsWhenReasonChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("wip\n"), 0o644); err != nil {
 		t.Fatalf("write uncommitted file: %v", err)
 	}
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 
 	reasons := skipReasonsFor(t, fake, wt)
 	if len(reasons) != 2 {
@@ -158,9 +158,9 @@ func TestReapSkipTracker_ReemitsAfterWorktreeLeavesTheSweep(t *testing.T) {
 	skips := newReapSkipTracker()
 	var stderr bytes.Buffer
 
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: closedStore}, nil, false, fake, skips, &stderr)
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: openStore}, nil, false, fake, skips, &stderr)
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: closedStore}, nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: closedStore}), nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: openStore}), nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: closedStore}), nil, false, fake, skips, &stderr)
 
 	reasons := skipReasonsFor(t, fake, wt)
 	if len(reasons) != 2 {
@@ -181,7 +181,7 @@ func TestReapSkipTracker_NilTrackerEmitsEveryPass(t *testing.T) {
 	fake := events.NewFake()
 	var stderr bytes.Buffer
 	for pass := 1; pass <= 3; pass++ {
-		reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, nil, &stderr)
+		reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, nil, &stderr)
 	}
 
 	if reasons := skipReasonsFor(t, fake, wt); len(reasons) != 3 {
@@ -204,7 +204,7 @@ func TestReapSkipTracker_SuppressesDryRunWouldReapRepeats(t *testing.T) {
 	var stderr bytes.Buffer
 
 	for pass := 1; pass <= 3; pass++ {
-		report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, true, fake, skips, &stderr)
+		report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, true, fake, skips, &stderr)
 		if len(report.Reaped) != 1 {
 			t.Fatalf("pass %d: Reaped = %+v, want the would-reap entry reported every pass", pass, report.Reaped)
 		}
@@ -237,14 +237,14 @@ func TestReapSkipTracker_TracksPathsIndependently(t *testing.T) {
 
 	live := []string{canonicalTestPath(stable), canonicalTestPath(changing)}
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: live})
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 
 	// Only `changing` transitions; `stable` holds its liveness protection.
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{canonicalTestPath(stable)}})
 	if err := os.WriteFile(filepath.Join(changing, "dirty.txt"), []byte("wip\n"), 0o644); err != nil {
 		t.Fatalf("write uncommitted file: %v", err)
 	}
-	reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+	reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 
 	if reasons := skipReasonsFor(t, fake, stable); len(reasons) != 1 {
 		t.Errorf("stable worktree emitted %d events, want 1: %q", len(reasons), reasons)
@@ -277,7 +277,7 @@ func TestReapSkipTracker_SuppressesQuarantineRepeats(t *testing.T) {
 
 	for pass := 1; pass <= 3; pass++ {
 		backdateWorktreeGitFile(t, wt, time.Duration(pass)*time.Minute)
-		report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+		report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, false, fake, skips, &stderr)
 		if len(report.Protected) != 1 {
 			t.Fatalf("pass %d: Protected = %+v, want exactly 1 quarantine entry regardless of suppression", pass, report.Protected)
 		}

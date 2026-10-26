@@ -468,13 +468,13 @@ func Cleanup(spec Spec) (CleanupReport, error) {
 				provenanceAttempt(verified.Provenance), spec.AttemptID))
 	}
 
-	worktreeGit := git.New(spec.Path)
-	status, err := worktreeGit.StatusPorcelain()
+	worktreeGit := git.NewInspection(spec.Path)
+	status, err := worktreeGit.WorkingTreeStatus()
 	if err != nil {
 		return cleanupFailure(report, CleanupErrorDirty, fmt.Sprintf("checking worktree status: %v", err))
 	}
-	if strings.TrimSpace(status) != "" {
-		return cleanupFailure(report, CleanupErrorDirty, "worktree contains staged, unstaged, or untracked changes")
+	if len(status.Dirty) != 0 || len(status.Ignored) != 0 {
+		return cleanupFailure(report, CleanupErrorDirty, "worktree contains staged, unstaged, untracked, or ignored changes")
 	}
 	hasUnreachable, err := worktreeGit.HasUnreachableCommitsResult()
 	if err != nil {
@@ -496,6 +496,9 @@ func Cleanup(spec Spec) (CleanupReport, error) {
 			fmt.Sprintf("worktree HEAD is not merged into local base %q at %s", spec.Base, baseSHA))
 	}
 
+	if err := worktreeGit.VerifyTrackedContent(verified.Head); err != nil {
+		return cleanupFailure(report, CleanupErrorDirty, "independent tracked-content verification: "+err.Error())
+	}
 	if err := repoGit.WorktreeRemove(spec.Path, false); err != nil {
 		return cleanupFailure(report, CleanupErrorRemove, err.Error())
 	}
@@ -681,12 +684,16 @@ func RollbackAttempt(spec Spec, report Report) error {
 		return fmt.Errorf("rollback refused: provenance attempt %q does not match report attempt %q",
 			provenanceAttempt(verified.Provenance), report.Provenance.AttemptID)
 	}
-	status, err := git.New(spec.Path).StatusPorcelain()
+	worktreeGit := git.NewInspection(spec.Path)
+	status, err := worktreeGit.WorkingTreeStatus()
 	if err != nil {
 		return fmt.Errorf("rollback refused: checking worktree status: %w", err)
 	}
-	if strings.TrimSpace(status) != "" {
-		return errors.New("rollback refused: worktree contains changes")
+	if len(status.Dirty) != 0 || len(status.Ignored) != 0 {
+		return errors.New("rollback refused: worktree contains changes or ignored content")
+	}
+	if err := worktreeGit.VerifyTrackedContent(verified.Head); err != nil {
+		return fmt.Errorf("rollback refused: independent tracked-content verification: %w", err)
 	}
 	repoGit := git.New(spec.RepoDir)
 	if err := repoGit.WorktreeRemove(spec.Path, false); err != nil {

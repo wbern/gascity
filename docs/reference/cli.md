@@ -5364,11 +5364,27 @@ gc worktree
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc worktree archive-reap](#gc-worktree-archive-reap) | Archive qualified task artifacts and reclaim a completed worktree |
 | [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
 | [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
 | [gc worktree reap](#gc-worktree-reap) | Report (or perform) closed-bead worktree reclamation |
 | [gc worktree scan](#gc-worktree-scan) | List stray worktrees under managed roots |
 | [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree archive-reap
+
+Archive qualified task artifacts and reclaim a completed worktree
+
+```
+gc worktree archive-reap [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--capabilities` | bool |  | Report the supported archive protocol without reading city state |
+| `--execute` | bool |  | Archive and reclaim after all guards pass (default: read-only plan) |
+| `--json` | bool |  | Output structured JSON |
+| `--request` | string |  | Private JSON file containing exact source expectations and approved artifact leaves |
 
 ## gc worktree cleanup
 

@@ -347,3 +347,27 @@ func unusedPID(t *testing.T) int {
 	t.Skip("no unused PID candidate found on this host")
 	return 0
 }
+
+func TestReadRegularFileStableBounded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.json")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if data, _, err := fsys.ReadRegularFileStableBounded(fsys.OSFS{}, path, 5); err != nil || string(data) != "12345" {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	if _, _, err := fsys.ReadRegularFileStableBounded(fsys.OSFS{}, path, 4); err == nil {
+		t.Fatal("oversized input admitted")
+	}
+	if _, _, err := fsys.ReadRegularFileStableBounded(fsys.OSFS{}, path, -1); err == nil {
+		t.Fatal("unbounded request admitted")
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fsys.ReadRegularFileStableBounded(fsys.OSFS{}, link, 5); err == nil {
+		t.Fatal("symlink input admitted")
+	}
+}

@@ -7,15 +7,17 @@
     "dry_run",
     "summary",
     "reaped",
-    "protected"
+    "protected",
+    "complete"
   ],
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1"
+      "const": "2"
     },
     "ok": {
-      "const": true
+      "type": "boolean",
+      "description": "False when a required borrow scope or populated managed namespace could not be inspected."
     },
     "dry_run": {
       "type": "boolean",
@@ -50,6 +52,21 @@
     },
     "protected": {
       "$ref": "#/$defs/decisions"
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "True only when required safety scopes were fully inspected; false on failure or load deferral."
+    },
+    "incomplete_scopes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Required stores or managed discovery namespaces that were missing or unreadable. No removal is allowed."
+    },
+    "deferred": {
+      "type": "string",
+      "description": "Why inspection was deferred without treating an empty result as a complete inventory."
     }
   },
   "$defs": {

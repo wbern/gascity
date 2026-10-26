@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 214,
+  "next_id": 215,
   "permanent_ids": [
     {
       "name": "help",
@@ -4687,6 +4687,21 @@
       "canonical_target": "@help",
       "owner": "immediate",
       "id": 1
+    },
+    {
+      "path": "gc worktree archive-reap",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-archive-reap",
+      "owner": "immediate",
+      "id": 214
     },
     {
       "path": "gc worktree cleanup",

@@ -58,7 +58,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaCrossMoleculeBorrowVeto(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when an unrelated open bead still references the path\nstderr:\n%s", report.Reaped, stderr.String())
@@ -96,7 +96,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaNonCanonicalWorkDirPath(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: an uncleaned gc.work_dir spelling must still veto\nstderr:\n%s", report.Reaped, stderr.String())
@@ -143,7 +143,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaSymlinkedWorkDirPath(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: a symlinked gc.work_dir path must still veto\nstderr:\n%s", report.Reaped, stderr.String())
@@ -170,7 +170,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaLegacyWorkDirKey(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when a legacy work_dir reference exists\nstderr:\n%s", report.Reaped, stderr.String())
@@ -194,7 +194,7 @@ func TestReapClosedBeadWorktrees_TerminalReferenceDoesNotVeto(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-owner05" {
 		t.Fatalf("Reaped = %+v, want ga-owner05 reaped: a tombstoned reference must not veto\nstderr:\n%s", report.Reaped, stderr.String())
@@ -217,7 +217,7 @@ func TestReapClosedBeadWorktrees_FailsClosedOnBorrowVetoQueryError(t *testing.T)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when the borrow-veto query errors (fail closed)\nstderr:\n%s", report.Reaped, stderr.String())
@@ -234,7 +234,8 @@ func TestReapClosedBeadWorktrees_FailsClosedOnBorrowVetoQueryError(t *testing.T)
 
 // TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig proves FR-3: with
 // multiple reap-eligible candidates in the same rig and tick, the borrow-veto
-// scan issues exactly one List call for that rig, not one per candidate.
+// discovery scan is batched. Each actual removal must additionally live-read
+// borrowers and its owner while holding the canonical retirement lock.
 func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-batchA1")
@@ -250,13 +251,22 @@ func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 3 {
 		t.Fatalf("Reaped = %+v, want all 3 candidates reaped\nstderr:\n%s", report.Reaped, stderr.String())
 	}
-	if store.calls != 1 {
-		t.Fatalf("List calls = %d, want exactly 1 batched call for 3 candidates in one rig", store.calls)
+	if store.calls != 7 {
+		t.Fatalf("List calls = %d, want one batched discovery plus a fresh borrower scan and owner lookup per removal", store.calls)
+	}
+	for i, query := range store.queries[1:] {
+		if i%2 == 0 {
+			if !query.Live || query.IncludeClosed || query.TierMode != beads.TierBoth || len(query.IDs) != 0 {
+				t.Fatalf("unsafe fresh borrower query: %+v", query)
+			}
+		} else if !query.Live || !query.IncludeClosed || len(query.IDs) != 1 {
+			t.Fatalf("unsafe fresh owner query: %+v", query)
+		}
 	}
 	q := store.queries[0]
 	if q.TierMode != beads.TierBoth {

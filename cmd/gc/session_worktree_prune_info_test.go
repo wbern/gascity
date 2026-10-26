@@ -147,7 +147,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HasUncommitted(t *testing.T) {
 	if !strings.Contains(stderr.String(), "uncommitted or ignored work") {
 		t.Errorf("expected uncommitted-reason log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_HasUnlanded(t *testing.T) {
@@ -161,7 +161,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_HasUnlanded(t *testing.T) {
 	if !strings.Contains(stderr.String(), "reachable from no ref") {
 		t.Errorf("expected commits-reachable-from-no-ref log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_UnlandedProbeError(t *testing.T) {

@@ -85,24 +85,6 @@ func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	return nil
 }
 
-// assertWorktreeStaleMarker fails the test unless workerDir contains a
-// .worktree-stale marker recording the given branch and reason. Shared by
-// both the raw and session.Info test forms.
-func assertWorktreeStaleMarker(t *testing.T, workerDir, wantBranch, wantReason string) {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(workerDir, worktreeStaleFileName))
-	if err != nil {
-		t.Fatalf("reading %s marker: %v", worktreeStaleFileName, err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "branch="+wantBranch) {
-		t.Errorf("marker content = %q, want to contain %q", content, "branch="+wantBranch)
-	}
-	if !strings.Contains(content, "reason="+wantReason) {
-		t.Errorf("marker content = %q, want to contain %q", content, "reason="+wantReason)
-	}
-}
-
 // assertNoWorktreeStaleMarker fails the test if workerDir contains a
 // .worktree-stale marker.
 func assertNoWorktreeStaleMarker(t *testing.T, workerDir string) {
@@ -316,7 +298,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasIgnoredWork(t *testing.T) {
 	if !strings.Contains(stderr.String(), "uncommitted or ignored work") {
 		t.Errorf("expected ignored-work log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-abc123", "uncommitted-work")
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_HasUnlanded(t *testing.T) {
@@ -330,7 +312,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUnlanded(t *testing.T) {
 	if !strings.Contains(stderr.String(), "reachable from no ref") {
 		t.Errorf("expected commits-reachable-from-no-ref log; got %q", stderr.String())
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-def456", "unlanded-commits")
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 // TestPruneAgentHomeWorktreeIfSafe_PrunesUnlandedWorkHeldByABranch is the
@@ -517,3 +499,6 @@ func TestLookupRigRootForSession(t *testing.T) {
 		})
 	}
 }
+
+func (*fakeGitProbe) RevParseVerifyCommit(string) (string, error) { return "fixture-head", nil }
+func (*fakeGitProbe) VerifyTrackedContent(string) error           { return nil }

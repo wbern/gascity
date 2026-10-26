@@ -178,6 +178,29 @@ func readRegularFileSnapshot(fs FS, path string) (regularFileSnapshot, error) {
 // verified file identity. Filesystems that cannot provide identity-bearing
 // snapshots fail closed.
 func ReadRegularFileStable(fs FS, path string) ([]byte, os.FileInfo, error) {
+	return readRegularFileStableLimit(fs, path, -1)
+}
+
+// ReadRegularFileStableBounded verifies a regular, non-symlink file while
+// limiting allocations, including when the OS file grows during the read.
+func ReadRegularFileStableBounded(fs FS, path string, limit int64) ([]byte, os.FileInfo, error) {
+	if limit < 0 || limit == int64(^uint64(0)>>1) {
+		return nil, nil, fmt.Errorf("invalid bounded read limit")
+	}
+	return readRegularFileStableLimit(fs, path, limit)
+}
+
+// FileIdentity exposes only the stable device/inode identity used by safety
+// callers. Unsupported filesystem metadata reports ok=false.
+func FileIdentity(info os.FileInfo) (device, inode uint64, ok bool) {
+	if info == nil {
+		return 0, 0, false
+	}
+	id, ok := fileIdentityFromInfo(info)
+	return id.dev, id.ino, ok
+}
+
+func readRegularFileStableLimit(fs FS, path string, limit int64) ([]byte, os.FileInfo, error) {
 	parent := filepath.Dir(path)
 	parentBefore, err := fs.Lstat(parent)
 	if err != nil {
@@ -187,9 +210,30 @@ func ReadRegularFileStable(fs FS, path string) ([]byte, os.FileInfo, error) {
 		return nil, nil, fmt.Errorf("inspecting parent %s: %w", parent, os.ErrInvalid)
 	}
 
-	snapshot, err := readRegularFileSnapshot(fs, path)
+	var snapshot regularFileSnapshot
+	if limit >= 0 {
+		info, statErr := fs.Lstat(path)
+		if statErr != nil {
+			return nil, nil, statErr
+		}
+		if !info.Mode().IsRegular() || info.Size() > limit {
+			return nil, nil, fmt.Errorf("bounded regular file %s exceeds limit or is not regular", path)
+		}
+		if reader, ok := fs.(interface {
+			readRegularFileSnapshotLimit(string, int64) (regularFileSnapshot, error)
+		}); ok {
+			snapshot, err = reader.readRegularFileSnapshotLimit(path, limit)
+		} else {
+			snapshot, err = readRegularFileSnapshot(fs, path)
+		}
+	} else {
+		snapshot, err = readRegularFileSnapshot(fs, path)
+	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if limit >= 0 && int64(len(snapshot.data)) > limit {
+		return nil, nil, fmt.Errorf("bounded regular file %s exceeded limit during read", path)
 	}
 	if !snapshot.hasID {
 		return nil, nil, &os.PathError{Op: "read", Path: path, Err: os.ErrInvalid}

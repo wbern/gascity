@@ -252,7 +252,8 @@ type CityRuntime struct {
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
 	// serial tick, like the other per-tick state above.
-	reapSkips *reapSkipTracker
+	reapSkips          *reapSkipTracker
+	workerDirRetryNext time.Time
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
@@ -1448,19 +1449,28 @@ func (cr *CityRuntime) tick(
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, reapStoreScope{RigStores: cr.rigBeadStores(), CityStore: cr.cityBeadStore()}, liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
-			"reaped":    len(report.Reaped),
-			"protected": len(report.Protected),
-			"dry_run":   !reapEnabled,
+			"incomplete_scope_count": len(report.IncompleteScopes),
+			"reaped":                 len(report.Reaped),
+			"protected":              len(report.Protected),
+			"dry_run":                !reapEnabled,
 		})
-		// Agent-home worktree cleanup performs real removals, so it runs only
-		// when real reaping is enabled — never under dry-run.
-		if reapEnabled {
+		// Agent-home cleanup mutates workspaces too. An incomplete or deferred
+		// safety inventory must not be followed by sibling workspace changes.
+		if reapEnabled && len(report.IncompleteScopes) == 0 && report.Deferred == "" {
 			phaseStart = time.Now()
 			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
 			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
+	}
+	if cr.workerDirRetryDue(time.Now()) {
+		phaseStart = time.Now()
+		retiredDirs := retryDeferredWorkerDirPrunesCtx(ctx, cr.cityPath, cr.cfg,
+			reapStoreScope{RigStores: cr.rigBeadStores(), CityStore: cr.cityBeadStore()},
+			cr.sessionsBeadStore().Store, liveSessionWorktreeDirs(sessionBeads), cr.stderr)
+		cr.workerDirRetryNext = time.Now().Add(workerDirRetryInterval)
+		recordPhase(TraceSiteControllerTickPhase, "retry_retired_worker_dirs", phaseStart, map[string]any{"reaped": retiredDirs})
 	}
 	if ctx.Err() != nil {
 		return

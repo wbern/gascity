@@ -23,6 +23,8 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedOrIgnoredWork() bool
 	WorkingTreeStatus() (git.WorkingTreeStatus, error)
+	RevParseVerifyCommit(string) (string, error)
+	VerifyTrackedContent(string) error
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
 	HasUnpreservedCommitsResult() (bool, error)
@@ -30,9 +32,9 @@ type gitProbe interface {
 	WorktreeRemove(path string, force bool) error
 }
 
-// newGitProbe returns a gitProbe scoped to the given directory. Indirected
+// newGitProbe returns inspection Git scoped to the given directory. Indirected
 // through a package-level var so tests can stub the git invocations.
-var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
+var newGitProbe = func(workDir string) gitProbe { return git.NewInspection(workDir) }
 
 // resolveWorkerDirForPrune applies the eligibility gates that precede any git
 // safety probe and returns the probe to continue with. When the worker_dir is
@@ -94,7 +96,6 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (skip string) {
 	if gp.HasUncommittedOrIgnoredWork() {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted or ignored work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
 		return "has uncommitted or ignored work"
 	}
 	hasUnlanded, err := gp.HasUnlandedCommitsResult()
@@ -114,7 +115,6 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 	// same worktree.
 	if hasUnlanded && hasUnpreserved {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has commits reachable from no ref\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "unlanded-commits", stderr)
 		return "has unlanded commits reachable from no ref"
 	}
 	warning := ""
@@ -127,21 +127,6 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: warning: %s\n", workerDir, warning) //nolint:errcheck
 	}
 	return ""
-}
-
-// writeWorktreeStaleMarker records why workerDir was left in place instead of
-// pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
-// can later detect when it's safe to reclaim. Best-effort: write failures are
-// logged but never alter the caller's control flow.
-func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.Writer) {
-	branch, err := gp.CurrentBranch()
-	if err != nil {
-		branch = ""
-	}
-	content := fmt.Sprintf("branch=%s\nreason=%s\n", branch, reason)
-	if err := os.WriteFile(filepath.Join(workerDir, worktreeStaleFileName), []byte(content), 0o644); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: writing %s marker for %s: %v\n", worktreeStaleFileName, workerDir, err) //nolint:errcheck
-	}
 }
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
@@ -183,6 +168,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
+		recordDeferredWorkerDirPrune(cityPath, lookupRigRootForSession(session, cfg), workerDir, session.ID, session.Metadata["template"], stderr)
 		return false
 	}
 
@@ -204,6 +190,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		recordDeferredWorkerDirPrune(cityPath, rigRoot, workerDir, session.ID, session.Metadata["template"], stderr)
 		return false
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, session.Metadata["session_name"]) //nolint:errcheck
@@ -230,6 +217,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
+		recordDeferredWorkerDirPrune(cityPath, lookupRigRootForSessionInfo(info, cfg), workerDir, info.ID, info.Template, stderr)
 		return
 	}
 
@@ -240,6 +228,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		recordDeferredWorkerDirPrune(cityPath, rigRoot, workerDir, info.ID, info.Template, stderr)
 		return
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck

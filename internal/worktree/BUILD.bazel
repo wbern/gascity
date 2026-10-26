@@ -3,9 +3,18 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "worktree",
     srcs = [
+        "archive.go",
+        "archive_ctime_darwin.go",
+        "archive_ctime_linux.go",
+        "archive_ctime_other.go",
+        "archive_open_other.go",
+        "archive_open_unix.go",
         "lock.go",
         "lock_unix.go",
         "lock_windows.go",
+        "retirement_lock.go",
+        "retirement_lock_unix.go",
+        "retirement_lock_windows.go",
         "worktree.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/worktree",
@@ -24,9 +33,13 @@ go_library(
 go_test(
     name = "worktree_test",
     srcs = [
+        "archive_race_unix_test.go",
+        "archive_test.go",
         "cleanup_attempt_test.go",
+        "cleanup_content_test.go",
         "cleanup_reachability_test.go",
         "lock_exclusion_unix_test.go",
+        "retirement_lock_unix_test.go",
         "testenv_import_test.go",
         "worktree_test.go",
     ],

@@ -240,7 +240,7 @@ func TestReapClosedBeadWorktrees_ReapsDisposableIgnoredOnlyWorktree(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want the disposable-ignored worktree reaped\nProtected: %+v\nstderr:\n%s",
@@ -266,13 +266,13 @@ func TestReapClosedBeadWorktrees_OperatorDisposablePatterns(t *testing.T) {
 
 	cfg := reapTestConfig(rigRoot)
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, true, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, true, events.Discard, nil, &stderr)
 	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "report/index.html") {
 		t.Fatalf("Protected = %+v, want report/ named as non-disposable without operator config", report.Protected)
 	}
 
 	cfg.Daemon.AutoReapDisposableIgnored = []string{"report/"}
-	report = reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report = reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want reaped once report/ is configured disposable\nProtected: %+v", report.Reaped, report.Protected)
 	}
@@ -326,7 +326,7 @@ func TestReapClosedBeadWorktrees_DirectorySymlinkTargetSurvives(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 {
 		t.Fatalf("Reaped = %+v, want the worktree reaped\nProtected: %+v\nstderr:\n%s", report.Reaped, report.Protected, stderr.String())

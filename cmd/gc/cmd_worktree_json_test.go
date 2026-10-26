@@ -65,7 +65,7 @@ func stubWorktreeCityDeps(t *testing.T) {
 			{Path: "/wt/held", Reason: "unlanded commits"},
 		}, nil
 	}
-	worktreeReapClosedBeadWorktrees = func(string, *config.City, map[string]beads.Store, []string, bool, events.Recorder, *reapSkipTracker, io.Writer) reapReport {
+	worktreeReapClosedBeadWorktrees = func(string, *config.City, reapStoreScope, []string, bool, events.Recorder, *reapSkipTracker, io.Writer) reapReport {
 		return reapReport{
 			DryRun: true,
 			Reaped: []reapDecision{{BeadID: "b-1", Rig: "demo", Branch: "polecat/b-1", Path: "/wt/1"}},
@@ -136,8 +136,8 @@ func TestWorktreeReapJSONSatisfiesTheContract(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
 		t.Fatalf("payload is not an object envelope: %v\n%s", err, stdout)
 	}
-	if envelope.SchemaVersion != "1" || !envelope.OK || !envelope.DryRun {
-		t.Errorf("envelope = %+v, want schema_version 1, ok true, dry_run true", envelope)
+	if envelope.SchemaVersion != "2" || !envelope.OK || !envelope.DryRun {
+		t.Errorf("envelope = %+v, want schema_version 2, ok true, dry_run true", envelope)
 	}
 	if envelope.Summary.Reaped != 1 || envelope.Summary.Kept != 1 {
 		t.Errorf("summary = %+v, want reaped 1 kept 1", envelope.Summary)
