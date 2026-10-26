@@ -463,6 +463,8 @@ go_library(
         "worktree_archive_identity_other.go",
         "worktree_archive_plan.go",
         "worktree_archive_types.go",
+        "worktree_retirement_platform_supported.go",
+        "worktree_retirement_platform_unsupported.go",
         "write_auth_boot_warning.go",
     ],
     embedsrcs = [
@@ -716,6 +718,7 @@ go_test(
         "bead_worktree_reaper_integration_test.go",
         "bead_worktree_reaper_merged_branch_test.go",
         "bead_worktree_reaper_production_lifecycle_test.go",
+        "bead_worktree_reaper_retirement_test.go",
         "bead_worktree_reaper_scope_test.go",
         "bead_worktree_reaper_skip_dedupe_test.go",
         "bead_worktree_reaper_symlink_test.go",
@@ -1558,6 +1561,7 @@ go_test(
         "worktree_archive_identity_darwin_test.go",
         "worktree_archive_hidden_index_test.go",
         "worktree_archive_plan_test.go",
+        "worktree_retirement_platform_unsupported_test.go",
         "write_auth_boot_warning_test.go",
     ],
     data = glob([

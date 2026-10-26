@@ -313,3 +313,40 @@ func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
 		t.Fatalf("worktree for open bead %s was removed: %v", wt, err)
 	}
 }
+
+// A repository-local core.worktree setting can make Git report another clean
+// directory while the registered removal candidate still contains user edits.
+func TestReapClosedBeadWorktrees_RejectsRedirectedGitRoot(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		t.Run(map[bool]string{true: "dry_run", false: "execute"}[dryRun], func(t *testing.T) {
+			city, rig := initReapRig(t)
+			wt := addClosedWorktree(t, rig, city, "builder", "ga-redir01")
+			outside, err := normalizeReapBorrowPath(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFileAt(t, outside, "README.md", "seed\n")
+			writeFileAt(t, wt, "README.md", "USER WIP\n")
+			mustGit(t, rig, "config", "extensions.worktreeConfig", "true")
+			mustGit(t, wt, "config", "--worktree", "core.worktree", outside)
+			if got := productionLifecycleGitOutput(t, wt, "rev-parse", "--show-toplevel"); got != outside {
+				t.Fatalf("fixture root = %q", got)
+			}
+			if got := productionLifecycleGitOutput(t, wt, "status", "--porcelain"); got != "" {
+				t.Fatalf("fixture is not falsely clean: %q", got)
+			}
+			backdateWorktreeGitFile(t, wt, 24*time.Hour)
+			store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-redir01", Status: "closed"}}, nil)
+			injectLiveness(t, liveWorktreeState{scanned: true})
+			var stderr bytes.Buffer
+			report := reapClosedBeadWorktrees(city, reapTestConfig(rig), reapTestScope(map[string]beads.Store{reapTestRigName: store}), nil, dryRun, events.Discard, nil, &stderr)
+			if len(report.Reaped) != 0 || len(report.Protected) != 1 {
+				t.Errorf("redirected candidate was not protected: %+v; %s", report, &stderr)
+			}
+			data, err := os.ReadFile(filepath.Join(wt, "README.md"))
+			if err != nil || string(data) != "USER WIP\n" {
+				t.Fatalf("source changed: %q %v", data, err)
+			}
+		})
+	}
+}

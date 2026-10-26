@@ -234,7 +234,8 @@ func TestReapClosedBeadWorktrees_FailsClosedOnBorrowVetoQueryError(t *testing.T)
 
 // TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig proves FR-3: with
 // multiple reap-eligible candidates in the same rig and tick, the borrow-veto
-// scan issues exactly one List call for that rig, not one per candidate.
+// discovery scan is batched. Each actual removal must additionally live-read
+// borrowers and its owner while holding the canonical retirement lock.
 func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-batchA1")
@@ -255,11 +256,15 @@ func TestReapClosedBeadWorktrees_BorrowVetoScanIsBatchedPerRig(t *testing.T) {
 	if len(report.Reaped) != 3 {
 		t.Fatalf("Reaped = %+v, want all 3 candidates reaped\nstderr:\n%s", report.Reaped, stderr.String())
 	}
-	if store.calls != 4 {
-		t.Fatalf("List calls = %d, want one batched borrower scan plus one fresh owner lookup per removal", store.calls)
+	if store.calls != 7 {
+		t.Fatalf("List calls = %d, want one batched discovery plus a fresh borrower scan and owner lookup per removal", store.calls)
 	}
-	for _, query := range store.queries[1:] {
-		if !query.Live || !query.IncludeClosed || len(query.IDs) != 1 {
+	for i, query := range store.queries[1:] {
+		if i%2 == 0 {
+			if !query.Live || query.IncludeClosed || query.TierMode != beads.TierBoth || len(query.IDs) != 0 {
+				t.Fatalf("unsafe fresh borrower query: %+v", query)
+			}
+		} else if !query.Live || !query.IncludeClosed || len(query.IDs) != 1 {
 			t.Fatalf("unsafe fresh owner query: %+v", query)
 		}
 	}

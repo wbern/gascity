@@ -32,9 +32,9 @@ type gitProbe interface {
 	WorktreeRemove(path string, force bool) error
 }
 
-// newGitProbe returns a gitProbe scoped to the given directory. Indirected
+// newGitProbe returns inspection Git scoped to the given directory. Indirected
 // through a package-level var so tests can stub the git invocations.
-var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
+var newGitProbe = func(workDir string) gitProbe { return git.NewInspection(workDir) }
 
 // resolveWorkerDirForPrune applies the eligibility gates that precede any git
 // safety probe and returns the probe to continue with. When the worker_dir is

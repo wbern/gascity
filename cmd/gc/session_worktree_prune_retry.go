@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -66,8 +65,23 @@ type pendingWorkerDir struct {
 // The record identifies a worktree incarnation and branch, not an old HEAD:
 // committing previously dirty work is allowed to make a retired tree safe.
 func workerDirRetirementIdentity(city, rigName, rigRoot, path, sessionID string) (workerDirRetirement, error) {
-	r := workerDirRetirement{Version: 1, SessionID: sessionID, Rig: rigName}
-	if sessionID == "" || rigName == "" || rigRoot == "" {
+	if sessionID == "" {
+		return workerDirRetirement{}, errors.New("retirement identity is incomplete")
+	}
+	r, err := linkedWorktreeRetirementIdentity(city, rigName, rigRoot, path)
+	r.SessionID = sessionID
+	if err == nil && r.Branch == "" {
+		err = errors.New("retirement branch unavailable")
+	}
+	return r, err
+}
+
+// linkedWorktreeRetirementIdentity binds Git inspection to the exact physical
+// linked checkout and its pointer incarnation, independently of owner kind.
+// Detached worktrees are valid here; the worker-dir record requires a branch.
+func linkedWorktreeRetirementIdentity(city, rigName, rigRoot, path string) (workerDirRetirement, error) {
+	r := workerDirRetirement{Version: 1, Rig: rigName}
+	if rigName == "" || rigRoot == "" {
 		return r, errors.New("retirement identity is incomplete")
 	}
 	root, err := normalizeReapBorrowPath(city)
@@ -160,7 +174,7 @@ func workerDirRetirementIdentity(city, rigName, rigRoot, path, sessionID string)
 	}
 
 	r.Branch, err = g.CurrentBranch()
-	if err != nil || r.Branch == "" {
+	if err != nil {
 		return r, errors.New("retirement branch unavailable")
 	}
 	return r, nil
@@ -186,6 +200,9 @@ func workerDirChangeStamp(info os.FileInfo) string {
 // openWorkerDirRetryRoot checks each component before and after opening its
 // descriptor. All subsequent IO stays relative to the pinned private root.
 func openWorkerDirRetryRoot(city string, create bool) (*os.Root, error) {
+	if err := workerDirRetryPlatformSupported(); err != nil {
+		return nil, err
+	}
 	physical, err := normalizeReapBorrowPath(city)
 	if err != nil {
 		return nil, err
@@ -228,8 +245,7 @@ func openWorkerDirRetryRoot(city string, create bool) (*os.Root, error) {
 			return nil, errors.New("retirement registry identity changed")
 		}
 		if i == 2 {
-			st, ok := inside.Sys().(*syscall.Stat_t)
-			if !ok || st.Uid != uint32(os.Geteuid()) || inside.Mode().Perm() != 0o700 {
+			if !workerDirRetryOwned(inside) || inside.Mode().Perm() != 0o700 {
 				_ = next.Close()
 				return nil, errors.New("retirement registry is not private and owned")
 			}
@@ -245,9 +261,7 @@ func sameWorkerDirRetryMetadata(first, second os.FileInfo) bool {
 	if !fsys.SameFileMetadata(first, second) || first.Mode() != second.Mode() {
 		return false
 	}
-	a, aOK := first.Sys().(*syscall.Stat_t)
-	b, bOK := second.Sys().(*syscall.Stat_t)
-	return aOK && bOK && a.Uid == b.Uid && a.Gid == b.Gid && a.Nlink == b.Nlink
+	return sameWorkerDirRetryOwnerLinks(first, second)
 }
 
 func readWorkerDirRetryFile(root *os.Root, name string) ([]byte, error) {
@@ -255,7 +269,7 @@ func readWorkerDirRetryFile(root *os.Root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Sys().(*syscall.Stat_t).Nlink != 1 {
+	if workerDirRetryLinkCount(info) != 1 {
 		return nil, errors.New("retirement registry file has unresolved aliases")
 	}
 	return data, nil
@@ -264,7 +278,7 @@ func readWorkerDirRetryFile(root *os.Root, name string) ([]byte, error) {
 // This bounded read does not admit a record. Multiple links are examined only
 // after strict JSON/hash validation by readCompletedWorkerDirRetryRecord.
 func readWorkerDirRetryMetadata(root *os.Root, name string) ([]byte, os.FileInfo, error) {
-	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openWorkerDirRetryPlatformFile(root, name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -273,8 +287,7 @@ func readWorkerDirRetryMetadata(root *os.Root, name string) ([]byte, os.FileInfo
 	if err != nil {
 		return nil, nil, err
 	}
-	st, ok := before.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uint32(os.Geteuid()) || st.Nlink == 0 || !before.Mode().IsRegular() || before.Mode().Perm() != 0o600 || before.Size() > 16<<10 {
+	if !workerDirRetryOwned(before) || workerDirRetryLinkCount(before) == 0 || !before.Mode().IsRegular() || before.Mode().Perm() != 0o600 || before.Size() > 16<<10 {
 		return nil, nil, errors.New("unsafe retirement registry file")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 16<<10+1))
@@ -314,7 +327,7 @@ func readCompletedWorkerDirRetryRecord(ctx context.Context, root *os.Root, name 
 	if err != nil {
 		return nil, record, err
 	}
-	if info.Sys().(*syscall.Stat_t).Nlink != 1 {
+	if workerDirRetryLinkCount(info) != 1 {
 		if err := recoverWorkerDirPendingLinks(ctx, root, name, info); err != nil {
 			return nil, record, err
 		}
@@ -338,7 +351,7 @@ func workerDirPendingName(name string) bool {
 // an outside or unknown alias leaves all names untouched. The held descriptor
 // pins the inode across recovery. No checkout path or user marker is mutated.
 func recoverWorkerDirPendingLinks(ctx context.Context, root *os.Root, name string, expected os.FileInfo) error {
-	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openWorkerDirRetryPlatformFile(root, name, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -375,7 +388,7 @@ func recoverWorkerDirPendingLinks(ctx context.Context, root *os.Root, name strin
 		aliases = append(aliases, entry.Name())
 	}
 	observed, err := f.Stat()
-	if err != nil || !sameWorkerDirRetryMetadata(current, observed) || len(aliases) == 0 || int64(observed.Sys().(*syscall.Stat_t).Nlink) != int64(len(aliases)+1) {
+	if err != nil || !sameWorkerDirRetryMetadata(current, observed) || len(aliases) == 0 || int64(workerDirRetryLinkCount(observed)) != int64(len(aliases)+1) {
 		return errors.New("retirement links are not completely accounted for")
 	}
 	// All aliases were validated before the first unlink. If a crash interrupts
@@ -390,12 +403,12 @@ func recoverWorkerDirPendingLinks(ctx context.Context, root *os.Root, name strin
 		if e1 != nil || e2 != nil || e3 != nil || !sameWorkerDirRetryMetadata(observed, held) || !sameWorkerDirRetryMetadata(held, published) || !sameWorkerDirRetryMetadata(held, pending) {
 			return errors.New("retirement alias changed before recovery")
 		}
-		links := held.Sys().(*syscall.Stat_t).Nlink
+		links := workerDirRetryLinkCount(held)
 		if err := root.Remove(alias); err != nil {
 			return err
 		}
 		observed, err = f.Stat()
-		if err != nil || !fsys.SameFileIdentity(held, observed) || held.Mode() != observed.Mode() || held.Size() != observed.Size() || !held.ModTime().Equal(observed.ModTime()) || observed.Sys().(*syscall.Stat_t).Nlink != links-1 {
+		if err != nil || !fsys.SameFileIdentity(held, observed) || held.Mode() != observed.Mode() || held.Size() != observed.Size() || !held.ModTime().Equal(observed.ModTime()) || workerDirRetryLinkCount(observed) != links-1 {
 			return errors.New("retirement metadata changed during recovery")
 		}
 	}
@@ -404,7 +417,7 @@ func recoverWorkerDirPendingLinks(ctx context.Context, root *os.Root, name strin
 
 func writeWorkerDirRetryFile(root *os.Root, name string, data []byte, replace bool) error {
 	temp := ".pending-" + rand.Text()
-	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	f, err := openWorkerDirRetryPlatformFile(root, temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

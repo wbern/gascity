@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // reapDecision records one worktree the reaper acted on or declined to act on,
@@ -377,6 +378,14 @@ func reapClosedBeadWorktrees(
 			unlandedButPreserved := ""
 			var nonDisposable []string
 			var inspectionHEAD string
+			var identity workerDirRetirement
+			if reason == "" {
+				var identityErr error
+				identity, identityErr = linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)
+				if identityErr != nil {
+					reason = "unsafe worktree identity: probe failed: " + identityErr.Error()
+				}
+			}
 			if reason == "" {
 				var headErr error
 				inspectionHEAD, headErr = wg.RevParseVerifyCommit("HEAD")
@@ -505,6 +514,11 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 			if dryRun {
+				current, err := linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)
+				if err != nil || current != identity {
+					report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: "worktree identity changed during inspection"})
+					continue
+				}
 				const whatIf = "dry-run: would reap (closed bead, clean tree, no live process)"
 				if skips.shouldSurface(worktreePath, whatIf) {
 					fmt.Fprintf(stderr, //nolint:errcheck
@@ -520,22 +534,69 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
-			// Check content again immediately before deletion: a user edit after
-			// initial classification must not ride an earlier ignored-file decision.
-			latest, latestErr := wg.WorkingTreeStatus()
-			var changedIgnored []string
-			changedReason := ""
-			switch {
-			case latestErr != nil:
-				changedReason = fmt.Sprintf("unsafe git state: status probe before removal failed: %v", latestErr)
-			case len(latest.Dirty) > 0:
-				changedReason = "unsafe git state: changed before removal: uncommitted=true"
-			default:
-				changedIgnored = nonDisposableIgnored(worktreePath, latest.Ignored, cfg.Daemon.AutoReapDisposableIgnored)
-				if len(changedIgnored) > 0 {
-					changedReason = "unsafe git state: non-disposable ignored before removal: " + describeNonDisposable(changedIgnored)
+			// The canonical Ensure/Cleanup lock fences a fresh removal decision.
+			// Earlier pass snapshots classify candidates but never authorize deletion.
+			changedReason, changedIgnored := func() (string, []string) {
+				unlock, err := worktree.TryLockRetirement(rigRoot, worktreePath)
+				if err != nil {
+					return "retirement lock unavailable: " + err.Error(), nil
 				}
-			}
+				defer unlock()
+				current, err := linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)
+				if err != nil || current != identity {
+					return "worktree identity changed before removal", nil
+				}
+				unlanded, err := wg.HasUnlandedCommitsResult()
+				if err != nil {
+					return "unlanded probe before removal failed: " + err.Error(), nil
+				}
+				unpreserved, err := wg.HasUnpreservedCommitsResult()
+				if err != nil || unlanded && unpreserved {
+					return "commit preservation changed or unavailable before removal", nil
+				}
+				refs, incomplete := collectReapBorrowScope(cityPath, cfg, scope, stderr)
+				if len(incomplete) > 0 {
+					return "borrow scope before removal unavailable: " + strings.Join(incomplete, ", "), nil
+				}
+				borrowers, err := reapBorrowersUnder(refs, worktreePath)
+				if err != nil || len(borrowers) > 0 {
+					return "borrow-veto before removal: references changed or unavailable", nil
+				}
+				freshLive := collectLiveWorktreeStateFn()
+				if !freshLive.scanned {
+					return "liveness scan before removal unavailable", nil
+				}
+				if yes, why := worktreeIsLive(worktreePath, freshLive, liveSessionDirs); yes {
+					return "live before removal: " + why, nil
+				}
+				owner, err := reapOwnerLive(store, beadID)
+				if err != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata["gc.user_paused"] == "true" {
+					return "owner is no longer closed or live owner read failed", nil
+				}
+				current, err = linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)
+				if err != nil || current != identity {
+					return "worktree identity changed during removal checks", nil
+				}
+				latest, err := wg.WorkingTreeStatus()
+				if err != nil {
+					return fmt.Sprintf("unsafe git state: status probe before removal failed: %v", err), nil
+				}
+				if len(latest.Dirty) > 0 {
+					return "unsafe git state: changed before removal: uncommitted=true", nil
+				}
+				ignored := nonDisposableIgnored(worktreePath, latest.Ignored, cfg.Daemon.AutoReapDisposableIgnored)
+				if len(ignored) > 0 {
+					return "unsafe git state: non-disposable ignored before removal: " + describeNonDisposable(ignored), ignored
+				}
+				if err := wg.VerifyTrackedContent(inspectionHEAD); err != nil {
+					return "tracked content changed before removal: " + err.Error(), nil
+				}
+				// Remove through the owning repository, without force, under the lock.
+				if err := git.NewInspection(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
+					return "removing worktree: " + err.Error(), nil
+				}
+				return "", nil
+			}()
 			if changedReason != "" {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: protecting %s: %s\n", worktreePath, changedReason) //nolint:errcheck
 				recordReapSkipped(rec, beadID, worktreePath, rigName, changedReason)
@@ -543,24 +604,6 @@ func reapClosedBeadWorktrees(
 					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
 					Reason: changedReason, NonDisposableIgnored: changedIgnored,
 				})
-				continue
-			}
-
-			owner, ownerErr := reapOwnerLive(store, beadID)
-			if ownerErr != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata["gc.user_paused"] == "true" {
-				reason := "owner is no longer closed or live owner read failed"
-				report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason})
-				continue
-			}
-			if err := wg.VerifyTrackedContent(inspectionHEAD); err != nil {
-				report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: "tracked content changed before removal: " + err.Error()})
-				continue
-			}
-			// Remove the worktree from the OWNING rig repository. git worktree
-			// remove must be run from the main repo root, not from within the
-			// worktree being removed.
-			if err := git.New(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
-				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
 			}
 			fmt.Fprintf(stderr, //nolint:errcheck

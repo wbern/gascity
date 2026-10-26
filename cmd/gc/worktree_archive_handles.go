@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -76,18 +74,9 @@ func collectArchiveHandleSnapshot(ctx context.Context) ([]byte, error) {
 }
 
 func archiveInventoryOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, int, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if err == syscall.ESRCH {
-			return nil
-		}
-		return err
+	cmd, err := archiveInventoryCommand(ctx, name, args...)
+	if err != nil {
+		return nil, 0, err
 	}
 	out := &archiveBoundedOutput{limit: limit}
 	diagnostics := &archiveBoundedOutput{limit: 64 << 10}
