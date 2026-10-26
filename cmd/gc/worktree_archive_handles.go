@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -77,21 +78,23 @@ func archiveInventoryOutput(ctx context.Context, limit int, name string, args ..
 }
 
 func archiveProcessIDs(ctx context.Context) (map[int]bool, error) {
-	data, err := archiveInventoryOutput(ctx, 1<<20, "ps", "-axo", "pid=,uid=")
+	data, err := archiveInventoryOutput(ctx, 1<<20, "ps", "-axo", "pid=,uid=,state=")
 	if err != nil {
 		return nil, err
 	}
-	return parseArchiveProcessIDs(data, uint32(os.Geteuid()), os.Getpid())
+	// Darwin's process-wide SZOMB follows descriptor-table teardown. Linux can
+	// retain a zombie group leader with live sibling threads, so stays strict.
+	return parseArchiveProcessIDs(data, uint32(os.Geteuid()), os.Getpid(), runtime.GOOS == "darwin")
 }
 
-func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int) (map[int]bool, error) {
+func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int, zombieFDsClosed bool) (map[int]bool, error) {
 	ids := make(map[int]bool)
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
-		if len(fields) != 2 {
+		if len(fields) != 3 {
 			return nil, fmt.Errorf("invalid process ownership inventory")
 		}
 		pid, e1 := strconv.Atoi(fields[0])
@@ -102,8 +105,14 @@ func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int) (map[int]boo
 		if e1 != nil || e2 != nil || pid < 0 || uid < -(1<<31) || uid > (1<<32)-1 {
 			return nil, fmt.Errorf("invalid process ownership record")
 		}
+		if !archiveProcessStateValid(fields[2]) {
+			return nil, fmt.Errorf("invalid or unknown process state")
+		}
 		if uint32(uid) == ownUID {
-			ids[pid] = true
+			// Darwin publishes SZOMB only after closing its descriptor table.
+			// Keep the key: a later live observation must still require coverage.
+			// A duplicate live row wins over any stale zombie observation.
+			ids[pid] = ids[pid] || !zombieFDsClosed || fields[2][0] != 'Z'
 		}
 	}
 	if !ids[ownPID] {
@@ -112,9 +121,19 @@ func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int) (map[int]boo
 	return ids, nil
 }
 
+// state= includes documented BSD/procps modifiers. Unknown output cannot
+// establish exit; do not mistake command names such as <defunct> for state.
+func archiveProcessStateValid(state string) bool {
+	if state == "" || len(state) > 16 || !strings.ContainsRune("DHIPRSTtUWXZ", rune(state[0])) {
+		return false
+	}
+	return strings.Trim(state[1:], "<>AELNSVWXsl+") == ""
+}
+
 // Darwin lsof may silently omit a process when its initial information query
-// is denied. Require coverage of every current-user PID surviving both sides
-// of enumeration; processes that exited have released their descriptors.
+// is denied. Require coverage of every PID present before and live afterward.
+// False-valued zombie keys remain in the first census, so PID reuse or a later
+// live observation never inherits an earlier zombie exemption.
 func archiveProcessCoverage(data []byte, before, after map[int]bool) error {
 	seen := make(map[int]bool)
 	for _, raw := range bytes.Split(data, []byte{0}) {

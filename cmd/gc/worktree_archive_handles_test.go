@@ -78,13 +78,13 @@ func TestArchiveProcessUIDRendering(t *testing.T) {
 		data string
 		want []int
 	}{
-		{"normal", 501, "42 501\n43 501\n77 0\n", []int{42, 43}},
-		{"foreign_nobody_forms", 501, "77 -2\n78 4294967294\n42 501\n", []int{42}},
-		{"current_nobody_forms", 4294967294, "42 -2\n43 4294967294\n77 501\n", []int{42, 43}},
-		{"signed_boundary", 2147483648, "42 -2147483648\n43 2147483648\n", []int{42, 43}},
+		{"normal", 501, "42 501 S\n43 501 S\n77 0 S\n", []int{42, 43}},
+		{"foreign_nobody_forms", 501, "77 -2 S\n78 4294967294 S\n42 501 S\n", []int{42}},
+		{"current_nobody_forms", 4294967294, "42 -2 S\n43 4294967294 S\n77 501 S\n", []int{42, 43}},
+		{"signed_boundary", 2147483648, "42 -2147483648 S\n43 2147483648 S\n", []int{42, 43}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ids, err := parseArchiveProcessIDs([]byte(tc.data), tc.uid, 42)
+			ids, err := parseArchiveProcessIDs([]byte(tc.data), tc.uid, 42, true)
 			if err != nil || len(ids) != len(tc.want) {
 				t.Fatalf("valid UID rendering refused or cohort changed: %v %v", ids, err)
 			}
@@ -103,12 +103,76 @@ func TestArchiveProcessUIDMalformedInventoryRefused(t *testing.T) {
 		"77 9223372036854775808", "-1 501", "unknown 501", "77 501 extra",
 	} {
 		t.Run(row, func(t *testing.T) {
-			if ids, err := parseArchiveProcessIDs([]byte("42 501\n"+row+"\n"), 501, 42); err == nil {
+			if ids, err := parseArchiveProcessIDs([]byte("42 501 S\n"+row+" S\n"), 501, 42, true); err == nil {
 				t.Fatalf("malformed foreign/current row was silently accepted: %v", ids)
 			}
 		})
 	}
-	if _, err := parseArchiveProcessIDs([]byte("77 -2\n"), 501, 42); err == nil {
+	if _, err := parseArchiveProcessIDs([]byte("77 -2 S\n"), 501, 42, true); err == nil {
 		t.Fatal("inventory omitting current process accepted")
+	}
+}
+
+func TestArchiveZombieProcessCoverage(t *testing.T) {
+	parse := func(rows string) map[int]bool {
+		t.Helper()
+		ids, err := parseArchiveProcessIDs([]byte("42 501 S\n"+rows), 501, 42, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	zombie := parse("77 501 Z\n")
+	if live, exists := zombie[77]; !exists || live {
+		t.Fatalf("zombie identity must remain present but not descriptor-bearing: %v", zombie)
+	}
+	if err := archiveProcessCoverage([]byte("p42\x00"), zombie, zombie); err != nil {
+		t.Fatalf("validated zombie incorrectly requires descriptors: %v", err)
+	}
+	for _, state := range []string{"R", "S", "T", "U", "I", "H", "D", "t", "X", "W", "P", "Ss", "SN+", "R<"} {
+		t.Run(state, func(t *testing.T) {
+			live := parse("77 501 " + state + "\n")
+			if err := archiveProcessCoverage([]byte("p42\x00"), live, live); err == nil {
+				t.Fatal("omitted non-zombie process admitted")
+			}
+			if err := archiveProcessCoverage([]byte("p42\x00"), zombie, live); err == nil {
+				t.Fatal("stale zombie observation exempted a later live process")
+			}
+		})
+	}
+	for _, rows := range []string{"77 501 S\n77 501 Z\n", "77 501 Z\n77 501 S\n"} {
+		duplicate := parse(rows)
+		if err := archiveProcessCoverage([]byte("p42\x00"), duplicate, duplicate); err == nil {
+			t.Fatal("duplicate zombie record erased live coverage requirement")
+		}
+	}
+	live := parse("77 501 S\n")
+	if err := archiveProcessCoverage([]byte("p42\x00"), live, zombie); err != nil {
+		t.Fatalf("process that became a validated zombie still requires descriptors: %v", err)
+	}
+	if _, err := parseArchiveProcessIDs([]byte("42 501 Z\n"), 501, 42, true); err == nil {
+		t.Fatal("current process accepted as zombie")
+	}
+}
+
+func TestArchiveProcessStateMalformedInventoryRefused(t *testing.T) {
+	for _, row := range []string{"77 501", "77 501 ?", "77 501 Q", "77 501 <defunct>", "77 501 Z?", "77 501 Zunknown", "77 501 Z extra"} {
+		t.Run(row, func(t *testing.T) {
+			if _, err := parseArchiveProcessIDs([]byte("42 501 S\n"+row+"\n"), 501, 42, true); err == nil {
+				t.Fatal("unknown or malformed process state accepted")
+			}
+		})
+	}
+}
+
+func TestArchiveZombieExemptionRequiresPlatformProof(t *testing.T) {
+	// Linux can expose a zombie thread-group leader with live sibling threads.
+	// Without Darwin's process-wide SZOMB guarantee, retain FD coverage.
+	ids, err := parseArchiveProcessIDs([]byte("42 501 S\n77 501 Z\n"), 501, 42, false)
+	if err != nil || !ids[77] {
+		t.Fatalf("unproven zombie exemption applied: %v %v", ids, err)
+	}
+	if err := archiveProcessCoverage([]byte("p42\x00"), ids, ids); err == nil {
+		t.Fatal("unproven zombie process omitted without protection")
 	}
 }
