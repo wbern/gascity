@@ -168,6 +168,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
+		recordDeferredWorkerDirPrune(cityPath, lookupRigRootForSession(session, cfg), workerDir, session.ID, session.Metadata["template"], stderr)
 		return false
 	}
 
@@ -189,6 +190,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	}
 	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		recordDeferredWorkerDirPrune(cityPath, rigRoot, workerDir, session.ID, session.Metadata["template"], stderr)
 		return false
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, session.Metadata["session_name"]) //nolint:errcheck
@@ -215,6 +217,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 	if skip := workerDirGitStateSkip(gp, workerDir, stderr); skip != "" {
+		recordDeferredWorkerDirPrune(cityPath, lookupRigRootForSessionInfo(info, cfg), workerDir, info.ID, info.Template, stderr)
 		return
 	}
 
@@ -225,6 +228,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, false); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
+		recordDeferredWorkerDirPrune(cityPath, rigRoot, workerDir, info.ID, info.Template, stderr)
 		return
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck

@@ -40,7 +40,9 @@ func TestArchiveDarwinHandleIdentityMembership(t *testing.T) {
 			old := archiveHandleSnapshot
 			t.Cleanup(func() { archiveHandleSnapshot = old })
 			wantClear := scenario == "unrelated_protected_path" || scenario == "outside_symlink_not_followed" || scenario == "own_root_anchor" || scenario == "same_inode_other_device"
+			calls := 0
 			archiveHandleSnapshot = func(_ context.Context) ([]byte, error) {
+				calls++
 				base := archiveTestHandleRecord(t, os.Getpid(), "cwd", "r", "DIR", parent, parent)
 				path, name := outside, unresolved
 				switch scenario {
@@ -126,6 +128,9 @@ func TestArchiveDarwinHandleIdentityMembership(t *testing.T) {
 				}
 			}
 			err = archiveHandlesClear(root)
+			if (scenario == "changed_namespace" || scenario == "replaced_root" || scenario == "replaced_leaf" || scenario == "transient_namespace" || scenario == "directory_ctime_change") && calls != 1 {
+				t.Fatalf("changed candidate was retried/adopted: %d", calls)
+			}
 			if (err == nil) != wantClear {
 				t.Fatalf("clear=%v want=%v: %v", err == nil, wantClear, err)
 			}

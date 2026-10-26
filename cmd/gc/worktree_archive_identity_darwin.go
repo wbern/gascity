@@ -47,37 +47,32 @@ func archivePlatformHandlesClear(ctx context.Context, root string) error {
 	if err != nil {
 		return err
 	}
-	data, err := archiveHandleSnapshot(ctx)
-	if err != nil {
-		return err
-	}
-	after, err := captureArchiveHandleTree(anchor, root, 250000, deadline)
-	if err != nil {
-		return err
-	}
-	if !maps.Equal(before, after) {
-		return errors.New("candidate identity inventory changed during descriptor census")
-	}
-	identities := make(map[archiveHandleIdentity]bool, len(after))
-	for _, entry := range after {
-		if entry.mode&unix.S_IFMT == unix.S_IFREG || entry.mode&unix.S_IFMT == unix.S_IFDIR {
-			identities[entry.identity] = true
-		}
-	}
-	match := func(device, inode string) (bool, bool, error) {
-		if err := ctx.Err(); err != nil {
-			return false, false, err
-		}
-		id, err := parseArchiveDarwinIdentity(device, inode)
+	return retryArchiveCensus(ctx, func(data []byte) error {
+		after, err := captureArchiveHandleTree(anchor, root, 250000, deadline)
 		if err != nil {
-			return false, false, err
+			return fmt.Errorf("%w: %v", errArchiveCandidateEvidence, err)
 		}
-		return identities[id], id == after["."].identity, nil
-	}
-	if err := inspectArchiveHandlesWithIdentity(data, root, os.Getpid(), match); err != nil {
-		return err
-	}
-	return ctx.Err()
+		if !maps.Equal(before, after) {
+			return fmt.Errorf("%w: inventory changed during descriptor census", errArchiveCandidateEvidence)
+		}
+		identities := make(map[archiveHandleIdentity]bool, len(after))
+		for _, entry := range after {
+			if entry.mode&unix.S_IFMT == unix.S_IFREG || entry.mode&unix.S_IFMT == unix.S_IFDIR {
+				identities[entry.identity] = true
+			}
+		}
+		match := func(device, inode string) (bool, bool, error) {
+			if err := ctx.Err(); err != nil {
+				return false, false, err
+			}
+			id, err := parseArchiveDarwinIdentity(device, inode)
+			if err != nil {
+				return false, false, err
+			}
+			return identities[id], id == before["."].identity, nil
+		}
+		return inspectArchiveHandlesWithIdentity(data, root, os.Getpid(), match)
+	})
 }
 
 func parseArchiveDarwinIdentity(device, inode string) (archiveHandleIdentity, error) {

@@ -8,12 +8,7 @@ import (
 )
 
 func archivePlatformHandlesClear(ctx context.Context, root string) error {
-	data, err := archiveHandleSnapshot(ctx)
-	if err != nil {
-		return err
-	}
-	if err := inspectArchiveHandles(data, root, os.Getpid()); err != nil {
-		return err
-	}
-	return ctx.Err()
+	return retryArchiveCensus(ctx, func(data []byte) error {
+		return inspectArchiveHandles(data, root, os.Getpid())
+	})
 }

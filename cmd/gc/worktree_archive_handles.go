@@ -18,7 +18,31 @@ import (
 // current-user regular-file and directory descriptor must be inspectable.
 var archiveHandleSnapshot = collectArchiveHandleSnapshot
 
-var errArchiveHeldHandle = errors.New("checkout has an open file or directory descriptor")
+var (
+	errArchiveHeldHandle        = errors.New("checkout has an open file or directory descriptor")
+	errArchiveCandidateEvidence = errors.New("candidate identity evidence changed or unavailable")
+)
+
+// retryArchiveCensus discards an incomplete observation and permits one whole
+// fresh census within the caller's original deadline. A positive hold or a
+// changed candidate stops immediately; snapshots and PID sets are never merged.
+func retryArchiveCensus(ctx context.Context, inspect func([]byte) error) error {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, err := archiveHandleSnapshot(ctx)
+		if err == nil {
+			err = inspect(data)
+		}
+		if err == nil {
+			return ctx.Err()
+		}
+		if attempt == 1 || ctx.Err() != nil || errors.Is(err, errArchiveHeldHandle) || errors.Is(err, errArchiveCandidateEvidence) {
+			return err
+		}
+	}
+}
 
 type archiveBoundedOutput struct {
 	bytes.Buffer
@@ -110,15 +134,20 @@ func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int, zombieFDsClo
 		if e1 != nil || e2 != nil || pid < 0 || uid < -(1<<31) || uid > (1<<32)-1 {
 			return nil, fmt.Errorf("invalid process ownership record")
 		}
+		if uint32(uid) != ownUID {
+			continue // This validated ownership is outside the lsof UID scope.
+		}
 		if !archiveProcessStateValid(fields[2]) {
-			return nil, fmt.Errorf("invalid or unknown process state")
+			state := fields[2]
+			if len(state) > 16 {
+				state = "<invalid-length>"
+			}
+			return nil, fmt.Errorf("invalid or unknown process state (pid %d, uid %d, state %q)", pid, uint32(uid), state)
 		}
-		if uint32(uid) == ownUID {
-			// Darwin publishes SZOMB only after closing its descriptor table.
-			// Keep the key: a later live observation must still require coverage.
-			// A duplicate live row wins over any stale zombie observation.
-			ids[pid] = ids[pid] || !zombieFDsClosed || fields[2][0] != 'Z'
-		}
+		// Darwin publishes SZOMB only after closing its descriptor table.
+		// Keep the key: a later live observation must still require coverage.
+		// A duplicate live row wins over any stale zombie observation.
+		ids[pid] = ids[pid] || !zombieFDsClosed || fields[2][0] != 'Z'
 	}
 	if !ids[ownPID] {
 		return nil, fmt.Errorf("process ownership inventory omitted current process")

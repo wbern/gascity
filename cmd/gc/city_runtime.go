@@ -252,7 +252,8 @@ type CityRuntime struct {
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
 	// serial tick, like the other per-tick state above.
-	reapSkips *reapSkipTracker
+	reapSkips          *reapSkipTracker
+	workerDirRetryNext time.Time
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
@@ -1462,6 +1463,14 @@ func (cr *CityRuntime) tick(
 			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
 			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
+	}
+	if cr.workerDirRetryDue(time.Now()) {
+		phaseStart = time.Now()
+		retiredDirs := retryDeferredWorkerDirPrunesCtx(ctx, cr.cityPath, cr.cfg,
+			reapStoreScope{RigStores: cr.rigBeadStores(), CityStore: cr.cityBeadStore()},
+			cr.sessionsBeadStore().Store, liveSessionWorktreeDirs(sessionBeads), cr.stderr)
+		cr.workerDirRetryNext = time.Now().Add(workerDirRetryInterval)
+		recordPhase(TraceSiteControllerTickPhase, "retry_retired_worker_dirs", phaseStart, map[string]any{"reaped": retiredDirs})
 	}
 	if ctx.Err() != nil {
 		return

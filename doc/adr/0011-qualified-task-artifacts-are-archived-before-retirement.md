@@ -7,11 +7,15 @@ applies_to:
   - "cmd/gc/bead_worktree_reaper*.go"
   - "internal/worktree/archive*.go"
   - "internal/worktree/retirement_lock*.go"
+  - "cmd/gc/session_worktree_prune*.go"
+  - "cmd/gc/city_runtime.go"
 pre_filter:
   - "Archive"
   - "archive"
   - "collectReapBorrowScope"
   - "reapOwnerLive"
+  - "workerDirRetry"
+  - "recordDeferredWorkerDirPrune"
 ---
 
 # 11. Qualified task artifacts are archived before checkout retirement
@@ -69,6 +73,44 @@ It does not claim atomic exclusion against a hostile same-user process that
 finds and mutates the private quarantine after the final checks. Archive
 retention and restoration are explicit operational responsibilities; archives
 are not automatically garbage-collected by the worktree reaper.
+
+## Deferred closed-session retirement
+
+A refused session-retirement attempt records an immutable intent under the
+city's private `.gc/runtime/worker-dir-retirement/` directory. The controller
+creates these records only for actual retirement refusals; it does not infer
+ownership from an arbitrary stale directory or create an inline
+`.worktree-stale` file. Existing user-authored markers remain ordinary content.
+
+The record binds the closed session, rig, linked-worktree pointer incarnation,
+private/common Git directories, exact physical Git root, and branch. It does
+not bind an old HEAD: preserving or committing previously dirty work may make
+the same retired checkout safe. Each retry rechecks current closed ownership,
+all required live borrower scopes, session directories, process cwd and file
+handles, current Git identity, ignored/uncommitted content, actual tracked
+bytes, and commit preservation under the canonical workspace lock. Removal
+uses non-force Git and retains the branch. This retry requires a fully clean
+checkout with no ignored content; the separate task-artifact archive protocol
+above handles explicitly approved configuration and handoff leftovers.
+
+The periodic consumer runs at most once per minute after the preceding pass
+finishes, rotates at most eight records per pass, and shares a ten-second
+cooperative budget across phases. Existing synchronous store/Git probes retain
+their own bounds; this is not a hard interruption guarantee for every filesystem
+call. Existing load, pacing, and removal limits also apply. The private registry
+has a bounded entry count, and its cursor advances only past actually attempted
+records, so retained work cannot indefinitely starve the unattempted batch tail.
+
+A crash after publishing a record can leave its reserved `.pending-*` hardlink.
+Recovery first validates the complete record's JSON, filename digest, private
+ownership/mode, inode, and every kernel link. Only matching reserved temporary
+aliases inside that same pinned registry may be removed. Unknown names,
+external links, symlinks, corrupt content, or changed evidence remain protected;
+no user marker or checkout artifact is removed during metadata recovery. The
+ordinary single-link reader must accept the same bytes after recovery before
+any retirement decision. Interrupted alias cleanup is safe to repeat. Incomplete prepublication
+`.pending-*` files and unknown aliases are retained; this is not a general
+metadata garbage sweep.
 
 ## Consequences
 
