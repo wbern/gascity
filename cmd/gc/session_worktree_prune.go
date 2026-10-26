@@ -23,6 +23,8 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedOrIgnoredWork() bool
 	WorkingTreeStatus() (git.WorkingTreeStatus, error)
+	RevParseVerifyCommit(string) (string, error)
+	VerifyTrackedContent(string) error
 	HasUnpushedCommitsResult() (bool, error)
 	HasUnlandedCommitsResult() (bool, error)
 	HasUnpreservedCommitsResult() (bool, error)
@@ -94,7 +96,6 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (skip string) {
 	if gp.HasUncommittedOrIgnoredWork() {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has uncommitted or ignored work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "uncommitted-work", stderr)
 		return "has uncommitted or ignored work"
 	}
 	hasUnlanded, err := gp.HasUnlandedCommitsResult()
@@ -114,7 +115,6 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 	// same worktree.
 	if hasUnlanded && hasUnpreserved {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has commits reachable from no ref\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "unlanded-commits", stderr)
 		return "has unlanded commits reachable from no ref"
 	}
 	warning := ""
@@ -127,21 +127,6 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: warning: %s\n", workerDir, warning) //nolint:errcheck
 	}
 	return ""
-}
-
-// writeWorktreeStaleMarker records why workerDir was left in place instead of
-// pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
-// can later detect when it's safe to reclaim. Best-effort: write failures are
-// logged but never alter the caller's control flow.
-func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.Writer) {
-	branch, err := gp.CurrentBranch()
-	if err != nil {
-		branch = ""
-	}
-	content := fmt.Sprintf("branch=%s\nreason=%s\n", branch, reason)
-	if err := os.WriteFile(filepath.Join(workerDir, worktreeStaleFileName), []byte(content), 0o644); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: writing %s marker for %s: %v\n", worktreeStaleFileName, workerDir, err) //nolint:errcheck
-	}
 }
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's

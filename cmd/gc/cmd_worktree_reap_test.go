@@ -35,6 +35,9 @@ func installReapCmdHarness(t *testing.T, h *reapCmdHarness) {
 	t.Helper()
 	cityPath := t.TempDir()
 	h.gotCityPath = ""
+	origCityStore := worktreeOpenCityStoreAt
+	t.Cleanup(func() { worktreeOpenCityStoreAt = origCityStore })
+	worktreeOpenCityStoreAt = func(string) (beads.Store, error) { return beads.NewMemStore(), nil }
 
 	origResolve, origLoad, origReap, origStore, origLive := worktreeResolveCity, worktreeLoadCityConfig, worktreeReapClosedBeadWorktrees,
 		worktreeOpenRigStore, worktreeLiveWorkerDirsFn
@@ -53,7 +56,7 @@ func installReapCmdHarness(t *testing.T, h *reapCmdHarness) {
 	worktreeLiveWorkerDirsFn = func(string) (map[string]bool, error) {
 		return map[string]bool{"/live/one": true}, nil
 	}
-	worktreeReapClosedBeadWorktrees = func(cp string, _ *config.City, _ map[string]beads.Store, liveDirs []string, dryRun bool, _ events.Recorder, _ *reapSkipTracker, _ io.Writer) reapReport {
+	worktreeReapClosedBeadWorktrees = func(cp string, _ *config.City, _ reapStoreScope, liveDirs []string, dryRun bool, _ events.Recorder, _ *reapSkipTracker, _ io.Writer) reapReport {
 		h.called++
 		h.gotDryRun = dryRun
 		h.gotCityPath = cp

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "outcome": {
+      "enum": [
+        "would_reap",
+        "reaped",
+        "protected",
+        "refused",
+        "error"
+      ]
+    },
+    "operation": {
+      "const": "worktree.archive-reap"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "size",
+          "mode"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mode": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "request_schema_version": {
+      "const": "1"
+    },
+    "report_schema_version": {
+      "const": "1"
+    },
+    "plan_no_mutation": {
+      "const": true
+    },
+    "files": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "inventory_sha256": {
+      "type": "string"
+    },
+    "archive_path": {
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "type": "string"
+    },
+    "quarantine_path": {
+      "type": "string"
+    },
+    "reason_code": {
+      "type": "string"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "operation",
+        "request_schema_version",
+        "report_schema_version",
+        "plan_no_mutation"
+      ]
+    },
+    {
+      "required": [
+        "complete",
+        "outcome",
+        "artifacts",
+        "files",
+        "bytes"
+      ]
+    }
+  ]
+}

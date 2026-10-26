@@ -10,6 +10,9 @@ import (
 // schemas/worktree/.
 const worktreeJSONSchemaVersion = "1"
 
+// Reap v2 distinguishes complete safety inspection from partial/deferred data.
+const worktreeReapJSONSchemaVersion = "2"
+
 // worktreeScanJSON is the machine-readable result of `gc worktree scan`.
 // Matches schemas/worktree/scan/result.schema.json.
 type worktreeScanJSON struct {
@@ -29,12 +32,15 @@ type worktreeStrayJSON struct {
 // worktreeReapJSON is the machine-readable result of `gc worktree reap`.
 // Matches schemas/worktree/reap/result.schema.json.
 type worktreeReapJSON struct {
-	SchemaVersion string                 `json:"schema_version"`
-	OK            bool                   `json:"ok"`
-	DryRun        bool                   `json:"dry_run"`
-	Summary       worktreeReapSummary    `json:"summary"`
-	Reaped        []worktreeDecisionJSON `json:"reaped"`
-	Protected     []worktreeDecisionJSON `json:"protected"`
+	SchemaVersion    string                 `json:"schema_version"`
+	OK               bool                   `json:"ok"`
+	Complete         bool                   `json:"complete"`
+	IncompleteScopes []string               `json:"incomplete_scopes,omitempty"`
+	Deferred         string                 `json:"deferred,omitempty"`
+	DryRun           bool                   `json:"dry_run"`
+	Summary          worktreeReapSummary    `json:"summary"`
+	Reaped           []worktreeDecisionJSON `json:"reaped"`
+	Protected        []worktreeDecisionJSON `json:"protected"`
 }
 
 // worktreeReapSummary carries the counts a caller would otherwise have to
@@ -63,9 +69,12 @@ type worktreeDecisionJSON struct {
 // newWorktreeReapJSON projects a reapReport onto its wire shape.
 func newWorktreeReapJSON(report reapReport) worktreeReapJSON {
 	return worktreeReapJSON{
-		SchemaVersion: worktreeJSONSchemaVersion,
-		OK:            true,
-		DryRun:        report.DryRun,
+		SchemaVersion:    worktreeReapJSONSchemaVersion,
+		OK:               len(report.IncompleteScopes) == 0,
+		Complete:         len(report.IncompleteScopes) == 0 && report.Deferred == "",
+		IncompleteScopes: report.IncompleteScopes,
+		Deferred:         report.Deferred,
+		DryRun:           report.DryRun,
 		Summary: worktreeReapSummary{
 			Reaped:              len(report.Reaped),
 			Kept:                len(report.Protected),

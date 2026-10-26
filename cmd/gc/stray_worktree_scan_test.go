@@ -163,3 +163,6 @@ func TestScanStrayWorktrees_DoesNotDescendIntoCheckout(t *testing.T) {
 		t.Fatalf("expected only the outer checkout, got %#v", got)
 	}
 }
+
+func (fakeStrayProbe) RevParseVerifyCommit(string) (string, error) { return "fixture-head", nil }
+func (fakeStrayProbe) VerifyTrackedContent(string) error           { return nil }

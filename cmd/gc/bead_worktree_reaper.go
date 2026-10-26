@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -51,9 +52,11 @@ type reapDecision struct {
 // referenced by a non-terminal bead in another molecule, live process, active
 // session, unsafe git state, or an indeterminate age/liveness/borrow-veto scan).
 type reapReport struct {
-	Reaped    []reapDecision
-	Protected []reapDecision
-	DryRun    bool
+	Reaped           []reapDecision
+	Protected        []reapDecision
+	DryRun           bool
+	IncompleteScopes []string
+	Deferred         string
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
@@ -124,7 +127,7 @@ type reapReport struct {
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigStores map[string]beads.Store,
+	scope reapStoreScope,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
@@ -132,13 +135,15 @@ func reapClosedBeadWorktrees(
 	stderr io.Writer,
 ) reapReport {
 	report := reapReport{DryRun: dryRun}
+	rigStores := scope.RigStores
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigStores) == 0 {
+	if cfg == nil {
+		report.IncompleteScopes = []string{"configuration"}
 		return report
 	}
 
@@ -177,6 +182,7 @@ func reapClosedBeadWorktrees(
 		if load, err := reapLoadAverageFn(); err == nil {
 			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
 			if load > ceiling {
+				report.Deferred = fmt.Sprintf("host load %.2f exceeds %.2f", load, ceiling)
 				fmt.Fprintf(stderr, //nolint:errcheck
 					"reapClosedBeadWorktrees: skipping pass, load %.2f exceeds %d%% of %d CPUs (%.2f)\n",
 					load, pct, runtime.NumCPU(), ceiling,
@@ -190,7 +196,15 @@ func reapClosedBeadWorktrees(
 	pace := cfg.Daemon.AutoReapClosedBeadWorktreesPace()
 	removedThisPass := 0
 
+	referencingBeads, incomplete := collectReapBorrowScope(cityPath, cfg, scope, stderr)
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	discovered, discoveryIncomplete := discoverReapNamespaces(cfg, scope, wtRoot, live, liveSessionDirs, stderr)
+	incomplete = append(incomplete, discoveryIncomplete...)
+	report.IncompleteScopes = incomplete
+	var listErr error
+	if len(incomplete) > 0 {
+		listErr = fmt.Errorf("incomplete required scope: %s", strings.Join(incomplete, ", "))
+	}
 
 	for rigName, store := range rigStores {
 		if store == nil {
@@ -204,18 +218,11 @@ func reapClosedBeadWorktrees(
 		}
 		rigWorktreeDir := filepath.Join(wtRoot, rigName)
 
-		// discoverWorktreeLiveness is the single shared scan: it enumerates
-		// every worktree git knows about for this rig — including ones
-		// outside .gc/worktrees entirely — and computes liveness for each
-		// against the pass's authoritative live set. Pass 1 below still
-		// narrows to gc-owned candidates before anything is ever reaped;
-		// pass 2 reuses the liveness already computed here instead of
-		// re-scanning per candidate.
-		worktreeLivenessResults, err := discoverWorktreeLiveness(rigRoot, live, liveSessionDirs)
-		if err != nil {
-			fmt.Fprintf(stderr, "reapClosedBeadWorktrees: listing worktrees for rig %s (%s): %v\n", rigName, rigRoot, err) //nolint:errcheck
+		worktreeLivenessResults := discovered[rigName]
+		if len(worktreeLivenessResults) == 0 {
 			continue
 		}
+
 		livenessByPath := make(map[string]worktreeLiveness, len(worktreeLivenessResults))
 		for _, wl := range worktreeLivenessResults {
 			livenessByPath[wl.Path] = wl
@@ -291,7 +298,7 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
-			candidates = append(candidates, reapCandidate{beadID: beadID, worktreePath: worktreePath})
+			candidates = append(candidates, reapCandidate{beadID: beadID, worktreePath: worktreePath, revision: bead.Revision})
 		}
 
 		if len(candidates) == 0 {
@@ -302,7 +309,6 @@ func reapClosedBeadWorktrees(
 		// surviving candidate in this rig instead of one query per candidate.
 		// A query error fails closed — every remaining candidate in this
 		// rig's tick is protected (NFR-1).
-		referencingBeads, listErr := scanBorrowVetoReferences(store, candidates)
 		if listErr != nil {
 			reason := fmt.Sprintf("borrow-veto scan failed (failing closed): %v", listErr)
 			for _, c := range candidates {
@@ -331,7 +337,10 @@ func reapClosedBeadWorktrees(
 			// bead — regardless of molecule — still references this path via
 			// work-dir metadata.
 			reason := ""
-			if refs := referencingBeads[worktreePath]; len(refs) > 0 {
+			refs, borrowPathErr := reapBorrowersUnder(referencingBeads, worktreePath)
+			if borrowPathErr != nil {
+				reason = fmt.Sprintf("borrow-veto path resolution failed: %v", borrowPathErr)
+			} else if len(refs) > 0 {
 				reason = fmt.Sprintf("borrow-veto: referenced by non-terminal bead(s) %s", strings.Join(refs, ", "))
 			}
 
@@ -367,7 +376,10 @@ func reapClosedBeadWorktrees(
 			holdsUnlandedWork := false
 			unlandedButPreserved := ""
 			var nonDisposable []string
+			var inspectionHEAD string
 			if reason == "" {
+				var headErr error
+				inspectionHEAD, headErr = wg.RevParseVerifyCommit("HEAD")
 				status, statusErr := wg.WorkingTreeStatus()
 				hasUncommitted := len(status.Dirty) > 0
 				if statusErr == nil && !hasUncommitted && len(status.Ignored) > 0 {
@@ -377,6 +389,8 @@ func reapClosedBeadWorktrees(
 				hasUnpreserved, preservedErr := wg.HasUnpreservedCommitsResult()
 				holdsUnlandedWork = unlandedErr == nil && hasUnlanded
 				switch {
+				case headErr != nil:
+					reason = fmt.Sprintf("unsafe git state: HEAD probe failed: %v", headErr)
 				case statusErr != nil:
 					reason = fmt.Sprintf("unsafe git state: status git probe failed (failing closed): %v", statusErr)
 				case unlandedErr != nil:
@@ -485,6 +499,11 @@ func reapClosedBeadWorktrees(
 				)
 			}
 
+			if err := wg.VerifyTrackedContent(inspectionHEAD); err != nil {
+				reason := "unsafe tracked content: " + err.Error()
+				report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason})
+				continue
+			}
 			if dryRun {
 				const whatIf = "dry-run: would reap (closed bead, clean tree, no live process)"
 				if skips.shouldSurface(worktreePath, whatIf) {
@@ -501,6 +520,42 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
+			// Check content again immediately before deletion: a user edit after
+			// initial classification must not ride an earlier ignored-file decision.
+			latest, latestErr := wg.WorkingTreeStatus()
+			var changedIgnored []string
+			changedReason := ""
+			switch {
+			case latestErr != nil:
+				changedReason = fmt.Sprintf("unsafe git state: status probe before removal failed: %v", latestErr)
+			case len(latest.Dirty) > 0:
+				changedReason = "unsafe git state: changed before removal: uncommitted=true"
+			default:
+				changedIgnored = nonDisposableIgnored(worktreePath, latest.Ignored, cfg.Daemon.AutoReapDisposableIgnored)
+				if len(changedIgnored) > 0 {
+					changedReason = "unsafe git state: non-disposable ignored before removal: " + describeNonDisposable(changedIgnored)
+				}
+			}
+			if changedReason != "" {
+				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: protecting %s: %s\n", worktreePath, changedReason) //nolint:errcheck
+				recordReapSkipped(rec, beadID, worktreePath, rigName, changedReason)
+				report.Protected = append(report.Protected, reapDecision{
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch,
+					Reason: changedReason, NonDisposableIgnored: changedIgnored,
+				})
+				continue
+			}
+
+			owner, ownerErr := reapOwnerLive(store, beadID)
+			if ownerErr != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata["gc.user_paused"] == "true" {
+				reason := "owner is no longer closed or live owner read failed"
+				report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason})
+				continue
+			}
+			if err := wg.VerifyTrackedContent(inspectionHEAD); err != nil {
+				report.Protected = append(report.Protected, reapDecision{BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: "tracked content changed before removal: " + err.Error()})
+				continue
+			}
 			// Remove the worktree from the OWNING rig repository. git worktree
 			// remove must be run from the main repo root, not from within the
 			// worktree being removed.
@@ -552,6 +607,7 @@ var reapPaceFn = time.Sleep
 type reapCandidate struct {
 	beadID       string
 	worktreePath string
+	revision     int64
 }
 
 // reapSkipTracker makes the reaper's skip reporting edge-triggered, so a
@@ -654,32 +710,46 @@ func computeWorktreeAge(worktreePath string) (age time.Duration, ok bool) {
 // metadata path recorded in a different-but-equivalent form still vetoes.
 // A query error is returned as-is; the caller must fail closed and protect
 // every candidate in the rig (NFR-1).
+// A nil candidate set collects all normalized paths for the once-per-pass scope index.
 func scanBorrowVetoReferences(store beads.Store, candidates []reapCandidate) (map[string][]string, error) {
 	// The query excludes closed beads at the store level (IsTerminalStatus
 	// would discard them anyway) and skips label hydration this scan never
 	// reads. TierBoth is explicit so the reaper's safety contract does not
 	// depend on a wrapping store expanding the default tier for it.
-	all, err := store.List(beads.ListQuery{AllowScan: true, SkipLabels: true, TierMode: beads.TierBoth})
+	all, err := store.List(beads.ListQuery{AllowScan: true, SkipLabels: true, TierMode: beads.TierBoth, Live: true})
 	if err != nil {
 		return nil, err
 	}
 	byNorm := make(map[string]string, len(candidates)) // normalized -> raw candidate path
 	for _, c := range candidates {
-		byNorm[pathutil.NormalizePathForCompare(c.worktreePath)] = c.worktreePath
+		normalized, err := normalizeReapBorrowPath(c.worktreePath)
+		if err != nil {
+			return nil, err
+		}
+		byNorm[normalized] = c.worktreePath
 	}
 	refs := make(map[string][]string)
 	for _, b := range all {
 		if convoycore.IsTerminalStatus(b.Status) {
 			continue
 		}
-		for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		seen := make(map[string]bool)
+		for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, contract.WorkerDirKey} {
 			p := strings.TrimSpace(b.Metadata[key])
 			if p == "" {
 				continue
 			}
-			if raw, hit := byNorm[pathutil.NormalizePathForCompare(p)]; hit {
+			normalized, err := normalizeReapBorrowPath(p)
+			if err != nil {
+				return nil, fmt.Errorf("bead %s has unresolved work-dir: %w", b.ID, err)
+			}
+			raw, hit := byNorm[normalized]
+			if candidates == nil {
+				raw, hit = normalized, true
+			}
+			if hit && !seen[raw] {
 				refs[raw] = append(refs[raw], b.ID)
-				break
+				seen[raw] = true
 			}
 		}
 	}

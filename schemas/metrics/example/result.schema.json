@@ -223,7 +223,8 @@
               "mcp-validate",
               "worktree-reap",
               "run-cancel",
-              "analyze-continuity"
+              "analyze-continuity",
+              "worktree-archive-reap"
             ]
           },
           "event_id": {

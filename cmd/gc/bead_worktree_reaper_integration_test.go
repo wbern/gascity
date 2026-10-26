@@ -114,7 +114,7 @@ func TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // scanned, but no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-idle01" {
 		t.Fatalf("Reaped = %+v, want exactly ga-idle01\nstderr:\n%s", report.Reaped, stderr.String())
@@ -145,7 +145,7 @@ func TestReapClosedBeadWorktrees_ProtectsIgnoredOnlyWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, reapTestConfig(rigRoot), reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for ignored-only worktree\nstderr:\n%s", report.Reaped, stderr.String())
@@ -176,7 +176,7 @@ func TestReapClosedBeadWorktrees_ProtectsLiveWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(wt)}})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a live worktree\nstderr:\n%s", report.Reaped, stderr.String())
@@ -200,7 +200,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaActiveSessionDir(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, []string{wt}, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), []string{wt}, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when an active session claims the worktree", report.Reaped)
@@ -224,7 +224,7 @@ func TestReapClosedBeadWorktrees_FailsClosedWhenLivenessUnavailable(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: false}) // liveness indeterminate
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when liveness scan is unavailable (fail closed)", report.Reaped)
@@ -248,7 +248,7 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, true, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, true, events.Discard, nil, &stderr)
 
 	if !report.DryRun {
 		t.Fatal("report.DryRun = false, want true")
@@ -284,7 +284,7 @@ func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testin
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(foreign)}})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("reaper acted on or reported a worktree outside its owned root: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
@@ -304,7 +304,7 @@ func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, reapTestScope(map[string]beads.Store{"mrig": store}), nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("open bead touched: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)

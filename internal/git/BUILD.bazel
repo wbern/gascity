@@ -22,6 +22,8 @@ go_test(
         "sshkeepalive_test.go",
         "testenv_import_test.go",
         "unreachable_commits_test.go",
+        "worktree_content_test.go",
+        "worktree_index_flags_test.go",
         "worktree_ops_test.go",
     ],
     embed = [":git"],

@@ -308,3 +308,49 @@ func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
 		}
 	}
 }
+
+func TestInspectionWorktreeMoveAndAncestry(t *testing.T) {
+	repo := initTestRepo(t)
+	g := NewInspection(repo)
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	dest := filepath.Join(root, "quarantine")
+	if err := g.WorktreeAddNewBranch(source, "retirement-test", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := NewInspection(source).RevParseVerifyCommit("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.WorktreeMove(source, dest); err != nil {
+		t.Fatal(err)
+	}
+	after, err := NewInspection(dest).RevParseVerifyCommit("HEAD")
+	if err != nil || before != after {
+		t.Fatalf("head=%s err=%v", after, err)
+	}
+	if yes, err := g.IsAncestor(before, after); err != nil || !yes {
+		t.Fatalf("ancestor=%v err=%v", yes, err)
+	}
+	if err := g.WorktreeMove(dest, repo); err == nil {
+		t.Fatal("move accepted an existing destination directory")
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatal("failed move lost source")
+	}
+	if _, err := os.Stat(filepath.Join(repo, filepath.Base(dest))); !os.IsNotExist(err) {
+		t.Fatalf("failed move nested source inside existing destination: %v", err)
+	}
+}
+
+func TestInspectionEnvironmentRemovesAllGitOverrides(t *testing.T) {
+	got := inspectionGitEnv([]string{"PATH=/bin", "GIT_DIR=/foreign", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.worktree", "GIT_CONFIG_VALUE_0=/foreign", "GIT_REPLACE_REF_BASE=refs/alternate", "OTHER=yes"})
+	for _, entry := range got {
+		if strings.Contains(entry, "foreign") || strings.HasPrefix(entry, "GIT_CONFIG_COUNT=") || strings.HasPrefix(entry, "GIT_REPLACE_REF_BASE=") {
+			t.Fatalf("ambient override retained: %q", entry)
+		}
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "GIT_NO_REPLACE_OBJECTS=1") {
+		t.Fatal("replacement disabling absent")
+	}
+}

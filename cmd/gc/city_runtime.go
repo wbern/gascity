@@ -1448,15 +1448,16 @@ func (cr *CityRuntime) tick(
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, reapStoreScope{RigStores: cr.rigBeadStores(), CityStore: cr.cityBeadStore()}, liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
-			"reaped":    len(report.Reaped),
-			"protected": len(report.Protected),
-			"dry_run":   !reapEnabled,
+			"incomplete_scope_count": len(report.IncompleteScopes),
+			"reaped":                 len(report.Reaped),
+			"protected":              len(report.Protected),
+			"dry_run":                !reapEnabled,
 		})
-		// Agent-home worktree cleanup performs real removals, so it runs only
-		// when real reaping is enabled — never under dry-run.
-		if reapEnabled {
+		// Agent-home cleanup mutates workspaces too. An incomplete or deferred
+		// safety inventory must not be followed by sibling workspace changes.
+		if reapEnabled && len(report.IncompleteScopes) == 0 && report.Deferred == "" {
 			phaseStart = time.Now()
 			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
 			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})

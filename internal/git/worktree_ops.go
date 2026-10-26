@@ -3,10 +3,83 @@ package git
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// WorktreeMove moves a registered checkout without forcing locked worktrees or
+// overwriting an existing destination. The branch and commit remain unchanged.
+func (g *Git) WorktreeMove(source, destination string) error {
+	if err := validateRefArg("source", source); err != nil {
+		return err
+	}
+	if err := validateRefArg("destination", destination); err != nil {
+		return err
+	}
+	// Git treats an existing directory as a container and silently nests the
+	// source inside it. Retirement requires one exact, absent destination.
+	absolute := func(path string) string {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(g.workDir, path)
+		}
+		return filepath.Clean(path)
+	}
+	source, destination = absolute(source), absolute(destination)
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("worktree move destination already exists")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspecting worktree move destination: %w", err)
+	}
+	privateDir, err := NewInspection(source).GitDir()
+	if err != nil {
+		return err
+	}
+	if _, err := g.run("worktree", "move", "--", source, destination); err != nil {
+		return err
+	}
+	// A destination created concurrently can still change Git's interpretation.
+	// Verify registration and identity; callers must retain uncertain results,
+	// never attempt a compensating move into a potentially recreated namespace.
+	physicalDestination, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		return fmt.Errorf("resolving moved worktree destination: %w", err)
+	}
+	entries, err := g.WorktreeList()
+	if err != nil {
+		return fmt.Errorf("verifying moved worktree registration: %w", err)
+	}
+	for _, entry := range entries {
+		if filepath.Clean(entry.Path) != physicalDestination {
+			continue
+		}
+		movedDir, err := NewInspection(destination).GitDir()
+		if err == nil && movedDir == privateDir {
+			return nil
+		}
+	}
+	return fmt.Errorf("moved worktree does not have the exact expected destination and identity")
+}
+
+// IsAncestor reports Git's ancestry result and distinguishes probe failures.
+func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
+	if err := validateRefArg("ancestor", ancestor); err != nil {
+		return false, err
+	}
+	if err := validateRefArg("descendant", descendant); err != nil {
+		return false, err
+	}
+	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
+	if err == nil {
+		return true, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
 
 // validateRefArg rejects ref/branch/path arguments that could be parsed as
 // git command-line options. All worktree-op helpers pass user-influenced

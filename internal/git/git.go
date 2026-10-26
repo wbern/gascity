@@ -2,13 +2,16 @@
 package git
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Worktree represents a single git worktree entry.
@@ -20,12 +23,31 @@ type Worktree struct {
 
 // Git wraps git operations scoped to a working directory.
 type Git struct {
-	workDir string
+	workDir    string
+	inspection bool
 }
 
 // New returns a Git instance scoped to the given directory.
 func New(workDir string) *Git {
 	return &Git{workDir: workDir}
+}
+
+// NewInspection scopes local safety probes and retirement operations to this
+// repository, without ambient Git routing/config/replacement hooks or prompts.
+// It does not fetch: callers qualify remote state separately and pin local refs.
+func NewInspection(workDir string) *Git {
+	return &Git{workDir: workDir, inspection: true}
+}
+
+func inspectionGitEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+5)
+	for _, item := range environ {
+		key, _, _ := strings.Cut(item, "=")
+		if !strings.HasPrefix(key, "GIT_") {
+			out = append(out, item)
+		}
+	}
+	return append(out, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_TERMINAL_PROMPT=0")
 }
 
 // IsRepo reports whether workDir is inside a git repository.
@@ -197,11 +219,12 @@ func (g *Git) HasUncommittedWork() bool {
 // changes, untracked files, or ignored files. Use it before removing a
 // worktree, because removal destroys ignored local files too.
 func (g *Git) HasUncommittedOrIgnoredWork() bool {
-	out, err := g.run("status", "--porcelain", "--ignored")
-	if err != nil {
-		return true // assume dirty on error (safe default)
+	status, err := g.WorkingTreeStatus()
+	if err != nil || len(status.Dirty) > 0 || len(status.Ignored) > 0 {
+		return true
 	}
-	return strings.TrimSpace(out) != ""
+	head, err := NewInspection(g.workDir).RevParseVerifyCommit("HEAD")
+	return err != nil || g.VerifyTrackedContent(head) != nil
 }
 
 // WorkingTreeStatus splits `git status --ignored` into real dirt and ignored
@@ -217,11 +240,102 @@ type WorkingTreeStatus struct {
 // WorkingTreeStatus reports the working tree's dirt and ignored roots. A
 // probe failure is returned as an error so removal callers can fail closed.
 func (g *Git) WorkingTreeStatus() (WorkingTreeStatus, error) {
-	out, err := g.run("status", "--porcelain=v1", "-z", "--ignored")
+	if err := g.checkWorkingTreeInspectionSettings(); err != nil {
+		return WorkingTreeStatus{}, err
+	}
+	// Git status and even non-force removal trust these index flags. They
+	// can hide real tracked edits, so never authorize removal through them.
+	entries, err := g.run("ls-files", "-v", "-z")
+	if err != nil {
+		return WorkingTreeStatus{}, fmt.Errorf("checking index visibility: %w", err)
+	}
+	for _, record := range strings.Split(entries, "\x00") {
+		if record == "" {
+			continue
+		}
+		if len(record) < 3 || record[1] != ' ' {
+			return WorkingTreeStatus{}, fmt.Errorf("unrecognized index visibility record")
+		}
+		tag := record[0]
+		if tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return WorkingTreeStatus{}, fmt.Errorf("index flags hide tracked work; preserve checkout until assume-unchanged/skip-worktree flags are reviewed")
+		}
+	}
+	// A human-facing status.showUntrackedFiles=no preference also suppresses
+	// ignored entries. Override it explicitly, preserving collapsed roots so
+	// ignored caches do not expand into an unbounded per-file status listing.
+	out, err := g.run("status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=normal")
 	if err != nil {
 		return WorkingTreeStatus{}, fmt.Errorf("checking working tree status: %w", err)
 	}
 	return parseWorkingTreeStatus(out), nil
+}
+
+// checkWorkingTreeInspectionSettings rejects current settings that can make
+// status trust stale cleanliness. Overriding them only for the final command
+// cannot repair an index already refreshed under weakened stat assumptions.
+// Read every visible scope so an inspection command override does not conceal
+// a persisted repository/worktree setting with weaker semantics.
+func (g *Git) checkWorkingTreeInspectionSettings() error {
+	out, err := g.readWorkingTreeInspectionSettings()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil
+		}
+		return fmt.Errorf("checking Git inspection settings: %w", err)
+	}
+	records := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	if out == "" {
+		return nil
+	}
+	if len(records)%2 != 0 {
+		return fmt.Errorf("unrecognized Git inspection settings")
+	}
+	for i := 0; i < len(records); i += 2 {
+		key, value, ok := strings.Cut(records[i+1], "\n")
+		if !ok {
+			return fmt.Errorf("unrecognized Git inspection setting")
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		safe := false
+		switch strings.ToLower(key) {
+		case "core.trustctime":
+			safe = value == "true" || value == "yes" || value == "on" || value == "1"
+		case "core.checkstat":
+			safe = value == "default"
+		case "core.ignorestat", "core.fsmonitor":
+			safe = value == "false" || value == "no" || value == "off" || value == "0"
+		}
+		if !safe {
+			return fmt.Errorf("git index inspection setting %s may hide tracked work; preserve checkout for review", key)
+		}
+	}
+	return nil
+}
+
+// Reading config executes no hooks or filesystem monitor. Preserve the real
+// persistent config scopes for this query only; ordinary safety commands remain
+// isolated from global routing, hooks and command configuration.
+func (g *Git) readWorkingTreeInspectionSettings() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "config", "--null", "--show-scope", "--get-regexp", `^core\.(trustctime|checkstat|ignorestat|fsmonitor)$`)
+	cmd.Dir = g.workDir
+	for _, item := range os.Environ() {
+		key, _, _ := strings.Cut(item, "=")
+		// Honor explicit config-file profiles (including TEST_ENV's seeded
+		// global file) for this read-only query. Routing/index/object and
+		// command-injection overrides remain stripped.
+		configProfile := key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_SYSTEM" || key == "GIT_CONFIG_NOSYSTEM"
+		if !strings.HasPrefix(key, "GIT_") || configProfile {
+			cmd.Env = append(cmd.Env, item)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = 100 * time.Millisecond
+	data, err := cmd.Output()
+	return string(data), err
 }
 
 // parseWorkingTreeStatus parses NUL-separated porcelain v1 records. Any record
@@ -557,15 +671,50 @@ func (g *Git) run(args ...string) (string, error) {
 
 // runCtx executes a git command with a context for cancellation/timeout.
 func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
+	if g.inspection {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		args = append([]string{"--no-replace-objects", "--no-optional-locks", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"}, args...)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	// Build clean env: inherit everything except git-specific vars.
 	cmd.Env = sanitizeGitEnv(os.Environ())
-	out, err := cmd.CombinedOutput()
+	if g.inspection {
+		cmd.Env = inspectionGitEnv(os.Environ())
+		cmd.WaitDelay = 100 * time.Millisecond
+	}
+	var out []byte
+	var err error
+	if g.inspection {
+		captured := &boundedInspectionOutput{limit: 16 << 20}
+		cmd.Stdout = captured
+		cmd.Stderr = captured
+		err = cmd.Run()
+		out = captured.Bytes()
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 	if err != nil {
+		if g.inspection && len(out) > 4096 {
+			out = out[:4096]
+		}
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return string(out), nil
+}
+
+type boundedInspectionOutput struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *boundedInspectionOutput) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.Len() {
+		return 0, fmt.Errorf("git inspection output exceeds byte budget")
+	}
+	return b.Buffer.Write(p)
 }
 
 // parseWorktreeList parses git worktree list --porcelain output.

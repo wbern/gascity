@@ -71,6 +71,7 @@ managed worktree roots (scan, reap).`,
 	cmd.AddCommand(newWorktreeCleanupCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeScanCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeReapCmd(stdout, stderr))
+	cmd.AddCommand(newWorktreeArchiveReapCmd(stdout, stderr))
 	return cmd
 }
 
@@ -147,23 +148,30 @@ func doWorktreeReap(args []string, execute, jsonFlag bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc worktree reap: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if len(stores) == 0 {
-		fmt.Fprintln(stderr, "gc worktree reap: no rig bead stores could be opened; nothing to inspect") //nolint:errcheck // best-effort stderr
-		return 1
+
+	cityStore, cityErr := worktreeOpenCityStoreAt(cityPath)
+	if cityErr != nil {
+		fmt.Fprintf(stderr, "gc worktree reap: city borrow scope unavailable: %v\n", cityErr) //nolint:errcheck // best-effort diagnostic
 	}
 
 	// Reaper diagnostics go to stderr so stdout stays a clean report.
-	report := worktreeReapClosedBeadWorktrees(cityPath, cfg, stores, liveDirs, !execute, events.Discard, nil, stderr)
+	report := worktreeReapClosedBeadWorktrees(cityPath, cfg, reapStoreScope{RigStores: stores, CityStore: cityStore}, liveDirs, !execute, events.Discard, nil, stderr)
 
 	if jsonFlag {
 		if err := encodeWorktreeJSON(stdout, newWorktreeReapJSON(report)); err != nil {
 			fmt.Fprintf(stderr, "gc worktree reap: writing json: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if len(report.IncompleteScopes) > 0 {
+			return 1
+		}
 		return 0
 	}
 
 	renderReapReport(stdout, report)
+	if len(report.IncompleteScopes) > 0 {
+		return 1
+	}
 	return 0
 }
 
@@ -197,6 +205,12 @@ func worktreeReapRigStores(cityPath string, cfg *config.City, stderr io.Writer) 
 // are printed with their reason — that column is the whole point, because "the
 // reaper reclaimed nothing" is only actionable when it says why.
 func renderReapReport(stdout io.Writer, report reapReport) {
+	if len(report.IncompleteScopes) > 0 {
+		fmt.Fprintf(stdout, "INCOMPLETE borrow safety scope: %s\n", strings.Join(report.IncompleteScopes, ", ")) //nolint:errcheck // best-effort report
+	}
+	if report.Deferred != "" {
+		fmt.Fprintf(stdout, "Inspection deferred: %s\n", report.Deferred) //nolint:errcheck // best-effort report
+	}
 	mode := "reaped"
 	verb := "reaped"
 	if report.DryRun {
