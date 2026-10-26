@@ -14,7 +14,18 @@ func TestDispatchHoldLabelsMatchCanonicalHoldValues(t *testing.T) {
 	if HoldExternalLabel != "hold:external" {
 		t.Fatalf("HoldExternalLabel = %q, want %q", HoldExternalLabel, "hold:external")
 	}
-	want := []string{HoldMayorLabel, HoldExternalLabel}
+	if HeldLabel != "held" {
+		t.Fatalf("HeldLabel = %q, want %q", HeldLabel, "held")
+	}
+	if HoldHumanLabel != "hold:human" {
+		t.Fatalf("HoldHumanLabel = %q, want %q", HoldHumanLabel, "hold:human")
+	}
+	want := []string{
+		HoldMayorLabel,
+		HoldExternalLabel,
+		HeldLabel,
+		HoldHumanLabel,
+	}
 	if len(DispatchHoldLabels) != len(want) {
 		t.Fatalf("DispatchHoldLabels = %#v, want %#v", DispatchHoldLabels, want)
 	}

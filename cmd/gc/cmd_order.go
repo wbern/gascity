@@ -2231,13 +2231,13 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err)     //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return 1
+
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
+	if cfgErr != nil && !os.IsNotExist(cfgErr) {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: loading city config: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
+		}
 	}
-	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 
 	// Load nudge state to protect live nudge IDs from being swept. A missing
 	// state file is not an error (LoadState returns empty state), so any error
@@ -2251,70 +2251,160 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 	statePtr := &nudgeState
 
 	if !mailTTLExplicit {
-		// Read the TTL default straight from city.toml. openStoreAtForCity above
-		// already loaded the city config through loadCityConfig, but it does not
-		// hand that config back to this caller, so the value is read again here.
-		mailTTL = nudgeMailSweepMailTTLForCity(cityPath, mailTTL, stderr)
+		mailTTL = nudgeMailSweepMailTTLForConfig(cfg, stderr)
+	}
+
+	var targets []nudgeMailSweepTarget
+	var toClose []beads.Store
+	defer func() {
+		for _, s := range toClose {
+			closeBeadStoreHandle(s) //nolint:errcheck
+		}
+	}()
+
+	if rigFlag != "" {
+		if cfg == nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: rig %q specified but city config not found\n", rigFlag) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		rig := findRigByName(rigFlag, cfg.Rigs)
+		if rig == nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: rig %q not found in city.toml\n", rigFlag) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: rig %q is unbound (missing path)\n", rigFlag) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		rigStore, err := openOneShotStoreAtForCityWithConfig(rig.Path, cityPath, cfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: opening store for rig %q: %v\n", rigFlag, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		toClose = append(toClose, rigStore)
+		targets = append(targets, nudgeMailSweepTarget{
+			Scope:  rig.Name,
+			Nudges: beads.NudgesStore{Store: rigStore},
+			Mail:   beads.MailStore{Store: rigStore},
+		})
+	} else {
+		// Sweep city store
+		store, err := openStoreAtForCity(cityPath, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err)     //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		toClose = append(toClose, store)
+		// Route each phase to its coordination class, the way the controller's
+		// nudge-mail sweep watchdog already does (city_runtime.go, via
+		// nudgesBeadStore/mailBeadStore).
+		targets = append(targets, nudgeMailSweepTarget{
+			Scope:  "city",
+			Nudges: cliNudgesStore(store, nil, cityPath),
+			Mail:   cliMailStore(store, nil, cityPath),
+		})
+
+		// Sweep all bound rig stores in cfg.Rigs
+		if cfg != nil && len(cfg.Rigs) > 0 {
+			rigStores := buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
+			for _, rig := range cfg.Rigs {
+				if rs, ok := rigStores[rig.Name]; ok && rs != nil {
+					toClose = append(toClose, rs)
+					targets = append(targets, nudgeMailSweepTarget{
+						Scope:  rig.Name,
+						Nudges: beads.NudgesStore{Store: rs},
+						Mail:   beads.MailStore{Store: rs},
+					})
+				}
+			}
+		}
 	}
 
 	now := time.Now()
-	// Route each phase to its coordination class, the way the controller's
-	// nudge-mail sweep watchdog already does (city_runtime.go, via
-	// nudgesBeadStore/mailBeadStore). Left unrouted, the CLI sweep reads an empty
-	// backlog on a relocated city and reports success while the real one grows.
-	// cfg is nil deliberately: resolveClassStore ignores it, and loading config
-	// here would stomp the process-wide feature-flag globals (see the
-	// resolveCLIStorageRoutes doc).
-	nudges := cliNudgesStore(store, nil, cityPath)
-	mail := cliMailStore(store, nil, cityPath)
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 }
 
+//nolint:unparam // compatibility wrapper retains the full nudgeState seam for tests
 func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	return cmdOrderSweepNudgeMailDryRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+}
+
+func cmdOrderSweepNudgeMailDryRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	var totalCounts nudgeMailSweepResult
+	remainingBudget := nudgeMailSweepCloseBudget
+	for _, target := range targets {
+		if remainingBudget <= 0 {
+			break
+		}
+		counts, err := countStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, remainingBudget)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		totalCounts.NudgeClosed += counts.NudgeClosed
+		totalCounts.MailClosed += counts.MailClosed
+		remainingBudget -= (counts.NudgeClosed + counts.MailClosed)
 	}
 	if quiet {
 		return 0
 	}
-	if counts.NudgeClosed == 0 && counts.MailClosed == 0 {
+	if totalCounts.NudgeClosed == 0 && totalCounts.MailClosed == 0 {
 		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s)  (no changes made)\n", //nolint:errcheck
-		counts.NudgeClosed, counts.MailClosed)
+		totalCounts.NudgeClosed, totalCounts.MailClosed)
 	return 0
 }
 
+//nolint:unparam // compatibility wrapper retains the full nudgeState seam for tests
 func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+	return cmdOrderSweepNudgeMailRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+}
 
-	if sweepErr != nil {
-		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
-		// to stderr and continue; the overall sweep is not fatal. A fatal list error
-		// is a single wrapped error that does not implement that interface: surface
-		// it and fail so an unreadable store does not silently "succeed".
-		type unwrapper interface{ Unwrap() []error }
-		if u, ok := sweepErr.(unwrapper); ok {
-			for _, e := range u.Unwrap() {
-				fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
-			}
-		} else {
-			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", sweepErr) //nolint:errcheck // best-effort stderr
-			return 1
+func cmdOrderSweepNudgeMailRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	var totalResult nudgeMailSweepResult
+	var fatalErr error
+	remainingBudget := nudgeMailSweepCloseBudget
+
+	for _, target := range targets {
+		if remainingBudget <= 0 {
+			break
 		}
+		result, sweepErr := sweepStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, remainingBudget)
+		if sweepErr != nil {
+			// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
+			// to stderr and continue; the overall sweep is not fatal. A fatal list error
+			// is a single wrapped error that does not implement that interface: surface
+			// it and fail so an unreadable store does not silently "succeed".
+			type unwrapper interface{ Unwrap() []error }
+			if u, ok := sweepErr.(unwrapper); ok {
+				for _, e := range u.Unwrap() {
+					fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
+				}
+			} else {
+				fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", sweepErr) //nolint:errcheck // best-effort stderr
+				fatalErr = sweepErr
+			}
+		}
+		totalResult.NudgeClosed += result.NudgeClosed
+		totalResult.MailClosed += result.MailClosed
+		remainingBudget -= (result.NudgeClosed + result.MailClosed)
+	}
+
+	if fatalErr != nil && totalResult.NudgeClosed == 0 && totalResult.MailClosed == 0 {
+		return 1
 	}
 
 	if quiet {
 		return 0
 	}
 
-	total := result.NudgeClosed + result.MailClosed
+	total := totalResult.NudgeClosed + totalResult.MailClosed
 	if total == 0 {
 		fmt.Fprintln(stdout, "nudge-mail-sweep: nothing to close (0 stale nudge beads, 0 stale mail beads)") //nolint:errcheck // best-effort stdout
 		return 0
@@ -2324,6 +2414,6 @@ func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, n
 		budgetLine = fmt.Sprintf("[budget: %d/%d — cap reached, re-run to continue]", total, nudgeMailSweepCloseBudget)
 	}
 	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
-		result.NudgeClosed, result.MailClosed, budgetLine)
+		totalResult.NudgeClosed, totalResult.MailClosed, budgetLine)
 	return 0
 }

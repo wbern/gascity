@@ -10,6 +10,8 @@ package beadmeta
 const (
 	HoldMayorLabel    = "hold:mayor"
 	HoldExternalLabel = "hold:external"
+	HeldLabel         = "held"
+	HoldHumanLabel    = "hold:human"
 )
 
 // DispatchHoldLabels is the complete set of hold label values naming a bead
@@ -34,4 +36,9 @@ const (
 //
 // The short rule: filter on holds when deciding what to DO, never when
 // deciding who EXISTS.
-var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
+var DispatchHoldLabels = []string{
+	HoldMayorLabel,
+	HoldExternalLabel,
+	HeldLabel,
+	HoldHumanLabel,
+}
