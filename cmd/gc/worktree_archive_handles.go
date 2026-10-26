@@ -32,14 +32,12 @@ func (b *archiveBoundedOutput) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func collectArchiveHandleSnapshot() ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+func collectArchiveHandleSnapshot(ctx context.Context) ([]byte, error) {
 	before, err := archiveProcessIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	data, err := archiveInventoryOutput(ctx, 8<<20, "lsof", "-n", "-P", "-a", "-u", strconv.Itoa(os.Geteuid()), "-F0pftan")
+	data, _, err := archiveInventoryOutput(ctx, 8<<20, "lsof", "-n", "-P", "-a", "-u", strconv.Itoa(os.Geteuid()), "-F0pftanDi")
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +51,7 @@ func collectArchiveHandleSnapshot() ([]byte, error) {
 	return data, nil
 }
 
-func archiveInventoryOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, error) {
+func archiveInventoryOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, int, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -72,19 +70,26 @@ func archiveInventoryOutput(ctx context.Context, limit int, name string, args ..
 	cmd.Stdout = out
 	cmd.Stderr = diagnostics
 	if err := cmd.Run(); err != nil || ctx.Err() != nil || diagnostics.Len() != 0 {
-		return nil, fmt.Errorf("%s process inventory unavailable or incomplete", name)
+		return nil, 0, fmt.Errorf("%s process inventory unavailable or incomplete", name)
 	}
-	return out.Bytes(), nil
+	// Run includes successful Wait. Only this exact subprocess is proven exited.
+	return out.Bytes(), cmd.Process.Pid, nil
 }
 
 func archiveProcessIDs(ctx context.Context) (map[int]bool, error) {
-	data, err := archiveInventoryOutput(ctx, 1<<20, "ps", "-axo", "pid=,uid=,state=")
+	data, waitedPID, err := archiveInventoryOutput(ctx, 1<<20, "ps", "-axo", "pid=,uid=,state=")
 	if err != nil {
 		return nil, err
 	}
 	// Darwin's process-wide SZOMB follows descriptor-table teardown. Linux can
 	// retain a zombie group leader with live sibling threads, so stays strict.
-	return parseArchiveProcessIDs(data, uint32(os.Geteuid()), os.Getpid(), runtime.GOOS == "darwin")
+	ids, err := parseArchiveProcessIDs(data, uint32(os.Geteuid()), os.Getpid(), runtime.GOOS == "darwin")
+	if err != nil {
+		return nil, err
+	}
+	// ps reports itself, but its successfully waited child cannot retain handles.
+	delete(ids, waitedPID)
+	return ids, nil
 }
 
 func parseArchiveProcessIDs(data []byte, ownUID uint32, ownPID int, zombieFDsClosed bool) (map[int]bool, error) {
@@ -131,10 +136,10 @@ func archiveProcessStateValid(state string) bool {
 }
 
 // Darwin lsof may silently omit a process when its initial information query
-// is denied. Require coverage of every PID present before and live afterward.
-// False-valued zombie keys remain in the first census, so PID reuse or a later
-// live observation never inherits an earlier zombie exemption.
-func archiveProcessCoverage(data []byte, before, after map[int]bool) error {
+// is denied. Require coverage of every live PID in the final census, including
+// processes that appeared after the initial census. An earlier zombie record
+// never exempts a later live observation.
+func archiveProcessCoverage(data []byte, _ map[int]bool, after map[int]bool) error {
 	seen := make(map[int]bool)
 	for _, raw := range bytes.Split(data, []byte{0}) {
 		field := strings.TrimLeft(string(raw), "\r\n")
@@ -147,8 +152,8 @@ func archiveProcessCoverage(data []byte, before, after map[int]bool) error {
 		}
 		seen[pid] = true
 	}
-	for pid := range before {
-		if after[pid] && !seen[pid] {
+	for pid, live := range after {
+		if live && !seen[pid] {
 			return fmt.Errorf("descriptor inventory omitted live current-user process %d", pid)
 		}
 	}
@@ -156,19 +161,24 @@ func archiveProcessCoverage(data []byte, before, after map[int]bool) error {
 }
 
 func archiveHandlesClear(root string) error {
-	data, err := archiveHandleSnapshot()
-	if err != nil {
-		return err
-	}
-	return inspectArchiveHandles(data, root, os.Getpid())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return archivePlatformHandlesClear(ctx, root)
 }
 
 func inspectArchiveHandles(data []byte, root string, ownPID int) error {
+	return inspectArchiveHandlesWithIdentity(data, root, ownPID, nil)
+}
+
+// identityMatch is supplied only after a complete, stable candidate census.
+// A positive match protects aliases even when their pathname is outside root.
+func inspectArchiveHandlesWithIdentity(data []byte, root string, ownPID int, identityMatch func(string, string) (bool, bool, error)) error {
 	if len(data) == 0 || len(data) > 8<<20 {
 		return fmt.Errorf("empty or oversized descriptor inventory")
 	}
 	pid := 0
-	fd, kind, access, name := "", "", "", ""
+	fd, kind, access, name, device, inode := "", "", "", "", "", ""
+	deviceSeen, inodeSeen := false, false
 	processes, files := 0, 0
 	seenOwn := false
 	flush := func() error {
@@ -189,17 +199,31 @@ func inspectArchiveHandles(data []byte, root string, ownPID int) error {
 		if name == "" || !strings.HasPrefix(name, "/") || lsofErrAnnotation.MatchString(name) {
 			return fmt.Errorf("file descriptor path unavailable")
 		}
+		matched, rootMatched := false, false
+		if identityMatch != nil {
+			var err error
+			matched, rootMatched, err = identityMatch(device, inode)
+			if err != nil {
+				return err
+			}
+		}
 		name = strings.TrimSuffix(name, " (deleted)")
 		physical, err := normalizeReapBorrowPath(name)
 		if err != nil {
-			return fmt.Errorf("file descriptor path unresolved")
+			if identityMatch == nil {
+				return fmt.Errorf("file descriptor path unresolved")
+			}
+			if !matched {
+				return nil
+			}
+			return fmt.Errorf("%w (pid %d)", errArchiveHeldHandle, pid)
 		}
-		if !pathAtOrUnder(root, physical) {
+		if !matched && !pathAtOrUnder(root, physical) {
 			return nil
 		}
 		// The archive plan's held read-only root descriptor deliberately pins the
 		// source inode. No other descriptor owned by this process is exempt.
-		if pid == ownPID && kind == "DIR" && access == "r" && physical == root && fd != "cwd" {
+		if pid == ownPID && kind == "DIR" && access == "r" && physical == root && fd != "cwd" && (identityMatch == nil || rootMatched) {
 			return nil
 		}
 		return fmt.Errorf("%w (pid %d)", errArchiveHeldHandle, pid)
@@ -214,7 +238,8 @@ func inspectArchiveHandles(data []byte, root string, ownPID int) error {
 			if err := flush(); err != nil {
 				return err
 			}
-			fd, kind, access, name = "", "", "", ""
+			fd, kind, access, name, device, inode = "", "", "", "", "", ""
+			deviceSeen, inodeSeen = false, false
 			value, err := strconv.Atoi(field[1:])
 			if err != nil || value <= 0 {
 				return fmt.Errorf("invalid process descriptor record")
@@ -230,13 +255,26 @@ func inspectArchiveHandles(data []byte, root string, ownPID int) error {
 				return err
 			}
 			fd = field[1:]
-			kind, access, name = "", "", ""
+			kind, access, name, device, inode = "", "", "", "", ""
+			deviceSeen, inodeSeen = false, false
 		case 't':
 			kind = field[1:]
 		case 'a':
 			access = field[1:]
 		case 'n':
 			name = field[1:]
+		case 'D':
+			if deviceSeen {
+				return fmt.Errorf("duplicate descriptor device")
+			}
+			deviceSeen = true
+			device = field[1:]
+		case 'i':
+			if inodeSeen {
+				return fmt.Errorf("duplicate descriptor inode")
+			}
+			inodeSeen = true
+			inode = field[1:]
 		default:
 			return fmt.Errorf("unexpected descriptor inventory field")
 		}

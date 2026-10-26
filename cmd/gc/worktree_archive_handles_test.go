@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestArchiveHandleInventoryFailsClosed(t *testing.T) {
@@ -42,8 +48,11 @@ func TestArchiveDescriptorCoverageRejectsSilentlyOmittedLiveProcess(t *testing.T
 	if err := archiveProcessCoverage([]byte("p1\x00p3\x00"), before, after); err == nil {
 		t.Fatal("live process omitted without refusal")
 	}
-	if err := archiveProcessCoverage([]byte("p1\x00p2\x00"), before, after); err != nil {
-		t.Fatalf("exited/new process misclassified: %v", err)
+	if err := archiveProcessCoverage([]byte("p1\x00p2\x00"), before, after); err == nil {
+		t.Fatal("new live process omitted without refusal")
+	}
+	if err := archiveProcessCoverage([]byte("p1\x00p2\x00p4\x00"), before, after); err != nil {
+		t.Fatalf("complete live cohort refused: %v", err)
 	}
 }
 
@@ -174,5 +183,65 @@ func TestArchiveZombieExemptionRequiresPlatformProof(t *testing.T) {
 	}
 	if err := archiveProcessCoverage([]byte("p42\x00"), ids, ids); err == nil {
 		t.Fatal("unproven zombie process omitted without protection")
+	}
+}
+
+// archiveTestHandleRecord models the device/inode fields of a real lsof row.
+func archiveTestHandleRecord(t *testing.T, pid int, fd, access, kind, path, name string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode, ok := fsys.FileIdentity(info)
+	if !ok {
+		t.Fatal("file identity unavailable")
+	}
+	if runtime.GOOS == "darwin" {
+		device = uint64(uint32(device))
+	}
+	return fmt.Sprintf("p%d\x00f%s\x00a%s\x00t%s\x00D0x%x\x00i%d\x00n%s\x00", pid, fd, access, kind, device, inode, name)
+}
+
+func TestArchiveInventoryExcludesOnlySuccessfullyWaitedPS(t *testing.T) {
+	dir := t.TempDir()
+	// A real child publishes its own PID as ps does. An unrelated after-only
+	// process must remain required, even though both rows are new to lsof.
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s %%s S\\n' '%d' '%d' \"$$\" '%d' '1999999999' '%d'\n", os.Getpid(), os.Geteuid(), os.Geteuid(), os.Geteuid())
+	path := filepath.Join(dir, "ps")
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ids, err := archiveProcessIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || !ids[os.Getpid()] || !ids[1999999999] {
+		t.Fatalf("waited child exemption broadened or missing: %v", ids)
+	}
+	if err := archiveProcessCoverage([]byte(fmt.Sprintf("p%d\x00", os.Getpid())), nil, ids); err == nil {
+		t.Fatal("unwaited new process exempted")
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 7\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archiveProcessIDs(ctx); err == nil {
+		t.Fatal("failed child treated as complete census")
+	}
+}
+
+func TestArchiveInventoryTimeoutIsIncomplete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	data, pid, err := archiveInventoryOutput(ctx, 1024, "/bin/sh", "-c", "exec /bin/sleep 5")
+	if err == nil || pid != 0 || data != nil {
+		t.Fatalf("timeout supplied exit proof: pid=%d err=%v", pid, err)
+	}
+	report := archiveHandleFailure(worktreeArchiveReport{Complete: true}, err)
+	if report.Complete || report.ReasonCode != "handle_inventory_incomplete" || report.ArchivePath != "" {
+		t.Fatalf("timeout classification: %+v", report)
 	}
 }

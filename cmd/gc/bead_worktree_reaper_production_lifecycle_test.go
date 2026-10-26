@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -62,6 +63,7 @@ func TestReapClosedBeadWorktrees_ProductionLifecycle(t *testing.T) {
 		{"late_changed_branch", false},
 		{"late_borrower", false},
 		{"late_artifact_fd", false},
+		{"late_handle_cancellation", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,8 +71,8 @@ func TestReapClosedBeadWorktrees_ProductionLifecycle(t *testing.T) {
 			// Deterministic complete descriptor snapshot for this isolated fixture.
 			// Strict host-wide lsof behavior is covered separately and live.
 			oldHandles := archiveHandleSnapshot
-			archiveHandleSnapshot = func() ([]byte, error) {
-				return []byte(fmt.Sprintf("p%d\x00fcwd\x00tDIR\x00ar\x00n%s\x00", os.Getpid(), rig)), nil
+			archiveHandleSnapshot = func(_ context.Context) ([]byte, error) {
+				return []byte(archiveTestHandleRecord(t, os.Getpid(), "cwd", "r", "DIR", rig, rig)), nil
 			}
 			t.Cleanup(func() { archiveHandleSnapshot = oldHandles })
 			const id = "ga-life01"
@@ -236,11 +238,11 @@ func TestReapClosedBeadWorktrees_ProductionLifecycle(t *testing.T) {
 			case "nested_repository_in_cache":
 				mustGit(t, "", "init", filepath.Join(wt, "node_modules", "nested"))
 			case "held_descriptor":
-				archiveHandleSnapshot = func() ([]byte, error) {
-					return []byte(fmt.Sprintf("p%d\x00fcwd\x00tDIR\x00ar\x00n%s\x00p%d\x00f5\x00tREG\x00au\x00n%s\x00", os.Getpid(), rig, os.Getpid()+1, filepath.Join(wt, "feature.txt"))), nil
+				archiveHandleSnapshot = func(_ context.Context) ([]byte, error) {
+					return []byte(archiveTestHandleRecord(t, os.Getpid(), "cwd", "r", "DIR", rig, rig) + archiveTestHandleRecord(t, os.Getpid()+1, "5", "u", "REG", filepath.Join(wt, "feature.txt"), filepath.Join(wt, "feature.txt"))), nil
 				}
 			case "unknown_descriptor":
-				archiveHandleSnapshot = func() ([]byte, error) {
+				archiveHandleSnapshot = func(_ context.Context) ([]byte, error) {
 					return []byte(fmt.Sprintf("p%d\x00f10\x00a \x00n(revoked)\x00", os.Getpid())), nil
 				}
 			case "transient_poisoned_index":
@@ -373,6 +375,8 @@ func TestReapClosedBeadWorktrees_ProductionLifecycle(t *testing.T) {
 						}
 						checkpointRan = true
 						switch tc.name {
+						case "late_handle_cancellation":
+							archiveHandleSnapshot = func(_ context.Context) ([]byte, error) { return nil, context.DeadlineExceeded }
 						case "late_unknown_quarantine_leaf", "late_recreated_original_with_hold":
 							writeFileAt(t, quarantine, ".runtime/new-source.py", "late unfinished source\n")
 						case "late_clean_commit":

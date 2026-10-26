@@ -458,6 +458,8 @@ go_library(
         "workflow_trace_rotation.go",
         "worktree_archive_execute.go",
         "worktree_archive_handles.go",
+        "worktree_archive_identity_darwin.go",
+        "worktree_archive_identity_other.go",
         "worktree_archive_plan.go",
         "worktree_archive_types.go",
         "write_auth_boot_warning.go",
@@ -1550,6 +1552,7 @@ go_test(
         "worker_handle_test.go",
         "workflow_trace_rotation_test.go",
         "worktree_archive_handles_test.go",
+        "worktree_archive_identity_darwin_test.go",
         "worktree_archive_hidden_index_test.go",
         "worktree_archive_plan_test.go",
         "write_auth_boot_warning_test.go",
@@ -1700,6 +1703,9 @@ go_test(
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/pathdurability",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/pathdurability",

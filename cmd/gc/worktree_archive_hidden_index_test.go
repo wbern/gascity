@@ -4,7 +4,7 @@ package main
 
 import (
 	"bytes"
-	"fmt"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,8 +28,8 @@ func TestArchiveAndOrdinaryReaperProtectHiddenIndexFlags(t *testing.T) {
 				wt := addClosedWorktree(t, rig, city, "tasks", id)
 				injectLiveness(t, liveWorktreeState{scanned: true})
 				previous := archiveHandleSnapshot
-				archiveHandleSnapshot = func() ([]byte, error) {
-					return []byte(fmt.Sprintf("p%d\x00fcwd\x00tDIR\x00ar\x00n%s\x00", os.Getpid(), rig)), nil
+				archiveHandleSnapshot = func(_ context.Context) ([]byte, error) {
+					return []byte(archiveTestHandleRecord(t, os.Getpid(), "cwd", "r", "DIR", rig, rig)), nil
 				}
 				t.Cleanup(func() { archiveHandleSnapshot = previous })
 				head := productionLifecycleGitOutput(t, wt, "rev-parse", "HEAD")
