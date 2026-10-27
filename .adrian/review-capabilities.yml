@@ -1,0 +1,7 @@
+# Vocabulary for trusted deterministic planning; this is not a review receipt.
+# Existing unannotated ADRs stay unclassified: no review.requires is added here.
+# Declaring code judgment supplies no visual capability or applicability waiver.
+version: 1
+capabilities:
+  code-judgment:
+    evidence: []
