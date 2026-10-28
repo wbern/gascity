@@ -7,7 +7,8 @@
     "city_path",
     "config",
     "warnings",
-    "validation"
+    "validation",
+    "resolved_agents"
   ],
   "properties": {
     "schema_version": {
@@ -57,6 +58,33 @@
     },
     "provenance": {
       "additionalProperties": true
+    },
+    "resolved_agents": {
+      "type": "array",
+      "description": "Canonical agent identity paired with resolved policy from the same config load as config, including config.Workspace.CapacityGroups. Runtime-only binding fields remain absent from agent.",
+      "items": {
+        "type": "object",
+        "required": [
+          "qualified_name",
+          "agent",
+          "suspended"
+        ],
+        "properties": {
+          "qualified_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agent": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "suspended": {
+            "type": "boolean",
+            "description": "Effective suspension including the runtime city/rig state, read once for this response."
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": true

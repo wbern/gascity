@@ -229,6 +229,7 @@
               "reference/cli",
               "reference/gastown-command-map",
               "reference/config",
+              "reference/config-identity-snapshot",
               "reference/trust-boundaries",
               "reference/api",
               "reference/events",
