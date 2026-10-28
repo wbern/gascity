@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -197,12 +198,38 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	return 0
 }
 
+// resolvedAgentDisplay binds canonical identity to its policy in the same config
+// load. Agent.BindingName remains runtime-only; consumers must not reconstruct
+// import identity from the lossy persisted Agent representation.
+type resolvedAgentDisplay struct {
+	QualifiedName string       `json:"qualified_name"`
+	Agent         config.Agent `json:"agent"`
+	Suspended     bool         `json:"suspended"`
+}
+
+func resolvedAgentsForDisplay(cfg *config.City, cityPath string, st suspensionstate.State) []resolvedAgentDisplay {
+	records := make([]resolvedAgentDisplay, 0)
+	if cfg != nil {
+		for _, agent := range cfg.Agents {
+			records = append(records, resolvedAgentDisplay{QualifiedName: agent.QualifiedName(), Agent: agent, Suspended: isAgentEffectivelySuspendedWith(cfg, cityPath, &agent, st)})
+		}
+	}
+	return records
+}
+
 func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any) int {
+	display := configForDisplay(cfg)
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		_ = writeJSONFailure(stdout, "suspension_state_unavailable", "cannot read runtime suspension state for identity snapshot", 1)
+		return 1
+	}
 	payload := map[string]any{
-		"schema_version": "1",
-		"city_path":      cityPath,
-		"config":         configForDisplay(cfg),
-		"warnings":       nonNilStrings(warnings),
+		"schema_version":  "1",
+		"city_path":       cityPath,
+		"config":          display,
+		"resolved_agents": resolvedAgentsForDisplay(display, cityPath, st),
+		"warnings":        nonNilStrings(warnings),
 		"validation": map[string]any{
 			"ok":       len(validationErrors) == 0,
 			"warnings": nonNilStrings(validationWarnings),
