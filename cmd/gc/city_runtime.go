@@ -129,6 +129,8 @@ type CityRuntime struct {
 	adt                     assignedWorkDeferTracker
 	wg                      wispGC
 	wispSweeps              wispGCRunner
+	orphanCooldown          orphanCooldownRegistry
+	orphanNow               func() time.Time
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -207,8 +209,9 @@ type CityRuntime struct {
 	// swaps them while background lanes read them, so both are written under
 	// serviceStateMu and read through cityBeadStore/rigBeadStores. Only the
 	// controller goroutine writes them.
-	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
-	standaloneRigStores map[string]beads.Store
+	standaloneCityStore     beads.Store // non-nil when API disabled; for chat auto-suspend
+	standaloneStoreIdentity beads.StoreIdentity
+	standaloneRigStores     map[string]beads.Store
 
 	// storageRoutes is the opened non-work storage binding this process
 	// resolved once at boot, or nil for every city that authors no [storage]
@@ -593,8 +596,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Open standalone city bead store when controllerState is unavailable.
 	// When controllerState is present, it manages the cached city store.
 	if cr.cs == nil && cityRoot != "" {
-		cityStore := cr.standaloneCityStore
-		if store, err := openCityStoreAt(cityRoot); err != nil {
+		cityStore := cr.standaloneStoreResult()
+		if store, err := openCityStoreResultAt(cityRoot); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
 			cityStore = store
@@ -2536,9 +2539,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		// Refresh standalone city store for auto-suspend.
 		// Also recovers from nil → non-nil when bd becomes available after startup.
 		// The stores are opened before the swap so readers never wait on an open.
-		cityStore := cr.standaloneCityStore
-		if s, err := openCityStoreAt(cityRoot); err != nil {
-			if cityStore != nil {
+		cityStore := cr.standaloneStoreResult()
+		if s, err := openCityStoreResultAt(cityRoot); err != nil {
+			if cityStore.Store != nil {
 				appendWarning(fmt.Sprintf("city bead store reload: %v", err))
 			}
 		} else {
@@ -3910,9 +3913,10 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 // recovery, completions, detached orphans) read them off the controller
 // goroutine, so an unlocked swap on reload would race those reads. The rig
 // map is replaced whole, never mutated in place.
-func (cr *CityRuntime) setStandaloneStores(city beads.Store, rigs map[string]beads.Store) {
+func (cr *CityRuntime) setStandaloneStores(city beads.StoreOpenResult, rigs map[string]beads.Store) {
 	cr.serviceStateMu.Lock()
-	cr.standaloneCityStore = city
+	cr.standaloneCityStore = city.Store
+	cr.standaloneStoreIdentity = city.Identity
 	cr.standaloneRigStores = rigs
 	cr.serviceStateMu.Unlock()
 }

@@ -73,11 +73,12 @@ type controllerState struct {
 	// re-parsing city.toml per request. Refreshed on every cfg swap; left
 	// at its prior value if a refresh load fails so the read never falls
 	// back to a nil-raw heuristic on a transient error.
-	rawCfg        *config.City
-	sp            runtime.Provider
-	cacheCtx      context.Context
-	beadStores    map[string]beads.Store
-	cityBeadStore beads.Store // city-level store for session beads
+	rawCfg            *config.City
+	sp                runtime.Provider
+	cacheCtx          context.Context
+	beadStores        map[string]beads.Store
+	cityBeadStore     beads.Store // city-level store for session beads
+	cityStoreIdentity beads.StoreIdentity
 	// storageRoutes is the opened non-work storage binding the city runtime
 	// resolved at boot: a constructor input, written once in
 	// newControllerStateWithRoutes and never reassigned, so reads are lock-free
@@ -281,6 +282,7 @@ func newControllerStateWithRoutes(
 	} else {
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		cs.cityStoreIdentity = opened.Identity
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -1034,6 +1036,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore
+		cs.cityStoreIdentity = openedCityStore.Identity
 		cs.cityBeadsDiagnostic = cityBeadsDiagnostic
 		cs.cityMailProv = cityMailProv
 		cs.storeMetadataSignature = storeSignature

@@ -1842,6 +1842,14 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	// Capture the inputs of this successful open before policy/cache wrappers.
+	// Custom providers may resolve a different workspace; do not infer theirs.
+	if result.Store != nil && (provider == "bd" || provider == "file") {
+		result.Identity = beads.StoreIdentity{
+			CityPath:  resolveStoreScopeRoot(runtimeCityPath, runtimeCityPath),
+			ScopeRoot: scopeRoot, Provider: provider,
+		}
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
 }

@@ -191,8 +191,19 @@ type StoreOpenOptions struct {
 	OnConditionalWritesDegraded func(ConditionalWritesDegrade)
 }
 
+// StoreIdentity identifies a successfully opened logical local workspace. It
+// survives wrapper replacement and native/CLI fallback. The zero value means
+// the opener cannot establish a stable identity; it is never a shared key.
+// This is process-local metadata, not detection of out-of-band database resets.
+type StoreIdentity struct {
+	CityPath  string
+	ScopeRoot string
+	Provider  string
+}
+
 // StoreOpenResult contains the selected Store plus native-selection diagnostics.
 type StoreOpenResult struct {
+	Identity   StoreIdentity
 	Store      Store
 	Diagnostic BeadsDiagnostic
 }
