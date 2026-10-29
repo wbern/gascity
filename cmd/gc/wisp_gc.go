@@ -171,6 +171,9 @@ type wispGC interface {
 
 // memoryWispGC is the production implementation of wispGC.
 type memoryWispGC struct {
+	orphanCooldown   *orphanCooldownRegistry
+	orphanIdentity   beads.StoreIdentity
+	orphanNow        func() time.Time
 	interval         time.Duration
 	ttl              time.Duration
 	mailRetentionTTL time.Duration
@@ -306,7 +309,7 @@ func (m *memoryWispGC) runGCContext(ctx context.Context, graphStore beads.GraphS
 			return purged, errors.Join(deleteErr, err)
 		}
 		armStart = time.Now()
-		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
+		orphanReaped, orphanErr := m.runOrphanArm(store, cutoff)
 		arms.since("orphan_reap", armStart)
 		purged += orphanReaped
 		deleteErr = errors.Join(deleteErr, orphanErr)

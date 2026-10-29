@@ -189,7 +189,7 @@ func (r *wispGCRunner) waitIdle(timeout time.Duration) bool {
 // graph-class store; the read-message retention arm through the typed
 // messaging-class store. Both collapse to the city store today.
 func (cr *CityRuntime) launchWispGC(now time.Time) {
-	graphStore := cr.graphBeadStore()
+	graphStore, identity := cr.orphanGraphStore()
 	if cr.wg == nil || graphStore.Store == nil {
 		return
 	}
@@ -209,6 +209,12 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	// Capture the tracker and stores on the tick goroutine: a config reload
 	// may replace cr.wg while the sweep runs.
 	wg, sessionLedger, mailStore, rigStores := cr.wg, cr.infraSessionLedger(), cr.mailBeadStore(), cr.rigBeadStores()
+	if m, ok := wg.(*memoryWispGC); ok {
+		m.orphanCooldown = &cr.orphanCooldown
+		m.orphanIdentity = identity
+		m.orphanNow = cr.orphanNow
+	}
+
 	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
 		purged, err := runWispGCWithContext(ctx, wg, graphStore, sessionLedger, mailStore, now)
