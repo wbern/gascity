@@ -3325,7 +3325,7 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // deletion count across all stores reaches limit, returning the partial deleted
 // count with a nil error on budget exhaustion. Store errors are returned as
 // normal; deletion errors within budget are propagated.
-func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}

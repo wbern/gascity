@@ -293,6 +293,7 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	dryRun := false
 	quiet := false
 	confirm := false
+	limit := 0
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
@@ -314,10 +315,15 @@ order-scoped to avoid scanning unrelated beads.
 When the number of eligible closed-bead deletions exceeds
 GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
 proceed. This guard prevents accidental mass-deletes without an explicit
-operator acknowledgement.`,
+operator acknowledgement.
+
+--limit N bounds the retention deletions of one run to N beads (stale-close
+is unaffected). Use it to drain a large backlog in paced batches — for
+example right after shortening delete_after_close — instead of issuing tens
+of thousands of deletes against the store in a single run.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
+			if cmdOrderSweepTrackingWithLimit(staleAfter, includeWisps, dryRun, quiet, confirm, limit, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -333,6 +339,7 @@ operator acknowledgement.`,
 	// construction time, which would make docs/reference/cli.md regenerate
 	// differently depending on the generator's environment.
 	cmd.Flags().BoolVar(&confirm, "confirm", false, fmt.Sprintf("confirm bulk deletion when eligible count > GC_BULK_DELETE_CONFIRM_THRESHOLD (default %d)", defaultBulkDeleteConfirmThreshold))
+	cmd.Flags().IntVar(&limit, "limit", 0, "delete at most this many expired closed tracking beads per run (0 = unbounded); the remainder drains on later runs")
 	return cmd
 }
 
@@ -1913,7 +1920,17 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
+//nolint:unparam // quiet is kept for the unbounded entry point's historical signature; only tests call it now
 func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+	return cmdOrderSweepTrackingWithLimit(staleAfter, includeWisps, dryRun, quiet, confirm, 0, orderNames, stdout, stderr)
+}
+
+// cmdOrderSweepTrackingWithLimit is cmdOrderSweepTrackingWithOptions with a
+// per-run bound on retention deletions. limit <= 0 keeps the historical
+// unbounded run-to-completion behavior; limit > 0 routes the retention sweep
+// through the same bounded helper the controller watchdog uses, so one run
+// never issues more than limit deletes.
+func cmdOrderSweepTrackingWithLimit(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, limit int, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1986,6 +2003,15 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 				"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
 				eligible, threshold)
 			confirmGateBlocked = true
+		case limit > 0:
+			var n int
+			n, retentionErr = sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores, now, retentionPolicy, onlyOrders, limit)
+			swept := boundedRetentionStoresSwept(len(stores), n, retentionErr)
+			retentionResult = orderTrackingRetentionSweepResult{deleted: n, storesSwept: swept}
+			result.trackingDeleted = n
+			if !quiet && eligible > n {
+				fmt.Fprintf(stdout, "gc order sweep-tracking: --limit %d reached; %d eligible closed order-tracking bead(s) remain for later runs\n", limit, eligible-n) //nolint:errcheck // best-effort stdout
+			}
 		default:
 			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
 			result.trackingDeleted = retentionResult.deleted
@@ -2018,6 +2044,17 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	return 0
+}
+
+// boundedRetentionStoresSwept reports how many stores a bounded retention sweep
+// actually covered. An error with nothing deleted means no store was swept, so
+// the run exits non-zero on a wedged Dolt instead of letting a paced drain loop
+// spin on a false success.
+func boundedRetentionStoresSwept(stores, deleted int, err error) int {
+	if err != nil && deleted == 0 {
+		return 0
+	}
+	return stores
 }
 
 func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {

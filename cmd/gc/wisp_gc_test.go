@@ -3022,3 +3022,90 @@ func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
 		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
 	}
 }
+
+// TestWispGC_ReapSkipsOrderTrackingRowsWithoutProbing pins the boundary between
+// wisp gc and the order_tracking retention policy. Closed order-tracking records
+// are rootless plain-task leaves older than wisp_ttl, so without an explicit
+// exclusion the rootless-orphan reaper (a) spends its probe budget on them,
+// starving genuine rootless orphans listed behind them, and (b) deletes them
+// when enforcement is on — ahead of delete_after_close and below the retain-10
+// floor. Fixture: more aged tracking rows than the probe cap, plus one genuine
+// rootless orphan. The orphan must still be reaped, the tracking rows must
+// survive, and no probe may be spent on a tracking row.
+func TestWispGC_ReapSkipsOrderTrackingRowsWithoutProbing(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	withReapOrphanProbeCap(t, 3)
+	now := time.Now()
+	aged := now.Add(-48 * time.Hour)
+	tracking := []string{"track-1", "track-2", "track-3", "track-4"}
+	existing := make([]beads.Bead, 0, len(tracking)+1)
+	for i, id := range tracking {
+		// Oldest first so an oldest-first scan meets them before the orphan.
+		existing = append(existing, makeGCBeadWithLabels(id, aged.Add(-time.Duration(len(tracking)-i)*time.Hour), "closed", "task", labelOrderTracking))
+	}
+	orphan := makeGCBead("rootless-orphan", aged, "closed", "task")
+	orphan.Ephemeral = true
+	existing = append(existing, orphan)
+	store := newGCStore(existing)
+
+	logOutput := captureWispGCLog(t, func() {
+		reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), 0)
+		if err != nil {
+			t.Fatalf("reapOrphanedClosedWisps: %v", err)
+		}
+		if reaped != 1 {
+			t.Fatalf("reaped = %d, want 1 (only the genuine rootless orphan)", reaped)
+		}
+	})
+
+	assertDeletedIDs(t, store.deletedIDs, "rootless-orphan")
+	for _, id := range tracking {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s must survive: order-tracking retention owns it, not wisp gc (%v)", id, err)
+		}
+	}
+	if store.childrenCalls != 1 {
+		t.Fatalf("childrenCalls = %d, want 1: tracking rows must not consume the probe budget", store.childrenCalls)
+	}
+	if !strings.Contains(logOutput, "skipped 4 closed order-tracking row(s)") {
+		t.Fatalf("log output = %q, want the skipped-tracking count", logOutput)
+	}
+}
+
+// TestWispGC_ReapDryRunEstimateExcludesOrderTrackingRows: the dry-run
+// "would be reaped" count is what an operator reads before enabling
+// GC_WISP_GC_REAP_ORPHANS. It must count genuine orphans only, not the
+// order-tracking history that the order_tracking policy already prunes.
+func TestWispGC_ReapDryRunEstimateExcludesOrderTrackingRows(t *testing.T) {
+	withReapOrphansEnforced(t, false)
+	withReapOrphanProbeCap(t, 2)
+	now := time.Now()
+	aged := now.Add(-48 * time.Hour)
+	orphan := makeGCBead("rootless-orphan", aged, "closed", "task")
+	orphan.Ephemeral = true
+	store := newGCStore([]beads.Bead{
+		makeGCBeadWithLabels("track-1", aged.Add(-3*time.Hour), "closed", "task", labelOrderTracking),
+		makeGCBeadWithLabels("track-2", aged.Add(-2*time.Hour), "closed", "task", labelOrderTracking),
+		makeGCBeadWithLabels("track-3", aged.Add(-1*time.Hour), "closed", "task", labelOrderTracking),
+		orphan,
+	})
+
+	logOutput := captureWispGCLog(t, func() {
+		reaped, err := reapOrphanedClosedWisps(store, now.Add(-time.Hour), 0)
+		if err != nil {
+			t.Fatalf("reapOrphanedClosedWisps: %v", err)
+		}
+		if reaped != 0 {
+			t.Fatalf("dry-run reaped = %d, want 0", reaped)
+		}
+	})
+	if len(store.deletedIDs) != 0 {
+		t.Fatalf("dry-run deleted %v, want nothing", store.deletedIDs)
+	}
+	if !strings.Contains(logOutput, "1 orphaned closed wisp(s) would be reaped") {
+		t.Fatalf("log output = %q, want a would-reap estimate of exactly 1", logOutput)
+	}
+	if strings.Contains(logOutput, "scan stopped after") {
+		t.Fatalf("log output = %q: tracking rows must not exhaust the probe cap", logOutput)
+	}
+}

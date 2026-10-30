@@ -4572,3 +4572,101 @@ prefix = "ct"
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
 	}
 }
+
+// TestOrderSweepTrackingLimitBoundsRetentionDeletes verifies --limit: with 5
+// closed beads past the retain-10 floor and --limit 2, one confirmed run
+// deletes exactly 2 (the oldest beyond the floor), reports the remainder, and
+// exits 0 so a paced drain loop can continue on the next run.
+func TestOrderSweepTrackingLimitBoundsRetentionDeletes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_BULK_DELETE_CONFIRM_THRESHOLD", "1")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	type fileStoreJSON struct {
+		Seq   int          `json:"seq"`
+		Beads []beads.Bead `json:"beads"`
+	}
+	const extra = 5
+	n := minClosedOrderTrackingRetained + extra
+	seedBeads := make([]beads.Bead, 0, n)
+	for i := range n {
+		seedBeads = append(seedBeads, beads.Bead{
+			ID:        fmt.Sprintf("sl-%02d", i),
+			Title:     "order:sweep-limit",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-10*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:sweep-limit", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	seedData, err := json.Marshal(fileStoreJSON{Seq: len(seedBeads), Beads: seedBeads})
+	if err != nil {
+		t.Fatalf("marshal seed beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "beads.json"), seedData, 0o644); err != nil {
+		t.Fatalf("write seed beads.json: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingWithLimit(time.Nanosecond, false, false, false, true, 2, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTrackingWithLimit = %d, want 0; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "deleted 2 closed order-tracking bead(s)") {
+		t.Fatalf("stdout = %q, want exactly 2 deletions reported", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "--limit 2 reached; 3 eligible") {
+		t.Fatalf("stdout = %q, want the remaining-eligible notice", stdout.String())
+	}
+
+	reopened, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	remaining := 0
+	for i := range n {
+		if _, err := reopened.Get(fmt.Sprintf("sl-%02d", i)); err == nil {
+			remaining++
+		}
+	}
+	if remaining != n-2 {
+		t.Fatalf("remaining = %d, want %d (limit must bound deletions to 2)", remaining, n-2)
+	}
+	// The retain floor is never breached: the 10 newest survive.
+	for i := extra; i < n; i++ {
+		if _, err := reopened.Get(fmt.Sprintf("sl-%02d", i)); err != nil {
+			t.Fatalf("sl-%02d should be preserved at the retain floor: %v", i, err)
+		}
+	}
+}
+
+func TestBoundedRetentionStoresSweptZeroWhenEveryStoreErrored(t *testing.T) {
+	boom := errors.New("dolt unavailable")
+	if got := boundedRetentionStoresSwept(3, 0, boom); got != 0 {
+		t.Fatalf("error with no deletions: swept = %d, want 0 so the run is fatal", got)
+	}
+	if got := boundedRetentionStoresSwept(3, 2, boom); got != 3 {
+		t.Fatalf("partial progress with error: swept = %d, want 3", got)
+	}
+	if got := boundedRetentionStoresSwept(3, 0, nil); got != 3 {
+		t.Fatalf("clean empty sweep: swept = %d, want 3", got)
+	}
+}

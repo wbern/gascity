@@ -457,6 +457,13 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 	return enumerateWispGCRoots(store, "closed")
 }
 
+// isOrderTrackingBead reports whether b is an order-dispatch tracking record
+// (label order-tracking). Those rows have their own retention policy
+// ([beads.policies.order_tracking]) and are never wisp-GC residue.
+func isOrderTrackingBead(b beads.Bead) bool {
+	return beadLabelsContain(b.Labels, labelOrderTracking)
+}
+
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
@@ -513,6 +520,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	// no deletes but still pays those backend reads per aged rootless candidate.
 	probed := 0
 	probeTruncated := false
+	// skippedTracking counts aged closed order-tracking rows the scan passed
+	// over: they belong to the order_tracking retention policy, not to this
+	// reaper, and are reported so an operator can tell "nothing eligible" from
+	// "everything aged here is tracking history".
+	skippedTracking := 0
 	var deleteErr error
 	for _, c := range candidates {
 		// The batch cap bounds DELETION ATTEMPTS per sweep — counting failed
@@ -549,6 +561,23 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			// collectibility fence only once both directions of ownership —
 			// column and dep row — come back empty (gastownhall/gascity#3780).
 			if strings.TrimSpace(c.ParentID) != "" {
+				continue
+			}
+			// Closed order-tracking records are rootless plain-task leaves by
+			// construction, so they satisfy every predicate below — but they
+			// are NOT wisp_ttl residue. Their retention is owned by
+			// [beads.policies.order_tracking].delete_after_close (7d default,
+			// retain-10 floor) via the order-tracking-sweep order and the
+			// controller watchdog; the closed-root purge already preserves
+			// them (TestWispGC_PreservesOrderTrackingBeads). Skip them BEFORE
+			// charging the probe budget: on a city with ~50k closed tracking
+			// rows older than wisp_ttl they otherwise monopolise every probe
+			// slot (the dry-run "500 would be reaped" is 100% tracking rows),
+			// spend 20-60 min of Children/DepList reads per sweep for nothing,
+			// and — if enforcement were ever enabled — would be deleted here
+			// ahead of their policy TTL and below the retain-10 floor.
+			if isOrderTrackingBead(c) {
+				skippedTracking++
 				continue
 			}
 			// Every remaining rootless candidate costs backend reads whether or
@@ -653,6 +682,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	if probeTruncated {
 		log.Printf("wisp gc: rootless-orphan scan stopped after %d probes (cap); the reported count is a floor, not the full eligible backlog", probed)
+	}
+	if skippedTracking > 0 {
+		log.Printf("wisp gc: orphan scan skipped %d closed order-tracking row(s) older than wisp_ttl: they are retained by [beads.policies.%s].delete_after_close, not by wisp gc", skippedTracking, orderTrackingBeadPolicyName)
 	}
 
 	if !enforce {
