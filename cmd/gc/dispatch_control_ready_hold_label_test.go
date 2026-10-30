@@ -66,13 +66,12 @@ func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache is
-// ga-5736js end-to-end on the cache path: a routed_to-matching bead carrying a
+// TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromLiveLeg is
+// ga-5736js through the live-leg path: a routed_to-matching bead carrying a
 // beadmeta.DispatchHoldLabels value must not reach the control dispatcher's
-// queue when the answer is served from CachedReady(). The filter-level tests
-// above pin the rule; this one pins that the cache actually carries Labels far
-// enough for the rule to fire. (End-to-end coverage originates from PR #4787.)
-func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t *testing.T) {
+// queue. The filter-level tests above pin the rule; this one pins that the live
+// store read carries Labels far enough for the rule to fire.
+func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromLiveLeg(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -126,6 +125,7 @@ func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t
 // format bd emits, so substituting the Go constants here would defeat it.
 // (End-to-end coverage originates from PR #4787.)
 func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsOnFallbackPath(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
