@@ -1960,13 +1960,39 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	statePtr := &nudgeState
 
 	mailTTL := nudgeMailSweepMailTTLForConfig(cfg, cr.stderr)
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
+	remainingBudget := nudgeMailSweepWatchdogCloseBudget
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, remainingBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
-	total := result.NudgeClosed + result.MailClosed
+	totalNudgeClosed := result.NudgeClosed
+	totalMailClosed := result.MailClosed
+	remainingBudget -= (result.NudgeClosed + result.MailClosed)
+
+	if remainingBudget > 0 {
+		rigStores := cr.rigBeadStores()
+		for rigName, rigStore := range rigStores {
+			if remainingBudget <= 0 {
+				break
+			}
+			if rigStore == nil {
+				continue
+			}
+			rigNudges := beads.NudgesStore{Store: rigStore}
+			rigMail := beads.MailStore{Store: rigStore}
+			rigResult, rigSweepErr := sweepStaleNudgeMail(rigNudges, rigMail, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, remainingBudget)
+			if rigSweepErr != nil && cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog [rig %s]: %v\n", cr.logPrefix, rigName, rigSweepErr) //nolint:errcheck // best-effort stderr
+			}
+			totalNudgeClosed += rigResult.NudgeClosed
+			totalMailClosed += rigResult.MailClosed
+			remainingBudget -= (rigResult.NudgeClosed + rigResult.MailClosed)
+		}
+	}
+
+	total := totalNudgeClosed + totalMailClosed
 	if total > 0 && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, totalNudgeClosed, totalMailClosed) //nolint:errcheck // best-effort stderr
 	}
 }
 
