@@ -4657,3 +4657,16 @@ prefix = "ct"
 		}
 	}
 }
+
+func TestBoundedRetentionStoresSweptZeroWhenEveryStoreErrored(t *testing.T) {
+	boom := errors.New("dolt unavailable")
+	if got := boundedRetentionStoresSwept(3, 0, boom); got != 0 {
+		t.Fatalf("error with no deletions: swept = %d, want 0 so the run is fatal", got)
+	}
+	if got := boundedRetentionStoresSwept(3, 2, boom); got != 3 {
+		t.Fatalf("partial progress with error: swept = %d, want 3", got)
+	}
+	if got := boundedRetentionStoresSwept(3, 0, nil); got != 3 {
+		t.Fatalf("clean empty sweep: swept = %d, want 3", got)
+	}
+}

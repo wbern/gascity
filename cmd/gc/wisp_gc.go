@@ -457,6 +457,13 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 	return enumerateWispGCRoots(store, "closed")
 }
 
+// isOrderTrackingBead reports whether b is an order-dispatch tracking record
+// (label order-tracking). Those rows have their own retention policy
+// ([beads.policies.order_tracking]) and are never wisp-GC residue.
+func isOrderTrackingBead(b beads.Bead) bool {
+	return beadLabelsContain(b.Labels, labelOrderTracking)
+}
+
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
@@ -486,13 +493,6 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
 // dry-run notice. Per-bead delete errors are joined and never abort the sweep.
 // The batch cap bounds reaps per sweep so the backlog drains over multiple ticks.
-// isOrderTrackingBead reports whether b is an order-dispatch tracking record
-// (label order-tracking). Those rows have their own retention policy
-// ([beads.policies.order_tracking]) and are never wisp-GC residue.
-func isOrderTrackingBead(b beads.Bead) bool {
-	return beadLabelsContain(b.Labels, labelOrderTracking)
-}
-
 func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")

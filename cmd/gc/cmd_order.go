@@ -1920,13 +1920,14 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
+//nolint:unparam // quiet is kept for the unbounded entry point's historical signature; only tests call it now
 func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
 	return cmdOrderSweepTrackingWithLimit(staleAfter, includeWisps, dryRun, quiet, confirm, 0, orderNames, stdout, stderr)
 }
 
 // cmdOrderSweepTrackingWithLimit is cmdOrderSweepTrackingWithOptions with a
 // per-run bound on retention deletions. limit <= 0 keeps the historical
-// unbounded run-to-completion behaviour; limit > 0 routes the retention sweep
+// unbounded run-to-completion behavior; limit > 0 routes the retention sweep
 // through the same bounded helper the controller watchdog uses, so one run
 // never issues more than limit deletes.
 func cmdOrderSweepTrackingWithLimit(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, limit int, orderNames []string, stdout, stderr io.Writer) int {
@@ -2005,7 +2006,8 @@ func cmdOrderSweepTrackingWithLimit(staleAfter time.Duration, includeWisps, dryR
 		case limit > 0:
 			var n int
 			n, retentionErr = sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores, now, retentionPolicy, onlyOrders, limit)
-			retentionResult = orderTrackingRetentionSweepResult{deleted: n, storesSwept: len(stores)}
+			swept := boundedRetentionStoresSwept(len(stores), n, retentionErr)
+			retentionResult = orderTrackingRetentionSweepResult{deleted: n, storesSwept: swept}
 			result.trackingDeleted = n
 			if !quiet && eligible > n {
 				fmt.Fprintf(stdout, "gc order sweep-tracking: --limit %d reached; %d eligible closed order-tracking bead(s) remain for later runs\n", limit, eligible-n) //nolint:errcheck // best-effort stdout
@@ -2042,6 +2044,17 @@ func cmdOrderSweepTrackingWithLimit(staleAfter time.Duration, includeWisps, dryR
 		return 1
 	}
 	return 0
+}
+
+// boundedRetentionStoresSwept reports how many stores a bounded retention sweep
+// actually covered. An error with nothing deleted means no store was swept, so
+// the run exits non-zero on a wedged Dolt instead of letting a paced drain loop
+// spin on a false success.
+func boundedRetentionStoresSwept(stores, deleted int, err error) int {
+	if err != nil && deleted == 0 {
+		return 0
+	}
+	return stores
 }
 
 func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
