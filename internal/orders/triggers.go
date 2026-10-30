@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -589,4 +592,166 @@ func MaxSeqFromLabels(labelSets [][]string) uint64 {
 		}
 	}
 	return maxSeq
+}
+
+// EventScanner retains private scan progress and a qualifying event latch.
+// Only the durable execution cursor can retire the latch. A controller owns its
+// lifetime; per-tick contexts can stop a Poll without destroying retained work.
+type EventScanner struct {
+	mu         sync.Mutex
+	order      Order
+	provider   events.Provider
+	watcher    events.PollWatcher
+	latch      uint64
+	closed     bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	joined     chan struct{}
+	evaluate   chan []events.Event
+	evaluated  chan uint64
+	evaluating bool
+	terminal   error
+	qualify    func(context.Context, events.Event) bool
+}
+
+// NewEventScanner starts a bounded scanner for an exact provider and predicate.
+// Unsupported providers fail explicitly rather than falling back to List.
+func NewEventScanner(ctx context.Context, a Order, ep events.Provider, cursor uint64) (*EventScanner, error) {
+	p, ok := ep.(events.PollProvider)
+	if !ok {
+		return nil, fmt.Errorf("event provider does not support bounded polling")
+	}
+	child, cancel := context.WithCancel(ctx)
+	w, err := p.BeginWatch(child, cursor)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	// Copy metadata so a later config mutation cannot silently change identity.
+	metadata := make(map[string]string, len(a.Metadata))
+	for k, v := range a.Metadata {
+		metadata[k] = v
+	}
+	a.Metadata = metadata
+	s := &EventScanner{order: a, provider: ep, watcher: w, ctx: child, cancel: cancel, joined: make(chan struct{}), evaluate: make(chan []events.Event, 1), evaluated: make(chan uint64, 1)}
+	s.qualify = func(_ context.Context, e events.Event) bool {
+		return !payloadHasLabel(e.Payload, labelOrderTracking) && payloadMatchesMetadata(e.Payload, s.order.Metadata)
+	}
+	go s.matchPayloads()
+	return s, nil
+}
+
+// Matches reports whether provider and trigger predicate are unchanged.
+func (s *EventScanner) Matches(a Order, ep events.Provider) bool {
+	return reflect.TypeOf(ep) == reflect.TypeOf(s.provider) && reflect.ValueOf(ep).Comparable() && ep == s.provider &&
+		s.order.ScopedName() == a.ScopedName() && s.order.On == a.On && s.order.Subject == a.Subject && maps.Equal(s.order.Metadata, a.Metadata)
+}
+
+// Check polls one bounded grant and preserves qualifying matches through gates
+// and launch failures. It never writes or advances the durable cursor.
+func (s *EventScanner) Check(ctx context.Context, cursor uint64, b events.PollBudget) TriggerResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return TriggerResult{Reason: fmt.Sprintf("event: %v", err)}
+	}
+	if err := s.ctx.Err(); err != nil {
+		return TriggerResult{Reason: fmt.Sprintf("event: %v", err)}
+	}
+	if s.closed {
+		return TriggerResult{Reason: "event: scanner closed"}
+	}
+	if s.latch > cursor {
+		return TriggerResult{Due: true, Reason: "event: retained matching event"}
+	}
+	s.latch = 0
+	if s.evaluating {
+		select {
+		case seq := <-s.evaluated:
+			s.evaluating = false
+			if seq > cursor {
+				s.latch = seq
+				return TriggerResult{Due: true, Reason: "event: retained matching event"}
+			}
+		default:
+			return TriggerResult{Reason: "event: payload evaluation pending"}
+		}
+	}
+	if s.terminal != nil {
+		return TriggerResult{Reason: fmt.Sprintf("event: bounded read error: %v", s.terminal)}
+	}
+	batch, err := s.watcher.Poll(ctx, b)
+	// A per-check cancellation interrupts this call, not the retained scanner.
+	// Keep genuine stream/lifetime failures terminal, and still evaluate any
+	// events returned alongside the error before exposing that terminal state.
+	if callerErr := ctx.Err(); callerErr == nil || !errors.Is(err, callerErr) || s.ctx.Err() != nil {
+		s.terminal = err
+	}
+	var candidates []events.Event
+	needsDecode := false
+	for _, e := range batch.Events {
+		if e.Seq > cursor && (s.order.On == "" || e.Type == s.order.On) && (s.order.Subject == "" || e.Subject == s.order.Subject) {
+			candidates = append(candidates, e)
+			if len(e.Payload) > 0 {
+				needsDecode = true
+			}
+		}
+	}
+	if needsDecode {
+		s.evaluating = true
+		s.evaluate <- candidates
+		return TriggerResult{Reason: "event: payload evaluation pending"}
+	}
+	// Empty payloads need no JSON decode: only an empty metadata predicate can
+	// qualify. Nonempty payloads are always decoded by the owned worker.
+	if len(s.order.Metadata) == 0 {
+		for _, e := range candidates {
+			if e.Seq > s.latch {
+				s.latch = e.Seq
+			}
+		}
+	}
+	if s.latch > cursor {
+		return TriggerResult{Due: true, Reason: "event: retained matching event"}
+	}
+	if err != nil {
+		return TriggerResult{Reason: fmt.Sprintf("event: bounded read error: %v", err)}
+	}
+	return TriggerResult{Reason: "event: scan pending"}
+}
+
+// Close cancels the scanner and joins all owned work. Repeated calls are safe.
+func (s *EventScanner) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.cancel()
+	err := s.watcher.Close()
+	<-s.joined
+	return err
+}
+
+func (s *EventScanner) matchPayloads() {
+	defer close(s.joined)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case batch := <-s.evaluate:
+			var seq uint64
+			for _, e := range batch {
+				if s.ctx.Err() != nil {
+					return
+				}
+				if s.qualify(s.ctx, e) && e.Seq > seq {
+					seq = e.Seq
+				}
+			}
+			select {
+			case s.evaluated <- seq:
+			case <-s.ctx.Done():
+				return
+			}
+		}
+	}
 }

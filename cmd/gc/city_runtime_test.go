@@ -7873,3 +7873,85 @@ func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
 }
+
+func TestCityRuntimeRetainsOnlyMatchingEventScanners(t *testing.T) {
+	p := &boundedEventProbe{Fake: events.NewFake(), watcher: &boundedEventProbeWatcher{}}
+	a := orders.Order{Name: "scan", Trigger: "event", On: events.BeadCreated}
+	old := &memoryOrderDispatcher{aa: []orders.Order{a}, ep: p}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cr := &CityRuntime{od: old, orderEventCtx: ctx}
+	cr.ownOrderEventScanners(old)
+	t.Cleanup(cr.closeOwnedOrderEventScanners)
+	if !old.checkBoundedEvent(ctx, a, 0).Due {
+		t.Fatal("initial match missing")
+	}
+	scanner := old.eventScanners[a.ScopedName()]
+	if !old.drain(ctx) {
+		t.Fatal("idle ordinary drain blocked")
+	}
+	p.watcher.mu.Lock()
+	closed := p.watcher.closed
+	p.watcher.mu.Unlock()
+	if closed {
+		t.Fatal("ordinary drain closed scanner")
+	}
+	next := &memoryOrderDispatcher{aa: []orders.Order{a}, ep: p}
+	cr.replaceOrderDispatcher(next)
+	if next.eventScanners[a.ScopedName()] != scanner {
+		t.Fatal("same provider/predicate lost scanner")
+	}
+	if !next.checkBoundedEvent(ctx, a, 0).Due {
+		t.Fatal("replacement lost match latch")
+	}
+	p.watcher.mu.Lock()
+	calls := p.watcher.calls
+	p.watcher.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("latch rescanned after replacement: %d polls", calls)
+	}
+	changed := a
+	changed.Subject = "different"
+	cr.replaceOrderDispatcher(&memoryOrderDispatcher{aa: []orders.Order{changed}, ep: p})
+	p.watcher.mu.Lock()
+	closed = p.watcher.closed
+	p.watcher.mu.Unlock()
+	if !closed {
+		t.Fatal("changed predicate leaked scanner")
+	}
+	if len(cr.orderEventOwners) != 1 {
+		t.Fatal("retired dispatcher ownership leaked")
+	}
+}
+
+func TestCityRuntimeEventScannerCloseIndependentOfLane(t *testing.T) {
+	p := &boundedEventProbe{Fake: events.NewFake(), watcher: &boundedEventProbeWatcher{}}
+	a := orders.Order{Name: "scan", Trigger: "event", On: events.BeadCreated}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &memoryOrderDispatcher{aa: []orders.Order{a}, ep: p}
+	cr := &CityRuntime{od: m, orderEventCtx: ctx}
+	cr.ownOrderEventScanners(m)
+	if !m.checkBoundedEvent(ctx, a, 0).Due {
+		t.Fatal("initial match missing")
+	}
+	lane := cr.ordersLaneOf()
+	lane.passMu.Lock()
+	defer lane.passMu.Unlock()
+	done := make(chan struct{})
+	go func() { cancel(); cr.closeOwnedOrderEventScanners(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("scanner close waited for lane lock")
+	}
+	p.watcher.mu.Lock()
+	closed := p.watcher.closed
+	p.watcher.mu.Unlock()
+	if !closed {
+		t.Fatal("owned scanner not closed")
+	}
+	if m.checkBoundedEvent(context.Background(), a, 0).Due {
+		t.Fatal("closed owner admitted scanner")
+	}
+}

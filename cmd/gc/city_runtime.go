@@ -158,8 +158,12 @@ type CityRuntime struct {
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
 	// clocks below; created on first use.
-	ordersLane     *ordersLane
-	ordersLaneOnce sync.Once
+	orderEventOwnersMu sync.Mutex
+	orderEventOwners   map[*memoryOrderDispatcher]struct{}
+	orderEventCtx      context.Context
+	orderEventCancel   context.CancelFunc
+	ordersLane         *ordersLane
+	ordersLaneOnce     sync.Once
 
 	// inventoryLane lists runtimes at patrol cadence and publishes the
 	// observation cache (runtime_inventory_lane.go). run() creates it; it
@@ -562,6 +566,10 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
+	cr.orderEventCtx, cr.orderEventCancel = context.WithCancel(ctx)
+	defer cr.orderEventCancel()
+	cr.ownOrderEventScanners(cr.od)
+
 	// Reaching run() means every init-failure/discard point is behind us:
 	// this runtime is the live owner of the city, so its shutdown() is the
 	// one allowed to tear the provider's shared server down.
@@ -1664,11 +1672,20 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+			cr.ownOrderEventScanners(nextMem)
+			nextMem.carryEventScannersFrom(prev)
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 		}
 	}
+	if old, ok := cr.od.(*memoryOrderDispatcher); ok {
+		old.closeEventScanners()
+		cr.orderEventOwnersMu.Lock()
+		delete(cr.orderEventOwners, old)
+		cr.orderEventOwnersMu.Unlock()
+	}
+	cr.ownOrderEventScanners(next)
 	cr.od = next
 }
 
@@ -4533,6 +4550,13 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		// Runtime cancellation owns all scanners even when the lane lock cannot be
+		// acquired below. Ordinary dispatcher drain is not scanner shutdown.
+		if cr.orderEventCancel != nil {
+			cr.orderEventCancel()
+		}
+		cr.closeOwnedOrderEventScanners()
+
 		// The storage binding's engine is opened once per process and closed
 		// once, at the very end of this one — deferred first so it runs last.
 		//
@@ -4669,4 +4693,38 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// The registry is independent of passMu: shutdown can cancel and join scanner
+// ownership even if an ordinary dispatch pass has not returned its lane lock.
+func (cr *CityRuntime) ownOrderEventScanners(od orderDispatcher) {
+	m, ok := od.(*memoryOrderDispatcher)
+	if !ok || m == nil {
+		return
+	}
+	cr.orderEventOwnersMu.Lock()
+	if cr.orderEventOwners == nil {
+		cr.orderEventOwners = make(map[*memoryOrderDispatcher]struct{})
+	}
+	cr.orderEventOwners[m] = struct{}{}
+	ctx := cr.orderEventCtx
+	cr.orderEventOwnersMu.Unlock()
+	m.eventMu.Lock()
+	m.eventCtx = ctx
+	m.eventMu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		m.closeEventScanners()
+	}
+}
+
+func (cr *CityRuntime) closeOwnedOrderEventScanners() {
+	cr.orderEventOwnersMu.Lock()
+	var owners []*memoryOrderDispatcher
+	for m := range cr.orderEventOwners {
+		owners = append(owners, m)
+	}
+	cr.orderEventOwnersMu.Unlock()
+	for _, m := range owners {
+		m.closeEventScanners()
+	}
 }
