@@ -203,6 +203,94 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 	return out, nil
 }
 
+// ClosedRunsForRetentionBounded is the bounded sibling of ClosedRunsForRetention
+// for the closed-tracking retention prune. The full read lists EVERY closed
+// tracking bead on every call (tens of thousands of rows, ~211 s per sweep and
+// frequently timing out), only to delete a handful. This read returns just what
+// the prune's decision depends on:
+//
+//   - every closed tracking bead created before cutoff: the only beads that can
+//     be eligible, because a bead's reference time is UpdatedAt (falling back to
+//     CreatedAt) and UpdatedAt >= CreatedAt, so reference < cutoff implies
+//     CreatedAt < cutoff. CreatedBefore is pushed to the backing store
+//     (bd list --created-before); and
+//   - for each order seen among those candidates, that order's newest floor
+//     closed tracking beads, so the recent-history floor still anchors against
+//     the order's real newest runs and not merely against its newest old ones.
+//
+// SAFETY, by construction: the prune keeps the newest `floor` runs of each order
+// and deletes the older ones past cutoff. Every row here is a row the full read
+// would also return, so a row's rank within this set is never higher than its
+// rank within the full set. Anything the prune would delete from this set it
+// would therefore also delete from the full set. A missing anchor (a crowded or
+// failed floor query, an unresolvable order name) can only make the prune delete
+// LESS, never more. Callers keep the same bucketing, sort and delete logic.
+//
+// The floor query reads the order-run:<name> label, which also rides graph and
+// molecule roots, so its result is filtered to tracking beads after the fact.
+func (s *Store) ClosedRunsForRetentionBounded(cutoff time.Time, floor int) ([]OrderRun, error) {
+	if s.store.Store == nil {
+		return nil, nil
+	}
+	if floor < 1 {
+		floor = 1
+	}
+	live := beads.HandlesFor(s.store.Store).Live
+	candidates, err := live.List(beads.ListQuery{
+		Status:        "closed",
+		Label:         labelOrderTracking,
+		CreatedBefore: cutoff,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	out := make([]OrderRun, 0, len(candidates)+floor)
+	seen := make(map[string]struct{}, len(candidates))
+	names := make(map[string]struct{})
+	for _, b := range candidates {
+		name, _ := NameFromTrackingBead(b)
+		out = append(out, decodeRun(name, b))
+		seen[b.ID] = struct{}{}
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	for name := range names {
+		newest, err := live.List(beads.ListQuery{
+			Status:   "closed",
+			Label:    labelOrderRunPrefix + name,
+			Limit:    floor,
+			Sort:     beads.SortCreatedDesc,
+			TierMode: beads.TierBoth,
+			// Aggregate read: only the newest floor rows are needed and the
+			// backing tie-break at the boundary is irrelevant to the floor.
+			AllowBackingCreatedLimit: true,
+		})
+		if err != nil {
+			// An anchor read failing only means fewer anchors, which can only
+			// make the prune delete less (see SAFETY). Do not fail the sweep.
+			runtimeHelpersLogf("orders: retention floor read failed for %s: %v", name, err)
+			continue
+		}
+		for _, b := range newest {
+			if !beadLabelsContain(b.Labels, labelOrderTracking) {
+				continue
+			}
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			out = append(out, decodeRun(name, b))
+		}
+	}
+	return out, nil
+}
+
 // CloseRuns closes a batch of tracking beads, stamping close_reason so
 // validation.on-close cities accept the close, then re-verifies that every id is
 // closed — retrying a bounded number of times with a short backoff to tolerate a
