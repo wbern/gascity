@@ -936,9 +936,13 @@ func isUnavailableSocketError(err error) bool {
 
 // --- In-memory process helpers ---
 
+// sessionStopGrace is how long a stopped session's process group gets between
+// SIGTERM and SIGKILL. A variable so tests can shorten it.
+var sessionStopGrace = runtime.ManagedProcessStopGrace
+
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
 func terminateSessionConn(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, sessionStopGrace)
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess
