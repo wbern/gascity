@@ -239,3 +239,46 @@ func TestClosedRetentionBoundedReadSteadyStateIsSmall(t *testing.T) {
 		t.Fatalf("full read=%d (want 5000), bounded read=%d (want 0: nothing is past the cutoff)", len(full), len(bounded))
 	}
 }
+
+// TestClosedRetentionBoundedReadNeverReturnsOpenBeads pins the Status filter of
+// the candidate query: an OPEN tracking bead is an in-flight single-flight marker
+// and must never reach the retention prune, however old it is. (Every other
+// fixture bead is closed, so without this a candidate query that dropped
+// Status:"closed" would pass the whole suite.)
+func TestClosedRetentionBoundedReadNeverReturnsOpenBeads(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-72 * time.Hour)
+	var all []beads.Bead
+	for k := 0; k < 30; k++ {
+		c := now.Add(-time.Duration(100+k) * time.Hour)
+		all = append(all, beads.Bead{
+			ID: fmt.Sprintf("closed-%02d", k), Title: "order:mixed", Status: "closed", Type: "task",
+			Labels: []string{"order-run:mixed", "order-tracking"}, CreatedAt: c, UpdatedAt: c.Add(time.Minute),
+		})
+	}
+	for k := 0; k < 5; k++ {
+		c := now.Add(-time.Duration(200+k) * time.Hour)
+		all = append(all, beads.Bead{
+			ID: fmt.Sprintf("open-%02d", k), Title: "order:mixed", Status: "open", Type: "task",
+			Labels: []string{"order-run:mixed", "order-tracking"}, CreatedAt: c, UpdatedAt: c,
+		})
+	}
+	st := orders.NewStore(beads.OrdersStore{Store: beads.NewMemStoreFrom(len(all), all, nil)})
+	bounded, err := st.ClosedRunsForRetentionBounded(cutoff, minClosedOrderTrackingRetained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range bounded {
+		if run.Open {
+			t.Fatalf("bounded read returned OPEN tracking bead %s; only closed beads may reach the prune", run.ID)
+		}
+	}
+	for id := range deletableIDs(bounded, cutoff) {
+		if len(id) >= 4 && id[:4] == "open" {
+			t.Fatalf("open bead %s is deletable", id)
+		}
+	}
+	if got := len(deletableIDs(bounded, cutoff)); got != 30-minClosedOrderTrackingRetained {
+		t.Fatalf("closed deletable = %d, want %d", got, 30-minClosedOrderTrackingRetained)
+	}
+}

@@ -209,11 +209,14 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 // frequently timing out), only to delete a handful. This read returns just what
 // the prune's decision depends on:
 //
-//   - every closed tracking bead created before cutoff: the only beads that can
-//     be eligible, because a bead's reference time is UpdatedAt (falling back to
-//     CreatedAt) and UpdatedAt >= CreatedAt, so reference < cutoff implies
-//     CreatedAt < cutoff. CreatedBefore is pushed to the backing store
-//     (bd list --created-before); and
+//   - every closed tracking bead created before cutoff: for any bead with
+//     UpdatedAt >= CreatedAt (always true for real beads) reference time
+//     UpdatedAt (falling back to CreatedAt) < cutoff implies CreatedAt < cutoff,
+//     so these are the only beads that can be eligible. EXACTNESS (not safety)
+//     depends on that ordering: a bead with UpdatedAt < CreatedAt could be
+//     missed, which only means it is deleted later, never earlier.
+//     CreatedBefore is pushed to the backing store (bd list --created-before);
+//     and
 //   - for each order seen among those candidates, that order's newest floor
 //     closed tracking beads, so the recent-history floor still anchors against
 //     the order's real newest runs and not merely against its newest old ones.
