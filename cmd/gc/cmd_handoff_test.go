@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -632,17 +633,108 @@ func TestDoHandoffWithRecycle_NamedSessionRequestsRestart(t *testing.T) {
 		t.Error("persistRestart was not called")
 	}
 	mailFound := false
+	var handoffBead beads.Bead
 	for _, got := range listOpenMessagesBothTiers(t, store) {
 		if got.Type == "message" && got.Title == "HANDOFF: context full" {
 			mailFound = true
+			handoffBead = got
 			break
 		}
 	}
 	if !mailFound {
 		t.Fatal("handoff mail not created before requesting restart")
 	}
+	for _, want := range []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel} {
+		if !hasString(handoffBead.Labels, want) {
+			t.Errorf("handoff bead missing label %q, labels=%#v", want, handoffBead.Labels)
+		}
+	}
 	if !strings.Contains(stdout.String(), "requesting restart") {
 		t.Errorf("stdout = %q, want restart confirmation", stdout.String())
+	}
+}
+
+func TestHandoffRecycleDeliversAutoHandoffToSessionStart(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte("worker prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
+
+	// Predecessor runs deliberate self-recycle with --recycle.
+	var stdout, stderr bytes.Buffer
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	outcome := doHandoffWithRecycleOutcome(store, store, rec, dops, func() error { return nil },
+		"worker", "gastown--worker", []string{"continue phase 2", "notes for the next turn"}, true, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("doHandoffWithRecycleOutcome() code = %d, want 0; stderr=%q", outcome.code, stderr.String())
+	}
+	if !outcome.restartRequested {
+		t.Fatal("restartRequested = false, want true")
+	}
+
+	// Also send an ordinary mail to verify it does not mask the handoff.
+	if _, err := beadmail.New(store).Send("human", sessionID, "ordinary mail", "irrelevant chatter"); err != nil {
+		t.Fatalf("Send ordinary mail: %v", err)
+	}
+
+	// Successor session starts at SessionStart hook.
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var hookStdout, hookStderr bytes.Buffer
+	if code := doPrimeWithHookFormat(nil, &hookStdout, &hookStderr, true, hookOutputFormatCodex, false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, hookStderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(hookStdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, hookStdout.String())
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+	for _, want := range []string{"continue phase 2", "notes for the next turn"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("successor SessionStart additionalContext = %q, want handoff substring %q", context, want)
+		}
 	}
 }
 
@@ -900,6 +992,9 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	}
 	if !strings.Contains(stdout.String(), "restart skipped") {
 		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Hint: run 'gc handoff --recycle'") {
+		t.Fatalf("stdout = %q, want recycle hint for attended session", stdout.String())
 	}
 }
 
