@@ -53,10 +53,12 @@ For city-level beads (no rig), `gc bd` works the same way without `--rig`.
 When your context is getting long or you're done for now, hand off to your
 next session so it has full context:
 
-    gc handoff "HANDOFF: <brief summary>" "<detailed context>"
+    gc handoff --recycle "HANDOFF: <brief summary>" "<detailed context>"
 
-This sends mail to yourself and restarts the session. Your next incarnation
-will see the handoff mail on startup.
+This sends mail to yourself and requests a controller session restart. Your
+next incarnation will see the handoff mail on startup. (Plain `gc handoff`
+without `--recycle` skips restart for attended named sessions to prevent
+disrupting an active human user; `--recycle` explicitly requests fresh continuation.)
 
 ## Environment
 
