@@ -248,6 +248,11 @@ describe('ActivityPage', () => {
     expect(screen.getByText('wire activity route')).toBeTruthy();
     expect(screen.getAllByText(/event history unavailable/i).length).toBeGreaterThan(0);
   });
+
+  it('renders the SseIndicator in PageHeader meta', async () => {
+    renderPage('/activity');
+    expect(await screen.findByTitle(/^SSE stream:/i)).toBeTruthy();
+  });
 });
 
 function renderPage(path: string, attention: { eventId?: string; deploys?: boolean } = {}) {

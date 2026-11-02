@@ -8,7 +8,10 @@ import { attentionRowProps, resourceAttentionSeverity } from '../attention/route
 import { Button } from '../components/Button';
 import { PageHeader } from '../components/PageHeader';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
+import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import type { TypedEventStreamEnvelope } from 'gas-city-dashboard-shared/gc-supervisor';
+import { SseIndicator } from '../components/SseIndicator';
+import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { formatClockTime, formatShortDate } from '../hooks/time';
 import { useCachedData } from '../hooks/useCachedData';
 import { useVisibleRefresh } from '../hooks/useVisibleRefresh';
@@ -78,6 +81,11 @@ export function ActivityPage() {
     fetchActivityBundle(mode, eventType, eventActor, eventWindow, eventSignal, textFilter),
   );
 
+  const sseState = useGcEventRefresh(
+    [GC_EVENT_PREFIX.bead, GC_EVENT_PREFIX.session, 'agent.', 'events.', 'deploy.'],
+    () => void refresh(),
+  );
+
   useVisibleRefresh(refresh, 30_000);
 
   return (
@@ -87,6 +95,7 @@ export function ActivityPage() {
         synopsis={activitySynopsis(mode, eventType)}
         meta={
           <>
+            <SseIndicator state={sseState} />
             {error && (
               <span className="normal-case text-body text-accent" role="alert">
                 {error}

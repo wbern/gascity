@@ -113,3 +113,6 @@ mimocode.json
 
 # Machine-local bazel config (remote executor endpoints, mTLS paths)
 .bazelrc.local
+
+# Gas City
+.agents/mcp_config.json
