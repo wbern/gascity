@@ -976,3 +976,124 @@ func TestRunNudgeMailSweepWatchdog_ExplicitZeroDisablesMailSweep(t *testing.T) {
 		t.Errorf("mail-old status = %s, want open (explicit retention_ttl=0 must disable the mail-close phase)", got.Status)
 	}
 }
+
+func TestCmdOrderSweepNudgeMailRunTargets_MultiTarget(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cityStore := beads.NewMemStoreFrom(100, []beads.Bead{
+		nudgeSeed("city-nudge", "n-city", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}, nil)
+	rig1Store := beads.NewMemStoreFrom(200, []beads.Bead{
+		nudgeSeed("rig1-nudge", "n-rig1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		mailSeed("rig1-mail", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+	}, nil)
+
+	targets := []nudgeMailSweepTarget{
+		{Scope: "city", Nudges: beads.NudgesStore{Store: cityStore}, Mail: beads.MailStore{Store: cityStore}},
+		{Scope: "rig1", Nudges: beads.NudgesStore{Store: rig1Store}, Mail: beads.MailStore{Store: rig1Store}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailRunTargets(targets, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	// Verify both city and rig stores were swept
+	bead, err := cityStore.Get("city-nudge")
+	if err != nil || bead.Status != "closed" {
+		t.Errorf("city-nudge should be closed, got status=%s err=%v", bead.Status, err)
+	}
+	bead, err = rig1Store.Get("rig1-nudge")
+	if err != nil || bead.Status != "closed" {
+		t.Errorf("rig1-nudge should be closed, got status=%s err=%v", bead.Status, err)
+	}
+	bead, err = rig1Store.Get("rig1-mail")
+	if err != nil || bead.Status != "closed" {
+		t.Errorf("rig1-mail should be closed, got status=%s err=%v", bead.Status, err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "closed 2 nudge bead(s), 1 mail bead(s)") {
+		t.Errorf("expected summary with 2 nudges and 1 mail closed, got: %s", out)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailDryRunTargets_MultiTarget(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cityStore := beads.NewMemStoreFrom(100, []beads.Bead{
+		nudgeSeed("city-nudge", "n-city", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(200, []beads.Bead{
+		nudgeSeed("rig-nudge", "n-rig", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}, nil)
+
+	targets := []nudgeMailSweepTarget{
+		{Scope: "city", Nudges: beads.NudgesStore{Store: cityStore}, Mail: beads.MailStore{Store: cityStore}},
+		{Scope: "rig", Nudges: beads.NudgesStore{Store: rigStore}, Mail: beads.MailStore{Store: rigStore}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailDryRunTargets(targets, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "would close 2 nudge bead(s), 0 mail bead(s)") {
+		t.Errorf("expected dry run summary with 2 nudges, got: %s", out)
+	}
+
+	// Verify no changes were made
+	bead, _ := cityStore.Get("city-nudge")
+	if bead.Status != "open" {
+		t.Errorf("city-nudge should still be open after dry-run, got %s", bead.Status)
+	}
+	bead, _ = rigStore.Get("rig-nudge")
+	if bead.Status != "open" {
+		t.Errorf("rig-nudge should still be open after dry-run, got %s", bead.Status)
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_SweepsRigStores(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cityStore := beads.NewMemStoreFrom(100, []beads.Bead{
+		nudgeSeed("city-nudge", "n-c", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+	}, nil)
+	crmStore := beads.NewMemStoreFrom(200, []beads.Bead{
+		nudgeSeed("crm-nudge", "n-crm", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+		mailSeed("crm-mail", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+	}, nil)
+
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"crm": crmStore},
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
+	}
+
+	cr.runNudgeMailSweepWatchdog(cr.cfg, now)
+
+	// Verify beads in both city and crm rig store were closed
+	cityNudge, err := cityStore.Get("city-nudge")
+	if err != nil || cityNudge.Status != "closed" {
+		t.Fatalf("city-nudge should be closed, got status=%s err=%v", cityNudge.Status, err)
+	}
+	crmNudge, err := crmStore.Get("crm-nudge")
+	if err != nil || crmNudge.Status != "closed" {
+		t.Fatalf("crm-nudge should be closed, got status=%s err=%v", crmNudge.Status, err)
+	}
+	crmMail, err := crmStore.Get("crm-mail")
+	if err != nil || crmMail.Status != "closed" {
+		t.Fatalf("crm-mail should be closed, got status=%s err=%v", crmMail.Status, err)
+	}
+
+	if !strings.Contains(stderr.String(), "nudge-mail-sweep watchdog closed 2 nudge bead(s), 1 mail bead(s)") {
+		t.Errorf("watchdog log missing or wrong: %s", stderr.String())
+	}
+}

@@ -40,6 +40,14 @@ type nudgeMailSweepResult struct {
 	MailClosed  int
 }
 
+// nudgeMailSweepTarget represents a bead store scope (city or a specific rig)
+// for multi-target nudge/mail sweeps.
+type nudgeMailSweepTarget struct {
+	Scope  string
+	Nudges beads.NudgesStore
+	Mail   beads.MailStore
+}
+
 // nudgeMailSweepMailTTLForConfig resolves the mail-close TTL for the
 // controller watchdog and the sweep-nudge-mail order command from
 // cfg.Mail.RetentionTTL. An empty (unset) value preserves
