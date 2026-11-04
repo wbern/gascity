@@ -642,7 +642,7 @@ printf '{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,
 	}
 }
 
-func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCalls(t *testing.T) {
+func TestTryControlReadyFromCacheOrFallbackReadsLiveLegWithZeroSubprocessCalls(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -697,6 +697,7 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 // `list`) and asserts the fallback makes exactly one bd invocation covering
 // the whole tick, not the shell script's N per-candidate/route calls.
 func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
@@ -1054,6 +1055,7 @@ func TestDecodeControlReadySummaryRejectsOmittedInstantiationMarker(t *testing.T
 }
 
 func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow
@@ -1109,6 +1111,7 @@ func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T)
 }
 
 func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	configureIsolatedRuntimeEnv(t)
 	originalExecutable := controlReadyExecutable
 	originalRunner := controlReadyCommandRunner
@@ -1206,6 +1209,7 @@ func controlReadyEquivalenceFixture(t *testing.T) (query string, parsed parsedCo
 // non-summary fallback already does -- not the per-candidate/per-route
 // fan-out controlReadyScopedSummaryQueue issues.
 func TestControlReadySummaryPathIssuesExactlyOneBdCall(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	usePathBDAsGCForControlReadyTest(t)
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
@@ -1343,6 +1347,7 @@ printf '[{"id":"ga-plain"}]'
 // weeks. The scan must fall back to the scoped assignee/route summaries and
 // still surface the dispatcher's work.
 func TestTryControlReadyFallsBackToScopedSummariesWhenWholeSetSummaryIncomplete(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	resetControlReadyCache(t)
 	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
 	t.Cleanup(func() {
@@ -1401,6 +1406,7 @@ func TestTryControlReadyFallsBackToScopedSummariesWhenWholeSetSummaryIncomplete(
 // the fail-loud contract: if the scoped fallback also fails, the scan errors
 // rather than reading as an empty queue.
 func TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails(t *testing.T) {
+	unavailableControlReadyLiveSources(t)
 	resetControlReadyCache(t)
 	originalExecutable, originalRunner := controlReadyExecutable, controlReadyCommandRunner
 	t.Cleanup(func() {
@@ -1437,6 +1443,7 @@ func TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails(t *tes
 // scoped calls each advance the clock by perCall, so one fallback round can
 // outlast controlReadyCacheTTL the way it does on GC3 crm (gcw-qg49y).
 func controlReadyIncompleteFallbackHarness(t *testing.T, perCall time.Duration) (now *time.Time, rounds *int, scan func()) {
+	unavailableControlReadyLiveSources(t)
 	t.Helper()
 	resetControlReadyCache(t)
 	originalExecutable, originalRunner, originalNow := controlReadyExecutable, controlReadyCommandRunner, controlReadyNow

@@ -987,6 +987,44 @@ func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) 
 	return mergeControlReadyLegs(legs...), true
 }
 
+// controlReadyLiveLegsReady reads the same authoritative legs as dispatch,
+// once each, without a primed snapshot or a bounded discovery projection.
+// This is the live-read path from upstream #7404/#7446. Unlike the shell
+// fallback, it keeps the complete ready set until route selection: truncating
+// before selection can hide a control behind unrelated ready work.
+func controlReadyLiveLegsReady(dir, cityPath string, cfg *config.City) ([]beads.Bead, bool, error) {
+	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
+	if err != nil {
+		log.Printf("control-ready scan: opening ledgers for %s: %v; using discovery fallback", dir, err)
+		return nil, false, nil
+	}
+	defer func() {
+		for _, source := range owned {
+			if err := closeBeadStoreHandle(source); err != nil {
+				log.Printf("control-ready scan: closing scope store for %s: %v", dir, err)
+			}
+		}
+	}()
+	if len(sources) == 0 {
+		return nil, false, nil
+	}
+	legs := make([][]beads.Bead, 0, len(sources))
+	for _, source := range sources {
+		ready, err := bindingEngine(source).Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil {
+			return nil, true, fmt.Errorf("control-ready scan: reading ledger for %s: %w", dir, err)
+		}
+		rows := make([]beads.Bead, 0, len(ready))
+		for _, bead := range ready {
+			if bead.Type != controlReadyExcludeType {
+				rows = append(rows, bead)
+			}
+		}
+		legs = append(legs, rows)
+	}
+	return mergeControlReadyLegs(legs...), true, nil
+}
+
 // tryControlReadyFromCacheOrFallback answers a control-dispatcher readiness
 // scan in-process instead of running workflowServeControlReadyQueryForBeads's
 // shell script. handled reports whether workQuery was even recognized as a
@@ -1004,6 +1042,13 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	cityPath := cityForStoreDir(dir)
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
+
+	if ready, opened, err := controlReadyLiveLegsReady(dir, cityPath, cfg); opened {
+		if err != nil {
+			return nil, true, err
+		}
+		return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+	}
 
 	if !parsed.includeEphemeral || controlReadyUsesSummary(env) {
 		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral, parsed); entry != nil {
