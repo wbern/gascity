@@ -232,13 +232,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// name. On a single-store city this is nil, so every lookup below misses
 	// and the counts stay byte-identical to the provider-only behavior.
 	graphWork := s.graphActiveWorkBySession()
+	pools := newRequestSessionListing(sp)
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, pools)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
@@ -278,6 +279,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
+				SessionID:     info.sessionID,
 				GroupName:     groupName,
 				Expanded:      isPool,
 			}
@@ -320,9 +322,12 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			suspendedRigs[rig.Name] = true
 		}
 		rigDetails = append(rigDetails, StatusRigDetail{
-			Name:      rig.Name,
-			Path:      rig.Path,
-			Suspended: rigSuspended,
+			Name:                rig.Name,
+			Path:                rig.Path,
+			Prefix:              rig.EffectivePrefix(),
+			DefaultSlingTarget:  rig.DefaultSlingTarget,
+			DefaultSlingTargets: append([]string(nil), rig.DefaultSlingTargets...),
+			Suspended:           rigSuspended,
 		})
 	}
 
@@ -548,6 +553,7 @@ type statusSessionSnapshot struct {
 }
 
 type statusSessionInfo struct {
+	sessionID   string
 	sessionName string
 	agentName   string
 	template    string
@@ -647,6 +653,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 			continue
 		}
 		info := statusSessionInfo{
+			sessionID:   sessInfo.ID,
 			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
 			agentName:   strings.TrimSpace(sessInfo.AgentName),
 			template:    strings.TrimSpace(sessInfo.Template),

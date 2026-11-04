@@ -3540,6 +3540,7 @@ export type SessionResponse = {
     active_bead?: string;
     activity?: string;
     agent_kind?: string;
+    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -3569,7 +3570,9 @@ export type SessionResponse = {
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
+    transport?: string;
     work_dir?: string;
+    worker_dir?: string;
 };
 
 export type SessionStartupUninitializedPayload = {
@@ -4938,6 +4941,10 @@ export type StatusAgentDetail = {
      */
     scope: string;
     /**
+     * Persistent session bead ID when known.
+     */
+    session_id?: string;
+    /**
      * tmux session name CLI drain-ops key on.
      */
     session_name?: string;
@@ -5131,6 +5138,14 @@ export type StatusRigCounts = {
 
 export type StatusRigDetail = {
     /**
+     * Default sling target, when configured.
+     */
+    default_sling_target?: string;
+    /**
+     * Ordered default sling targets, when configured.
+     */
+    default_sling_targets?: Array<string> | null;
+    /**
      * Rig name.
      */
     name: string;
@@ -5138,6 +5153,10 @@ export type StatusRigDetail = {
      * Rig directory path.
      */
     path: string;
+    /**
+     * Effective rig bead prefix.
+     */
+    prefix?: string;
     /**
      * Whether the rig is suspended (either explicitly or because all its agents are suspended).
      */

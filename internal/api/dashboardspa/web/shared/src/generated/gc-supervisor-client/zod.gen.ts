@@ -2994,6 +2994,7 @@ export const zStatusAgentDetail = z.object({
     running: z.boolean(),
     scale_label: z.string().optional(),
     scope: z.string(),
+    session_id: z.string().optional(),
     session_name: z.string().optional(),
     suspended: z.boolean()
 });
@@ -3028,8 +3029,11 @@ export const zStatusRigCounts = z.object({
 });
 
 export const zStatusRigDetail = z.object({
+    default_sling_target: z.string().optional(),
+    default_sling_targets: z.array(z.string()).nullish(),
     name: z.string(),
     path: z.string(),
+    prefix: z.string().optional(),
     suspended: z.boolean()
 });
 
@@ -3157,6 +3161,7 @@ export const zSessionResponse = z.object({
     active_bead: z.string().optional(),
     activity: z.string().optional(),
     agent_kind: z.string().optional(),
+    agent_name: z.string().optional(),
     alias: z.string().optional(),
     attached: z.boolean(),
     configured_named_session: z.boolean().optional(),
@@ -3182,7 +3187,9 @@ export const zSessionResponse = z.object({
     submission_capabilities: zSubmissionCapabilities.optional(),
     template: z.string(),
     title: z.string(),
-    work_dir: z.string().optional()
+    transport: z.string().optional(),
+    work_dir: z.string().optional(),
+    worker_dir: z.string().optional()
 });
 
 export const zListBodySessionResponse = z.object({

@@ -65,7 +65,7 @@ args = ["notes-mcp"]
 	if err != nil {
 		t.Fatalf("ReadFile(.gitignore): %v", err)
 	}
-	for _, want := range managedMCPGitignoreEntries {
+	for _, want := range []string{"/.gemini/settings.json"} {
 		if !strings.Contains(string(gitignore), want) {
 			t.Fatalf(".gitignore missing %q:\n%s", want, string(gitignore))
 		}

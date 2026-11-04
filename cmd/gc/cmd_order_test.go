@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -3521,6 +3522,36 @@ func TestOrderHistoryJSON(t *testing.T) {
 	}
 	if len(payload.Entries) != 1 || payload.Entries[0].Order != "digest" || payload.Entries[0].BeadID != "WP-42" {
 		t.Fatalf("entries = %+v, want digest WP-42", payload.Entries)
+	}
+}
+
+func TestOrderHistoryAPIRenderMatchesLocalJSONContract(t *testing.T) {
+	createdAt := "2026-10-28T12:00:00.123456789Z"
+	stamp, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-run-1", Title: "digest run", Status: "closed", Type: "task", CreatedAt: stamp, Labels: []string{"order-run:digest", "exec"}}}, nil)
+	ordersForRead := []orders.Order{{Name: "digest", Formula: "mol-digest"}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: store}}, nil
+	}
+	var local, routed, localErr, routedErr bytes.Buffer
+	if code := doOrderHistoryWithStoresResolverJSON("digest", "", ordersForRead, resolver, true, &local, &localErr); code != 0 {
+		t.Fatalf("local order history JSON = %d, stderr=%q", code, localErr.String())
+	}
+	if code := renderOrderHistoryFromAPI(api.CachedRead[[]api.OrderHistoryView]{AgeSeconds: 2, Body: []api.OrderHistoryView{{BeadID: "gc-run-1", Name: "digest", ScopedName: "digest", CreatedAt: createdAt}}}, "digest", "", orderHistoryBounds{}, true, &routed, &routedErr); code != 0 {
+		t.Fatalf("API order history JSON = %d, stderr=%q", code, routedErr.String())
+	}
+	var localDoc, apiDoc orderHistoryJSONResult
+	if err := json.Unmarshal(local.Bytes(), &localDoc); err != nil {
+		t.Fatalf("decode local JSON: %v", err)
+	}
+	if err := json.Unmarshal(routed.Bytes(), &apiDoc); err != nil {
+		t.Fatalf("decode API JSON: %v", err)
+	}
+	if !reflect.DeepEqual(apiDoc, localDoc) {
+		t.Fatalf("API order history differs from local JSON contract:\nlocal: %+v\nAPI:   %+v", localDoc, apiDoc)
 	}
 }
 

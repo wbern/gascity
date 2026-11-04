@@ -3,6 +3,7 @@ package materialize
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -245,6 +246,75 @@ func TestApplyMCPProjectionAntigravityRejectsLegacySSE(t *testing.T) {
 	}
 }
 
+func TestApplyMCPProjectionRefusesToDropProjectOwnedContent(t *testing.T) {
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderClaude, dir, []MCPServer{{
+		Name: "gc-search", Transport: MCPTransportStdio, Command: "npx", Args: []string{"search-mcp"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := []byte(`{"mcpServers":{"team-db":{"command":"team-db-mcp"}},"customSetting":true}` + "\n")
+	if err := os.WriteFile(proj.Target, projectConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil || !strings.Contains(err.Error(), "not adopting") {
+		t.Fatalf("Apply error = %v, want an adoption refusal", err)
+	}
+	got, err := os.ReadFile(proj.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, projectConfig) {
+		t.Fatalf("project config changed on refused adoption:\n got: %s\nwant: %s", got, projectConfig)
+	}
+	for _, path := range []string{
+		proj.markerPath(),
+		filepath.Join(dir, ".gc", "mcp-adopted", MCPProviderClaude),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("refused adoption created %s (stat error %v)", path, err)
+		}
+	}
+}
+
+func TestApplyMCPProjectionAntigravityLeavesProjectOwnedConfigAlone(t *testing.T) {
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderAntigravity, dir, []MCPServer{{
+		Name: "gc-search", Transport: MCPTransportStdio, Command: "npx", Args: []string{"search-mcp"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(proj.Target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := []byte(`{"mcpServers":{"team-db":{"command":"team-db-mcp"}},"workspace":{"trusted":true}}` + "\n")
+	if err := os.WriteFile(proj.Target, projectConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil || !strings.Contains(err.Error(), "not adopting") {
+		t.Fatalf("Apply error = %v, want an adoption refusal", err)
+	}
+	got, err := os.ReadFile(proj.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, projectConfig) {
+		t.Fatalf("Antigravity project config changed on refused adoption:\n got: %s\nwant: %s", got, projectConfig)
+	}
+	if _, err := os.Stat(proj.markerPath()); !os.IsNotExist(err) {
+		t.Fatalf("refused Antigravity adoption created managed marker (stat error %v)", err)
+	}
+}
+
 func TestApplyMCPProjectionAntigravityPreservesNonMCPKeysAndAdopts(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, ".agents", "mcp_config.json")
@@ -253,11 +323,7 @@ func TestApplyMCPProjectionAntigravityPreservesNonMCPKeysAndAdopts(t *testing.T)
 	}
 	if err := os.WriteFile(target, []byte(`{
   "comment": "keep me",
-  "mcpServers": {
-    "stale": {
-      "command": "old"
-    }
-  }
+  "mcpServers": {}
 }
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -288,9 +354,6 @@ func TestApplyMCPProjectionAntigravityPreservesNonMCPKeysAndAdopts(t *testing.T)
 	servers, ok := doc["mcpServers"].(map[string]any)
 	if !ok {
 		t.Fatalf("mcpServers missing or wrong type: %+v", doc["mcpServers"])
-	}
-	if _, ok := servers["stale"]; ok {
-		t.Fatalf("stale server should be replaced by the managed catalog: %+v", servers)
 	}
 	if _, ok := servers["alpha"]; !ok {
 		t.Fatalf("alpha server missing: %+v", servers)
@@ -489,6 +552,7 @@ func TestApplyMCPProjectionCursorPreservesNonMCPSettings(t *testing.T) {
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	markMCPManaged(t, dir, MCPProviderCursor)
 
 	proj, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
 		{
@@ -571,6 +635,7 @@ func TestApplyMCPProjectionGeminiPreservesNonMCPSettings(t *testing.T) {
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	markMCPManaged(t, dir, MCPProviderGemini)
 
 	proj, err := BuildMCPProjection(MCPProviderGemini, dir, []MCPServer{
 		{
@@ -647,6 +712,7 @@ command = "old"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	markMCPManaged(t, dir, MCPProviderCodex)
 
 	proj, err := BuildMCPProjection(MCPProviderCodex, dir, []MCPServer{
 		{
@@ -747,6 +813,7 @@ func TestApplyMCPProjectionOpenCodePreservesNonMCPConfig(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"theme":"system","mcp":{"old":{"type":"local","command":["old"]}}}`), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+	markMCPManaged(t, dir, MCPProviderOpenCode)
 
 	proj, err := BuildMCPProjection(MCPProviderOpenCode, dir, []MCPServer{
 		{
@@ -1008,7 +1075,7 @@ func TestApplyMCPProjectionFakeChmodsBeforeRename(t *testing.T) {
 func TestApplyMCPProjectionSnapshotsExistingContentBeforeFirstAdoption(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, ".mcp.json")
-	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	existing := []byte(`{"mcpServers":{}}` + "\n")
 	if err := os.WriteFile(target, existing, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,8 +1094,8 @@ func TestApplyMCPProjectionSnapshotsExistingContentBeforeFirstAdoption(t *testin
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// The pre-existing hand-authored file must have been preserved under
-	// .gc/mcp-adopted/claude/<timestamp>.json before being overwritten.
+	// The compatible pre-existing file must be preserved under
+	// .gc/mcp-adopted/claude/<timestamp>.json before being adopted.
 	adoptedDir := filepath.Join(dir, ".gc", "mcp-adopted", "claude")
 	entries, err := os.ReadDir(adoptedDir)
 	if err != nil {
@@ -1076,7 +1143,7 @@ func TestApplyMCPProjectionCursorAdoptsExistingFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	existing := []byte(`{"mcpServers":{}}` + "\n")
 	if err := os.WriteFile(target, existing, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1200,8 +1267,9 @@ func TestApplyMCPProjectionRejectsSymlinkedTarget(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected symlink rejection, got nil error")
 	}
-	if !strings.Contains(err.Error(), "symlinked path") {
-		t.Fatalf("unexpected error: %v", err)
+	var refused *MCPAdoptionRefusedError
+	if !errors.As(err, &refused) || refused.Symlink != target {
+		t.Fatalf("Apply error = %v, want a symlink adoption refusal for %s", err, target)
 	}
 	// Victim file content must be untouched.
 	got, err := os.ReadFile(victim)

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -75,22 +74,7 @@ func cmdRunCancel(runID string, jsonOut bool, stdout, stderr io.Writer) int {
 // fallback: run cancel's teardown is server-side only (see cancelRun in
 // internal/api/huma_handlers_runs.go), so a fallback here would mean
 // reimplementing domain logic in the CLI, which AGENTS.md forbids.
-var runAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	// A supervisor-managed city omits a standalone [api] port, so apiClient
-	// returns nil even though the controller socket is alive. Route to the
-	// supervisor-managed client directly, mirroring maintenanceAPIClient.
-	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
-		if apiRouteControllerAliveHook(cityPath) != 0 {
-			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
-				return c, ""
-			}
-		}
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+var runAPIClient = supervisorFallthroughAPIClient
 
 // routeRunCancel dispatches `gc run cancel` to the supervisor API. Exit
 // codes: 0 on success, 2 when the supervisor is unreachable (no client, a

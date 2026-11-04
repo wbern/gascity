@@ -3962,6 +3962,7 @@ type SessionResponse struct {
 	ActiveBead             *string                 `json:"active_bead,omitempty"`
 	Activity               *string                 `json:"activity,omitempty"`
 	AgentKind              *string                 `json:"agent_kind,omitempty"`
+	AgentName              *string                 `json:"agent_name,omitempty"`
 	Alias                  *string                 `json:"alias,omitempty"`
 	Attached               bool                    `json:"attached"`
 	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
@@ -3987,7 +3988,9 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
+	Transport              *string                 `json:"transport,omitempty"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
+	WorkerDir              *string                 `json:"worker_dir,omitempty"`
 }
 
 // SessionStartupUninitializedPayload defines model for SessionStartupUninitializedPayload.
@@ -5110,6 +5113,9 @@ type StatusAgentDetail struct {
 	// Scope city or rig.
 	Scope string `json:"scope"`
 
+	// SessionId Persistent session bead ID when known.
+	SessionId *string `json:"session_id,omitempty"`
+
 	// SessionName tmux session name CLI drain-ops key on.
 	SessionName *string `json:"session_name,omitempty"`
 
@@ -5259,11 +5265,20 @@ type StatusRigCounts struct {
 
 // StatusRigDetail defines model for StatusRigDetail.
 type StatusRigDetail struct {
+	// DefaultSlingTarget Default sling target, when configured.
+	DefaultSlingTarget *string `json:"default_sling_target,omitempty"`
+
+	// DefaultSlingTargets Ordered default sling targets, when configured.
+	DefaultSlingTargets *[]string `json:"default_sling_targets,omitempty"`
+
 	// Name Rig name.
 	Name string `json:"name"`
 
 	// Path Rig directory path.
 	Path string `json:"path"`
+
+	// Prefix Effective rig bead prefix.
+	Prefix *string `json:"prefix,omitempty"`
 
 	// Suspended Whether the rig is suspended (either explicitly or because all its agents are suspended).
 	Suspended bool `json:"suspended"`

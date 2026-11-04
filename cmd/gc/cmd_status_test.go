@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,6 +22,51 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+func TestStatusAPIProjectionPreservesSessionAndRigConfig(t *testing.T) {
+	setStringField := func(target any, field, value string) {
+		t.Helper()
+		v := reflect.ValueOf(target).Elem().FieldByName(field)
+		if !v.IsValid() {
+			t.Fatalf("%T has no %s field", target, field)
+		}
+		v.SetString(value)
+	}
+	setStringSliceField := func(target any, field string, value []string) {
+		t.Helper()
+		v := reflect.ValueOf(target).Elem().FieldByName(field)
+		if !v.IsValid() {
+			t.Fatalf("%T has no %s field", target, field)
+		}
+		v.Set(reflect.ValueOf(value))
+	}
+
+	agent := api.StatusAgentView{
+		Name:          "worker",
+		QualifiedName: "alpha/worker",
+		Scope:         "rig",
+		Running:       true,
+		SessionName:   "alpha--worker",
+	}
+	setStringField(&agent, "SessionID", "session-bead-123")
+	rigAgent := rigStatusAgentJSONFromAPI(agent, newFakeDrainOps())
+	if rigAgent.SessionID != "session-bead-123" {
+		t.Errorf("API rig status session_id = %q, want session-bead-123", rigAgent.SessionID)
+	}
+
+	rig := api.StatusRigView{Name: "alpha", Path: "/work/alpha"}
+	setStringField(&rig, "Prefix", "al")
+	setStringField(&rig, "DefaultSlingTarget", "alpha/worker")
+	setStringSliceField(&rig, "DefaultSlingTargets", []string{"alpha/worker", "beta/worker"})
+	snapshot := snapshotFromStatusView("/work/city", api.StatusView{Rigs: []api.StatusRigView{rig}})
+	if len(snapshot.Rigs) != 1 {
+		t.Fatalf("API status rig rows = %d, want 1", len(snapshot.Rigs))
+	}
+	got := snapshot.Rigs[0]
+	if got.Prefix != "al" || got.DefaultSlingTarget != "alpha/worker" || !reflect.DeepEqual(got.DefaultSlingTargets, []string{"alpha/worker", "beta/worker"}) {
+		t.Errorf("API status rig config = %+v, want prefix and default sling targets", got)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // doRigStatus tests

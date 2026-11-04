@@ -974,9 +974,28 @@ func provenanceFilePath(worktreePath string) (string, error) {
 }
 
 func readProvenance(worktreePath string) (Provenance, error) {
-	path, err := provenanceFilePath(worktreePath)
+	gitDir, err := git.New(worktreePath).GitDir()
 	if err != nil {
 		return Provenance{}, err
+	}
+	return ReadProvenanceAt(gitDir)
+}
+
+// ReadProvenanceAt reads a worktree's durable ownership record from its
+// private Git directory. An error wrapping fs.ErrNotExist means no managed
+// worktree provenance was published there; other errors indicate that the
+// ownership record could not be trusted.
+func ReadProvenanceAt(gitDir string) (Provenance, error) {
+	if strings.TrimSpace(gitDir) == "" {
+		return Provenance{}, errors.New("git directory is empty")
+	}
+	path := filepath.Join(gitDir, provenanceFilename)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return Provenance{}, fmt.Errorf("inspecting %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return Provenance{}, fmt.Errorf("inspecting %q: provenance is not a regular file", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

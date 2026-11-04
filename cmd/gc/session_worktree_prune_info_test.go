@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,83 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_NotARepo(t *testing.T) {
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_LeavesManagedWorktree(t *testing.T) {
+	fx := newPruneFixture(t)
+	gitDir := t.TempDir()
+	writePruneProvenance(t, gitDir, `{"owner":"another-provisioner","bead_id":"gc-work"}`)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDir: gitDir})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called for a managed worktree owned by another provisioner")
+	}
+	if !strings.Contains(stderr.String(), "managed worktree") {
+		t.Errorf("expected managed-worktree refusal, got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_ManagedWorktreeUnreadableProvenanceFailsClosed(t *testing.T) {
+	fx := newPruneFixture(t)
+	gitDir := t.TempDir()
+	writePruneProvenance(t, gitDir, `{`)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDir: gitDir})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called with unreadable managed-worktree provenance")
+	}
+	if !strings.Contains(stderr.String(), "cannot read its worktree provenance") {
+		t.Errorf("expected provenance-read refusal, got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_UnresolvedGitDirFailsClosed(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDirErr: errors.New("rev-parse failed")})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called when the worktree's git directory could not be resolved")
+	}
+	if !strings.Contains(stderr.String(), "cannot read its worktree provenance") {
+		t.Errorf("expected GitDir refusal, got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_ManagedDirtyWorktreeGetsNoStaleMarker(t *testing.T) {
+	fx := newPruneFixture(t)
+	gitDir := t.TempDir()
+	writePruneProvenance(t, gitDir, `{"owner":"another-provisioner"}`)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDir: gitDir, hasUncommitted: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called for a dirty managed worktree")
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+	if strings.Contains(stderr.String(), "could not defer worker_dir") {
+		t.Errorf("managed worktree entered deferred retirement path: %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(fx.cityPath, ".gc", "runtime", "worker-dir-retirement")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("managed worktree created a deferred retirement registry: stat err = %v", err)
+	}
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_HasUncommitted(t *testing.T) {

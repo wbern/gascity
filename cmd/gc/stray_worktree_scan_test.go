@@ -23,6 +23,7 @@ type fakeStrayProbe struct {
 }
 
 func (f fakeStrayProbe) IsRepo() bool                            { return f.isRepo }
+func (f fakeStrayProbe) GitDir() (string, error)                 { return "", nil }
 func (f fakeStrayProbe) CurrentBranch() (string, error)          { return f.branch, nil }
 func (f fakeStrayProbe) HasUncommittedOrIgnoredWork() bool       { return f.uncommitted || f.ignored }
 func (f fakeStrayProbe) HasUnpushedCommitsResult() (bool, error) { return f.unpushed, nil }

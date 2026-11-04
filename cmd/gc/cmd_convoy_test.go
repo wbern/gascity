@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,6 +20,37 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
+
+func TestConvoyListAPIRenderMatchesLocalJSONContract(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{
+		Title:    "release train",
+		Type:     "convoy",
+		Status:   "open",
+		Labels:   []string{"owned"},
+		Metadata: map[string]string{"target": "main", "convoy.owner": "operator"},
+	})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	var local, routed bytes.Buffer
+	if code := writeConvoyListJSON([]convoyWithStore{{store: store, bead: convoy}}, &local, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("writeConvoyListJSON = %d, want 0", code)
+	}
+	if code := renderConvoyListFromAPI(api.CachedRead[[]beads.Bead]{Body: []beads.Bead{convoy}}, []api.ConvoyCheckView{{ConvoyID: convoy.ID}}, true, &routed, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("renderConvoyListFromAPI = %d, want 0", code)
+	}
+	var localDoc, apiDoc convoyListResultJSON
+	if err := json.Unmarshal(local.Bytes(), &localDoc); err != nil {
+		t.Fatalf("decode local JSON: %v", err)
+	}
+	if err := json.Unmarshal(routed.Bytes(), &apiDoc); err != nil {
+		t.Fatalf("decode API JSON: %v", err)
+	}
+	if !reflect.DeepEqual(apiDoc, localDoc) {
+		t.Fatalf("API convoy list differs from local JSON contract:\nlocal: %+v\nAPI:   %+v", localDoc, apiDoc)
+	}
+}
 
 // --- gc convoy create ---
 

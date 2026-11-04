@@ -172,6 +172,9 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 		Running:       g.Running,
 		Suspended:     g.Suspended,
 	}
+	if g.SessionId != nil {
+		out.SessionID = *g.SessionId
+	}
 	if g.SessionName != nil {
 		out.SessionName = *g.SessionName
 	}
@@ -188,9 +191,19 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 }
 
 func statusRigViewFromGen(g genclient.StatusRigDetail) StatusRigView {
-	return StatusRigView{
+	out := StatusRigView{
 		Name:      g.Name,
 		Path:      g.Path,
 		Suspended: g.Suspended,
 	}
+	if g.Prefix != nil {
+		out.Prefix = *g.Prefix
+	}
+	if g.DefaultSlingTarget != nil {
+		out.DefaultSlingTarget = *g.DefaultSlingTarget
+	}
+	if g.DefaultSlingTargets != nil {
+		out.DefaultSlingTargets = append([]string(nil), (*g.DefaultSlingTargets)...)
+	}
+	return out
 }

@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -32,6 +34,42 @@ func TestDoBeadsHealth_FileProvider(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Beads provider: healthy") {
 		t.Errorf("should show healthy message: %s", stdout.String())
+	}
+}
+
+func TestBeadsListAPIRenderMatchesLocalBeadPayload(t *testing.T) {
+	priority := 2
+	rows := []beads.Bead{{
+		ID:        "gc-a1",
+		Title:     "same work item",
+		Status:    "open",
+		Type:      "task",
+		Priority:  &priority,
+		Assignee:  "worker",
+		Labels:    []string{"route-eq"},
+		CreatedAt: time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC),
+	}}
+	var local, routed bytes.Buffer
+	writeBeadsJSON(rows, &local)
+	if code := renderBeadsListFromAPI(api.CachedRead[[]beads.Bead]{AgeSeconds: 2, Body: rows}, "json", beadFilters{}, &routed); code != 0 {
+		t.Fatalf("renderBeadsListFromAPI = %d, want 0", code)
+	}
+	var localRows []beads.Bead
+	if err := json.Unmarshal(local.Bytes(), &localRows); err != nil {
+		t.Fatalf("decode local payload: %v", err)
+	}
+	var apiEnvelope struct {
+		Beads     []beads.Bead `json:"beads"`
+		CacheAgeS float64      `json:"_cache_age_s"`
+	}
+	if err := json.Unmarshal(routed.Bytes(), &apiEnvelope); err != nil {
+		t.Fatalf("decode API payload: %v", err)
+	}
+	if apiEnvelope.CacheAgeS != 2 {
+		t.Errorf("API _cache_age_s = %v, want 2", apiEnvelope.CacheAgeS)
+	}
+	if !reflect.DeepEqual(apiEnvelope.Beads, localRows) {
+		t.Fatalf("API bead payload differs from local payload:\nlocal: %#v\nAPI:   %#v", localRows, apiEnvelope.Beads)
 	}
 }
 

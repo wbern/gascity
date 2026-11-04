@@ -19,14 +19,14 @@ func observeProviderSession(sp runtime.Provider, sessionName string, processName
 	liveness := runtime.ObserveLiveness(sp, sessionName, processNames)
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
+	if !obs.Running {
+		return obs
+	}
 	if suspended, err := sp.GetMeta(sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
 		obs.Suspended = true
 	}
 	if sessionID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
-	}
-	if !obs.Running {
-		return obs
 	}
 	obs.Attached = sp.IsAttached(sessionName)
 	if lastActive, err := sp.GetLastActivity(sessionName); err == nil && !lastActive.IsZero() {

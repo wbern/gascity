@@ -3104,6 +3104,11 @@ GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
 proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.
 
+--limit N bounds the retention deletions of one run to N beads (stale-close
+is unaffected). Use it to drain a large backlog in paced batches — for
+example right after shortening delete_after_close — instead of issuing tens
+of thousands of deletes against the store in a single run.
+
 ```
 gc order sweep-tracking [order ...] [flags]
 ```
@@ -3113,6 +3118,7 @@ gc order sweep-tracking [order ...] [flags]
 | `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
+| `--limit` | int |  | delete at most this many expired closed tracking beads per run (0 = unbounded); the remainder drains on later runs |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 

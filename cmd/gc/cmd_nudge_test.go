@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -308,12 +310,21 @@ func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	item.LastError = "expired"
 	item.DeadAt = now.Add(-30 * time.Minute)
 
-	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.Dead = append(state.Dead, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("seed dead item: %v", err)
 	}
-	if len(state.Dead) != 1 {
-		t.Fatalf("dead = %d, want 1 before retention cutoff", len(state.Dead))
+	if err := runNudgeQueueMaintenanceSweepWithStore(dir, store, now); err != nil {
+		t.Fatalf("runNudgeQueueMaintenanceSweepWithStore: %v", err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Dead) != 1 || state.Dead[0].Shadow == nil || !state.Dead[0].Shadow.Paid {
+		t.Fatalf("dead = %+v, want one verified and paid item before retention cutoff", state.Dead)
 	}
 
 	bead, err := store.Get(beadID)
@@ -3147,6 +3158,89 @@ func (s *failingTerminalNudgeStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type blockingTerminalNudgeStore struct {
+	*beads.MemStore
+	entered chan struct{}
+	release <-chan struct{}
+	blocked bool
+	once    sync.Once
+}
+
+func (s *blockingTerminalNudgeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.blocked {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func TestAckQueuedNudgesDoesNotHoldQueueLockDuringShadowWrite(t *testing.T) {
+	dir := t.TempDir()
+	store := &blockingTerminalNudgeStore{
+		MemStore: beads.NewMemStore(),
+		entered:  make(chan struct{}),
+	}
+	item := newQueuedNudgeWithOptions("worker", "do work", "session", time.Now(), queuedNudgeOptions{ID: "n-lock-boundary"})
+	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	itemBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(item.ID)
+	if err != nil || !ok {
+		t.Fatalf("nudgeFrontDoor.Find = (%v,%v), want existing shadow", err, ok)
+	}
+	blocked := make(chan struct{})
+	store.blocked = true
+	store.release = blocked
+	ackDone := make(chan error, 1)
+	ackComplete := make(chan struct{})
+	previous := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		return beads.NudgesStore{Store: store}, store
+	}
+	t.Cleanup(func() {
+		select {
+		case <-blocked:
+		default:
+			close(blocked)
+		}
+		select {
+		case <-ackComplete:
+		case <-time.After(hangBudget):
+			t.Errorf("ack goroutine did not finish during cleanup")
+		}
+		openOwnedNudgeBeadStore = previous
+	})
+
+	go func() {
+		defer close(ackComplete)
+		ackDone <- ackQueuedNudgesWithOutcome(dir, []string{item.ID}, "injected", "", "test-boundary")
+	}()
+	awaitClose(t, store.entered, "ack shadow write to reach its blocking store")
+
+	lockFile, err := os.OpenFile(nudgequeue.LockPath(dir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		close(blocked)
+		t.Fatalf("open nudge queue lock: %v", err)
+	}
+	lockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if lockErr == nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	}
+	_ = lockFile.Close()
+	close(blocked)
+	if err := <-ackDone; err != nil {
+		t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
+	}
+	if lockErr != nil {
+		if errors.Is(lockErr, syscall.EWOULDBLOCK) || errors.Is(lockErr, syscall.EAGAIN) {
+			t.Fatalf("nudge queue lock remained held during blocked shadow write for %s", itemBead.BeadID)
+		}
+		t.Fatalf("nonblocking queue-lock probe: %v", lockErr)
+	}
+}
+
 func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -3344,6 +3438,51 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 	}
 	if b.Metadata["state"] != "queued" {
 		t.Fatalf("bead state = %q, want still queued after failed terminal mark", b.Metadata["state"])
+	}
+}
+
+func TestAckQueuedNudgesShadowFailureDoesNotRedeliverAndMaintenanceRetries(t *testing.T) {
+	dir := t.TempDir()
+	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore()}
+	item := newQueuedNudgeWithOptions("worker", "already delivered", "session", time.Now(), queuedNudgeOptions{ID: "n-ack-debt"})
+	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	shadow, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(item.ID)
+	if err != nil || !ok {
+		t.Fatalf("nudgeFrontDoor.Find = (%v,%v), want existing shadow", err, ok)
+	}
+	store.failID = shadow.BeadID
+	previous := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		return beads.NudgesStore{Store: store}, store
+	}
+	t.Cleanup(func() { openOwnedNudgeBeadStore = previous })
+
+	if err := ackQueuedNudgesWithOutcome(dir, []string{item.ID}, "injected", "", "test-boundary"); err != nil {
+		t.Fatalf("ack must commit queue removal even when shadow payment fails: %v", err)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges after ack: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue after ack = pending/inFlight/dead %d/%d/%d, want 0/0/0", len(pending), len(inFlight), len(dead))
+	}
+	openShadow, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(item.ID)
+	if err != nil || !ok || !openShadow.Open {
+		t.Fatalf("shadow after failed payment = (%+v,%v,%v), want open record awaiting debt retry", openShadow, ok, err)
+	}
+	store.failID = ""
+	if err := runNudgeQueueMaintenanceSweepWithStore(dir, beads.NudgesStore{Store: store}, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("maintenance should pay the persisted shadow debt: %v", err)
+	}
+	terminal, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(item.ID)
+	if err != nil || !ok {
+		t.Fatalf("FindIncludingTerminal = (%v,%v), want retried shadow", err, ok)
+	}
+	if terminal.Open || terminal.State != "injected" {
+		t.Fatalf("shadow after debt payment = %+v, want closed injected record", terminal)
 	}
 }
 
@@ -5207,9 +5346,18 @@ func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
 		t.Fatalf("Delete(%s): %v", beadID, err)
 	}
 
-	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
-		t.Fatalf("pruneDeadQueuedNudges: %v", err)
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.Dead = append(state.Dead, item)
+		return nil
+	}); err != nil {
+		t.Fatalf("seed dead item: %v", err)
+	}
+	if err := runNudgeQueueMaintenanceSweepWithStore(dir, store, now); err != nil {
+		t.Fatalf("runNudgeQueueMaintenanceSweepWithStore: %v", err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
 	}
 	if len(state.Dead) != 0 {
 		t.Fatalf("dead = %d, want 0 -- a dead-letter item whose bead was reaped and is past retention must still be prunable", len(state.Dead))
@@ -5472,6 +5620,7 @@ func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 func TestCmdNudgeDropNonexistentIDReportsError(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
+	writeNamedSessionCityTOML(t, dir)
 	t.Setenv("GC_CITY", dir)
 	// A city dir with no queue state file at all is a legitimate case ("no
 	// nudge has ever been queued here") and must classify the same as one
@@ -5937,20 +6086,31 @@ func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
 	}
 }
 
-// TestNudgePollHelpersOpenOnceWhenQueueHasWork pins the no-regression edge: when
-// the queue is non-empty the maintenance passes (recover/prune/terminalize) must
-// still run against Dolt, so each helper opens the front-door store exactly once
-// per call and releases it (open == close, no leak, no double-open).
-func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
+// TestNudgePollHelpersOpenOnceWhenQueueHasDebtToPay pins store ownership when a
+// queue helper commits terminal debt: it opens the front-door store after the
+// flock is released and closes exactly the handle it owns.
+func TestNudgePollHelpersOpenOnceWhenQueueHasDebtToPay(t *testing.T) {
 	now := time.Now()
 
-	assertOneOpenOneClose := func(t *testing.T, name string, run func(dir string)) {
+	assertOneOpenOneClose := func(t *testing.T, name string, expired bool, run func(dir string)) {
 		t.Helper()
 		opens, closes := installCountingNudgeStoreSeam(t)
 		dir := t.TempDir()
 		item := newQueuedNudgeWithOptions("worker", "do work", "session", now, queuedNudgeOptions{ID: "n-work"})
 		if err := enqueueQueuedNudge(dir, item); err != nil {
 			t.Fatalf("%s: enqueueQueuedNudge: %v", name, err)
+		}
+		if expired {
+			if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+				for i := range state.Pending {
+					if state.Pending[i].ID == item.ID {
+						state.Pending[i].ExpiresAt = now.Add(-time.Second)
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("%s: expire queued nudge: %v", name, err)
+			}
 		}
 		// enqueue opened+closed its own store; measure deltas around the helper.
 		opensBefore, closesBefore := *opens, *closes
@@ -5963,27 +6123,27 @@ func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
 		}
 	}
 
-	assertOneOpenOneClose(t, "claim", func(dir string) {
+	assertOneOpenOneClose(t, "claim", true, func(dir string) {
 		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
 			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "list", func(dir string) {
+	assertOneOpenOneClose(t, "list", true, func(dir string) {
 		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
 			t.Fatalf("listQueuedNudges: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "listForTarget", func(dir string) {
+	assertOneOpenOneClose(t, "listForTarget", true, func(dir string) {
 		if _, _, _, err := listQueuedNudgesForTarget(dir, nudgeTarget{cityPath: dir}, now); err != nil {
 			t.Fatalf("listQueuedNudgesForTarget: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "release", func(dir string) {
+	assertOneOpenOneClose(t, "release", true, func(dir string) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
 	})
-	assertOneOpenOneClose(t, "ack", func(dir string) {
+	assertOneOpenOneClose(t, "ack", false, func(dir string) {
 		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
@@ -6368,6 +6528,60 @@ func TestResolveNudgePollInterval(t *testing.T) {
 			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
 		}
 	})
+}
+
+func TestCmdNudgeDrainInjectReleasesClaimWhenHookDeadlineCannotCoverAck(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "retain this reminder", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: created.ID})
+	if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+	now := time.Now()
+	setHookProcessStart(t, now.Add(-time.Minute))
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(now.Add(time.Second)))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat([]string{created.ID}, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want fail-open 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "retain this reminder") {
+		t.Fatalf("stdout = %q, want injected nudge text", stdout.String())
+	}
+	pending, inFlight, dead, err := listQueuedNudges(cityDir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != item.ID || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue after deadline guard = pending/inFlight/dead %v/%v/%v, want item pending and no terminal transition", queuedNudgeIDs(pending), queuedNudgeIDs(inFlight), queuedNudgeIDs(dead))
+	}
+	shadow, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(item.ID)
+	if err != nil || !ok || !shadow.Open || shadow.State != "queued" {
+		t.Fatalf("shadow after deadline guard = (%+v,%v,%v), want open queued shadow", shadow, ok, err)
+	}
 }
 
 // setupNudgeDrainInjectFastPathCity stands up a file-beads city whose

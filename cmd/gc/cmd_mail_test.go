@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -3212,6 +3213,41 @@ func TestMailCountJSON(t *testing.T) {
 		t.Fatalf("recipients = %#v, want [bob]", got.Recipients)
 	}
 	validateJSONResultSchema(t, []string{"mail", "count"}, stdout.Bytes())
+}
+
+func TestMailCountAPIRouteMatchesLocalJSONContract(t *testing.T) {
+	store := beads.NewMemStore()
+	provider := beadmail.New(store)
+	if _, err := provider.Send("alice", "human", "one", "first"); err != nil {
+		t.Fatalf("seed first message: %v", err)
+	}
+	read, err := provider.Send("alice", "human", "two", "second")
+	if err != nil {
+		t.Fatalf("seed second message: %v", err)
+	}
+	if err := provider.MarkRead(read.ID); err != nil {
+		t.Fatalf("mark second message read: %v", err)
+	}
+	if _, err := provider.Send("carol", "human", "three", "third"); err != nil {
+		t.Fatalf("seed third message: %v", err)
+	}
+	var apiOut, localOut, apiErr, localErr bytes.Buffer
+	if code := renderMailCountFromAPI(api.CachedRead[api.MailCountView]{Body: api.MailCountView{Total: 3, Unread: 2}}, "human", true, &apiOut, &apiErr); code != 0 {
+		t.Fatalf("API routeMailCount = %d, stderr=%q", code, apiErr.String())
+	}
+	if code := doMailCountTargetWithJSON(provider, resolvedMailTarget{display: "human", recipients: []string{"human"}}, true, &localOut, &localErr); code != 0 {
+		t.Fatalf("local routeMailCount = %d, stderr=%q", code, localErr.String())
+	}
+	var gotAPI, gotLocal mailCountJSONResult
+	if err := json.Unmarshal(apiOut.Bytes(), &gotAPI); err != nil {
+		t.Fatalf("decode API JSON: %v\n%s", err, apiOut.String())
+	}
+	if err := json.Unmarshal(localOut.Bytes(), &gotLocal); err != nil {
+		t.Fatalf("decode local JSON: %v\n%s", err, localOut.String())
+	}
+	if !reflect.DeepEqual(gotAPI, gotLocal) {
+		t.Fatalf("API mail-count JSON = %+v, local JSON = %+v", gotAPI, gotLocal)
+	}
 }
 
 func TestMailCountJSONIncludesEmptyRecipientsArray(t *testing.T) {

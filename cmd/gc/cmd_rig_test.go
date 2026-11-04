@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -3214,6 +3215,40 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 	if _, ok := fb["_cache_age_s"]; ok {
 		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	}
+}
+
+func TestRigListAPIRenderMatchesLocalJSONContract(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous := rigListHQRunning
+	rigListHQRunning = func(string) bool { return false }
+	t.Cleanup(func() { rigListHQRunning = previous })
+	var local, routed bytes.Buffer
+	if code := doRigList(fsys.OSFS{}, cityPath, true, &local, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("doRigList = %d, want 0", code)
+	}
+	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, api.CachedRead[[]api.RigView]{AgeSeconds: 2, Body: []api.RigView{}}, true, &routed, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("renderRigListFromAPI = %d, want 0", code)
+	}
+	var localDoc, apiDoc RigListJSON
+	if err := json.Unmarshal(local.Bytes(), &localDoc); err != nil {
+		t.Fatalf("decode local JSON: %v", err)
+	}
+	if err := json.Unmarshal(routed.Bytes(), &apiDoc); err != nil {
+		t.Fatalf("decode API JSON: %v", err)
+	}
+	if apiDoc.CacheAgeS == nil || *apiDoc.CacheAgeS != 2 {
+		t.Errorf("API _cache_age_s = %v, want 2", apiDoc.CacheAgeS)
+	}
+	apiDoc.CacheAgeS = nil
+	if !reflect.DeepEqual(apiDoc, localDoc) {
+		t.Fatalf("API rig list differs from local JSON contract:\nlocal: %+v\nAPI:   %+v", localDoc, apiDoc)
 	}
 }
 

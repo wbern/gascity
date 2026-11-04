@@ -775,7 +775,9 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 			cr, err = c.ListSessions(stateFilter, templateFilter, false)
 			return err
 		},
-		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int {
+			return renderSessionListFromAPIWithFilters(cr, stateFilter, templateFilter, jsonOutput, stdout)
+		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
 }
@@ -785,8 +787,42 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 // alongside at the envelope level — the shape documented in the
 // ga-h6w designer's D5 contract.
 type sessionListJSONEnvelope struct {
-	CacheAgeS float64       `json:"_cache_age_s"`
-	Sessions  []SessionView `json:"sessions"`
+	SchemaVersion string              `json:"schema_version"`
+	OK            bool                `json:"ok"`
+	Filters       sessionListFilters  `json:"filters"`
+	Summary       sessionListSummary  `json:"summary"`
+	CacheAgeS     float64             `json:"_cache_age_s"`
+	Sessions      []sessionListAPIRow `json:"sessions"`
+}
+
+// sessionListAPIRow derives local display fields without adding them to the
+// HTTP contract. Sensitive resume and command fields remain absent.
+type sessionListAPIRow struct {
+	SessionView
+	Name   string `json:"name,omitempty"`
+	Closed bool   `json:"closed"`
+}
+
+func sessionListAPIRows(views []SessionView) []sessionListAPIRow {
+	rows := make([]sessionListAPIRow, len(views))
+	for i, view := range views {
+		info := session.Info{ID: view.ID, Alias: view.Alias, Template: view.Template, SessionName: view.SessionName}
+		closed := view.State == string(session.StateClosed)
+		if closed {
+			view.State = ""
+		}
+		if view.LastActive == "" {
+			view.LastActive = time.Time{}.Format(time.RFC3339Nano)
+		}
+		if view.CreatedAt == "" {
+			view.CreatedAt = time.Time{}.Format(time.RFC3339Nano)
+		}
+		if view.Rig == "" {
+			view.Rig = sessionListJSONRig(info)
+		}
+		rows[i] = sessionListAPIRow{SessionView: view, Name: sessionListJSONName(info), Closed: closed}
+	}
+	return rows
 }
 
 // SessionView mirrors api.SessionView for CLI JSON output. Defined as an
@@ -798,13 +834,25 @@ type SessionView = api.SessionView
 // mirrors the fallback tabwriter format and appends a staleness banner when
 // the supervisor cache age crosses the threshold.
 func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
+	return renderSessionListFromAPIWithFilters(cr, "", "", jsonOutput, stdout)
+}
+
+func renderSessionListFromAPIWithFilters(cr api.CachedRead[[]SessionView], stateFilter, templateFilter string, jsonOutput bool, stdout io.Writer) int {
 	if jsonOutput {
+		rows := sessionListAPIRows(cr.Body)
+		summaryRows := make([]sessionListJSONRow, len(rows))
+		for i, row := range rows {
+			summaryRows[i] = sessionListJSONRow{State: session.State(row.State), Closed: row.Closed}
+		}
 		env := sessionListJSONEnvelope{
+			SchemaVersion: "1", OK: true,
+			Filters:   sessionListFilters{State: stateFilter, Template: templateFilter},
+			Summary:   summarizeSessionList(summaryRows),
 			CacheAgeS: cr.AgeSeconds,
-			Sessions:  cr.Body,
+			Sessions:  rows,
 		}
 		if env.Sessions == nil {
-			env.Sessions = []SessionView{}
+			env.Sessions = []sessionListAPIRow{}
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")

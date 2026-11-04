@@ -1946,6 +1946,12 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
+	// Pay shadow debts the queue's immediate writers left behind (a crash, a
+	// deadline or a failing store). This watchdog also runs in legacy-dispatcher
+	// cities, so their nudge queue converges with only the controller running.
+	if err := runNudgeQueueMaintenanceSweepWithStore(cr.cityPath, nudgeStore, now); err != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping
