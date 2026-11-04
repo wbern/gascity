@@ -176,6 +176,60 @@ func TestVerifySubdirOfWorktreeFails(t *testing.T) {
 	}
 }
 
+func TestReadProvenanceAt(t *testing.T) {
+	gitDir := t.TempDir()
+	path := filepath.Join(gitDir, provenanceFilename)
+	want := `{"owner":"provisioner-a","bead_id":"gc-test"}`
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatalf("write provenance: %v", err)
+	}
+
+	got, err := ReadProvenanceAt(gitDir)
+	if err != nil {
+		t.Fatalf("ReadProvenanceAt: %v", err)
+	}
+	if got.Owner != "provisioner-a" || got.BeadID != "gc-test" {
+		t.Fatalf("ReadProvenanceAt = %+v, want owner and bead from record", got)
+	}
+}
+
+func TestReadProvenanceAtMissing(t *testing.T) {
+	_, err := ReadProvenanceAt(t.TempDir())
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadProvenanceAt missing record error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestReadProvenanceAtEmptyGitDir(t *testing.T) {
+	if _, err := ReadProvenanceAt(""); err == nil {
+		t.Fatal("ReadProvenanceAt empty Git directory succeeded")
+	}
+}
+
+func TestReadProvenanceAtRejectsNonRegularFile(t *testing.T) {
+	gitDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(gitDir, provenanceFilename), 0o700); err != nil {
+		t.Fatalf("create non-regular provenance: %v", err)
+	}
+	if _, err := ReadProvenanceAt(gitDir); err == nil {
+		t.Fatal("ReadProvenanceAt non-regular provenance succeeded")
+	}
+}
+
+func TestReadProvenanceAtRejectsSymlink(t *testing.T) {
+	gitDir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "provenance.json")
+	if err := os.WriteFile(target, []byte(`{"owner":"provisioner-a"}`), 0o600); err != nil {
+		t.Fatalf("write provenance target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(gitDir, provenanceFilename)); err != nil {
+		t.Fatalf("create provenance symlink: %v", err)
+	}
+	if _, err := ReadProvenanceAt(gitDir); err == nil {
+		t.Fatal("ReadProvenanceAt followed a provenance symlink")
+	}
+}
+
 func TestVerifySpecValidation(t *testing.T) {
 	repo, _ := initTestRepo(t)
 	cases := []Spec{

@@ -45,6 +45,7 @@ rig-pack-coverage
 pack-runtimes
 mcp-config
 mcp-shared-target
+mcp-adoption
 mcp-rejected-servers
 builtin-pack-imports
 packv2-import-state

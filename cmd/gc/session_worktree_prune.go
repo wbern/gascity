@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // gitProbe is the slice of internal/git.Git used by the worker-dir
@@ -20,6 +23,7 @@ import (
 // without standing up real git worktrees.
 type gitProbe interface {
 	IsRepo() bool
+	GitDir() (string, error)
 	CurrentBranch() (string, error)
 	HasUncommittedOrIgnoredWork() bool
 	WorkingTreeStatus() (git.WorkingTreeStatus, error)
@@ -70,6 +74,18 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 	gp = newGitProbe(workerDir)
 	if !gp.IsRepo() {
 		return nil, "worker_dir is not a readable git repo"
+	}
+	gitDir, err := gp.GitDir()
+	if err != nil || strings.TrimSpace(gitDir) == "" {
+		if err == nil {
+			err = fmt.Errorf("git directory is empty")
+		}
+		return nil, fmt.Sprintf("cannot read its worktree provenance: cannot resolve Git directory: %v", err)
+	}
+	if _, err := worktree.ReadProvenanceAt(gitDir); err == nil {
+		return nil, "managed worktree has durable ownership provenance"
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Sprintf("cannot read its worktree provenance: %v", err)
 	}
 	return gp, ""
 }

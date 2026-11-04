@@ -808,3 +808,44 @@ func statusPartialErrorsContain(errors []string, substr string) bool {
 	}
 	return false
 }
+
+func TestStatusHTTPPreservesSessionAndRigIdentity(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	state.cityBeadStore = store
+	state.cfg.Rigs[0].Prefix = "project"
+	state.cfg.Rigs[0].DefaultSlingTarget = "myrig/worker"
+	state.cfg.Rigs[0].DefaultSlingTargets = []string{"myrig/worker", "myrig/reviewer"}
+	row, err := store.Create(beads.Bead{
+		Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"state": string(session.StateActive), "template": "myrig/worker", "session_name": "myrig--worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/status"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Agents []struct {
+			SessionID string `json:"session_id"`
+		} `json:"agent_details"`
+		Rigs []struct {
+			Prefix  string   `json:"prefix"`
+			Target  string   `json:"default_sling_target"`
+			Targets []string `json:"default_sling_targets"`
+		} `json:"rig_details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Agents) != 1 || body.Agents[0].SessionID != row.ID {
+		t.Fatalf("session identity = %+v, want %s", body.Agents, row.ID)
+	}
+	if len(body.Rigs) != 1 || body.Rigs[0].Prefix != "project" || body.Rigs[0].Target != "myrig/worker" || len(body.Rigs[0].Targets) != 2 {
+		t.Fatalf("rig identity = %+v", body.Rigs)
+	}
+}

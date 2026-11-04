@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -123,5 +124,16 @@ func TestSessionsFromGenList_PartialMissingFields(t *testing.T) {
 	}
 	if v.ID != "gc-noopts" || v.Template != "agent" {
 		t.Errorf("required fields mismatch: %+v", v)
+	}
+}
+
+func TestSessionViewFromGenPreservesSafeLocalFields(t *testing.T) {
+	var row genclient.SessionResponse
+	if err := json.Unmarshal([]byte(`{"id":"s1","template":"rig/worker","state":"active","rig":"rig","provider":"claude","agent_name":"rig/worker","transport":"tmux","worker_dir":"/work/task","last_nudge_delivered_at":"2026-11-04T21:00:00.123456789Z"}`), &row); err != nil {
+		t.Fatal(err)
+	}
+	got := sessionViewFromGen(row)
+	if got.Rig != "rig" || got.Provider != "claude" || got.AgentName != "rig/worker" || got.Transport != "tmux" || got.WorkerDir != "/work/task" || got.LastNudgeDeliveredAt != "2026-11-04T21:00:00.123456789Z" {
+		t.Fatalf("safe fields lost: %+v", got)
 	}
 }

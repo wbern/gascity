@@ -265,6 +265,7 @@ func rigStatusAgentJSONFromAPI(a api.StatusAgentView, dops drainOps) RigStatusAg
 		Name:               a.Name,
 		QualifiedName:      a.QualifiedName,
 		RuntimeSessionName: a.SessionName,
+		SessionID:          a.SessionID,
 		Running:            a.Running,
 		Suspended:          a.Suspended,
 		Draining:           draining,

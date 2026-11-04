@@ -136,7 +136,8 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	// parked the instant it is won; the claim path refuses on this marker (F-A,
 	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
 	// --inject, nudge drain, mail check — is read-only and unaffected.
-	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
+	cmd.Env = append(removeEnvKey(os.Environ(), hookDeadlineEnv),
+		"GC_HOOK_CALLBACK_LANE=1", hookDeadlineEnv+"="+hookDeadlineEnvValue(childHookDeadline(ctx)))
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on

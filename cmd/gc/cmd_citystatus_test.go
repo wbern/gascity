@@ -1176,10 +1176,10 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 	srv := httptest.NewServer(okCityStatusHandler(t))
 	defer srv.Close()
 
-	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origAlive, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
 	origOpen := openCityStoreAtForStatus
 	t.Cleanup(func() {
-		apiRouteControllerAliveHook = origAlive
+		apiRouteControllerIdentityHook = origAlive
 		apiRouteSupervisorClientHook = origSup
 		openCityStoreAtForStatus = origOpen
 	})
@@ -1187,7 +1187,7 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 	// controller in-process) answering the "alive" ping, paired with a
 	// supervisor-managed API client — the exact combination apiClient alone
 	// cannot route because city.toml has no [api] port.
-	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
 	apiRouteSupervisorClientHook = func(cp string) *api.Client {
 		if cp != cityPath {
 			return nil

@@ -449,22 +449,20 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if strings.TrimSpace(name) == "" {
 		return runtime.Liveness{}
 	}
-	running := p.cache.IsRunning(name)
+	// A stopped session has no live agent process. Answer from one snapshot
+	// before resolving GT_PROCESS_NAMES, which otherwise forks tmux per row.
+	state := p.cache.currentState()
+	if session, ok := state.Sessions[name]; !ok || !session.Running {
+		return runtime.Liveness{}
+	}
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return runtime.Liveness{Running: running, Alive: running}
+		return runtime.Liveness{Running: true, Alive: true}
 	}
-	alive := p.cache.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
-	}
-	return runtime.Liveness{
-		Running: running,
-		Alive:   alive,
-	}
+	return runtime.Liveness{Running: true, Alive: state.processAlive(name, processNames)}
 }
 
 // ObserveLivenessWithError reports pane and agent-process presence like

@@ -2907,28 +2907,32 @@ func routeMailCount(_ string, args []string, c *api.Client, nilReason string, js
 			}
 			return nil
 		},
-		func() int {
-			if jsonOut {
-				if err := writeCLIJSONLine(stdout, mailCountJSONResult{
-					SchemaVersion: "1",
-					Recipient:     recipient,
-					Recipients:    []string{recipient},
-					Total:         cr.Body.Total,
-					Unread:        cr.Body.Unread,
-				}); err != nil {
-					fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
-					return 1
-				}
-				return 0
-			}
-			fmt.Fprintf(stdout, "%d total, %d unread for %s\n", cr.Body.Total, cr.Body.Unread, recipient) //nolint:errcheck // best-effort stdout
-			if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-				fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-			}
-			return 0
-		},
+		func() int { return renderMailCountFromAPI(cr, recipient, jsonOut, stdout, stderr) },
 		func() int { return doMailCountFallback(args, jsonOut, stdout, stderr) },
 	)
+}
+
+// renderMailCountFromAPI projects API counts onto the same JSON contract as
+// the local mail provider. HTTP transport is owned by routeMailCount.
+func renderMailCountFromAPI(cr api.CachedRead[api.MailCountView], recipient string, jsonOut bool, stdout, stderr io.Writer) int {
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, mailCountJSONResult{
+			SchemaVersion: "1",
+			Recipient:     recipient,
+			Recipients:    []string{recipient},
+			Total:         cr.Body.Total,
+			Unread:        cr.Body.Unread,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc mail count: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "%d total, %d unread for %s\n", cr.Body.Total, cr.Body.Unread, recipient) //nolint:errcheck // best-effort stdout
+	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+	}
+	return 0
 }
 
 // doMailCountFallback is the direct-bd path for `gc mail count`.

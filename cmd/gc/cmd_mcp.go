@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
@@ -127,14 +128,19 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
+			refused, err := mcpViewAdoptionRefusal(view)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mcp list: inspecting adoption target: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if jsonOutput {
-				if err := writeCLIJSONLine(stdout, projectedMCPJSONFromView(cityPath, view, agentName, sessionID)); err != nil {
+				if err := writeCLIJSONLine(stdout, projectedMCPJSONFromView(cityPath, view, agentName, sessionID, refused)); err != nil {
 					fmt.Fprintf(stderr, "gc mcp list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 				return nil
 			}
-			writeProjectedMCPView(stdout, cityPath, view)
+			writeProjectedMCPView(stdout, cityPath, view, refused)
 			return nil
 		},
 	}
@@ -160,13 +166,25 @@ type projectedMCPQueryJSON struct {
 }
 
 type projectedMCPTargetJSON struct {
-	Provider     string `json:"provider"`
-	Target       string `json:"target"`
-	WorkDir      string `json:"work_dir,omitempty"`
-	Delivery     string `json:"delivery,omitempty"`
-	ScopeRoot    string `json:"scope_root,omitempty"`
-	Identity     string `json:"identity,omitempty"`
-	ProviderKind string `json:"provider_kind,omitempty"`
+	Provider     string                      `json:"provider"`
+	Target       string                      `json:"target"`
+	WorkDir      string                      `json:"work_dir,omitempty"`
+	Delivery     string                      `json:"delivery,omitempty"`
+	ScopeRoot    string                      `json:"scope_root,omitempty"`
+	Identity     string                      `json:"identity,omitempty"`
+	ProviderKind string                      `json:"provider_kind,omitempty"`
+	NotAdopted   *projectedMCPNotAdoptedJSON `json:"not_adopted,omitempty"`
+}
+
+type projectedMCPNotAdoptedJSON struct {
+	Reason           string   `json:"reason"`
+	Remedy           string   `json:"remedy"`
+	UnmanagedServers []string `json:"unmanaged_servers,omitempty"`
+	RedefinedServers []string `json:"redefined_servers,omitempty"`
+	UnmanagedKeys    []string `json:"unmanaged_keys,omitempty"`
+	Symlink          string   `json:"symlink,omitempty"`
+	ReadError        string   `json:"read_error,omitempty"`
+	ParseError       string   `json:"parse_error,omitempty"`
 }
 
 type projectedMCPServerJSON struct {
@@ -192,7 +210,14 @@ type projectedMCPShadowJSON struct {
 	LoserFile  string `json:"loser_file"`
 }
 
-func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agentName, sessionID string) projectedMCPJSON {
+func mcpViewAdoptionRefusal(view resolvedMCPProjection) (*materialize.MCPAdoptionRefusedError, error) {
+	if view.Delivery != "stage1" && view.Delivery != "stage2" {
+		return nil, nil
+	}
+	return view.Projection.AdoptionRefusal(fsys.OSFS{})
+}
+
+func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agentName, sessionID string, refused *materialize.MCPAdoptionRefusedError) projectedMCPJSON {
 	servers := make([]projectedMCPServerJSON, 0, len(view.Catalog.Servers))
 	for _, server := range view.Catalog.Servers {
 		servers = append(servers, projectedMCPServerJSON{
@@ -220,6 +245,23 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 			LoserFile:  displayMCPSourcePath(cityPath, shadow.LoserFile),
 		})
 	}
+	var notAdopted *projectedMCPNotAdoptedJSON
+	if refused != nil {
+		notAdopted = &projectedMCPNotAdoptedJSON{
+			Reason:           refused.Reason(),
+			Remedy:           refused.Remedy(),
+			UnmanagedServers: refused.Servers,
+			RedefinedServers: refused.Redefined,
+			UnmanagedKeys:    refused.Keys,
+			Symlink:          refused.Symlink,
+		}
+		if refused.ReadErr != nil {
+			notAdopted.ReadError = refused.ReadErr.Error()
+		}
+		if refused.ParseErr != nil {
+			notAdopted.ParseError = refused.ParseErr.Error()
+		}
+	}
 	return projectedMCPJSON{
 		SchemaVersion: "1",
 		OK:            true,
@@ -236,13 +278,14 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 			ScopeRoot:    view.ScopeRoot,
 			Identity:     view.Identity,
 			ProviderKind: view.ProviderKind,
+			NotAdopted:   notAdopted,
 		},
 		Servers: servers,
 		Shadows: shadows,
 	}
 }
 
-func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProjection) {
+func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProjection, refused *materialize.MCPAdoptionRefusedError) {
 	fmt.Fprintf(w, "Provider: %s\n", view.Projection.Provider) //nolint:errcheck // best-effort
 	fmt.Fprintf(w, "Target: %s\n", view.Projection.Target)     //nolint:errcheck // best-effort
 	if view.WorkDir != "" {
@@ -272,6 +315,10 @@ func writeProjectedMCPView(w io.Writer, cityPath string, view resolvedMCPProject
 		)
 	}
 	_ = tw.Flush()
+	if refused != nil {
+		_, _ = fmt.Fprintf(w, "\nNot delivered: gc leaves %s as it is, so the agent starts without these servers: %s; %s.\n",
+			view.Projection.Target, refused.Reason(), refused.Remedy()) //nolint:errcheck // best-effort
+	}
 }
 
 func mcpCommandOrURL(server materialize.MCPServer) string {

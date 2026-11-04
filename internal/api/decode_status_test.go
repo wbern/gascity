@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -164,5 +166,41 @@ func TestStatusViewFromGen_PartialMissingField(t *testing.T) {
 	}
 	if a.Expanded {
 		t.Error("Expanded should default to false")
+	}
+}
+
+func TestStatusViewFromGenPreservesRigJSONFields(t *testing.T) {
+	var body genclient.StatusBody
+	raw := []byte(`{"agent_details":[{"name":"worker","qualified_name":"alpha/worker","scope":"rig","running":true,"session_name":"alpha--worker","session_id":"sess-123"}],"rig_details":[{"name":"alpha","path":"/work/alpha","prefix":"al","suspended":false,"default_sling_target":"alpha/worker","default_sling_targets":["alpha/worker","beta/worker"]}]}`)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode status body: %v", err)
+	}
+	view := statusViewFromGen(&body)
+	if len(view.Agents) != 1 {
+		t.Fatalf("status agent rows = %d, want 1", len(view.Agents))
+	}
+	assertStringField := func(label string, value any, field, want string) {
+		t.Helper()
+		got := reflect.ValueOf(value).FieldByName(field)
+		if !got.IsValid() {
+			t.Fatalf("%s has no %s field", label, field)
+		}
+		if got.String() != want {
+			t.Errorf("%s.%s = %q, want %q", label, field, got.String(), want)
+		}
+	}
+	assertStringField("status agent", view.Agents[0], "SessionID", "sess-123")
+	if len(view.Rigs) != 1 {
+		t.Fatalf("status rig rows = %d, want 1", len(view.Rigs))
+	}
+	assertStringField("status rig", view.Rigs[0], "Prefix", "al")
+	assertStringField("status rig", view.Rigs[0], "DefaultSlingTarget", "alpha/worker")
+	gotTargets := reflect.ValueOf(view.Rigs[0]).FieldByName("DefaultSlingTargets")
+	if !gotTargets.IsValid() {
+		t.Fatal("status rig has no DefaultSlingTargets field")
+	}
+	wantTargets := []string{"alpha/worker", "beta/worker"}
+	if got, ok := gotTargets.Interface().([]string); !ok || !reflect.DeepEqual(got, wantTargets) {
+		t.Errorf("status rig DefaultSlingTargets = %#v, want %#v", gotTargets.Interface(), wantTargets)
 	}
 }

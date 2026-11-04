@@ -20,6 +20,8 @@ import (
 // can assert which directory the removal targeted.
 type fakeGitProbe struct {
 	isRepo           bool
+	gitDir           string
+	gitDirErr        error
 	currentBranch    string
 	currentBranchErr error
 	hasUncommitted   bool
@@ -36,9 +38,17 @@ type fakeGitProbe struct {
 	removeInvoked    bool
 }
 
-func (f *fakeGitProbe) IsRepo() bool { return f.isRepo }
+func (f *fakeGitProbe) IsRepo() bool            { return f.isRepo }
+func (f *fakeGitProbe) GitDir() (string, error) { return f.gitDir, f.gitDirErr }
 func (f *fakeGitProbe) CurrentBranch() (string, error) {
 	return f.currentBranch, f.currentBranchErr
+}
+
+func writePruneProvenance(t *testing.T, gitDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(gitDir, "gascity-worktree-provenance.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write managed worktree provenance: %v", err)
+	}
 }
 func (f *fakeGitProbe) HasUncommittedOrIgnoredWork() bool { return f.hasUncommitted || f.hasIgnored }
 
@@ -149,7 +159,7 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		if !ok {
 			// Default: a healthy probe. The WorktreeRemove call goes
 			// through this default for the rig-root invocation.
-			probe = &fakeGitProbe{isRepo: true}
+			probe = &fakeGitProbe{isRepo: true, gitDir: filepath.Join(cityPath, ".missing-gitdir")}
 			fx.probesByWD[workDir] = probe
 		}
 		return probe
@@ -159,6 +169,9 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 }
 
 func (fx *pruneTestFixture) setProbe(workDir string, probe *fakeGitProbe) {
+	if probe.gitDir == "" && probe.gitDirErr == nil {
+		probe.gitDir = filepath.Join(fx.cityPath, ".missing-gitdir")
+	}
 	fx.probesByWD[workDir] = probe
 }
 
@@ -283,6 +296,27 @@ func TestPruneAgentHomeWorktreeIfSafe_NotARepo(t *testing.T) {
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
 		t.Fatal("prune returned true when IsRepo=false")
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LeavesManagedWorktree(t *testing.T) {
+	fx := newPruneFixture(t)
+	gitDir := t.TempDir()
+	writePruneProvenance(t, gitDir, `{"owner":"another-provisioner","bead_id":"gc-work"}`)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDir: gitDir})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+		t.Fatal("prune reported success for a managed worktree owned by another provisioner")
+	}
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called for a managed worktree owned by another provisioner")
+	}
+	if !strings.Contains(stderr.String(), "managed worktree") {
+		t.Errorf("expected managed-worktree refusal, got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }

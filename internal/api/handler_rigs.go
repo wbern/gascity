@@ -36,7 +36,7 @@ type gitStatus struct {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -45,12 +45,15 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
-		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		processNames := lazyAgentProcessNames(cfg, a)
+		expanded := expandAgent(a, cityName, tmpl, pools)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, processNames)
+			if listedAbsent(pools, sessionName) {
+				continue
+			}
+			obs := observeProviderSession(sp, sessionName, processNames())
 			if obs.Running {
 				runningCount++
 			}
@@ -63,7 +66,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	resp := rigResponse{
 		Name:          rig.Name,
 		Path:          rig.Path,
-		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Suspended:     s.rigSuspended(cfg, rig, sp, pools, cityName, cityPath),
 		Prefix:        rig.Prefix,
 		DefaultBranch: rig.DefaultBranch,
 		AgentCount:    agentCount,
@@ -82,29 +85,40 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // metadata. The deprecated `[[rig]] suspended` field in city.toml is
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
 // target.
-func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate
-	var agentCount, suspendedCount int
+	agentCount := 0
 	for _, a := range cfg.Agents {
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
-		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		processNames := lazyAgentProcessNames(cfg, a)
+		expanded := expandAgent(a, cityName, tmpl, pools)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, processNames)
-			if obs.Suspended {
-				suspendedCount++
+			if listedAbsent(pools, sessionName) || !observeProviderSession(sp, sessionName, processNames()).Suspended {
+				return false
 			}
 		}
 	}
-	return agentCount > 0 && suspendedCount == agentCount
+	return agentCount > 0
+}
+
+// lazyAgentProcessNames resolves the provider chain only for rows that need a probe.
+func lazyAgentProcessNames(cfg *config.City, a config.Agent) func() []string {
+	var names []string
+	resolved := false
+	return func() []string {
+		if !resolved {
+			names, resolved = config.AgentProcessNames(cfg, a, exec.LookPath), true
+		}
+		return names
+	}
 }
 
 // gitStatusTimeout bounds how long git operations can take per rig.

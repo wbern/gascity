@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/spf13/cobra"
 )
 
@@ -83,12 +85,19 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+			err = projection.ApplyWithStderr(fsys.OSFS{}, stderr)
+			var refused *materialize.MCPAdoptionRefusedError
+			if errors.As(err, &refused) {
+				warnMCPAdoptionRefusedWithPrefix(cityPath, []string{identity}, projection, refused, fsys.OSFS{}, stderr, "gc internal project-mcp: warning:")
+				return nil
+			}
+			if err != nil {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			clearMCPAdoptionRefusal(cityPath, projection.Target)
 			if len(catalog.Servers) > 0 {
-				ensureMCPGitignoreBestEffort(absWorkdir, stderr)
+				ensureMCPGitignoreBestEffort(absWorkdir, []string{mcpGitignoreEntry(projection)}, stderr)
 				fmt.Fprintf(stdout, "projected %d MCP server(s) into %s\n", len(catalog.Servers), projection.Target) //nolint:errcheck // best-effort stdout
 			}
 			return nil

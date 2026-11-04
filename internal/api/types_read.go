@@ -79,6 +79,7 @@ type StatusAgentView struct {
 	Scope         string
 	Running       bool
 	Suspended     bool
+	SessionID     string
 	SessionName   string
 	GroupName     string
 	ScaleLabel    string
@@ -87,9 +88,12 @@ type StatusAgentView struct {
 
 // StatusRigView is the CLI-facing per-rig row.
 type StatusRigView struct {
-	Name      string
-	Path      string
-	Suspended bool
+	Name                string
+	Path                string
+	Prefix              string
+	Suspended           bool
+	DefaultSlingTarget  string
+	DefaultSlingTargets []string
 }
 
 // StatusNamedSessionView is the CLI-facing named-session row.

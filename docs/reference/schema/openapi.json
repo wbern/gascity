@@ -8405,6 +8405,9 @@
           "agent_kind": {
             "type": "string"
           },
+          "agent_name": {
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -8488,7 +8491,13 @@
           "title": {
             "type": "string"
           },
+          "transport": {
+            "type": "string"
+          },
           "work_dir": {
+            "type": "string"
+          },
+          "worker_dir": {
             "type": "string"
           }
         },
@@ -11918,6 +11927,10 @@
             "description": "city or rig.",
             "type": "string"
           },
+          "session_id": {
+            "description": "Persistent session bead ID when known.",
+            "type": "string"
+          },
           "session_name": {
             "description": "tmux session name CLI drain-ops key on.",
             "type": "string"
@@ -12247,12 +12260,30 @@
       "StatusRigDetail": {
         "additionalProperties": false,
         "properties": {
+          "default_sling_target": {
+            "description": "Default sling target, when configured.",
+            "type": "string"
+          },
+          "default_sling_targets": {
+            "description": "Ordered default sling targets, when configured.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "name": {
             "description": "Rig name.",
             "type": "string"
           },
           "path": {
             "description": "Rig directory path.",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Effective rig bead prefix.",
             "type": "string"
           },
           "suspended": {

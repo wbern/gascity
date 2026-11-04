@@ -28,9 +28,12 @@ type sessionResponse struct {
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
 	Provider    string `json:"provider"`
+	AgentName   string `json:"agent_name,omitempty"`
+	Transport   string `json:"transport,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	WorkerDir   string `json:"worker_dir,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -94,17 +97,24 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
+	state := string(info.State)
+	if info.Closed {
+		state = string(session.StateClosed)
+	}
 	r := sessionResponse{
 		ID:          info.ID,
 		Template:    info.Template,
-		State:       string(info.State),
+		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
 		Provider:    provider,
+		AgentName:   info.AgentName,
+		Transport:   info.Transport,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
 		WorkDir:     info.WorkDir,
-		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
+		WorkerDir:   strings.TrimSpace(info.WorkerDir),
+		CreatedAt:   info.CreatedAt.Format(time.RFC3339Nano),
 		Attached:    info.Attached,
 		Rig:         rig,
 	}
@@ -121,10 +131,10 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		}
 	}
 	if !info.LastActive.IsZero() {
-		r.LastActive = info.LastActive.Format(time.RFC3339)
+		r.LastActive = info.LastActive.Format(time.RFC3339Nano)
 	}
 	if !info.LastNudgeDeliveredAt.IsZero() {
-		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339)
+		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339Nano)
 	}
 	return r
 }

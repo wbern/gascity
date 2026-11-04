@@ -71,11 +71,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 
 	var agents []agentResponse
+	pools := newRequestSessionListing(sp)
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, pools)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
 				continue

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,14 +21,36 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
-var managedMCPGitignoreEntries = []string{
-	".mcp.json",
-	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
-	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
-	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
-	filepath.ToSlash(filepath.Join(".agents", "mcp_config.json")),
-	"opencode.json",
-	"mimocode.json",
+func mcpGitignoreEntry(p materialize.MCPProjection) string {
+	rel, err := filepath.Rel(p.Root, p.Target)
+	if err != nil {
+		return ""
+	}
+	return "/" + filepath.ToSlash(rel)
+}
+
+func missingMCPGitignoreEntries(fs fsys.FS, root string, entries []string) ([]string, error) {
+	var missing []string
+	data, err := fs.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("reading %s/.gitignore: %w", root, err)
+	}
+	present := make(map[string]bool)
+	for _, line := range strings.Split(string(data), "\n") {
+		present[strings.TrimSpace(line)] = true
+	}
+	for _, entry := range entries {
+		if present[entry] {
+			continue
+		}
+		// An earlier version wrote the same pattern without a leading slash.
+		// It still ignores this root's target, so don't churn those files.
+		if present[strings.TrimPrefix(entry, "/")] {
+			continue
+		}
+		missing = append(missing, entry)
+	}
+	return missing, nil
 }
 
 type mcpTargetSpec struct {
@@ -160,11 +185,22 @@ func appendProjectMCPPreStart(prestart []string, agentName, identity, workDir st
 	return append(prestart, cmd)
 }
 
-func ensureMCPGitignoreBestEffort(root string, stderr io.Writer) {
+func ensureMCPGitignoreBestEffort(root string, entries []string, stderr io.Writer) {
 	if strings.TrimSpace(root) == "" {
 		return
 	}
-	if err := ensureGitignoreEntries(fsys.OSFS{}, root, managedMCPGitignoreEntries); err != nil && stderr != nil {
+	missing, err := missingMCPGitignoreEntries(fsys.OSFS{}, root, entries)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc: warning: reading %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	entries = missing
+	if len(entries) == 0 {
+		return
+	}
+	if err := ensureGitignoreEntries(fsys.OSFS{}, root, entries); err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc: warning: updating %s/.gitignore for MCP: %v\n", root, err) //nolint:errcheck // best-effort stderr
 	}
 }
@@ -259,19 +295,131 @@ func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.L
 		return err
 	}
 	desired := make(map[string]bool, len(targets)) // provider+root keys we still own
+	gitignore := make(map[string][]string)
+	defer func() {
+		for _, root := range sortedMapKeys(gitignore) {
+			ensureMCPGitignoreBestEffort(root, gitignore[root], stderr)
+		}
+	}()
 	for _, target := range targets {
-		if err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+		err := target.Projection.ApplyWithStderr(fsys.OSFS{}, stderr)
+		var refused *materialize.MCPAdoptionRefusedError
+		if errors.As(err, &refused) {
+			warnMCPAdoptionRefused(cityPath, target.Agents, target.Projection, refused, fsys.OSFS{}, stderr)
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("reconciling %s: %w", target.Projection.Target, err)
 		}
+		clearMCPAdoptionRefusal(cityPath, target.Projection.Target)
 		desired[managedKey(target.Projection.Provider, target.Root)] = true
 		if len(target.Projection.Servers) > 0 {
-			ensureMCPGitignoreBestEffort(target.Root, stderr)
+			gitignore[target.Root] = append(gitignore[target.Root], mcpGitignoreEntry(target.Projection))
 		}
 	}
 	if err := cleanupOrphanStage1Targets(cityPath, cfg, desired, stderr); err != nil {
 		return err
 	}
 	return nil
+}
+
+var mcpAdoptionRefusals = struct {
+	sync.Mutex
+	byTarget map[string]map[string]string
+}{byTarget: map[string]map[string]string{}}
+
+func mcpRefusalTargetKey(cityPath, target string) string {
+	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(target)
+}
+
+func mcpTargetStamp(fs fsys.FS, target string) string {
+	data, err := materialize.ReadMCPFile(fs, target)
+	var notRegular *materialize.NotRegularFileError
+	var tooLarge *materialize.FileTooLargeError
+	switch {
+	case err == nil:
+		sum := sha256.Sum256(data)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	case errors.As(err, &notRegular):
+		return "type:" + notRegular.Mode.Type().String()
+	case errors.As(err, &tooLarge):
+		return fmt.Sprintf("size:%d", tooLarge.Size)
+	default:
+		return ""
+	}
+}
+
+func warnMCPAdoptionRefused(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, fs fsys.FS, stderr io.Writer) {
+	warnMCPAdoptionRefusedWithPrefix(cityPath, agents, projection, refused, fs, stderr, "gc: warning:")
+}
+
+func warnMCPAdoptionRefusedWithPrefix(cityPath string, agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError, fs fsys.FS, stderr io.Writer, prefix string) {
+	if stderr == nil {
+		return
+	}
+	message := describeMCPAdoptionRefused(agents, projection, refused)
+	key := mcpRefusalTargetKey(cityPath, projection.Target)
+	stamp := "symlink:" + refused.Symlink
+	if refused.Symlink == "" {
+		stamp = mcpTargetStamp(fs, projection.Target)
+	}
+	mcpAdoptionRefusals.Lock()
+	reported := mcpAdoptionRefusals.byTarget[key]
+	if previous, seen := reported[message]; seen && previous == stamp {
+		mcpAdoptionRefusals.Unlock()
+		return
+	}
+	if reported == nil {
+		reported = make(map[string]string, 1)
+		mcpAdoptionRefusals.byTarget[key] = reported
+	}
+	reported[message] = stamp
+	mcpAdoptionRefusals.Unlock()
+	fmt.Fprintf(stderr, "%s %s\n", prefix, message) //nolint:errcheck // best-effort stderr
+}
+
+func clearMCPAdoptionRefusal(cityPath, target string) {
+	mcpAdoptionRefusals.Lock()
+	delete(mcpAdoptionRefusals.byTarget, mcpRefusalTargetKey(cityPath, target))
+	mcpAdoptionRefusals.Unlock()
+}
+
+func warnStage2MCPAdoptionRefusal(cityPath, identity string, projection materialize.MCPProjection, fs fsys.FS, stderr io.Writer) {
+	if stderr == nil || fs == nil {
+		return
+	}
+	refused, err := projection.AdoptionRefusal(fs)
+	if err != nil {
+		return
+	}
+	if refused == nil {
+		clearMCPAdoptionRefusal(cityPath, projection.Target)
+		return
+	}
+	warnMCPAdoptionRefused(cityPath, []string{identity}, projection, refused, fs, stderr)
+}
+
+func describeMCPAdoptionRefused(agents []string, projection materialize.MCPProjection, refused *materialize.MCPAdoptionRefusedError) string {
+	quoted := make([]string, len(agents))
+	for i, agent := range agents {
+		quoted[i] = strconv.Quote(agent)
+	}
+	who := "agent " + strings.Join(quoted, ", ") + " starts"
+	if len(quoted) > 1 {
+		who = "agents " + strings.Join(quoted, ", ") + " start"
+	}
+	return fmt.Sprintf("%s without %s: %v; %s", who, describeGCMCPServers(projection), refused, refused.Remedy())
+}
+
+func describeGCMCPServers(projection materialize.MCPProjection) string {
+	servers := make([]string, len(projection.Servers))
+	for i, server := range projection.Servers {
+		servers[i] = strconv.Quote(server.Name)
+	}
+	if len(servers) == 1 {
+		return "gc's MCP server " + servers[0]
+	}
+	return "gc's MCP servers " + strings.Join(servers, ", ")
 }
 
 // managedKey combines provider and scope-root into the key used by stage-1
@@ -406,7 +554,7 @@ func resolveDeterministicAgentMCPProjection(
 	}
 
 	altIdentity := agent.QualifiedName() + "-alt"
-	altWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, altIdentity)
+	altWorkDir, err := resolveMCPWorkDirForQualifiedName(cityPath, cfg, agent, altIdentity)
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent %q has session-specific MCP targets; use --session", agent.QualifiedName())
 	}
@@ -420,6 +568,16 @@ func resolveDeterministicAgentMCPProjection(
 	return view, nil
 }
 
+// resolveMCPWorkDirForQualifiedName resolves an MCP target's work dir without
+// creating it. Projection planning, diagnostics and claimant checks are reads;
+// only the session-start path creates the directory before it runs.
+func resolveMCPWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("city config unavailable")
+	}
+	return resolveConfiguredWorkDirPath(cityPath, loadedCityName(cfg, cityPath), qualifiedName, agent, cfg.Rigs)
+}
+
 func resolveConfiguredAgentMCPProjection(
 	cityPath string,
 	cfg *config.City,
@@ -430,7 +588,7 @@ func resolveConfiguredAgentMCPProjection(
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
 	identity := agent.QualifiedName()
-	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+	workDir, err := resolveMCPWorkDirForQualifiedName(cityPath, cfg, agent, identity)
 	if err != nil {
 		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {
@@ -484,7 +642,7 @@ func resolveSessionMCPProjection(
 	}
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
-		workDir, err = resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+		workDir, err = resolveMCPWorkDirForQualifiedName(cityPath, cfg, agent, identity)
 		if err != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for session %q: %w", sessionID, err)
 		}
@@ -581,7 +739,7 @@ func validateStage2TargetClaimants(
 		// Resolve the candidate's own workdir. Failures here are
 		// treated as "this agent can't claim any target in this city
 		// right now" — not a conflict.
-		otherWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, other, identity)
+		otherWorkDir, err := resolveMCPWorkDirForQualifiedName(cityPath, cfg, other, identity)
 		if err != nil {
 			continue
 		}

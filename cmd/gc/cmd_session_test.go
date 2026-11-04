@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2096,6 +2097,93 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 	}
 }
 
+func TestSessionListJSONAPIRowsMatchLocalSafeFields(t *testing.T) {
+	createdAt := time.Date(2026, 10, 28, 12, 0, 0, 123456789, time.UTC)
+	lastActive := createdAt.Add(time.Minute)
+	lastNudge := createdAt.Add(2 * time.Minute)
+	info := session.Info{
+		ID:                   "gc-session-1",
+		Template:             "alpha/worker",
+		State:                session.StateActive,
+		Title:                "Review task",
+		Alias:                "worker-one",
+		AgentName:            "alpha/worker",
+		Provider:             "claude",
+		Transport:            "tmux",
+		WorkDir:              "/work/home",
+		WorkerDir:            " /work/tree ",
+		SessionName:          "alpha--worker-one",
+		CreatedAt:            createdAt,
+		LastActive:           lastActive,
+		LastNudgeDeliveredAt: lastNudge,
+		Attached:             true,
+	}
+	var local, routed bytes.Buffer
+	if code := writeSessionListJSON([]session.Info{info}, "", "", &local, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("writeSessionListJSON = %d, want 0", code)
+	}
+	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
+		AgeSeconds: 1.25,
+		Body: []SessionView{{
+			ID:                   info.ID,
+			Template:             info.Template,
+			State:                string(info.State),
+			Title:                info.Title,
+			Alias:                info.Alias,
+			Rig:                  "alpha",
+			AgentName:            info.AgentName,
+			Provider:             info.Provider,
+			Transport:            info.Transport,
+			SessionName:          info.SessionName,
+			WorkDir:              info.WorkDir,
+			WorkerDir:            "/work/tree",
+			CreatedAt:            info.CreatedAt.Format(time.RFC3339Nano),
+			LastActive:           info.LastActive.Format(time.RFC3339Nano),
+			LastNudgeDeliveredAt: info.LastNudgeDeliveredAt.Format(time.RFC3339Nano),
+			Attached:             info.Attached,
+			Running:              true,
+		}},
+	}, true, &routed); code != 0 {
+		t.Fatalf("renderSessionListFromAPI = %d, want 0", code)
+	}
+
+	var localDoc, routedDoc struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	for label, raw := range map[string][]byte{"local": local.Bytes(), "API": routed.Bytes()} {
+		var doc struct {
+			Sessions []map[string]any `json:"sessions"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("decode %s JSON: %v\n%s", label, err, raw)
+		}
+		if len(doc.Sessions) != 1 {
+			t.Fatalf("%s session rows = %d, want 1", label, len(doc.Sessions))
+		}
+		for _, key := range []string{"id", "template", "state", "title", "rig", "agent_name", "provider", "transport", "work_dir", "worker_dir", "session_name", "created_at", "last_active", "last_nudge_delivered_at", "attached", "closed"} {
+			if _, ok := doc.Sessions[0][key]; !ok {
+				t.Errorf("%s row is missing shared local-contract field %q: %s", label, key, raw)
+			}
+		}
+		delete(doc.Sessions[0], "running")
+		delete(doc.Sessions[0], "reason")
+		delete(doc.Sessions[0], "last_output")
+		delete(doc.Sessions[0], "program_status")
+		delete(doc.Sessions[0], "_cache_age_s")
+		for _, key := range []string{"command", "session_key", "resume_flag", "resume_style", "resume_command"} {
+			delete(doc.Sessions[0], key)
+		}
+		if label == "local" {
+			localDoc = doc
+		} else {
+			routedDoc = doc
+		}
+	}
+	if !reflect.DeepEqual(routedDoc, localDoc) {
+		t.Fatalf("API session-list row differs from local safe fields:\nlocal: %#v\nAPI:   %#v", localDoc.Sessions[0], routedDoc.Sessions[0])
+	}
+}
+
 func TestRenderSessionListFromAPIHumanIncludesTitleAndWorkDir(t *testing.T) {
 	var stdout bytes.Buffer
 	code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
@@ -3602,5 +3690,44 @@ func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	}
+}
+
+func TestSessionListAPIRowsDeriveClosedIdentity(t *testing.T) {
+	for _, tc := range []struct{ alias, runtime, want string }{
+		{"alias", "runtime", "alias"}, {"", "runtime", "runtime"}, {"", "", "id"},
+	} {
+		rows := sessionListAPIRows([]SessionView{{ID: "id", Alias: tc.alias, SessionName: tc.runtime, State: "closed"}})
+		if len(rows) != 1 || rows[0].Name != tc.want || !rows[0].Closed || rows[0].State != "" || rows[0].LastActive != (time.Time{}).Format(time.RFC3339Nano) {
+			t.Fatalf("closed local projection: %+v", rows)
+		}
+	}
+}
+
+func TestSessionListAPIPreservesEnvelope(t *testing.T) {
+	var out bytes.Buffer
+	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{AgeSeconds: 1.25, Body: []SessionView{{ID: "closed-session", State: "closed"}}}, true, &out); code != 0 {
+		t.Fatal(code)
+	}
+	var got struct {
+		SchemaVersion string              `json:"schema_version"`
+		OK            bool                `json:"ok"`
+		Filters       *sessionListFilters `json:"filters"`
+		Summary       sessionListSummary  `json:"summary"`
+		Age           float64             `json:"_cache_age_s"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Filters == nil || got.Summary.Total != 1 || got.Summary.Closed != 1 || got.Age != 1.25 {
+		t.Fatalf("API lost local envelope fields: %s", out.String())
+	}
+	validateJSONResultSchema(t, []string{"session", "list"}, out.Bytes())
+}
+
+func TestSessionListAPIDoesNotTreatUnknownStateAsClosed(t *testing.T) {
+	rows := sessionListAPIRows([]SessionView{{ID: "unclassified"}})
+	if len(rows) != 1 || rows[0].Closed {
+		t.Fatalf("unknown state inferred closed: %+v", rows)
 	}
 }

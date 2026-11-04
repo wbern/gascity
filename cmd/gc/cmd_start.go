@@ -912,20 +912,33 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// Stage-1 skill materialization — runs for every eligible agent
-	// at its scope root before sessions spawn. Non-fatal: per-agent
-	// Per-agent I/O errors remain best-effort, but an unsafe filtered agent
-	// sharing the stage-1 sink is a configuration error and must block start.
-	if err := runStage1SkillMaterialization(cityPath, cfg, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	// Stage-1 skill materialization writes provider-specific files at each
+	// agent's scope root. A dry run validates collisions above, but does not
+	// materialize skills while it previews MCP and agent plans.
+	if !dryRunMode {
+		if err := runStage1SkillMaterialization(cityPath, cfg, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's
 	// active runtime config surface. Conflicting shared targets or projection
 	// write failures must block startup before sessions launch against stale or
 	// ambiguous MCP state.
-	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
+	if dryRunMode {
+		lines, err := planStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start --dry-run: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if len(lines) > 0 {
+			fmt.Fprintln(stdout, "MCP projection plan:") //nolint:errcheck // best-effort stdout
+			for _, line := range lines {
+				fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
+			}
+		}
+	} else if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

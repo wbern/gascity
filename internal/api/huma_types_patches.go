@@ -226,6 +226,7 @@ type StatusAgentDetail struct {
 	Scope         string `json:"scope" doc:"city or rig."`
 	Running       bool   `json:"running" doc:"Observed running state of the agent's session."`
 	Suspended     bool   `json:"suspended" doc:"Whether the agent (or its rig) is suspended."`
+	SessionID     string `json:"session_id,omitempty" doc:"Persistent session bead ID when known."`
 	Draining      bool   `json:"draining,omitempty" doc:"True when the pool is draining this instance."`
 	SessionName   string `json:"session_name,omitempty" doc:"tmux session name CLI drain-ops key on."`
 	GroupName     string `json:"group_name,omitempty" doc:"Pool group label for expanded rows; same as QualifiedName for singletons."`
@@ -236,9 +237,12 @@ type StatusAgentDetail struct {
 // StatusRigDetail mirrors the CLI's StatusRigJSON (name/path/suspended)
 // so the API path can render the Rigs section without a separate /rigs call.
 type StatusRigDetail struct {
-	Name      string `json:"name" doc:"Rig name."`
-	Path      string `json:"path" doc:"Rig directory path."`
-	Suspended bool   `json:"suspended" doc:"Whether the rig is suspended (either explicitly or because all its agents are suspended)."`
+	Name                string   `json:"name" doc:"Rig name."`
+	Path                string   `json:"path" doc:"Rig directory path."`
+	Prefix              string   `json:"prefix,omitempty" doc:"Effective rig bead prefix."`
+	Suspended           bool     `json:"suspended" doc:"Whether the rig is suspended (either explicitly or because all its agents are suspended)."`
+	DefaultSlingTarget  string   `json:"default_sling_target,omitempty" doc:"Default sling target, when configured."`
+	DefaultSlingTargets []string `json:"default_sling_targets,omitempty" doc:"Ordered default sling targets, when configured."`
 }
 
 // StatusNamedSessionDetail mirrors the CLI's Named sessions block so the
