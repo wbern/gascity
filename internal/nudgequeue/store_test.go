@@ -599,3 +599,31 @@ func TestNilStoreIsNoOp(t *testing.T) {
 		t.Errorf("FindIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", shadow, ok, err)
 	}
 }
+
+func TestTerminalizeMissingRecordedBeadDoesNotCloseNewGeneration(t *testing.T) {
+	mem := beads.NewMemStore()
+	front := NewStore(beads.NudgesStore{Store: mem})
+	item := sampleNudgeItem()
+	oldID, _, err := front.Save(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Delete(oldID); err != nil {
+		t.Fatal(err)
+	}
+	newID, _, err := front.Save(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.BeadID = oldID
+	if err := front.Terminalize(item, "injected", "old delivered", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := mem.Get(newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newer.Status != "open" || newer.Metadata["state"] != "queued" {
+		t.Fatalf("old debt terminalized newer generation: %+v", newer)
+	}
+}

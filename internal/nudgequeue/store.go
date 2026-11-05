@@ -168,6 +168,18 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 	if ok {
 		return existing.ID, false, nil
 	}
+	return s.CreateShadow(item)
+}
+
+// CreateShadow allocates a new shadow identity for one enqueue attempt. Unlike
+// Save, it never reuses a same-label record: an older generation's out-of-lock
+// terminal payer may still hold that record. Queue admission, not the shadow
+// label, deduplicates attempts. A losing attempt may roll back only this new
+// identity, which no other new enqueue adopts.
+func (s *Store) CreateShadow(item Item) (beadID string, created bool, err error) {
+	if s == nil || s.store.Store == nil {
+		return "", false, nil
+	}
 	meta := map[string]string{
 		"nudge_id":           item.ID,
 		"agent":              item.Agent,
@@ -204,10 +216,10 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 
 // Terminalize stamps the controller-supplied terminal fields on the shadow bead
 // and closes it. It is the write half of the terminal codec: the update map, the
-// canonical close_reason floor, and the BeadID-then-find fallback are confined
-// here. It emits byte-identical bead writes to the prior raw markQueuedNudgeTerminal
-// helper (SetMetadataBatch with the same keys, then Close), tolerating a missing
-// bead as a no-op.
+// canonical close_reason floor, and exact-record fencing are confined here.
+// A recorded BeadID binds the payment to that generation, even if it was reaped.
+// Only legacy items without a BeadID resolve by logical ID. Missing records
+// are no-ops; writes remain SetMetadataBatch followed by Close.
 func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now time.Time) error {
 	if s == nil || s.store.Store == nil {
 		return nil
@@ -245,6 +257,11 @@ func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now
 		return nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return err
+	}
+	// A recorded identity is a generation fence. A reaped old bead must
+	// never redirect a stale payment to the newest same-label shadow.
+	if item.BeadID != "" {
+		return nil
 	}
 
 	b, ok, err := s.find(item.ID, true)
@@ -393,6 +410,25 @@ func (s *Store) Find(nudgeID string) (NudgeShadow, bool, error) {
 	b, ok, err := s.find(nudgeID, false)
 	if err != nil || !ok {
 		return NudgeShadow{}, ok, err
+	}
+	return decodeNudgeItem(b), true, nil
+}
+
+// FindItemShadow resolves the exact recorded shadow, falling back to the
+// logical ID only for legacy items without a recorded BeadID.
+func (s *Store) FindItemShadow(item Item) (NudgeShadow, bool, error) {
+	if item.BeadID == "" {
+		return s.FindIncludingTerminal(item.ID)
+	}
+	if s == nil || s.store.Store == nil {
+		return NudgeShadow{}, false, nil
+	}
+	b, err := s.store.Get(item.BeadID)
+	if isMissingNudgeBeadErr(err, item.BeadID) {
+		return NudgeShadow{}, false, nil
+	}
+	if err != nil {
+		return NudgeShadow{}, false, err
 	}
 	return decodeNudgeItem(b), true, nil
 }
