@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -410,5 +411,42 @@ func TestConcurrentDuplicateEnqueueRollsBackOnlyItsPrivateShadow(t *testing.T) {
 	if err != nil || len(shadows) != 2 {
 		t.Fatalf("ordinary duplicate allocated another shadow: %+v, %v", shadows, err)
 	}
+}
 
+func TestEnqueueSlowCreateStillSupersedesPendingAndInFlight(t *testing.T) {
+	cityPath := t.TempDir()
+	now := time.Now().UTC()
+	clk := &clock.Fake{Time: now}
+	ref := &nudgequeue.Reference{Kind: "bead", ID: "work"}
+	pending := newQueuedNudgeWithOptions("worker", "old pending", "sling", now, queuedNudgeOptions{ID: "old-pending", Reference: ref})
+	inflight := newQueuedNudgeWithOptions("worker", "old flight", "sling", now, queuedNudgeOptions{ID: "old-flight", Reference: ref})
+	inflight.ClaimedAt = now
+	inflight.LeaseUntil = now.Add(time.Hour)
+	if err := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
+		state.Pending = []queuedNudge{pending}
+		state.InFlight = []queuedNudge{inflight}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := &afterLookupNudgeStore{Store: beads.NewMemStore(), afterCreate: func(beads.Bead) { clk.Advance(3 * time.Second) }}
+	replacement := newQueuedNudgeWithOptions("worker", "replacement", "sling", now, queuedNudgeOptions{ID: "new", Reference: ref})
+	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, replacement, clk); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].ID != replacement.ID || len(state.InFlight) != 0 {
+		t.Fatalf("slow create left superseded reminders deliverable: %+v", state)
+	}
+	if len(state.Dead) != 2 {
+		t.Fatalf("superseded records lost: %+v", state)
+	}
+	for _, old := range state.Dead {
+		if old.LastError != "superseded" || !old.DeadAt.Equal(clk.Now()) {
+			t.Fatalf("wrong supersession record/time: %+v", old)
+		}
+	}
 }

@@ -2954,9 +2954,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	// Maintain and dedupe before allocating a private shadow. The final
 	// admission repeats this under flock because another producer can win
 	// while the new shadow is being created outside the lock.
-	now := clk.Now()
-	deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
-	prepare := func(state *nudgeQueueState) error {
+	prepare := func(state *nudgeQueueState, now, deadline time.Time) error {
 		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
@@ -2973,7 +2971,9 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	// Preflight commits only pure maintenance. Leave its debts unleased so
 	// the final mutation pays one bounded batch for the entire enqueue.
 	if err := nudgequeue.WithStateWithin(cityPath, "enqueue_prepare", nudgeQueueLockWait(), func(state *nudgeQueueState) error {
-		if err := prepare(state); err != nil {
+		now := clk.Now()
+		deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
+		if err := prepare(state, now, deadline); err != nil {
 			return err
 		}
 		duplicate = queuedNudgeExists(state, item.ID)
@@ -2996,7 +2996,12 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	item.BeadID = beadID
 	admitted := false
 	err = withNudgeQueueStateUsingStore(cityPath, "enqueue", store, func(state *nudgeQueueState) error {
-		if err := prepare(state); err != nil {
+		// Shadow creation and lock acquisition may have been slow. Admission
+		// needs its own current time and bounded pure-maintenance window so
+		// supersession is not skipped solely because preflight's window elapsed.
+		now := clk.Now()
+		deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
+		if err := prepare(state, now, deadline); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
