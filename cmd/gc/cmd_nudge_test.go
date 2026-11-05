@@ -191,7 +191,7 @@ func TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty(t *testing.T) {
 	}
 }
 
-func TestMarkQueuedNudgeTerminalFallsBackFromMissingStoredBeadID(t *testing.T) {
+func TestMarkQueuedNudgeTerminalDoesNotRedirectMissingStoredBeadID(t *testing.T) {
 	store := beads.NudgesStore{Store: &missingNudgeBeadStore{MemStore: beads.NewMemStore(), missingID: "gc-458"}}
 	item := queuedNudge{
 		ID:        "nudge-stale",
@@ -220,14 +220,17 @@ func TestMarkQueuedNudgeTerminalFallsBackFromMissingStoredBeadID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%q): %v", createdID, err)
 	}
-	if bead.Status != "closed" {
-		t.Fatalf("bead.Status = %q, want closed", bead.Status)
+	// A stale/ambiguous recorded ID must not redirect payment to the
+	// replacement shadow created above. Legacy empty-ID fallback has its
+	// own coverage in TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty.
+	if bead.Status != "open" {
+		t.Fatalf("replacement bead.Status = %q, want open", bead.Status)
 	}
-	if bead.Metadata["state"] != "expired" {
-		t.Fatalf("state = %q, want expired", bead.Metadata["state"])
+	if bead.Metadata["state"] != "queued" {
+		t.Fatalf("replacement state = %q, want queued", bead.Metadata["state"])
 	}
-	if bead.Metadata["terminal_reason"] != "expired" {
-		t.Fatalf("terminal_reason = %q, want expired", bead.Metadata["terminal_reason"])
+	if bead.Metadata["terminal_reason"] != "" {
+		t.Fatalf("replacement terminal_reason = %q, want empty", bead.Metadata["terminal_reason"])
 	}
 }
 
@@ -342,7 +345,7 @@ func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	}
 }
 
-func TestMarkQueuedNudgeTerminalHandlesAmbiguousBeadID(t *testing.T) {
+func TestMarkQueuedNudgeTerminalDoesNotRedirectAmbiguousBeadID(t *testing.T) {
 	store := beads.NudgesStore{Store: &ambiguousNudgeBeadStore{MemStore: beads.NewMemStore(), ambiguousID: "gc-17"}}
 	item := queuedNudge{
 		ID:        "nudge-ambiguous",
@@ -371,11 +374,14 @@ func TestMarkQueuedNudgeTerminalHandlesAmbiguousBeadID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%q): %v", createdID, err)
 	}
-	if bead.Status != "closed" {
-		t.Fatalf("bead.Status = %q, want closed", bead.Status)
+	// A stale/ambiguous recorded ID must not redirect payment to the
+	// replacement shadow created above. Legacy empty-ID fallback has its
+	// own coverage in TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty.
+	if bead.Status != "open" {
+		t.Fatalf("replacement bead.Status = %q, want open", bead.Status)
 	}
-	if bead.Metadata["state"] != "expired" {
-		t.Fatalf("state = %q, want expired", bead.Metadata["state"])
+	if bead.Metadata["state"] != "queued" {
+		t.Fatalf("replacement state = %q, want queued", bead.Metadata["state"])
 	}
 }
 
@@ -5229,10 +5235,12 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 	// ages out on DeadAt alone; a zero DeadAt gives no age and is kept. A
 	// shadow-backed item past retention is still kept when no store is
 	// available to confirm its terminal record.
+	// This owns the pure pruning rule. Use the state transaction directly;
+	// the CLI mutation wrapper also pays debts and can start a real store.
 	dir := t.TempDir()
 	now := time.Now()
 
-	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+	err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
 		state.Dead = append(state.Dead,
 			queuedNudge{ID: "n-old", Agent: "worker", Source: "session", Message: "old", DeadAt: now.Add(-3 * time.Hour)},
 			queuedNudge{ID: "n-recent", Agent: "worker", Source: "session", Message: "recent", DeadAt: now.Add(-30 * time.Minute)},
@@ -5245,7 +5253,7 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 		t.Fatalf("seed dead items: %v", err)
 	}
 
-	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+	err = nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
 		return pruneDeadQueuedNudges(state, nil, now, noMaintenanceDeadline())
 	})
 	if err != nil {
@@ -5848,21 +5856,22 @@ func TestNudgeCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
 // validation.on-close=error) rejects the close, and the rollback leaks
 // an OPEN nudge bead with metadata.state="queued".
 //
-// Triggers the rollback by writing corrupt JSON to the queue state
-// file before the call, which fails LoadState inside withNudgeQueueState
+// Triggers rollback by corrupting the queue state after shadow creation,
+// which fails LoadState inside the final admission transaction
 // and propagates the error up to the rollback site.
 func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 	dir := t.TempDir()
 
-	// Force LoadState to fail by pre-populating state.json with corrupt
-	// JSON. WithState propagates the parse error up, which means
-	// enqueueQueuedNudgeWithStore enters its rollback branch.
+	// Corrupt state.json after preflight and shadow creation, so final
+	// admission fails and must roll back only the private new shadow.
 	statePath := nudgequeue.StatePath(dir)
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	corruptAfterCreate := func(beads.Bead) {
+		if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 
 	store := beads.NudgesStore{Store: beads.NewMemStore()}
@@ -5870,6 +5879,7 @@ func TestEnqueueQueuedNudgeWithStore_RollbackStampsCloseReason(t *testing.T) {
 		ID: "nudge-rollback-target",
 	})
 
+	store.Store = &afterLookupNudgeStore{Store: store.Store, afterCreate: corruptAfterCreate}
 	err := enqueueQueuedNudgeWithStore(dir, store, item)
 	if err == nil {
 		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state")
@@ -5902,8 +5912,10 @@ func TestEnqueueQueuedNudgeWithStore_RollbackReturnsCloseFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	corruptAfterCreate := func(beads.Bead) {
+		if err := os.WriteFile(statePath, []byte("{not-valid-json"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 
 	closeErr := errors.New("rollback close failed")
@@ -5915,6 +5927,7 @@ func TestEnqueueQueuedNudgeWithStore_RollbackReturnsCloseFailure(t *testing.T) {
 		ID: "nudge-rollback-close-failure",
 	})
 
+	store.Store = &afterLookupNudgeStore{Store: store.Store, afterCreate: corruptAfterCreate}
 	err := enqueueQueuedNudgeWithStore(dir, store, item)
 	if err == nil {
 		t.Fatal("enqueueQueuedNudgeWithStore: expected error from corrupt queue state and rollback close failure")
@@ -5962,6 +5975,8 @@ func TestFormatNudgeInjectOutputStripsSystemReminderBreakoutSequence(t *testing.
 // closeBeadStoreHandle peels policy/Router/Caching wrappers and finally calls
 // CloseStore() on the unwrapped store; a leaking helper that never closes the
 // store it opened leaves opens > closes.
+//
+//nolint:unparam // CloseStore must return error to satisfy the store closer contract.
 type countingNudgeStore struct {
 	*beads.MemStore
 	closes *int

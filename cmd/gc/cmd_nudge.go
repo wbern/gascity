@@ -2951,16 +2951,12 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	if store.Store != nil {
 		front = nudgeFrontDoor(store)
 	}
-	beadID, created, err := ensureQueuedNudgeBead(store, item)
-	if err != nil {
-		return err
-	}
-	if beadID != "" {
-		item.BeadID = beadID
-	}
-	err = withNudgeQueueStateUsingStore(cityPath, "enqueue", store, func(state *nudgeQueueState) error {
-		now := clk.Now()
-		deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
+	// Maintain and dedupe before allocating a private shadow. The final
+	// admission repeats this under flock because another producer can win
+	// while the new shadow is being created outside the lock.
+	now := clk.Now()
+	deadline := clk.Now().Add(nudgeEnqueueMaintenanceBudget)
+	prepare := func(state *nudgeQueueState) error {
 		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
@@ -2968,6 +2964,39 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 			return err
 		}
 		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
+			return err
+		}
+		sortQueuedNudges(state)
+		return nil
+	}
+	duplicate := false
+	// Preflight commits only pure maintenance. Leave its debts unleased so
+	// the final mutation pays one bounded batch for the entire enqueue.
+	if err := nudgequeue.WithStateWithin(cityPath, "enqueue_prepare", nudgeQueueLockWait(), func(state *nudgeQueueState) error {
+		if err := prepare(state); err != nil {
+			return err
+		}
+		duplicate = queuedNudgeExists(state, item.ID)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if duplicate {
+		if err := withNudgeQueueStateUsingStore(cityPath, "enqueue_dedupe", store, func(*nudgeQueueState) error { return nil }); err != nil {
+			return err
+		}
+		pingNudgeWakeSocket(cityPath)
+		return nil
+	}
+	beadID, created, err := nudgeFrontDoor(store).CreateShadow(item)
+	if err != nil {
+		return err
+	}
+	// Incoming shadow identities cannot be adopted by a fresh generation.
+	item.BeadID = beadID
+	admitted := false
+	err = withNudgeQueueStateUsingStore(cityPath, "enqueue", store, func(state *nudgeQueueState) error {
+		if err := prepare(state); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
@@ -3020,11 +3049,14 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 			}
 			state.InFlight = inFlight
 		}
+		admitted = true
 		state.Pending = append(state.Pending, item)
 		sortQueuedNudges(state)
 		return nil
 	})
-	if err != nil && created && store.Store != nil && beadID != "" {
+	// Each attempt owns a fresh bead identity. A failed or deduplicated
+	// admission cannot close a shadow used by the winning generation.
+	if (err != nil || !admitted) && created && store.Store != nil && beadID != "" {
 		// Roll back the leaked shadow bead through the nudge front door, which
 		// stamps the canonical close_reason before Close so BdStore.Close can
 		// forward it as `bd close --reason` and satisfy validation.on-close=error.

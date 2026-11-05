@@ -154,7 +154,7 @@ func payNudgeShadowDebt(front *nudgequeue.Store, item queuedNudge) error {
 		return errNoNudgesStoreForDebt
 	}
 	if debt.Verify {
-		shadow, ok, err := front.FindIncludingTerminal(item.ID)
+		shadow, ok, err := front.FindItemShadow(item)
 		if err != nil {
 			return err
 		}
