@@ -111,13 +111,13 @@ func TestEphemeralInProgressProbeServesUnheldCandidate(t *testing.T) {
 	}{
 		{
 			name: "non-canonical labels are not holds",
-			rows: `[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":["mpr-human-hold","needs-mayor"]}]`,
+			rows: `[{"id":"wisp-1","status":"in_progress","dependency_count":0,"assignee":"sess-1","labels":["mpr-human-hold","needs-mayor"]}]`,
 			want: "wisp-1",
 		},
 		{
 			name: "held first row does not shadow an unheld second",
-			rows: `[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":["` + beadmeta.HoldExternalLabel + `"]},` +
-				`{"id":"wisp-2","status":"in_progress","assignee":"sess-1","labels":[]}]`,
+			rows: `[{"id":"wisp-1","status":"in_progress","dependency_count":0,"assignee":"sess-1","labels":["` + beadmeta.HoldExternalLabel + `"]},` +
+				`{"id":"wisp-2","status":"in_progress","dependency_count":0,"assignee":"sess-1","labels":[]}]`,
 			want: "wisp-2",
 		},
 	}

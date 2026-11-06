@@ -1462,3 +1462,40 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 	}
 	return loadCityConfigCalls.Load() - before
 }
+
+// Brief discovery omits instructions without losing the owning leg's blocker
+// evidence, including a computed empty set. Full detail remains the default.
+func TestReadyBriefDiscovery(t *testing.T) {
+	store := beads.NewMemStore()
+	held := mustCreateReadyBead(t, store, beads.Bead{Title: "held", Labels: []string{"hold:mayor"}, Description: strings.Repeat("held body", 10000), Priority: readyPriority(0)})
+	b := mustCreateReadyBead(t, store, beads.Bead{Title: "large", Status: "in_progress", Assignee: "sess", Description: strings.Repeat("instructions", 10000)})
+	inProgress := "in_progress"
+	if err := store.Update(held.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newReadyCmd(io.Discard, io.Discard)
+	if err := cmd.ParseFlags([]string{"--brief", "--status=in_progress"}); err != nil {
+		t.Fatalf("brief flag unavailable: %v", err)
+	}
+	rows, err := readyBeadsForOpts([]readyLeg{readyTestLeg("local", store)}, readyOpts{status: "in_progress", brief: true, excludeLabels: []string{"hold:mayor"}, limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= 65536 || strings.Contains(string(encoded), "instructions") {
+		t.Fatalf("brief emitted full body (%d bytes)", len(encoded))
+	}
+	if !strings.Contains(string(encoded), `"blocked_by":[]`) {
+		t.Fatalf("known empty blockers omitted: %s", encoded)
+	}
+	full, err := readyBeadsForOpts([]readyLeg{readyTestLeg("local", store)}, readyOpts{status: "in_progress", excludeLabels: []string{"hold:mayor"}, limit: 1})
+	if err != nil || len(full) != 1 || full[0].ID != b.ID || full[0].Description != b.Description {
+		t.Fatalf("full retrieval changed: err=%v", err)
+	}
+}

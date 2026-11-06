@@ -463,7 +463,7 @@ func RelocatedClassFrontierRefusal(op string, matched []RelocatedClass) error {
 		"complete. Use `gc ready`, which federates the city store, the rig stores and the relocated binding as ordered "+
 		"legs and fails loud on a leg it cannot read instead of returning a short array. It is flag-compatible with the "+
 		"`bd ready` invocation the generated work query builds — NOT with all of `bd ready`: it takes --assignee, "+
-		"--unassigned, --metadata-field, --exclude-type, --exclude-label, --sort, --limit, --include-ephemeral, --status "+
+		"--unassigned, --metadata-field, --exclude-type, --exclude-label, --sort, --limit, --include-ephemeral, --status, --brief "+
 		"and --json, and rejects the rest of bd's ready surface (--label, --label-any, --parent, --type, --priority, "+
 		"--offset, --has-metadata-key, --mol, --include-deferred, --gated, --claim, and every single-letter shorthand), "+
 		"with --sort taking oldest|newest rather than bd's priority|hybrid|oldest. A query only bd's surface can express "+

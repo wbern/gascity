@@ -15,7 +15,7 @@ import (
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --limit=1) || exit $?; `
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1) || exit $?; `
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
@@ -37,19 +37,14 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	}
 }
 
-// TestAssignedInProgressTierIsByteIdenticalOnSingleStore is the zero-risk
-// control: every city that relocates nothing runs character-identical bytes.
-//
-// This is the whole reason the swap is topology-keyed rather than unconditional.
-// The crash-recovery tier is on the hot path of every worker in every deployed
-// city, and a change to its shell that was not required by the bug is a change
-// that can only lose.
-func TestAssignedInProgressTierIsByteIdenticalOnSingleStore(t *testing.T) {
+// Single-store discovery keeps its local reader, with compact projection,
+// hold filtering before the limit, and visible reader failures.
+func TestAssignedInProgressTierUsesCompactSingleStoreRead(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
-		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --limit=1 2>/dev/null); `
+		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1) || exit $?; `
 		if got != want {
-			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant the pre-swap bytes\n  %q", shellVar, got, want)
+			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant compact work discovery\n  %q", shellVar, got, want)
 		}
 	}
 	// The single-store enrichment must not grow the presence key either: its
@@ -58,8 +53,5 @@ func TestAssignedInProgressTierIsByteIdenticalOnSingleStore(t *testing.T) {
 	single := inProgressBlockedByEnrichmentScript(false, true)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)
-	}
-	if !strings.HasPrefix(single, `bid=$(printf "%s" "$r" | jq -r ".[0].id // empty" 2>/dev/null); bb="[]"; [ -n "$bid" ] && bb=$(bd show `) {
-		t.Errorf("single-store enrichment diverged from its pre-swap bytes: %q", single)
 	}
 }

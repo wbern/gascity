@@ -582,8 +582,8 @@ func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
 // after the stock one-row recovery tier has identified a graph workflow root.
-// This preserves that tier's byte and fail-open contracts while preventing the
-// root from hiding another in-progress step owned by the same session.
+// This prevents the root from hiding another in-progress step owned by the
+// same session while retaining the same discovery and serving gates.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
 	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
 }
@@ -594,8 +594,14 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
-		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
+	holdArgs := ""
+	for _, label := range beadmeta.DispatchHoldLabels {
+		holdArgs += " --exclude-label=" + shellquote.Quote(label)
+	}
+	// Discovery filters before limiting and omits bodies before the output
+	// firewall measures the response. Ownership/existence probes do neither.
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --brief` + holdArgs + ` --limit=` + strconv.Itoa(limit) +
+		`) || exit $?; `
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
@@ -648,30 +654,15 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
 // cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
 // assignment still keeps its owner visible to demand and recovery accounting.
-// Those callers pass checkHold=false, which omits every `.labels` reference
-// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
-// pins the omission, not just the outcome.
+// Those probes do not call this work-serving enrichment helper.
+// TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels pins
+// their hold transparency.
 //
-// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
-// degrades to the stock behavior of serving the candidate unchanged, never to
-// dropping it, so a malformed or log-prefixed bd stdout can never disable
-// crash recovery. The hold count fails open the same way when checkHold is
-// true.
-//
-// # The presence key, and why only the federated form has it
-//
-// On a federated topology the reader is `gc ready --status in_progress`, which
-// already carries `blocked_by` resolved in-process from the leg that served the
-// row. Re-deriving it here with `bd show` would resolve nothing for a relocated
-// id and overwrite a correct answer with an empty one, so the federated form
-// reads the field off the row first and only falls back to `bd show` when the
-// row does not carry it.
-//
-// The single-store form is left byte-identical, deliberately. Its reader is
-// `bd list`, whose rows never carry `blocked_by`, so the presence branch could
-// never fire there — it would be pure added shell on the path every existing
-// deployment runs, for zero behavior change. Same zero-risk scoping the ready
-// tiers used for their own swap.
+// Dependency evidence is fail-loud: failed or malformed detail reads cannot
+// establish that a candidate has no blockers. Holds are checked before detail
+// reads. Federated rows carry evidence computed by the owning store, including
+// an explicitly empty blocked_by array, and must never be re-read through bd
+// in a different store.
 func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string {
 	return inProgressBlockedByEnrichmentScriptWithServeAction(
 		federated,
@@ -708,57 +699,43 @@ func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) stri
 }
 
 func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
-	// The tier stores its candidate row in $r and its enriched copy in
-	// $r_enriched; both callers use those names.
-	const shellVar = "r"
-	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
-		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
-		`.dependency_type == "conditional-blocks") | {id, status}]`
-	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
-
-	const enrichJQ = `map(. + {blocked_by: $bb})`
+	const blockingDepsJQ = `if type != "array" or length != 1 or (.[0] | type) != "object" or (.[0].id | type) != "string" or ((.[0].dependencies // []) | type) != "array" then error("invalid issue detail") else ` +
+		`[.[0].dependencies[]? | if type != "object" or (.dependency_type | type) != "string" then error("invalid dependency evidence") else ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or .dependency_type == "conditional-blocks") | ` +
+		`if (.id | type) != "string" or (.status | type) != "string" then error("incomplete blocker evidence") else {id, status} end end] end`
+	const openBlockerCountJQ = `if type != "array" then error("invalid blocker evidence") else ` +
+		`[.[] | if type != "object" or (.id | type) != "string" or (.status | type) != "string" then error("incomplete blocker evidence") else ` +
+		`select((.status | ascii_downcase) != "closed") end] | length end`
 	const carriedBlockedByJQ = `.[0].blocked_by // empty`
-
-	v := `$r`
-	// The enriched payload lands in a scratch variable so the
-	// candidate itself is never clobbered: if jq fails (non-JSON or
-	// log-prefixed `bd list` stdout) the original is served unchanged.
-	enrichedVar := `r_enriched`
-	e := `$` + enrichedVar
-	carried := ``
-	if federated {
-		carried = `bb=$(printf "%s" "` + v + `" | jq -c ` + shellquote.Quote(carriedBlockedByJQ) + ` 2>/dev/null); ` +
-			`[ "$bb" = "null" ] && bb=""; ` +
-			`if [ -z "$bb" ]; then `
-	}
-	fallback := `[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
-		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); `
-	if federated {
-		fallback += `fi; `
-	}
-
 	holdCheck := ""
 	holdCond := ""
 	if checkHold {
-		holdCheck = `nheld=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
-			`[ -z "$nheld" ] && nheld=0; `
-		holdCond = ` && [ "$nheld" = "0" ]`
+		holdCheck = `nheld=$(printf "%s" "$r" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); [ -z "$nheld" ] && nheld=0; `
+		holdCond = `if [ "$nheld" = "0" ]; then `
 	}
-
-	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
-		carried +
-		`bb="[]"; ` +
-		fallback +
-		`[ -z "$bb" ] && bb="[]"; ` +
-		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
-		`[ -z "$nblocked" ] && nblocked=0; ` +
-		holdCheck +
-		`if [ "$nblocked" = "0" ]` + holdCond + `; then ` +
-		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
-		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
-		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
-		serveAction +
-		`fi; `
+	carried := `bb=$(printf "%s" "$r" | jq -c 'if .[0].dependency_count == 0 then [] else empty end' 2>/dev/null); `
+	if federated {
+		carried = `bb=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(carriedBlockedByJQ) + ` 2>/dev/null); `
+	}
+	// Capture the producer separately: a pipeline's jq status cannot establish
+	// whether bd succeeded. A withheld manifest is not an empty dependency set.
+	fallback := `if [ -z "$bb" ]; then ` +
+		`detail=$(bd show "$bid" --json --brief-deps) || exit $?; ` +
+		`bb=$(printf "%s" "$detail" | jq -ce ` + shellquote.Quote(blockingDepsJQ) + `) || { printf "%s\n" "work discovery: dependency evidence unavailable for $bid" >&2; exit 1; }; fi; `
+	endHold := ""
+	if checkHold {
+		endHold = `fi; `
+	}
+	return holdCheck + holdCond +
+		`bid=$(printf "%s" "$r" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		// Preserve the historical raw-output path for malformed candidate rows;
+		// claimHookWork still validates candidates before any claim or serving.
+		`if [ -z "$bid" ]; then ` + serveAction + `else ` +
+		carried + fallback +
+		`nblocked=$(printf "%s" "$bb" | jq -er ` + shellquote.Quote(openBlockerCountJQ) + `) || exit $?; ` +
+		`if [ "$nblocked" = "0" ]; then ` +
+		`r_enriched=$(printf "%s" "$r" | jq -c --argjson bb "$bb" 'map(. + {blocked_by: $bb})') || exit $?; r="$r_enriched"; ` +
+		serveAction + `fi; fi; ` + endHold
 }
 
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
