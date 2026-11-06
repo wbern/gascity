@@ -1489,6 +1489,11 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
 		return hookAdoptionRefused, ""
 	}
+	if beadCarriesDispatchHoldLabel(canonical.Labels) {
+		fmt.Fprintf(stderr, "gc hook --claim: refusing to re-serve %s: the canonical assignment is held\n", beadID) //nolint:errcheck
+		return hookAdoptionRefused, ""
+	}
+
 	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
 }
 

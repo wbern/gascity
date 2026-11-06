@@ -83,7 +83,8 @@ type readyBead struct {
 	// Every other arm leaves it absent, and absent means "not computed", which
 	// every consumer already reads as not-blocked (fail-open). See
 	// readyBlockedByForRows for why it is not computed on the ready arm.
-	BlockedBy []readyBeadBlocker `json:"blocked_by,omitempty"`
+	// omitzero omits nil (not computed), but retains a computed empty slice.
+	BlockedBy []readyBeadBlocker `json:"blocked_by,omitzero"`
 }
 
 // readyBeadDep is the wire shape of one dependency edge, for the same reason
@@ -161,6 +162,7 @@ func toReadyBeadDeps(deps []beads.Dep) []readyBeadDep {
 // tiers on every leg unconditionally (beads.FederatedReadTier), so the flag
 // selects nothing. See newReadyCmd.
 type readyOpts struct {
+	brief          bool
 	assignee       string
 	unassigned     bool
 	metadataFields []string
@@ -231,6 +233,7 @@ orchestration step runs as are claimable work here whether or not
 // A test that re-declared these flags would be testing its own copy of the
 // contract, which is the drift this whole lane exists to remove.
 func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, jsonOut *bool) {
+	cmd.Flags().BoolVar(&opts.brief, "brief", false, "omit task descriptions for discovery; fetch full instructions with gc bd show <id>")
 	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
@@ -334,7 +337,13 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if err != nil {
 		return nil, err
 	}
-	return toReadyBeads(items, blockers), nil
+	rows := toReadyBeads(items, blockers)
+	if opts.brief {
+		for i := range rows {
+			rows[i].Description = ""
+		}
+	}
+	return rows, nil
 }
 
 // readyBlockedByForRows resolves each row's blocking dependencies through the
@@ -385,9 +394,8 @@ func readyBlockedByForRows(items []beads.Bead, owners map[string]readyLeg) (map[
 			}
 			blockers = append(blockers, readyBeadBlocker{ID: blocker.ID, Status: blocker.Status})
 		}
-		if len(blockers) > 0 {
-			out[item.ID] = blockers
-		}
+		// Presence distinguishes computed-empty from unavailable evidence.
+		out[item.ID] = blockers
 	}
 	return out, nil
 }

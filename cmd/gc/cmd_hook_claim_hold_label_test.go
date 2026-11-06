@@ -197,3 +197,29 @@ func TestFilterUnreadyHookCandidatesKeepsNonHoldLabels(t *testing.T) {
 			beadmeta.DispatchHoldLabels, got)
 	}
 }
+
+// Compact discovery is a snapshot: a hold added afterwards must be enforced
+// by the canonical claim-time read, before returning a work receipt.
+func TestHookClaimHoldAddedAfterDiscovery(t *testing.T) {
+	for _, label := range beadmeta.DispatchHoldLabels {
+		t.Run(label, func(t *testing.T) {
+			ops := hookClaimOps{
+				Runner: func(string, string) (string, error) {
+					return `[{"id":"work-1","status":"in_progress","assignee":"` + holdTestIdentity + `"}]`, nil
+				},
+				ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: holdTestIdentity, Labels: []string{label}, Description: "full instructions"}, nil
+				},
+			}
+			var stdout, stderr bytes.Buffer
+			doHookClaim("query", "/rig", holdTestClaimOptions(), ops, &stdout, &stderr)
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("invalid output: %v stderr=%s", err, &stderr)
+			}
+			if result.Action == "work" {
+				t.Fatalf("served %s despite a hold added after discovery: %s", label, &stdout)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -385,13 +386,16 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
+	// Protect recovery commands: both topologies now propagate their errors,
+	// unlike the older ready tiers normalized below.
+	recovery := map[string]string{}
 	for _, shellVar := range []string{"id", "cand"} {
-		federated = replaceFragment(federated,
-			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressTierCommand(shellVar, QueryTopology{}))
-		federated = replaceFragment(federated,
-			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
-			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
+		for _, limit := range []int{1, 20} {
+			marker := "__recovery_" + shellVar + "_" + strconv.Itoa(limit) + "__"
+			from := assignedInProgressTierCommandWithLimit(shellVar, QueryTopology{FederatedReady: true}, limit)
+			recovery[marker] = assignedInProgressTierCommandWithLimit(shellVar, QueryTopology{}, limit)
+			federated = replaceFragment(federated, from, marker)
+		}
 	}
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
@@ -403,6 +407,9 @@ func renormalizeFederatedCommand(federated string) string {
 	// The named session's legacy graph-step fallback scans the generic routed
 	// read unbounded (namedGraphV2RoutedReadyTierScript).
 	federated = strings.ReplaceAll(federated, `--limit=0) || exit $?`, `--limit=0 2>/dev/null)`)
+	for marker, command := range recovery {
+		federated = replaceFragment(federated, marker, command)
+	}
 	return federated
 }
 

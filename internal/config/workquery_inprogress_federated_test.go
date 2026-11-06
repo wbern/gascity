@@ -34,7 +34,7 @@ esac
 // presence key short-circuited the single-store fallback.
 const fakeBDRecordingShow = `#!/bin/sh
 case "$1" in
-  show) printf '%s\n' "$@" >> "$BD_SHOW_LOG"; printf '[]' ;;
+  show) printf '%s\n' "$@" >> "$BD_SHOW_LOG"; printf '[{"id":"gcg-own","dependencies":[]}]' ;;
   *) printf '[]' ;;
 esac
 `

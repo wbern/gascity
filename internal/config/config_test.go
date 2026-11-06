@@ -2038,7 +2038,7 @@ case "$1" in
   query)
     case "$*" in
       *"ephemeral=true AND status=in_progress"*)
-        printf '[{"id":"ga-ephemeral-progress","assignee":"hello-world/dog","status":"in_progress","ephemeral":true}]'
+        printf '[{"id":"ga-ephemeral-progress","dependency_count":0,"assignee":"hello-world/dog","status":"in_progress","ephemeral":true}]'
         ;;
       *)
         printf '[]'
@@ -2107,7 +2107,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
 		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
-		`bd list --status in_progress --assignee="$id" --json --limit=1`,
+		`bd list --status in_progress --assignee="$id" --json --brief`,
 		`ephemeral=true AND status=in_progress`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2123,7 +2123,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
+  "list --status in_progress --assignee=worker-bead --json --brief --exclude-label=hold:mayor --exclude-label=hold:external --exclude-label=held --exclude-label=hold:human --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true,"dependency_count":0}]' ;;
   *) printf '[]' ;;
 esac
 `)
