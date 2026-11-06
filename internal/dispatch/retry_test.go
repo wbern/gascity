@@ -2712,3 +2712,30 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStore
 		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via MemberStores?)", got, want)
 	}
 }
+
+// TestResolveRetryRunSubjectCrossRootFallback covers the legacy blocker fallback
+// when there is no stamped retry-run matching the logical attempt lookup.
+func TestResolveRetryRunSubjectCrossRootFallback(t *testing.T) {
+	t.Parallel()
+	for _, externalFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("external-first=%v", externalFirst), func(t *testing.T) {
+			t.Parallel()
+			store := beads.NewMemStore()
+			predecessor := mustCreateWorkflowBead(t, store, beads.Bead{Title: "predecessor workflow", Type: "task", Status: "closed", Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": "fail"}})
+			root := mustCreateWorkflowBead(t, store, beads.Bead{Title: "own workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+			own := mustCreateWorkflowBead(t, store, beads.Bead{Title: "legacy attempt", Type: "task", Status: "closed", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.outcome": "pass"}})
+			eval := mustCreateWorkflowBead(t, store, beads.Bead{Title: "eval", Type: "task", Metadata: map[string]string{"gc.kind": "retry-eval", "gc.root_bead_id": root.ID}})
+			ids := []string{own.ID, predecessor.ID}
+			if externalFirst {
+				ids = []string{predecessor.ID, own.ID}
+			}
+			for _, id := range ids {
+				mustDepAdd(t, store, eval.ID, id, "blocks")
+			}
+			got, err := resolveRetryRunSubject(store, eval, "legacy-logical", 1)
+			if err != nil || got.ID != own.ID || got.Metadata["gc.outcome"] != "pass" {
+				t.Fatalf("subject=%+v err=%v, want own %s/pass", got, err, own.ID)
+			}
+		})
+	}
+}
