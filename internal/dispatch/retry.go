@@ -249,7 +249,7 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 		}
 	}
 
-	subjectID, err := resolveBlockingSubjectID(store, eval.ID)
+	subjectID, err := resolveBlockingSubjectID(store, eval)
 	if err != nil {
 		return beads.Bead{}, err
 	}

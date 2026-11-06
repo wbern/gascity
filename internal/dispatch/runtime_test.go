@@ -457,21 +457,33 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 		name          string
 		sourceOutcome string
 		wantAction    string
+		externalFirst bool
 	}{
-		{name: "pass", sourceOutcome: "pass", wantAction: "scope-pass"},
-		{name: "fail", sourceOutcome: "fail", wantAction: "scope-fail"},
+		{name: "pass/external-first", sourceOutcome: "pass", wantAction: "scope-pass", externalFirst: true},
+		{name: "pass/own-first", sourceOutcome: "pass", wantAction: "scope-pass"},
+		{name: "fail/external-first", sourceOutcome: "fail", wantAction: "scope-fail", externalFirst: true},
+		{name: "fail/own-first", sourceOutcome: "fail", wantAction: "scope-fail"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			store := beads.NewMemStore()
+			externalOutcome := "fail"
+			if tc.sourceOutcome == "fail" {
+				externalOutcome = "pass"
+			}
+			predecessor := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "predecessor workflow", Type: "task", Status: "closed",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": externalOutcome},
+			})
+			root := mustCreateWorkflowBead(t, store, beads.Bead{Title: "own workflow", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
 			body := mustCreateWorkflowBead(t, store, beads.Bead{
 				Title: "body",
 				Type:  "task",
 				Metadata: map[string]string{
 					"gc.kind":         "scope",
 					"gc.scope_role":   "body",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": root.ID,
 					"gc.step_ref":     "demo.body",
 				},
 			})
@@ -480,7 +492,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Type:   "task",
 				Status: "closed",
 				Metadata: map[string]string{
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": root.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "member",
 					"gc.outcome":      tc.sourceOutcome,
@@ -493,7 +505,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Status: "closed",
 				Metadata: map[string]string{
 					"gc.kind":         "fanout",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": root.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "control",
 					"gc.outcome":      "pass",
@@ -505,19 +517,24 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				Type:  "task",
 				Metadata: map[string]string{
 					"gc.kind":         "scope-check",
-					"gc.root_bead_id": "wf-1",
+					"gc.root_bead_id": root.ID,
 					"gc.scope_ref":    "body",
 					"gc.scope_role":   "control",
 				},
 			})
 
-			// The fanout edge goes in first so a first-blocker lookup would
-			// pick the fanout control.
+			// Both gates are readiness-only; only the own-root source supplies the outcome.
+			if tc.externalFirst {
+				mustDepAdd(t, store, control.ID, predecessor.ID, "blocks")
+			}
 			mustDepAdd(t, store, control.ID, fanout.ID, "blocks")
 			mustDepAdd(t, store, control.ID, source.ID, "blocks")
+			if !tc.externalFirst {
+				mustDepAdd(t, store, control.ID, predecessor.ID, "blocks")
+			}
 			mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			subjectID, err := resolveScopeCheckSubjectID(store, control)
 			if err != nil {
 				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
 			}
@@ -6537,7 +6554,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 		t.Fatalf("logical deps = %+v, want exactly one current blocker", logicalDeps)
 	}
 	check2 := mustGetBead(t, store, logicalDeps[0].DependsOnID)
-	run2ID, err := resolveBlockingSubjectID(store, check2.ID)
+	run2ID, err := resolveBlockingSubjectID(store, check2)
 	if err != nil {
 		t.Fatalf("resolve run2 subject: %v", err)
 	}
@@ -12531,5 +12548,238 @@ func TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent(t *testing.
 	assertFailureStamp(t, parent, "postcondition_failed", "hard", cleanup.ID)
 	if got := parent.Metadata["gc.outcome"]; got != "" {
 		t.Errorf("parent gc.outcome = %q, want unset (the parent is not terminal)", got)
+	}
+}
+
+// TestProcessScopeCheckSubjectSkipsCrossRootDrainGate pins that a drain item's
+// scope-check, which also blocks on the item root of a predecessor member
+// (drainWorkflowExternalDeps wires that gate onto every step of the item),
+// resolves its own step as the subject even when the gate edge is listed
+// first. Taking the predecessor's failed root as the subject aborted the
+// item's first iteration right after its prepare step passed.
+func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "predecessor item",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":    "workflow",
+			"gc.outcome": "fail",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "develop iteration 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-item",
+			"gc.step_ref":     "develop.iteration.1",
+		},
+	})
+	prepare := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for prepare",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "control",
+		},
+	})
+	implement := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+		},
+	})
+
+	// The drain gate goes in first so a first-blocker lookup would pick the
+	// predecessor's failed root.
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, prepare.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, control.ID, "blocks")
+	mustDepAdd(t, store, body.ID, implement.ID, "blocks")
+
+	subjectID, err := resolveScopeCheckSubjectID(store, control)
+	if err != nil {
+		t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+	}
+	if subjectID != prepare.ID {
+		t.Fatalf("subject = %s, want prepare %s (drain gate is %s)", subjectID, prepare.ID, predecessorRoot.ID)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "continue" {
+		t.Fatalf("scope result = %+v, want processed continue", result)
+	}
+	if got := mustGetBead(t, store, implement.ID); got.Status != "open" {
+		t.Fatalf("implement status = %q (outcome %q), want open: the scope must not abort", got.Status, got.Metadata["gc.outcome"])
+	}
+	if got := mustGetBead(t, store, body.ID); got.Status != "open" {
+		t.Fatalf("body status = %q (outcome %q), want open", got.Status, got.Metadata["gc.outcome"])
+	}
+}
+
+// TestResolveBlockingSubjectIDSkipsCrossRootDrainGate pins the same rule for
+// the ralph and retry controls: the subject is the first blocker in the
+// control's own root, not a predecessor drain item's root listed before it.
+func TestResolveBlockingSubjectIDSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "predecessor item",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": "fail"},
+	})
+	iteration := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop iteration 1",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": "wf-item"},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "ralph", "gc.root_bead_id": "wf-item"},
+	})
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, iteration.ID, "blocks")
+
+	subjectID, err := resolveBlockingSubjectID(store, control)
+	if err != nil {
+		t.Fatalf("resolveBlockingSubjectID: %v", err)
+	}
+	if subjectID != iteration.ID {
+		t.Fatalf("subject = %s, want iteration %s (drain gate is %s)", subjectID, iteration.ID, predecessorRoot.ID)
+	}
+}
+
+// TestControlSubjectCompatibility preserves the upstream fallback and read-error
+// behavior for old graphs that do not stamp a shared workflow root.
+func TestControlSubjectCompatibility(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		controlRoot string
+		roots       []string
+		kinds       []string
+		failIndex   int
+		wantIndex   int
+		wantErr     string
+	}{
+		{name: "single-unread", controlRoot: "own", roots: []string{"other"}, failIndex: 0},
+		{name: "unstamped-control", roots: []string{"other", "own"}, failIndex: -1},
+		{name: "no-same-root", controlRoot: "own", roots: []string{"", "other"}, failIndex: -1},
+		{name: "trimmed-roots", controlRoot: " own ", roots: []string{"other", " own "}, failIndex: -1, wantIndex: 1},
+		{name: "read-error", controlRoot: "own", roots: []string{"other", "own"}, failIndex: 1, wantErr: "loading blocker"},
+		{name: "no-blockers", failIndex: -1, wantErr: "no blocking dependency"},
+		{name: "fanout-only", roots: []string{"", ""}, kinds: []string{"fanout", "fanout"}, failIndex: -1, wantErr: "no non-fanout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, scope := range []bool{false, true} {
+				store := beads.NewMemStore()
+				control := mustCreateWorkflowBead(t, store, beads.Bead{Title: "control", Type: "task", Metadata: map[string]string{"gc.root_bead_id": tc.controlRoot}})
+				var ids []string
+				for i, root := range tc.roots {
+					kind := ""
+					if len(tc.kinds) > i {
+						kind = tc.kinds[i]
+					}
+					b := mustCreateWorkflowBead(t, store, beads.Bead{Title: "blocker", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root, "gc.kind": kind}})
+					ids = append(ids, b.ID)
+					mustDepAdd(t, store, control.ID, b.ID, "blocks")
+				}
+				var reader beads.Store = store
+				if tc.failIndex >= 0 {
+					reader = getErrorStore{Store: store, failID: ids[tc.failIndex], err: errors.New("unavailable")}
+				}
+				resolve := resolveBlockingSubjectID
+				wantErr := tc.wantErr
+				if scope {
+					resolve = resolveScopeCheckSubjectID
+				} else if tc.name == "fanout-only" {
+					wantErr = ""
+				}
+				got, err := resolve(reader, control)
+				if wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), wantErr) {
+						t.Fatalf("scope=%v: got %q, %v; want %s", scope, got, err, wantErr)
+					}
+				} else if err != nil || got != ids[tc.wantIndex] {
+					t.Fatalf("scope=%v: got %q, %v; want %s", scope, got, err, ids[tc.wantIndex])
+				}
+			}
+		})
+	}
+}
+
+// TestProcessRalphCheckCrossRootSubject proves that the caller passes its root
+// into subject resolution and evaluates the own attempt rather than the gate.
+func TestProcessRalphCheckCrossRootSubject(t *testing.T) {
+	t.Parallel()
+	for _, externalFirst := range []bool{true, false} {
+		for _, ownOutcome := range []string{"pass", "fail"} {
+			t.Run(fmt.Sprintf("external-first=%v/own=%s", externalFirst, ownOutcome), func(t *testing.T) {
+				t.Parallel()
+				city := t.TempDir()
+				script := writeCheckScript(t, city, "pass.sh", "#!/bin/sh\nexit 0\n")
+				store, logical, run, check := newSimpleRalphLoop(t, "implement", script, 1)
+				externalOutcome := "fail"
+				if ownOutcome == "fail" {
+					externalOutcome = "pass"
+				}
+				predecessor := mustCreateWorkflowBead(t, store, beads.Bead{Title: "predecessor workflow", Type: "task", Status: "closed", Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": externalOutcome}})
+				if err := store.SetMetadata(run.ID, "gc.outcome", ownOutcome); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(run.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.DepRemove(check.ID, run.ID); err != nil {
+					t.Fatal(err)
+				}
+				ids := []string{run.ID, predecessor.ID}
+				if externalFirst {
+					ids = []string{predecessor.ID, run.ID}
+				}
+				for _, id := range ids {
+					mustDepAdd(t, store, check.ID, id, "blocks")
+				}
+				result, err := ProcessControl(store, check, ProcessOptions{CityPath: city})
+				if err != nil || !result.Processed {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				after := mustGetBead(t, store, logical.ID)
+				if after.Status != "closed" || after.Metadata["gc.outcome"] != ownOutcome {
+					t.Fatalf("logical status=%s outcome=%s, want closed/%s", after.Status, after.Metadata["gc.outcome"], ownOutcome)
+				}
+			})
+		}
 	}
 }

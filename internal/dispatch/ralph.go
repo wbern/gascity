@@ -71,7 +71,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{Processed: true, Action: "logical-settled"}, nil
 	}
 
-	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
+	subjectID, err := resolveBlockingSubjectID(store, bead)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving subject: %w", bead.ID, err)
 	}
