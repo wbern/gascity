@@ -728,9 +728,9 @@ func (p *Provider) SetMeta(name, key, value string) error {
 
 // GetMeta retrieves a value from the named session's tmux environment.
 // Returns ("", nil) only when the session answered that the key is not set.
-// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
-// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
-// so a failed read is never mistaken for "unset".
+// A missing session, or a normalized no-server response corroborated by the
+// explicitly named socket's absence, wraps [runtime.ErrSessionNotFound]. Other
+// failures wrap [runtime.ErrRuntimeUnavailable], never an "unset" result.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
 	switch {
@@ -738,6 +738,8 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 		return val, nil
 	case errors.Is(err, errEnvUnset):
 		return "", nil
+	case err == ErrNoServer && p.tm.cfg.SocketName != "" && p.tm.serverConfirmedDead(): //nolint:errorlint // only the normalized sentinel; joined or wrapped failures remain unavailable
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
 	case errors.Is(err, ErrSessionNotFound):
 		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
 	default:

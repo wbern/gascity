@@ -12,12 +12,54 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	runtimetmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
+
+// A cold server must reach the controller's first Start without a placeholder
+// session or model invocation. The only process launched is a sleeping fixture.
+func TestReconcilerColdTmuxMetadataAllowsFirstStart(t *testing.T) {
+	guard := tmuxtest.NewGuard(t)
+	tmuxCfg := runtimetmux.DefaultConfig()
+	tmuxCfg.SocketName = guard.SocketName()
+	sp := runtimetmux.NewProviderWithConfig(tmuxCfg)
+	env := newReconcilerTestEnv()
+	const name = "cold-fixture"
+	env.cfg = &config.City{Agents: []config.Agent{{Name: name}}}
+	env.addDesired(name, name, false)
+	tp := env.desiredState[name]
+	tp.Command = "sleep 300"
+	tp.WorkDir = t.TempDir()
+	env.desiredState[name] = tp
+	seat := env.createSessionBead(name, name)
+	env.markSessionCreating(&seat)
+	front := sessionFrontDoor(env.store)
+	info, err := front.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acked, _, err := currentDrainAck(info, front, sp, newDrainOps(sp), name)
+	if err != nil || acked {
+		t.Fatalf("cold runtime drain ACK=(%t,%v), want false,nil", acked, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
+	defer cancel()
+	woken := reconcileSessionBeads(ctx, []beads.Bead{seat}, env.desiredState,
+		configuredSessionNames(env.cfg, "", env.store), env.cfg, sp, env.store,
+		nil, nil, nil, env.dt, map[string]int{name: 1}, false, nil, "", nil,
+		env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+	if woken != 1 || !guard.HasSession(name) {
+		t.Fatalf("cold controller start=%d: %s", woken, env.stderr.String())
+	}
+	if value, err := sp.GetMeta(name, "GC_DRAIN_ACK"); err != nil || value != "" {
+		t.Fatalf("warm fixture ACK=(%q,%v), want unset", value, err)
+	}
+}
 
 // phase2RealTransportBound and phase2RealTransportMarkerBound gate a real
 // tmux session start (ctx timeout, post-start file polling, and the

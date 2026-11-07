@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -458,6 +459,58 @@ func TestGetMetaFailuresAreTyped(t *testing.T) {
 			}
 			if isNoServerError(err) != errors.Is(tc.err, ErrNoServer) {
 				t.Errorf("isNoServerError(%v) = %t", err, isNoServerError(err))
+			}
+		})
+	}
+}
+
+func TestGetMetaConfirmedAbsentServer(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		readErr    error
+		socketErr  error
+		wantGone   bool
+		wantProbes int
+		unnamed    bool
+	}{
+		{"confirmed absent", ErrNoServer, nil, true, 1, false},
+		{"live socket", ErrNoServer, errors.New("live unix socket"), false, 1, false},
+		{"unreadable socket", ErrNoServer, errors.New("permission denied"), false, 1, false},
+		{"socket observation timeout", ErrNoServer, context.DeadlineExceeded, false, 1, false},
+		{"transport timeout", context.DeadlineExceeded, nil, false, 0, false},
+		{"joined unknown", errors.Join(ErrNoServer, errors.New("permission denied")), nil, false, 0, false},
+		{"wrapped no-server remains uncertain", fmt.Errorf("probe context: %w", ErrNoServer), nil, false, 0, false},
+		{"implicit socket remains uncertain", ErrNoServer, nil, false, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := 0
+			tm := &Tmux{cfg: Config{SocketName: "gc-meta-probe"}, exec: &fakeExecutor{err: tc.readErr}}
+			if tc.unnamed {
+				tm.cfg.SocketName = ""
+			}
+			tm.serverSocketObserver = func(_ context.Context, path string) error {
+				probes++
+				if path != namedSocketPath("gc-meta-probe") {
+					t.Fatalf("observed wrong socket: %q", path)
+				}
+				return tc.socketErr
+			}
+			p := &Provider{tm: tm}
+			value, err := p.GetMeta("fixture-session", "GC_DRAIN_ACK")
+			if value != "" || err == nil {
+				t.Fatalf("GetMeta=(%q,%v), want an explicit absence or unavailable error", value, err)
+			}
+			if runtime.IsSessionGone(err) != tc.wantGone || errors.Is(err, runtime.ErrSessionNotFound) != tc.wantGone {
+				t.Fatalf("GetMeta=%v, want gone=%t", err, tc.wantGone)
+			}
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) == tc.wantGone {
+				t.Fatalf("incorrect unavailable classification: %v", err)
+			}
+			if !errors.Is(err, tc.readErr) {
+				t.Fatalf("lost original read error: %v", err)
+			}
+			if probes != tc.wantProbes {
+				t.Fatalf("socket observations=%d, want %d", probes, tc.wantProbes)
 			}
 		})
 	}
