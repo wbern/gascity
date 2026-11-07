@@ -102,6 +102,59 @@ func TestCodexSubmitRequiresDraftConsumption(t *testing.T) {
 	}
 }
 
+// A transport failure must distinguish refusal before a key from an attempted
+// or delivered key without exposing the message or a captured composer frame.
+func TestCodexSubmitFailureReportsKeyBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		observation codexSubmitObservation
+		sendErr     error
+		want        []string
+	}{
+		{"unreadable before key", codexSubmitObservation{}, nil, []string{"adapter=codex_draft", "phase=ownership", "composer=unknown", "keys_attempted=0", "keys_delivered=0", "last_key=none"}},
+		{"foreign before key", codexSubmitObservation{composer: codexComposerOther}, nil, []string{"phase=ownership", "composer=other", "keys_attempted=0", "keys_delivered=0"}},
+		{"send failed", codexSubmitObservation{composer: codexComposerOwned}, errors.New("key transport failed"), []string{"phase=submit", "keys_attempted=1", "keys_delivered=0", "last_key=Enter"}},
+		{"draft retained", codexSubmitObservation{composer: codexComposerOwned}, nil, []string{"phase=budget", "keys_attempted=8", "keys_delivered=8", "last_key=Enter"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := submitCodexDraft(true, func() (codexSubmitObservation, error) { return tc.observation, nil }, func(string) error { return tc.sendErr }, noSleep)
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+				t.Fatalf("lost unconfirmed classification: %v", err)
+			}
+			for _, part := range tc.want {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q lacks %q", err, part)
+				}
+			}
+			if tc.sendErr != nil && !errors.Is(err, tc.sendErr) {
+				t.Errorf("lost transport cause: %v", err)
+			}
+			if strings.Contains(err.Error(), "Enter delivered") {
+				t.Errorf("ambiguous delivery claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestCodexSubmitFailureKeepsCapturePrivate(t *testing.T) {
+	cause := errors.New("capture contains private draft: SECRET_NONCE")
+	sends := 0
+	err := submitCodexDraft(true, func() (codexSubmitObservation, error) {
+		return codexSubmitObservation{}, cause
+	}, func(string) error { sends++; return nil }, noSleep)
+	if sends != 0 || !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, cause) {
+		t.Fatalf("capture failure changed delivery or error identity: sends=%d err=%v", sends, err)
+	}
+	for _, part := range []string{"phase=observe", "keys_attempted=0", "keys_delivered=0", "key_transport=tmux"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("missing %q: %v", part, err)
+		}
+	}
+	if strings.Contains(err.Error(), "SECRET_NONCE") {
+		t.Fatalf("capture leaked: %v", err)
+	}
+}
+
 func TestCodexNudgeQueuesOwnDraftWithoutEscape(t *testing.T) {
 	for _, attached := range []string{"0", "1"} {
 		for _, placeholder := range []bool{false, true} {

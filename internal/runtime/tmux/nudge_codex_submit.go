@@ -30,6 +30,48 @@ type codexSubmitObservation struct {
 	queue    bool
 }
 
+// codexSubmitFailure reports only mechanical state, never the payload, captured
+// pane, or raw transport error. The cause remains available through errors.Is.
+type codexSubmitFailure struct {
+	phase         string
+	observation   codexSubmitObservation
+	keysAttempted int
+	keysDelivered int
+	lastKey       string
+	cause         error
+}
+
+// Error describes tmux key-call outcomes, not provider acceptance.
+func (e *codexSubmitFailure) Error() string {
+	return fmt.Sprintf("nudge: submit unconfirmed (adapter=codex_draft key_transport=tmux phase=%s composer=%s busy=%t queue=%t keys_attempted=%d keys_delivered=%d last_key=%s)",
+		e.phase, codexComposerName(e.observation.composer), e.observation.busy, e.observation.queue, e.keysAttempted, e.keysDelivered, e.lastKey)
+}
+
+// Unwrap retains the queue's existing classification and the transport cause.
+func (e *codexSubmitFailure) Unwrap() []error {
+	if e.cause != nil {
+		return []error{ErrNudgeSubmitUnconfirmed, e.cause}
+	}
+	return []error{ErrNudgeSubmitUnconfirmed}
+}
+
+func codexComposerName(state codexComposerState) string {
+	switch state {
+	case codexComposerEmpty:
+		return "empty"
+	case codexComposerOwned:
+		return "owned"
+	case codexComposerPaste:
+		return "paste"
+	case codexComposerWrapped:
+		return "wrapped"
+	case codexComposerOther:
+		return "other"
+	default:
+		return "unknown"
+	}
+}
+
 var (
 	codexSGR     = regexp.MustCompile("\x1b\\[[0-9;]*m")
 	codexDimText = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
@@ -194,10 +236,14 @@ func codexDimPlaceholder(raw, content string) bool {
 func submitCodexDraft(ownPaste bool, observe func() (codexSubmitObservation, error), send func(string) error, sleep func(time.Duration)) error {
 	sawDraft := false
 	sent := false
+	failure := &codexSubmitFailure{phase: "budget", lastKey: "none"}
 	for poll := 0; poll < submitDraftRecoverySends*submitConfirmPollsPerSend; poll++ {
+		failure.phase = "budget"
 		obs, err := observe()
+		failure.observation = obs
 		if err != nil {
-			return errors.Join(ErrNudgeSubmitUnconfirmed, err)
+			failure.phase, failure.cause = "observe", err
+			return failure
 		}
 		switch obs.composer {
 		case codexComposerEmpty:
@@ -205,10 +251,12 @@ func submitCodexDraft(ownPaste bool, observe func() (codexSubmitObservation, err
 				return nil
 			}
 		case codexComposerOther:
-			return ErrNudgeSubmitUnconfirmed
+			failure.phase = "ownership"
+			return failure
 		case codexComposerOwned, codexComposerPaste, codexComposerWrapped:
 			if (obs.composer == codexComposerPaste || obs.composer == codexComposerWrapped) && !ownPaste {
-				return ErrNudgeSubmitUnconfirmed
+				failure.phase = "ownership"
+				return failure
 			}
 			sawDraft = true
 			if poll%submitConfirmPollsPerSend == 0 {
@@ -220,13 +268,22 @@ func submitCodexDraft(ownPaste bool, observe func() (codexSubmitObservation, err
 					}
 					key = "Tab"
 				}
+				failure.keysAttempted++
+				failure.lastKey = key
 				if err := send(key); err != nil {
-					return errors.Join(ErrNudgeSubmitUnconfirmed, err)
+					failure.phase, failure.cause = "submit", err
+					return failure
 				}
+				failure.keysDelivered++
 				sent = true
 			}
 		}
+		if obs.composer == codexComposerUnknown {
+			// Retain the existing observation budget; this label does not
+			// authorize a key or alter the delivery decision.
+			failure.phase = "ownership"
+		}
 		sleep(submitConfirmPollInterval)
 	}
-	return ErrNudgeSubmitUnconfirmed
+	return failure
 }
