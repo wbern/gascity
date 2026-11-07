@@ -2983,20 +2983,29 @@ prefix = "fe"
 // TestDoBdReleaseIfCurrentUsesNativeVerbAndReadsExit13 is the CLI twin of the
 // store-level conversion: on a bd that HAS the conditional-release flags, the
 // command must issue the native verb (never SQL) and must read bd's exit 13 as
-// an authoritative "not released", printing skipped and exiting 0 — not as a
-// command failure.
+// "not released" verdict. Only a successful read-back may print skipped;
+// a failed read-back must remain an error.
 func TestDoBdReleaseIfCurrentUsesNativeVerbAndReadsExit13(t *testing.T) {
-	clearInheritedBeadsEnv(t)
-	origCityFlag, origRigFlag := cityFlag, rigFlag
-	defer func() { cityFlag, rigFlag = origCityFlag, origRigFlag }()
-	cityFlag, rigFlag = "", ""
+	for _, tc := range []struct {
+		name, readback   string
+		wantCode         int
+		wantOut, wantErr string
+	}{
+		{"present", "printf '[{\"id\":\"fe-abc\",\"status\":\"in_progress\",\"assignee\":\"worker-2\"}]\\n'; exit 0", 0, "skipped", ""},
+		{"read failure", "echo 'readback unavailable' >&2; exit 1", 1, "", "reading it back"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			origCityFlag, origRigFlag := cityFlag, rigFlag
+			defer func() { cityFlag, rigFlag = origCityFlag, origRigFlag }()
+			cityFlag, rigFlag = "", ""
 
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(cityDir, "frontend")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(cityDir, "frontend")
+			if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+				t.Fatalf("mkdir rig .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 
 [beads]
@@ -3007,52 +3016,58 @@ name = "frontend"
 path = "frontend"
 prefix = "fe"
 `), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
-		t.Fatalf("write rig metadata: %v", err)
-	}
+				t.Fatalf("write city.toml: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+				t.Fatalf("write rig metadata: %v", err)
+			}
 
-	fakeBin := t.TempDir()
-	argvLog := filepath.Join(fakeBin, "argv.log")
-	// A capable bd: the verb is understood, and the precondition miss is
-	// reported the way bd reports it — exit 13, nothing written.
-	fakeBD := "#!/bin/sh\n" +
-		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
-		"if [ \"$1\" = \"update\" ]; then\n" +
-		"  printf 'assignee mismatch\\n' >&2\n" +
-		"  exit 13\n" +
-		"fi\n" +
-		"printf 'unexpected bd args:' >&2\n" +
-		"printf ' %s' \"$@\" >&2\n" +
-		"exit 2\n"
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	setCwd(t, cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+			fakeBin := t.TempDir()
+			argvLog := filepath.Join(fakeBin, "argv.log")
+			// A capable bd: the verb is understood, and the precondition miss is
+			// reported the way bd reports it — exit 13, nothing written.
+			fakeBD := "#!/bin/sh\n" +
+				"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
+				"if [ \"$1\" = \"update\" ]; then\n" +
+				"  printf 'assignee mismatch\\n' >&2\n" +
+				"  exit 13\n" +
+				"fi\n" +
+				"if [ \"$1\" = \"show\" ]; then " + tc.readback + "; fi\n" +
+				"printf 'unexpected bd args:' >&2\n" +
+				"printf ' %s' \"$@\" >&2\n" +
+				"exit 2\n"
+			if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
+				t.Fatalf("write fake bd: %v", err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			setCwd(t, cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
 
-	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
-	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
-		t.Fatalf("doBdReleaseIfCurrent = %d, want 0 (exit 13 is a verdict, not a failure); stderr=%q", got, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != "skipped" {
-		t.Fatalf("output = %q, want skipped", stdout.String())
-	}
-	argv, err := os.ReadFile(argvLog)
-	if err != nil {
-		t.Fatalf("read argv log: %v", err)
-	}
-	for _, want := range []string{"update fe-abc", "--if-assignee worker-1", "--if-status in_progress", "--status open"} {
-		if !strings.Contains(string(argv), want) {
-			t.Errorf("bd argv %q does not contain %q", string(argv), want)
-		}
-	}
-	if strings.Contains(string(argv), "UPDATE issues SET") {
-		t.Fatalf("a capable bd still received hand-built SQL: %q", string(argv))
+			target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
+			var stdout, stderr bytes.Buffer
+			if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != tc.wantCode {
+				t.Fatalf("doBdReleaseIfCurrent = %d, want %d; stderr=%q", got, tc.wantCode, stderr.String())
+			}
+			if strings.TrimSpace(stdout.String()) != tc.wantOut {
+				t.Fatalf("output = %q, want %q", stdout.String(), tc.wantOut)
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantErr)
+			}
+			argv, err := os.ReadFile(argvLog)
+			if err != nil {
+				t.Fatalf("read argv log: %v", err)
+			}
+			for _, want := range []string{"update fe-abc", "--if-assignee worker-1", "--if-status in_progress", "--status open"} {
+				if !strings.Contains(string(argv), want) {
+					t.Errorf("bd argv %q does not contain %q", string(argv), want)
+				}
+			}
+			if strings.Contains(string(argv), "UPDATE issues SET") {
+				t.Fatalf("a capable bd still received hand-built SQL: %q", string(argv))
+			}
+		})
 	}
 }
 
@@ -3525,5 +3540,106 @@ printf '{"id":"gc-1","status":"in_progress"}\n'
 	}
 	if msg := warnings.String(); strings.Count(msg, "\n") != 1 || !strings.Contains(msg, stale) {
 		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)
+	}
+}
+
+// TestResolveBdScopeTargetRoutesReleaseIfCurrentByItsBead pins the store gc's
+// own `release-if-current <issue-id> <assignee>` runs in: the issue's, named by
+// the issue id's prefix, with no existence probe. The second argument is the
+// expected assignee, an identity rather than a subject. On a city whose rigs
+// keep their own stores it is often a session bead id with the city's prefix,
+// and that session bead exists in the city store, so a probe that took it as a
+// candidate sent the release of a rig bead to the city store.
+func TestResolveBdScopeTargetRoutesReleaseIfCurrentByItsBead(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	probes := 0
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool {
+		probes++
+		return true
+	}
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fe"}},
+	}
+	for _, tc := range []struct {
+		name     string
+		cwd      string
+		gcRig    string
+		args     []string
+		wantKind string
+	}{
+		{"rig bead held by a city session, city cwd", cityDir, "", []string{"release-if-current", "fe-abc", "demo-wisp-8ft"}, "rig"},
+		{"rig bead held by a city session, rig cwd", rigDir, "", []string{"release-if-current", "fe-abc", "demo-wisp-8ft"}, "rig"},
+		{"rig bead held by a city session, GC_RIG", cityDir, "frontend", []string{"release-if-current", "fe-abc", "demo-session-0123456789abcdef"}, "rig"},
+		{"city bead held by a rig-prefixed id, rig cwd", rigDir, "", []string{"release-if-current", "demo-abc", "fe-wisp-xyz"}, "city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setCwd(t, tc.cwd)
+			t.Setenv("GC_RIG", tc.gcRig)
+			probes = 0
+			got, err := resolveBdScopeTarget(cfg, cityDir, "", tc.args, false, io.Discard)
+			if err != nil {
+				t.Fatalf("resolveBdScopeTarget(%v) error = %v", tc.args, err)
+			}
+			if got.ScopeKind != tc.wantKind || probes != 0 {
+				t.Fatalf("resolveBdScopeTarget(%v) = %+v after %d probes, want kind %q and no probe (the issue id's prefix names its store)", tc.args, got, probes, tc.wantKind)
+			}
+		})
+	}
+}
+
+// TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssigneeWhenTheCitySharesItsPrefix
+// pins the probe chain's half of the same rule. Where the prefix alone cannot
+// answer (here the city and a rig carry the same prefix), the existence probes
+// ask about the issue id only. The holder's session bead exists in the city
+// store, so a probe of the assignee would answer "city" for a bead the rig holds.
+func TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssigneeWhenTheCitySharesItsPrefix(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	var probed []string
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, id string) bool {
+		probed = append(probed, target.ScopeKind+":"+id)
+		return (target.ScopeKind == "city" && id == "demo-wisp-8ft") || (target.ScopeKind == "rig" && id == "demo-abc")
+	}
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "alpha"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	t.Setenv("GC_RIG", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: "alpha", Prefix: "demo"}},
+	}
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"release-if-current", "demo-abc", "demo-wisp-8ft"}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	if got.ScopeKind != "rig" || got.RigName != "alpha" {
+		t.Fatalf("scope = %+v after probes %q, want rig alpha, the store that holds demo-abc", got, probed)
+	}
+	for _, p := range probed {
+		if strings.HasSuffix(p, ":demo-wisp-8ft") {
+			t.Fatalf("probes = %q: the assignee was probed as a bead id", probed)
+		}
+	}
+}
+
+func TestDoBdReleaseIfCurrentRefusesAbsentIssue(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[beads]\nprovider = \"file\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, diag bytes.Buffer
+	target := execStoreTarget{ScopeRoot: city, ScopeKind: "city", Prefix: "gc"}
+	code := doBdReleaseIfCurrent(city, nil, target, "gc-absent", "demo-wisp-holder", &out, &diag)
+	if code != 1 || out.Len() != 0 || !strings.Contains(diag.String(), "not in the city store") {
+		t.Fatalf("absent issue: code=%d out=%q err=%q", code, out.String(), diag.String())
 	}
 }

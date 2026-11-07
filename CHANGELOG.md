@@ -267,6 +267,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd release-if-current` selects the store from the issue ID alone.**
+  A city-prefixed assignee no longer redirects a rig claim to the city store.
+  A missing issue or failed read-back now exits 1 instead of reporting
+  `skipped`; another claimant or status still reports `skipped` with exit 0
+  (upstream #8684).
+
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
   ones survive into the persisted service file.** The two allowlists used to

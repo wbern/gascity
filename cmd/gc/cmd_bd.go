@@ -123,7 +123,10 @@ Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
-that assignee.
+that assignee. It is routed by the issue id; the assignee never selects the
+store. It prints "released" when it cleared the assignment and "skipped"
+when that store holds the bead under another assignee or status. A missing
+bead or failed read-back exits 1.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -1024,6 +1027,17 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	// A CAS miss alone cannot distinguish another claimant from a wrong store.
+	// Read back only after the atomic release has declined; never emulate CAS
+	// with a read followed by an unconditional update.
+	if _, err := store.Get(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			fmt.Fprintf(stderr, "gc bd release-if-current: bead %q is not in the %s store; nothing was released\n", id, scopeLabel(target)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "gc bd release-if-current: %s was not released, and reading it back from the %s store failed: %v\n", id, scopeLabel(target), err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1129,8 +1143,37 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	cityPrefix := config.EffectiveHQPrefix(cfg)
+	// The second release operand is an identity, often a city session bead ID.
+	// It must never participate in either prefix routing or existence probes.
+	probeArgs := args
+	if id, _, release, err := parseBdReleaseIfCurrentArgs(args); release {
+		if err != nil {
+			return execStoreTarget{}, err
+		}
+		probeArgs = []string{id}
+		// A unique bound prefix names the work store without a preliminary read.
+		// Shared prefixes retain the existing residence-probe fallback below.
+		prefix := beadPrefix(cfg, id)
+		var prefixTarget execStoreTarget
+		matches := 0
+		if prefix != "" && prefix == cityPrefix {
+			prefixTarget = cityTarget
+			matches++
+		}
+		for _, rig := range cfg.Rigs {
+			if prefix != "" && prefix == rig.EffectivePrefix() {
+				matches++
+				if strings.TrimSpace(rig.Path) != "" {
+					prefixTarget = bdRigScopeTarget(cityPath, rig)
+				}
+			}
+		}
+		if matches == 1 && prefixTarget.ScopeRoot != "" {
+			return prefixTarget, nil
+		}
+	}
 	if cityPrefix != "" {
-		for _, arg := range args {
+		for _, arg := range probeArgs {
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
@@ -1144,7 +1187,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// actually exist in the resolved rig store. This keeps hyphenated flag
 	// values and other non-ID args from silently retargeting the command.
 	// Unbound rigs are skipped so we don't alias them to the city store.
-	for _, arg := range args {
+	for _, arg := range probeArgs {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
