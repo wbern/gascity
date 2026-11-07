@@ -40,9 +40,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      # The upstream CI graph owns real tmux integration coverage. This narrow
-      # fork-only fence only compiles integration-tagged files when they change,
-      # catching missing test-only helpers without starting a tmux server.
+      # Broad tmux integration coverage belongs to upstream CI. The fork also
+      # executes the narrow, non-model cold-start controller regression below.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: runtime-tmux
         with:
@@ -50,6 +49,9 @@ jobs:
             runtime_tmux:
               - 'internal/runtime/tmux/**'
               - 'scripts/runtime-tmux-tests.manifest'
+              - 'cmd/gc/phase2_real_transport_test.go'
+              - 'cmd/gc/session_reconciler.go'
+              - 'cmd/gc/cmd_runtime_drain.go'
               - '.github/workflows/fork-verify.yml'
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
@@ -91,6 +93,9 @@ jobs:
         id: test-runtime-tmux
         if: ${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}
         run: go test ./internal/runtime/tmux/... -count=1
+      - name: Cold tmux controller startup (non-model fixture)
+        if: ${{ steps.runtime-tmux.outputs.runtime_tmux == 'true' }}
+        run: go test -tags=integration ./cmd/gc/ -run '^TestReconcilerColdTmuxMetadataAllowsFirstStart$' -count=1 -v
       - name: Vet changed package
         run: go vet ./cmd/gc/...
       - name: Unit tests — cross-store work delivery
