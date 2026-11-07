@@ -312,6 +312,13 @@ type orderSetSnapshot struct {
 // ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
 // dispatchCtx.
 type memoryOrderDispatcher struct {
+	eventMu             sync.Mutex
+	eventScanners       map[string]*orders.EventScanner
+	eventCtx            context.Context
+	eventScannersClosed bool
+	eventScanStart      int
+	eventScanAllowed    map[string]bool
+
 	aa      []orders.Order
 	storeFn orderStoreFunc
 	// storageRoutes is the opened non-work storage binding this process
@@ -626,6 +633,8 @@ func (m *memoryOrderDispatcher) prefetchConditionResults(candidates []*orderDisp
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	m.prepareEventScanPass()
+
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
 	// against the controlled city rather than the process cwd.
@@ -976,9 +985,15 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	// A condition order's verdict was already computed by the parallel pass;
 	// re-running it here would fork the check a second time.
 	var result orders.TriggerResult
-	if cand.conditionResult != nil {
+	switch {
+	case cand.conditionResult != nil:
 		result = *cand.conditionResult
-	} else {
+	case a.Trigger == "event":
+		if !m.eventScanAllowed[scoped] {
+			return false
+		}
+		result = m.checkBoundedEvent(ctx, a, cursorFn(scoped))
+	default:
 		result = orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 	}
 	if lastRunErr != nil {
@@ -4215,4 +4230,88 @@ func appendUniquePoolTarget(values []string, want string) []string {
 		}
 	}
 	return append(values, want)
+}
+
+// A rotating global content-grant budget limits aggregate scan work while clock
+// and condition orders keep their existing dispatch fairness.
+func (m *memoryOrderDispatcher) prepareEventScanPass() {
+	m.eventScanAllowed = make(map[string]bool)
+	if len(m.aa) == 0 {
+		return
+	}
+	start := m.eventScanStart % len(m.aa)
+	for n := 0; n < len(m.aa); n++ {
+		i := (start + n) % len(m.aa)
+		if m.aa[i].Trigger == "event" {
+			m.eventScanAllowed[m.aa[i].ScopedName()] = true
+		}
+		m.eventScanStart = (i + 1) % len(m.aa)
+		if len(m.eventScanAllowed) == 16 {
+			break
+		}
+	}
+}
+
+func (m *memoryOrderDispatcher) checkBoundedEvent(ctx context.Context, a orders.Order, cursor uint64) orders.TriggerResult {
+	m.eventMu.Lock()
+	defer m.eventMu.Unlock()
+	if m.eventScannersClosed {
+		return orders.TriggerResult{Reason: "event: scanner owner closed"}
+	}
+	if m.eventScanners == nil {
+		m.eventScanners = make(map[string]*orders.EventScanner)
+	}
+	s := m.eventScanners[a.ScopedName()]
+	if s == nil {
+		lifetime := m.eventCtx
+		if lifetime == nil {
+			lifetime = context.Background()
+		}
+		var err error
+		s, err = orders.NewEventScanner(lifetime, a, m.ep, cursor)
+		if err != nil {
+			return orders.TriggerResult{Reason: fmt.Sprintf("event: %v", err)}
+		}
+		m.eventScanners[a.ScopedName()] = s
+	}
+	return s.Check(ctx, cursor, events.PollBudget{CompressedBytes: 64 * 1024, RawBytes: 64 * 1024, Records: 128, Segments: 4})
+}
+
+func (m *memoryOrderDispatcher) closeEventScanners() {
+	m.eventMu.Lock()
+	defer m.eventMu.Unlock()
+	m.eventScannersClosed = true
+	for k, s := range m.eventScanners {
+		_ = s.Close()
+		delete(m.eventScanners, k)
+	}
+}
+
+// Ordinary dispatch drain deliberately leaves scanners alive. Transfer happens
+// only after that drain; exact predicate/provider matches keep partial framing,
+// pending output and the match latch. Unmatched resources are then retired.
+func (m *memoryOrderDispatcher) carryEventScannersFrom(prev *memoryOrderDispatcher) {
+	prev.eventMu.Lock()
+	defer prev.eventMu.Unlock()
+	m.eventMu.Lock()
+	defer m.eventMu.Unlock()
+	if m.eventScanners == nil {
+		m.eventScanners = make(map[string]*orders.EventScanner)
+	}
+	for key, s := range prev.eventScanners {
+		keep := false
+		for _, a := range m.aa {
+			if a.Trigger == "event" && s.Matches(a, m.ep) {
+				keep = true
+				break
+			}
+		}
+		if keep && !m.eventScannersClosed {
+			m.eventScanners[key] = s
+		} else {
+			_ = s.Close()
+		}
+		delete(prev.eventScanners, key)
+	}
+	m.eventScanStart = prev.eventScanStart
 }

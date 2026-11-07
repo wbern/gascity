@@ -11159,3 +11159,88 @@ title = "Do work"
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
 }
+
+// boundedEventProbe proves coordination without duplicating provider framing
+// cases. Its only event is a retained match; Close is separately observable.
+type boundedEventProbe struct {
+	*events.Fake
+	watcher *boundedEventProbeWatcher
+}
+type boundedEventProbeWatcher struct {
+	pending bool
+	closed  bool
+	mu      sync.Mutex
+	calls   int
+}
+
+func (p *boundedEventProbe) BeginWatch(context.Context, uint64) (events.PollWatcher, error) { //nolint:unparam // provider contract
+	return p.watcher, nil
+}
+
+func (w *boundedEventProbeWatcher) Poll(context.Context, events.PollBudget) (events.PollBatch, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.pending {
+		return events.PollBatch{Pending: true}, nil
+	}
+	if w.closed {
+		return events.PollBatch{}, errors.New("closed")
+	}
+	return events.PollBatch{Events: []events.Event{{Seq: 9, Type: events.BeadCreated}}}, nil
+}
+
+func (w *boundedEventProbeWatcher) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return nil
+}
+
+func TestBoundedEventScanPassRotatesGlobally(t *testing.T) {
+	m := &memoryOrderDispatcher{}
+	for i := 0; i < 35; i++ {
+		m.aa = append(m.aa, orders.Order{Name: fmt.Sprintf("event-%d", i), Trigger: "event"})
+	}
+	seen := make(map[string]bool)
+	for i := 0; i < 3; i++ {
+		m.prepareEventScanPass()
+		if len(m.eventScanAllowed) > 16 {
+			t.Fatal("global grant budget exceeded")
+		}
+		for k := range m.eventScanAllowed {
+			seen[k] = true
+		}
+	}
+	if len(seen) != 35 {
+		t.Fatalf("later event orders starved: %d reached", len(seen))
+	}
+}
+
+func TestPendingEventScanAllowsLaterClockOrder(t *testing.T) {
+	p := &boundedEventProbe{Fake: events.NewFake(), watcher: &boundedEventProbeWatcher{pending: true}}
+	ran := make(chan struct{}, 1)
+	ad := buildOrderDispatcherFromListExec([]orders.Order{
+		{Name: "cold-history", Trigger: "event", On: events.BeadCreated, Exec: "event"},
+		{Name: "later-clock", Trigger: "cooldown", Interval: "1s", Exec: "clock"},
+	}, beads.NewMemStore(), p, func(_ context.Context, command, _ string, _ []string) ([]byte, error) {
+		if command != "clock" {
+			return nil, fmt.Errorf("unexpected event dispatch: %s", command)
+		}
+		ran <- struct{}{}
+		return nil, nil
+	}, events.NewFake())
+	m := ad.(*memoryOrderDispatcher)
+	defer m.closeEventScanners()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ad.dispatch(ctx, t.TempDir(), time.Now())
+	if !ad.drain(ctx) {
+		t.Fatal("later clock did not drain")
+	}
+	select {
+	case <-ran:
+	default:
+		t.Fatal("pending cold event blocked later clock order")
+	}
+}

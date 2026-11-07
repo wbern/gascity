@@ -1,7 +1,9 @@
 package events
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -661,7 +663,6 @@ func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, err
 	var offset int64
 	var inode uint64
 	var size int64
-	var haveStat bool
 	// Open the active file once and keep the fd: the resume backfill reads its
 	// tail leg from this fd (capped at the captured size), so a rotation landing
 	// mid-backfill still reads the correct bytes instead of the fresh file the
@@ -671,24 +672,10 @@ func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, err
 		if info, serr := activeFile.Stat(); serr == nil {
 			size = info.Size()
 			inode = inodeOf(info)
-			haveStat = true
 		}
 	}
-	latestSeq, err := ReadLatestSeq(r.path)
-	if err != nil {
-		if activeFile != nil {
-			_ = activeFile.Close()
-		}
-		return nil, err
-	}
-	r.mu.Lock()
-	if latestSeq > r.seq {
-		r.seq = latestSeq
-	}
-	if haveStat && afterSeq >= latestSeq {
-		offset = size
-	}
-	r.mu.Unlock()
+	// History and active-tail contents are inspected lazily by Next. In
+	// particular, Watch must not scan ReadLatestSeq on a cold or partial log.
 
 	w := &fileWatcher{
 		path:       r.path,
@@ -702,14 +689,9 @@ func (r *FileRecorder) Watch(ctx context.Context, afterSeq uint64) (Watcher, err
 		activeFile: activeFile,
 		activeSize: size,
 	}
-	// Backfill is needed only when the cursor predates the active file's head.
-	if haveStat && afterSeq < latestSeq {
-		w.needsBackfill = true
-		w.bfActive = true
-	} else if activeFile != nil {
-		// No backfill: close the captured fd immediately (once).
-		w.closeFd()
-	}
+	w.needsBackfill = true
+	w.bfActive = activeFile != nil
+
 	return w, nil
 }
 
@@ -1175,7 +1157,7 @@ func (w *fileWatcher) readActiveLegLocked(filter Filter) (eof bool, err error) {
 	w.bfMu.Lock()
 	defer w.bfMu.Unlock()
 	if w.bfReader == nil {
-		sr, serr := activeSegmentReader(w.activeFile, w.activeSize)
+		sr, serr := activeSegmentReader(w.activeFile, w.activeSize, w.maxSeq)
 		if serr != nil {
 			return false, serr
 		}
@@ -1308,5 +1290,121 @@ func (w *fileWatcher) Close() error {
 		w.closeFd()
 		w.releaseBackfillReader()
 	})
+	return nil
+}
+
+// BeginWatch starts retained file scanning without inspecting history on the
+// caller. The worker owns its descriptor, decompressor, framing and grant state.
+func (r *FileRecorder) BeginWatch(ctx context.Context, afterSeq uint64) (PollWatcher, error) {
+	return newPollScanner(ctx, func(w *pollScanner) error { return r.runPollWatch(w, afterSeq) }), nil
+}
+
+func (r *FileRecorder) runPollWatch(w *pollScanner, maxSeq uint64) error {
+	var active *os.File
+	var partial []byte
+	defer func() {
+		if active != nil {
+			_ = active.Close()
+		}
+	}()
+	for {
+		// Capture the active inode BEFORE enumerating history. If rotation happens
+		// during enumeration, this descriptor still owns the old active tail.
+		if active == nil {
+			if err := w.take(func(b *PollBudget) *int { return &b.Segments }); err != nil {
+				return err
+			}
+			f, err := os.Open(r.path)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			active = f
+		}
+		sources, err := listBackfillSources(filepath.Dir(r.path), maxSeq)
+		if err != nil {
+			return err
+		}
+		for _, src := range sources {
+			if src.lastSeq <= maxSeq {
+				continue
+			}
+			if err := w.take(func(b *PollBudget) *int { return &b.Segments }); err != nil {
+				return err
+			}
+			if err := w.scanPollSource(src, &maxSeq); err != nil {
+				return err
+			}
+		}
+		if active != nil {
+			stop := context.AfterFunc(w.ctx, func() { _ = active.Close() })
+			reader := bufio.NewReaderSize(&grantReader{w: w, r: active}, 4096)
+			err = w.scanPollLines(reader, &maxSeq, &partial)
+			if !stop() && w.ctx.Err() != nil {
+				return w.ctx.Err()
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			// The path may now name a different inode. Finish the pinned descriptor
+			// before listing catch-up sources and opening the new active file.
+			st, statErr := active.Stat()
+			cur, pathErr := os.Stat(r.path)
+			if statErr != nil {
+				return statErr
+			}
+			if pathErr != nil && !os.IsNotExist(pathErr) {
+				return pathErr
+			}
+			if pathErr == nil && !os.SameFile(st, cur) {
+				_ = active.Close()
+				active = nil
+				partial = nil
+				continue
+			}
+		}
+		// A completed live pass is one observed batch; the NEXT call may grant
+		// append/rotation work. Partial active bytes stay owned across this boundary.
+		if err := w.boundary(); err != nil {
+			return err
+		}
+	}
+}
+
+func (w *pollScanner) scanPollSource(src backfillSource, maxSeq *uint64) error {
+	f, err := os.Open(src.path)
+	kind := src.kind
+	if os.IsNotExist(err) && src.fallbackPath != "" {
+		f, err = os.Open(src.fallbackPath)
+		kind = sourceArchive
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck // read-only stream
+	stop := context.AfterFunc(w.ctx, func() { _ = f.Close() })
+	defer stop()
+	input := bufio.NewReaderSize(&grantReader{w: w, r: f}, 4096)
+	var reader io.Reader = input
+	if kind == sourceArchive {
+		gz, e := gzip.NewReader(input)
+		if e != nil {
+			return e
+		}
+		defer gz.Close() //nolint:errcheck // read-only stream
+		reader = gz
+	}
+	var partial []byte
+	err = w.scanPollLines(reader, maxSeq, &partial)
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	// Historical segment framing accepts the final valid row without newline,
+	// matching the synchronous segment reader. Active partial writes are retained.
+	if len(partial) > 0 {
+		return w.record(partial, maxSeq)
+	}
 	return nil
 }
