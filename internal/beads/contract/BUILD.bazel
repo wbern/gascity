@@ -65,6 +65,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/fsys",
+        "//internal/platform/livefile",
         "//internal/testenv",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

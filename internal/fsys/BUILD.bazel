@@ -5,9 +5,14 @@ go_library(
     srcs = [
         "atomic.go",
         "content.go",
+        "dir_not_empty_other.go",
+        "dir_not_empty_windows.go",
+        "executable_other.go",
+        "executable_windows.go",
         "fake.go",
         "fsys.go",
         "read_regular_unix.go",
+        "read_regular_windows.go",
         "remove_all.go",
         "resolve_symlinks.go",
         "scaffold.go",
@@ -48,6 +53,9 @@ go_library(
         "@rules_go//go/platform:solaris": [
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -59,8 +67,12 @@ go_test(
         "atomic_test.go",
         "conformance_test.go",
         "content_test.go",
+        "dir_not_empty_test.go",
+        "executable_other_test.go",
+        "executable_windows_test.go",
         "fake_test.go",
         "read_regular_unix_internal_test.go",
+        "read_regular_windows_internal_test.go",
         "remove_all_test.go",
         "resolve_symlinks_test.go",
         "testenv_import_test.go",

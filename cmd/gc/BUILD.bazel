@@ -1747,6 +1747,8 @@ go_test(
         "//internal/packregistry",
         "//internal/pathutil",
         "//internal/pidutil",
+        "//internal/platform/filelock",
+        "//internal/platform/localsocket",
         "//internal/poolplan",
         "//internal/processgroup/processgrouptest",
         "//internal/productmetrics",
