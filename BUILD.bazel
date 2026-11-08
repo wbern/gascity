@@ -362,6 +362,7 @@ filegroup(
         "//internal/storeref/storereftest:bazel_repo_srcs",
         "//internal/supervisor:bazel_repo_srcs",
         "//internal/suspensionstate:bazel_repo_srcs",
+        "//internal/tailfile:bazel_repo_srcs",
         "//internal/telemetry:bazel_repo_srcs",
         "//internal/testenv:bazel_repo_srcs",
         "//internal/testfixtures/reviewworkflows:bazel_repo_srcs",
