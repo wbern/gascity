@@ -286,22 +286,28 @@ func doHandoffWithOutcome(store, sessStore beads.Store, rec events.Recorder, dop
 func doHandoffWithRecycleOutcome(store, sessStore beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, recycle bool, stdout, stderr io.Writer,
 ) handoffOutcome {
-	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stderr)
-	if !ok {
-		return handoffOutcome{code: 1}
-	}
-
 	restartable, pinned, err := sessionRestartableByController(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
+
+	extraLabels := []string{"priority:1"}
+	if restartable || recycle {
+		extraLabels = append(extraLabels, mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel)
+	}
+
+	b, ok := createHandoffMail(store, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", extraLabels, stderr)
+	if !ok {
+		return handoffOutcome{code: 1}
+	}
+
 	if !restartable && !recycle {
 		if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1}
 		}
-		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\nHint: run 'gc handoff --recycle' to request deliberate restart for an attended session.\n", b.ID) //nolint:errcheck // best-effort stdout
 		return handoffOutcome{code: 0}
 	}
 
