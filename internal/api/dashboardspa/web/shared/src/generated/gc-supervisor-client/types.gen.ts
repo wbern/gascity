@@ -15,21 +15,6 @@ export type AdapterEventPayload = {
     provider: string;
 };
 
-export type AdmissionConfig = {
-    check?: string;
-    interval?: string;
-    on_error?: string;
-    timeout?: string;
-};
-
-export type AdmissionVetoPayload = {
-    pool: string;
-    reason?: string;
-    signal: string;
-    threshold: string;
-    value: string;
-};
-
 export type AgentCreateInputBody = {
     /**
      * Working directory (rig name).
@@ -73,14 +58,11 @@ export type AgentOutputResponse = {
 };
 
 export type AgentPatch = {
-    Admission: AdmissionConfig;
     AppendFragments: Array<string> | null;
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     AutoReclaimStaleClaims: boolean | null;
-    CapacityGroup?: string;
-    ClaimHolderStallTimeout: string | null;
     ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
@@ -89,7 +71,6 @@ export type AgentPatch = {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
-    GrantTTL: string | null;
     HooksInstalled: boolean | null;
     IdleTimeout: string | null;
     InjectAssignedSkills: boolean | null;
@@ -110,7 +91,6 @@ export type AgentPatch = {
     OptionDefaults: {
         [key: string]: string;
     };
-    OutputFirewallByteBudget: number | null;
     OverlayDir: string | null;
     Pool: PoolOverride;
     PreStart: Array<string> | null;
@@ -127,8 +107,6 @@ export type AgentPatch = {
     SessionSetup: Array<string> | null;
     SessionSetupAppend: Array<string> | null;
     SessionSetupScript: string | null;
-    SkillExclude: Array<string> | null;
-    SkillInclude: Array<string> | null;
     Skills: Array<string> | null;
     SkillsAppend: Array<string> | null;
     SleepAfterIdle: string | null;
@@ -194,7 +172,14 @@ export type AgentResponse = {
     name: string;
     pack?: string;
     pack_derived: boolean;
+    /**
+     * Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
+     */
     pool?: string;
+    /**
+     * Configured session limits of the agent (or of its pool).
+     */
+    pool_limits?: PoolLimits;
     provider?: string;
     rig?: string;
     running: boolean;
@@ -303,9 +288,8 @@ export type BackendCredentialResolvedPayload = {
 
 export type Bead = {
     assignee?: string;
-    await_type?: string;
+    close_reason?: string;
     created_at: string;
-    created_by?: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
@@ -320,8 +304,6 @@ export type Bead = {
     };
     needs?: Array<string> | null;
     no_history?: boolean;
-    notes?: string;
-    owner?: string;
     parent?: string;
     priority?: number;
     ref?: string;
@@ -337,13 +319,6 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
-export type BeadClaimInputBody = {
-    /**
-     * Actor to claim the bead for (the calling agent's identity).
-     */
-    actor: string;
-};
-
 export type BeadClaimRejectedPayload = {
     attempted_claimant: string;
     bead_id: string;
@@ -356,15 +331,11 @@ export type BeadClaimReleasedPayload = {
     reason: string;
 };
 
-export type BeadClaimResult = {
+export type BeadCloseBody = {
     /**
-     * The bead's current state: the claim on success, or the winning holder on a lost race.
+     * Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.
      */
-    bead: Bead;
-    /**
-     * True when the actor now holds the bead; false when another actor won the race.
-     */
-    claimed: boolean;
+    reason?: string;
 };
 
 export type BeadCreateInputBody = {
@@ -445,18 +416,6 @@ export type BeadGraphResponse = {
     root: Bead;
 };
 
-export type BeadParkedPayload = {
-    bead_id: string;
-    defer_until?: string;
-    reason: string;
-};
-
-export type BeadUnworkablePayload = {
-    bead_id: string;
-    reason: string;
-    target?: string;
-};
-
 export type BeadUpdateBody = {
     /**
      * Assigned agent.
@@ -528,6 +487,12 @@ export type BeadsDiagnostic = {
  * Lifecycle state of a session binding.
  */
 export type BindingStatus = 'active' | 'ended';
+
+export type BlockedRecomputedPayload = {
+    bd_version: string;
+    rows_corrected: number;
+    scope: string;
+};
 
 export type BoundEventPayload = {
     agent_name?: string;
@@ -900,36 +865,7 @@ export type DeliveryContextRecord = {
 export type Dep = {
     depends_on_id: string;
     issue_id: string;
-    status?: string;
     type: string;
-};
-
-export type DiscoverySummary = {
-    assignee?: string;
-    created_at?: string;
-    details_omitted: Array<string> | null;
-    fields_omitted?: Array<string> | null;
-    id: string;
-    labels?: Array<string> | null;
-    parent?: string;
-    priority?: number;
-    routing_metadata?: {
-        [key: string]: string;
-    };
-    source_serialized_bytes: number;
-    status: string;
-    title?: string;
-    type?: string;
-};
-
-export type DiscoverySummaryEnvelope = {
-    beads: Array<DiscoverySummary> | null;
-    budget_bytes: number;
-    kind: string;
-    omitted: number;
-    schema_version: string;
-    total: number;
-    verb: string;
 };
 
 export type ErrorDetail = {
@@ -1004,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2418,6 +2354,17 @@ export type PendingInteraction = {
     request_id: string;
 };
 
+export type PoolLimits = {
+    /**
+     * Maximum concurrent sessions; -1 means unlimited.
+     */
+    max: number;
+    /**
+     * Minimum concurrent sessions kept running.
+     */
+    min: number;
+};
+
 export type PoolOverride = {
     Check: string | null;
     DrainTimeout: string | null;
@@ -2882,6 +2829,7 @@ export type RigCreateSucceededPayload = {
 };
 
 export type RigPatch = {
+    BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
     FormulaVars: {
@@ -2942,11 +2890,25 @@ export type RigProvisionProgressPayload = {
 
 export type RigResponse = {
     agent_count: number;
+    /**
+     * Mainline branch (e.g. main, master).
+     */
     default_branch?: string;
+    /**
+     * Agent qualified name that targetless gc sling routes this rig's work to.
+     */
+    default_sling_target?: string;
+    /**
+     * Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.
+     */
+    default_sling_targets?: Array<string> | null;
     git?: GitStatus;
     last_activity?: string;
     name: string;
     path: string;
+    /**
+     * Effective bead ID prefix: the configured prefix, or the one derived from the rig name.
+     */
     prefix?: string;
     running_count: number;
     suspended: boolean;
@@ -3232,81 +3194,6 @@ export type SessionBindingRecord = {
     Status: BindingStatus;
 };
 
-export type SessionContinuationObservedPayload = {
-    /**
-     * Byte length of the provider hook context written; the context body itself is never recorded.
-     */
-    body_bytes?: number;
-    /**
-     * Observed boundary: reset, runtime_stop, runtime_start, provider_hook, or mail_injection.
-     */
-    boundary: string;
-    /**
-     * Persisted provider-continuation epoch when known.
-     */
-    continuation_epoch?: string;
-    /**
-     * Stable coarse failure code. Raw error strings are never recorded.
-     */
-    error_code?: string;
-    /**
-     * Persisted session generation, kept as a string so generation 0 differs from an absent value.
-     */
-    generation?: string;
-    /**
-     * Provider hook event, such as SessionStart, PreCompact, or UserPromptSubmit.
-     */
-    hook_event?: string;
-    /**
-     * Bounded provider hook-origin label when supplied by the runtime.
-     */
-    hook_source?: string;
-    /**
-     * SHA-256 fingerprint used to correlate an opaque session instance token without exposing the token.
-     */
-    instance_token_fingerprint?: string;
-    /**
-     * Mail bead IDs written to or injected by the hook boundary.
-     */
-    mail_ids?: Array<string> | null;
-    /**
-     * Number of messages handled by a mail hook. Zero is present only when the hook counted zero messages.
-     */
-    message_count?: number;
-    /**
-     * Work bead associated with the session after the boundary.
-     */
-    new_work_id?: string;
-    /**
-     * Work bead associated with the session before the boundary.
-     */
-    old_work_id?: string;
-    /**
-     * Result observed at this boundary. This is diagnostic evidence, not an end-to-end delivery guarantee.
-     */
-    outcome: string;
-    /**
-     * Observed command or provider route, such as fallback, suspended, codex, or gemini.
-     */
-    route?: string;
-    /**
-     * Payload schema version. Version 1 is emitted by this release.
-     */
-    schema_version: string;
-    /**
-     * Stable runtime session name when known.
-     */
-    session_name?: string;
-    /**
-     * Code path that reached the boundary, such as explicit_reset, session_reconciler, or pre_compact.
-     */
-    source: string;
-    /**
-     * Configured agent template when known.
-     */
-    template?: string;
-};
-
 export type SessionCreateBody = {
     /**
      * Optional session alias.
@@ -3448,6 +3335,62 @@ export type SessionPendingClearedEvent = {
     request_id: string;
 };
 
+export type SessionPendingClearedPayload = {
+    /**
+     * Interaction kind from the matching session.pending.
+     */
+    kind: string;
+    /**
+     * Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).
+     */
+    reason: 'resolved' | 'replaced' | 'session_gone';
+    /**
+     * Request ID from the matching session.pending.
+     */
+    request_id: string;
+    /**
+     * Session bead ID from the matching session.pending.
+     */
+    session_id: string;
+};
+
+export type SessionPendingPayload = {
+    /**
+     * Session alias, when set.
+     */
+    alias?: string;
+    /**
+     * Interaction kind (e.g. approval).
+     */
+    kind: string;
+    /**
+     * Provider metadata (e.g. tool_name, source).
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    /**
+     * Answer options as the session shows them.
+     */
+    options?: Array<string> | null;
+    /**
+     * Human-readable prompt.
+     */
+    prompt?: string;
+    /**
+     * Pending interaction request ID. Pass it to POST .../session/{id}/respond.
+     */
+    request_id: string;
+    /**
+     * Session bead ID awaiting a decision.
+     */
+    session_id: string;
+    /**
+     * Session template, when known.
+     */
+    template?: string;
+};
+
 export type SessionPendingResponse = {
     pending?: PendingInteraction;
     supported: boolean;
@@ -3540,7 +3483,6 @@ export type SessionResponse = {
     active_bead?: string;
     activity?: string;
     agent_kind?: string;
-    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -3570,18 +3512,7 @@ export type SessionResponse = {
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
-    transport?: string;
     work_dir?: string;
-    worker_dir?: string;
-};
-
-export type SessionStartupUninitializedPayload = {
-    elapsed_s: number;
-    primed_at_present: boolean;
-    reset_committed_at: string;
-    session_name: string;
-    started_config_present: boolean;
-    template: string;
 };
 
 export type SessionStrandedPayload = {
@@ -4626,10 +4557,6 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
-    /**
-     * Optional key that replaces an equivalent pending deferred submit.
-     */
-    replace_key?: string;
 };
 
 export type SessionSubmitSucceededPayload = {
@@ -4785,13 +4712,40 @@ export type SessionWakeRefusedPayload = {
     wake_request: string;
 };
 
+export type SlingBatchSummary = {
+    /**
+     * Container bead type, e.g. convoy.
+     */
+    container_type?: string;
+    /**
+     * Children whose routing failed.
+     */
+    failed: number;
+    /**
+     * Children skipped because they were already routed to the target.
+     */
+    idempotent: number;
+    /**
+     * Children routed by this sling.
+     */
+    routed: number;
+    /**
+     * Children skipped: already routed, or not open.
+     */
+    skipped: number;
+    /**
+     * Children tracked by the container.
+     */
+    total: number;
+};
+
 export type SlingInputBody = {
     /**
-     * Bead ID to attach a formula to.
+     * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
      */
     attached_bead_id?: string;
     /**
-     * Bead ID to sling.
+     * Bead or convoy ID to sling, like gc sling <target> <bead>. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.
      */
     bead?: string;
     /**
@@ -4799,7 +4753,7 @@ export type SlingInputBody = {
      */
     force?: boolean;
     /**
-     * Formula name for workflow launch.
+     * Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling <target> <bead> --on <formula>).
      */
     formula?: string;
     /**
@@ -4811,7 +4765,7 @@ export type SlingInputBody = {
      */
     no_convoy?: boolean;
     /**
-     * Suppress the target's default_sling_formula even when configured.
+     * Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).
      */
     no_formula?: boolean;
     /**
@@ -4839,11 +4793,11 @@ export type SlingInputBody = {
      */
     target: string;
     /**
-     * Workflow title.
+     * Workflow title (gc sling --title), for an explicit or default formula.
      */
     title?: string;
     /**
-     * Formula variables.
+     * Formula variables (gc sling --var), for an explicit or default formula.
      */
     vars?: {
         [key: string]: string;
@@ -4852,13 +4806,25 @@ export type SlingInputBody = {
 
 export type SlingResponse = {
     attached_bead_id?: string;
+    /**
+     * Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch.
+     */
+    batch?: SlingBatchSummary;
     bead?: string;
+    /**
+     * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
+     */
+    convoy_id?: string;
     /**
      * Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
      */
     dashboard_url?: string;
     formula?: string;
     mode?: string;
+    /**
+     * Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
+     */
+    molecule_id?: string;
     root_bead_id?: string;
     /**
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
@@ -4940,10 +4906,6 @@ export type StatusAgentDetail = {
      * city or rig.
      */
     scope: string;
-    /**
-     * Persistent session bead ID when known.
-     */
-    session_id?: string;
     /**
      * tmux session name CLI drain-ops key on.
      */
@@ -5031,6 +4993,10 @@ export type StatusBody = {
      * Dolt bead store health summary. Omitted when unavailable.
      */
     store_health?: StatusStoreHealth;
+    /**
+     * True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+     */
+    stores_not_read?: boolean;
     /**
      * Whether the city is suspended.
      */
@@ -5138,14 +5104,6 @@ export type StatusRigCounts = {
 
 export type StatusRigDetail = {
     /**
-     * Default sling target, when configured.
-     */
-    default_sling_target?: string;
-    /**
-     * Ordered default sling targets, when configured.
-     */
-    default_sling_targets?: Array<string> | null;
-    /**
      * Rig name.
      */
     name: string;
@@ -5153,10 +5111,6 @@ export type StatusRigDetail = {
      * Rig directory path.
      */
     path: string;
-    /**
-     * Effective rig bead prefix.
-     */
-    prefix?: string;
     /**
      * Whether the rig is suspended (either explicitly or because all its agents are suspended).
      */
@@ -5253,12 +5207,17 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
+    /**
+     * Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+     */
+    suspended_rigs_excluded?: number;
 };
 
 export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
     invariant: string;
+    lost_cross_edges?: Array<string> | null;
     outcome: string;
     proven_beads: number;
 };
@@ -5494,8 +5453,6 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
-    type: 'admission.veto';
-} & TypedEventStreamEnvelopeAdmissionVeto) | ({
     type: 'backend.credential_resolved';
 } & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
@@ -5510,16 +5467,14 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedEventStreamEnvelopeBeadDeleted) | ({
-    type: 'bead.parked';
-} & TypedEventStreamEnvelopeBeadParked) | ({
-    type: 'bead.unworkable';
-} & TypedEventStreamEnvelopeBeadUnworkable) | ({
     type: 'bead.updated';
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'bead.worktree.reap_skipped';
 } & TypedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.blocked.recomputed';
+} & TypedEventStreamEnvelopeBeadsBlockedRecomputed) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
@@ -5638,8 +5593,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
-    type: 'session.continuation_observed';
-} & TypedEventStreamEnvelopeSessionContinuationObserved) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -5656,16 +5609,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
 } & TypedEventStreamEnvelopeSessionResetStalled) | ({
-    type: 'session.runtime_lost';
-} & TypedEventStreamEnvelopeSessionRuntimeLost) | ({
-    type: 'session.startup_uninitialized';
-} & TypedEventStreamEnvelopeSessionStartupUninitialized) | ({
     type: 'session.stopped';
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -5710,24 +5663,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
-
-/**
- * TypedEventStreamEnvelope admission.veto
- */
-export type TypedEventStreamEnvelopeAdmissionVeto = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: AdmissionVetoPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'admission.veto';
-    workflow?: WorkflowEventProjection;
-};
 
 /**
  * TypedEventStreamEnvelope backend.credential_resolved
@@ -5856,42 +5791,6 @@ export type TypedEventStreamEnvelopeBeadDeleted = {
 };
 
 /**
- * TypedEventStreamEnvelope bead.parked
- */
-export type TypedEventStreamEnvelopeBeadParked = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BeadParkedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.parked';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope bead.unworkable
- */
-export type TypedEventStreamEnvelopeBeadUnworkable = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BeadUnworkablePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.unworkable';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope bead.updated
  */
 export type TypedEventStreamEnvelopeBeadUpdated = {
@@ -5942,6 +5841,24 @@ export type TypedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope beads.blocked.recomputed
+ */
+export type TypedEventStreamEnvelopeBeadsBlockedRecomputed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BlockedRecomputedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.blocked.recomputed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7026,24 +6943,6 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
 };
 
 /**
- * TypedEventStreamEnvelope session.continuation_observed
- */
-export type TypedEventStreamEnvelopeSessionContinuationObserved = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionContinuationObservedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.continuation_observed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -7188,6 +7087,42 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.pending
+ */
+export type TypedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
  */
 export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
@@ -7238,42 +7173,6 @@ export type TypedEventStreamEnvelopeSessionResetStalled = {
     subject?: string;
     ts: string;
     type: 'session.reset_stalled';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope session.runtime_lost
- */
-export type TypedEventStreamEnvelopeSessionRuntimeLost = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionLifecyclePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.runtime_lost';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope session.startup_uninitialized
- */
-export type TypedEventStreamEnvelopeSessionStartupUninitialized = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionStartupUninitializedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.startup_uninitialized';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7661,8 +7560,6 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
-    type: 'admission.veto';
-} & TypedTaggedEventStreamEnvelopeAdmissionVeto) | ({
     type: 'backend.credential_resolved';
 } & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
@@ -7677,16 +7574,14 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
-    type: 'bead.parked';
-} & TypedTaggedEventStreamEnvelopeBeadParked) | ({
-    type: 'bead.unworkable';
-} & TypedTaggedEventStreamEnvelopeBeadUnworkable) | ({
     type: 'bead.updated';
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'bead.worktree.reap_skipped';
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped) | ({
     type: 'bead.worktree.reaped';
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
+    type: 'beads.blocked.recomputed';
+} & TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
     type: 'city.created';
@@ -7805,8 +7700,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
-    type: 'session.continuation_observed';
-} & TypedTaggedEventStreamEnvelopeSessionContinuationObserved) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -7823,16 +7716,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedTaggedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
 } & TypedTaggedEventStreamEnvelopeSessionResetStalled) | ({
-    type: 'session.runtime_lost';
-} & TypedTaggedEventStreamEnvelopeSessionRuntimeLost) | ({
-    type: 'session.startup_uninitialized';
-} & TypedTaggedEventStreamEnvelopeSessionStartupUninitialized) | ({
     type: 'session.stopped';
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
@@ -7877,25 +7770,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
-
-/**
- * TypedTaggedEventStreamEnvelope admission.veto
- */
-export type TypedTaggedEventStreamEnvelopeAdmissionVeto = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: AdmissionVetoPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'admission.veto';
-    workflow?: WorkflowEventProjection;
-};
 
 /**
  * TypedTaggedEventStreamEnvelope backend.credential_resolved
@@ -8031,44 +7905,6 @@ export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope bead.parked
- */
-export type TypedTaggedEventStreamEnvelopeBeadParked = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BeadParkedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.parked';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope bead.unworkable
- */
-export type TypedTaggedEventStreamEnvelopeBeadUnworkable = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BeadUnworkablePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'bead.unworkable';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope bead.updated
  */
 export type TypedTaggedEventStreamEnvelopeBeadUpdated = {
@@ -8122,6 +7958,25 @@ export type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped = {
     subject?: string;
     ts: string;
     type: 'bead.worktree.reaped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope beads.blocked.recomputed
+ */
+export type TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BlockedRecomputedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'beads.blocked.recomputed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9266,25 +9121,6 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope session.continuation_observed
- */
-export type TypedTaggedEventStreamEnvelopeSessionContinuationObserved = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionContinuationObservedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.continuation_observed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope session.crashed
  */
 export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
@@ -9437,6 +9273,44 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.pending
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
  */
 export type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
@@ -9490,44 +9364,6 @@ export type TypedTaggedEventStreamEnvelopeSessionResetStalled = {
     subject?: string;
     ts: string;
     type: 'session.reset_stalled';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope session.runtime_lost
- */
-export type TypedTaggedEventStreamEnvelopeSessionRuntimeLost = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionLifecyclePayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.runtime_lost';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope session.startup_uninitialized
- */
-export type TypedTaggedEventStreamEnvelopeSessionStartupUninitialized = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: SessionStartupUninitializedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'session.startup_uninitialized';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11719,76 +11555,8 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
-export type PostV0CityByCityNameBeadByIdClaimData = {
-    body: BeadClaimInputBody;
-    headers: {
-        /**
-         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-         */
-        'X-GC-Request': string;
-    };
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-        /**
-         * Bead ID.
-         */
-        id: string;
-    };
-    query?: never;
-    url: '/v0/city/{cityName}/bead/{id}/claim';
-};
-
-export type PostV0CityByCityNameBeadByIdClaimErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unauthorized
-     */
-    401: ErrorModel;
-    /**
-     * Forbidden
-     */
-    403: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Conflict
-     */
-    409: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Not Implemented
-     */
-    501: ErrorModel;
-};
-
-export type PostV0CityByCityNameBeadByIdClaimError = PostV0CityByCityNameBeadByIdClaimErrors[keyof PostV0CityByCityNameBeadByIdClaimErrors];
-
-export type PostV0CityByCityNameBeadByIdClaimResponses = {
-    /**
-     * OK
-     */
-    200: BeadClaimResult;
-};
-
-export type PostV0CityByCityNameBeadByIdClaimResponse = PostV0CityByCityNameBeadByIdClaimResponses[keyof PostV0CityByCityNameBeadByIdClaimResponses];
-
 export type PostV0CityByCityNameBeadByIdCloseData = {
-    body?: never;
+    body?: BeadCloseBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -12164,85 +11932,6 @@ export type CreateBeadResponses = {
 
 export type CreateBeadResponse = CreateBeadResponses[keyof CreateBeadResponses];
 
-export type GetV0CityByCityNameBeadsEphemeralData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
-         */
-        cursor?: string;
-        /**
-         * Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected.
-         */
-        limit?: number;
-        /**
-         * Filter by bead status.
-         */
-        status?: string;
-        /**
-         * Filter by bead type.
-         */
-        type?: string;
-        /**
-         * Filter by label.
-         */
-        label?: string;
-        /**
-         * Filter by assignee.
-         */
-        assignee?: string;
-        /**
-         * Filter by parent bead ID.
-         */
-        parent?: string;
-        /**
-         * Filter by rig.
-         */
-        rig?: string;
-        /**
-         * Include closed beads.
-         */
-        all?: boolean;
-    };
-    url: '/v0/city/{cityName}/beads/ephemeral';
-};
-
-export type GetV0CityByCityNameBeadsEphemeralErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameBeadsEphemeralError = GetV0CityByCityNameBeadsEphemeralErrors[keyof GetV0CityByCityNameBeadsEphemeralErrors];
-
-export type GetV0CityByCityNameBeadsEphemeralResponses = {
-    /**
-     * OK
-     */
-    200: ListBodyBead;
-};
-
-export type GetV0CityByCityNameBeadsEphemeralResponse = GetV0CityByCityNameBeadsEphemeralResponses[keyof GetV0CityByCityNameBeadsEphemeralResponses];
-
 export type GetV0CityByCityNameBeadsGraphByRootIdData = {
     body?: never;
     path: {
@@ -12302,10 +11991,6 @@ export type GetV0CityByCityNameBeadsReadyData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
-        /**
-         * Filter by rig.
-         */
-        rig?: string;
     };
     url: '/v0/city/{cityName}/beads/ready';
 };
@@ -12339,85 +12024,6 @@ export type GetV0CityByCityNameBeadsReadyResponses = {
 };
 
 export type GetV0CityByCityNameBeadsReadyResponse = GetV0CityByCityNameBeadsReadyResponses[keyof GetV0CityByCityNameBeadsReadyResponses];
-
-export type GetV0CityByCityNameBeadsReadySummaryData = {
-    body?: never;
-    path: {
-        /**
-         * City name.
-         */
-        cityName: string;
-    };
-    query?: {
-        /**
-         * Filter by rig.
-         */
-        rig?: string;
-        /**
-         * Filter by assignee.
-         */
-        assignee?: string;
-        /**
-         * Include only unassigned beads.
-         */
-        unassigned?: boolean;
-        /**
-         * Metadata key to match; requires metadata_value.
-         */
-        metadata_key?: string;
-        /**
-         * Metadata value to match; requires metadata_key.
-         */
-        metadata_value?: string;
-        /**
-         * Bead types to exclude.
-         */
-        exclude_type?: Array<string> | null;
-        /**
-         * Bead labels to exclude.
-         */
-        exclude_label?: Array<string> | null;
-        /**
-         * Maximum matching entries to consider. The compact response remains capped at 100 rows.
-         */
-        limit?: number;
-    };
-    url: '/v0/city/{cityName}/beads/ready/summary';
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryErrors = {
-    /**
-     * Bad Request
-     */
-    400: ErrorModel;
-    /**
-     * Not Found
-     */
-    404: ErrorModel;
-    /**
-     * Unprocessable Entity
-     */
-    422: ErrorModel;
-    /**
-     * Internal Server Error
-     */
-    500: ErrorModel;
-    /**
-     * Service Unavailable
-     */
-    503: ErrorModel;
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryError = GetV0CityByCityNameBeadsReadySummaryErrors[keyof GetV0CityByCityNameBeadsReadySummaryErrors];
-
-export type GetV0CityByCityNameBeadsReadySummaryResponses = {
-    /**
-     * OK
-     */
-    200: DiscoverySummaryEnvelope;
-};
-
-export type GetV0CityByCityNameBeadsReadySummaryResponse = GetV0CityByCityNameBeadsReadySummaryResponses[keyof GetV0CityByCityNameBeadsReadySummaryResponses];
 
 export type GetV0CityByCityNameConfigData = {
     body?: never;

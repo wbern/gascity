@@ -448,6 +448,7 @@ func TestOrphanCooldownCapturedRouteAndIndependentCities(t *testing.T) {
 }
 
 func TestOrphanCooldownSuccessfulOpenAndReopenIdentity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
 	logs := orphanLogs(t)
 	cr, _, clock := orphanRuntimeFixture(t)
 	// Exercise the actual controller constructor and update publication seam.

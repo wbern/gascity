@@ -44,8 +44,10 @@ if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
-  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
-  printf '%s\n' "$staged_go_files" | xargs git add
+  # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
+  # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
+  # prints a `patch -p1` command for the ones with suggested fixes.
+  make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published

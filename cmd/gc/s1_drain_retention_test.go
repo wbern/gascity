@@ -686,7 +686,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 			t.Cleanup(func() { drainAckPokeController = oldPoke })
 			var stdout, stderr bytes.Buffer
-			code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+			code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 			if code != 0 || err != nil {
 				t.Fatalf("production ACK failed: code=%d err=%v stderr=%s", code, err, stderr.String())
 			}
@@ -706,7 +706,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			// that census is a sentinel: sweeping again would release it.
 			late := mustCreateDrainAckBead(t, f.store, beads.Bead{Title: "assigned after committed census", Type: "task"}, "in_progress", "worker-1")
 			committedAttempt := cell.Drain.Attempt
-			if code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr); code != 0 || err != nil {
+			if code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr); code != 0 || err != nil {
 				t.Fatalf("actual ACK retry failed: code=%d err=%v stderr=%s", code, err, stderr.String())
 			}
 			_, retried, _, err := front.ExecutionEvidence(f.seat.ID)
@@ -786,7 +786,7 @@ func TestS1NoArgumentDelayedAckCannotSurviveCanonicalCancellation(t *testing.T) 
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+		code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 		done <- outcome{code, err}
 	}()
 	t.Cleanup(func() {
@@ -915,7 +915,7 @@ func TestS1AckFlagBeforeFrameCannotBeCleanedAsStale(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	go func() {
 		defer close(finished)
-		code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+		code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 		done <- outcome{code, err}
 	}()
 	t.Cleanup(func() {

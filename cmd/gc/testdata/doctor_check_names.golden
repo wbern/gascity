@@ -25,6 +25,7 @@ daemon-session-reconciler
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
+rollout:beads.allow_schema_behind_migrate
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
@@ -43,6 +44,7 @@ order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
+prompt-delivery-budget
 mcp-config
 mcp-shared-target
 mcp-adoption
@@ -74,6 +76,8 @@ run-target-routed-to-backfill
 route-recovery-quarantine
 hold-label-routed-to
 pool-idle-routed-work
+v2-demand-migrations
+v2-session-migration
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

@@ -13,10 +13,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// ApplyEvent updates the cache from a bd hook event. Call this when the
+// ApplyEvent updates the cache from a bead event. Call this when the
 // event bus delivers a bead.created, bead.updated, bead.closed, or bead.deleted event
-// with the full bead JSON payload. This keeps the cache fresh without
-// waiting for reconciliation.
+// with the full bead JSON payload. This keeps the cache fresher without
+// waiting for reconciliation; it does not make it exact (see CachingStore).
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	c.applyEvent(eventType, payload, false)
 }
@@ -217,6 +217,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		c.applyEventBeforeCommitForTest()
 	}
 
+	// Deferred before the unlock so it runs after it: an event patch carrying
+	// status=closed can be the first sight of that close, and nothing else
+	// would announce it.
+	defer c.announceUnannouncedCloses()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -246,6 +250,15 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			}
 			return
 		}
+	} else if !cached && refreshedFromBacking && eventType != "bead.deleted" &&
+		!c.writeFencedLocked(patch.ID, readSeq) && c.rowReadDisagreesLocked(patch.ID, b, true) {
+		// A refresh (a Live or Parent list, RefreshRow, another event)
+		// installed the row after this event read it uncached. The two backing
+		// reads are unordered, so neither may drop or overwrite the other: a
+		// close would otherwise meet a held open row and be dropped unverified.
+		// The row goes dirty for a backing read to settle.
+		c.settleUnorderedReadLocked(patch.ID, b, true)
+		return
 	}
 	if current, ok := c.beads[patch.ID]; ok {
 		currentDeps, depsKnown := c.deps[patch.ID]
@@ -328,6 +341,9 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
+				// A snapshot is another cache's own emission, and that cache
+				// announces the closes it observes; a patch is not.
+				closeAnnounced: depsAuthoritative,
 			})
 			mutated = true
 		}
@@ -351,6 +367,8 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
 			clearDirty: !heldAtLock,
+			// The bead.closed being applied is already on the bus.
+			closeAnnounced: true,
 		})
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		mutated = true
@@ -591,6 +609,14 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "is_blocked") {
 		merged.IsBlocked = cloneBoolPtr(patch.IsBlocked)
 	}
+	// bd omits an empty close_reason, so a reopen event names only the new
+	// status; a row that is not closed keeps no reason either way.
+	if hasCacheEventField(fields, "close_reason") {
+		merged.CloseReason = patch.CloseReason
+	}
+	if merged.Status != "closed" {
+		merged.CloseReason = ""
+	}
 	return merged
 }
 
@@ -639,6 +665,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "is_blocked") && !boolPtrEqual(current.IsBlocked, patch.IsBlocked) {
+		return true
+	}
+	if hasCacheEventField(fields, "close_reason") && current.CloseReason != patch.CloseReason {
 		return true
 	}
 	return false
@@ -793,7 +822,59 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	return b, fields, nil
 }
 
-func (c *CachingStore) notifyChange(eventType string, b Bead) {
+// ChangeSource names the path that produced a change notification. A local
+// write is a fact this process made durable; every other source is inferred
+// from a read of the backing, which out-of-process writes and scan races can
+// make stale (mc-zndi7.43, .56). Treat an inferred notification as a hint and
+// re-read the store before acting on it durably.
+//
+// ApplyEvent and the list/Get refetch installs notify nothing, so they have no
+// source (mc-zndi7.55), except for a close they install over a cached open row:
+// that close is queued and announced as ChangeRefresh (gastownhall/gascity#6860).
+type ChangeSource uint8
+
+const (
+	// ChangeLocal is a write made through this cache: Create, Update, Close,
+	// Reopen, metadata and dependency writes, deletes, Tx, conditional writes
+	// and graph apply.
+	ChangeLocal ChangeSource = iota + 1
+	// ChangeScan is the reconcile scan's diff, including its synthetic close of
+	// a cached open row the scan did not list.
+	ChangeScan
+	// ChangeRefresh is a point read: RefreshRow, Update's refetch that found
+	// the row gone after the write (its bead.closed is the read's inference,
+	// not a close this process made), and a close a list, dirty-row read or
+	// event patch installed over a cached open row.
+	ChangeRefresh
+)
+
+// Inferred reports whether the notification was inferred from a read rather
+// than written by this process. An unknown source counts as inferred, so a
+// consumer that re-validates inferred closes fails toward the extra read.
+func (s ChangeSource) Inferred() bool { return s != ChangeLocal }
+
+func (s ChangeSource) String() string {
+	switch s {
+	case ChangeLocal:
+		return "local"
+	case ChangeScan:
+		return "scan"
+	case ChangeRefresh:
+		return "refresh"
+	default:
+		return "unknown"
+	}
+}
+
+// notifyChange announces one change. Any close a read or an event patch
+// installed without announcing goes out first, so a close is never reported
+// after a later change to the same bead.
+func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
+	c.announceUnannouncedCloses()
+	c.emitChange(source, eventType, b)
+}
+
+func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
 	if c.onChange == nil {
 		return
 	}
@@ -814,7 +895,7 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
+	c.onChange(source, eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
 }
 
 // NativeStepDependencies returns the explicit, canonical native topology fact.
@@ -855,9 +936,9 @@ type cacheNotification struct {
 	bead      Bead
 }
 
-func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
+func (c *CachingStore) notifyChanges(source ChangeSource, notifications []cacheNotification) {
 	for _, notification := range notifications {
-		c.notifyChange(notification.eventType, notification.bead)
+		c.notifyChange(source, notification.eventType, notification.bead)
 	}
 }
 
@@ -876,7 +957,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ephemeral != fresh.Ephemeral ||
 		old.IndefinitelyDeferred != fresh.IndefinitelyDeferred ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
-		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) ||
+		old.CloseReason != fresh.CloseReason {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {

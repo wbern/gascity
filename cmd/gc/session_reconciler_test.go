@@ -7198,6 +7198,8 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
 	session := env.createSessionBead("orphan", "orphan")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the live assigned work is what keeps it.
+	env.setSessionMetadata(&session, map[string]string{"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)})
 
 	if _, err := env.store.Create(beads.Bead{
 		Title:    "claimed work",
@@ -7859,9 +7861,11 @@ func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	session := env.createSessionBead("polecat", "polecat-ga-mg0")
-	session.Metadata["state"] = "failed-create"
-	session.Metadata["pool_managed"] = "true"
-	session.Metadata["pool_slot"] = "1"
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "failed-create",
+		"pool_managed": "true",
+		"pool_slot":    "1",
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -14816,8 +14820,9 @@ func TestReconcileSessionBeads_CustomScaleCheck_GrantTTL_RetainsSeatWithoutRoute
 		t.Fatalf("seat within GrantTTL was drained as orphaned; stdout:\n%s", stdout.String())
 	}
 
-	// Advance clock past GrantTTL (e.g. 100s after start, which is now + 90s).
-	clk.Time = now.Add(95 * time.Second)
+	// Advance clock past GrantTTL (90s) and past the undesired-wake grace (INC-003:
+	// an orphan drain is deferred while the row was woken within wakeUndesiredGrace).
+	clk.Time = now.Add(95*time.Second + wakeUndesiredGrace)
 
 	stdout.Reset()
 	stderr.Reset()

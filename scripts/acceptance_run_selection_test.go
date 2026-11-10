@@ -119,9 +119,9 @@ type acceptanceWorkflowDoc struct {
 
 // TestAcceptancePerfGateHasALane is round3 review (completeness).
 //
-// TestBeadsProxiedDefault gates the proxied-native lane's `gc status --json`
-// wall clock only when GC_ACCEPTANCE_PERF is set, because wall clock on a
-// shared PR runner is a statement about the runner. The plan leaves the number
+// TestBeadsProxiedDefaultNativeLane gates the proxied-native lane's
+// `gc status --json` wall clock only when GC_ACCEPTANCE_PERF is set, because
+// wall clock on a shared PR runner is a statement about the runner. The plan leaves the number
 // to "the GC_ACCEPTANCE_PERF nightly lane" — and nothing anywhere set the
 // variable: no workflow, no Makefile target, and `make test-acceptance` runs
 // under `env -i`, which dropped it even when a developer exported it. So a flag-on
@@ -133,7 +133,7 @@ type acceptanceWorkflowDoc struct {
 func TestAcceptancePerfGateHasALane(t *testing.T) {
 	const (
 		gate     = "GC_ACCEPTANCE_PERF"
-		testName = "TestBeadsProxiedDefault"
+		testName = "TestBeadsProxiedDefaultNativeLane"
 	)
 	root := repoRoot(t)
 	set := func(values ...map[string]any) bool {
@@ -186,16 +186,16 @@ func TestAcceptancePerfGateHasALane(t *testing.T) {
 	recipe := ""
 	lines := strings.Split(string(makefile), "\n")
 	for i, line := range lines {
-		if strings.HasPrefix(line, "test-acceptance:") && i+1 < len(lines) {
+		if strings.HasPrefix(line, "test-acceptance-go:") && i+1 < len(lines) {
 			recipe = lines[i+1]
 			break
 		}
 	}
 	if recipe == "" {
-		t.Fatal("the Makefile has no test-acceptance recipe; the scan is broken")
+		t.Fatal("the Makefile has no test-acceptance-go recipe; the scan is broken")
 	}
 	if !strings.Contains(recipe, gate+"=") {
-		t.Errorf("`make test-acceptance` does not pass %s through its env -i allowlist, so exporting it "+
+		t.Errorf("`make test-acceptance-go` does not pass %s through its env -i allowlist, so exporting it "+
 			"runs the suite with the perf gate silently off:\n%s", gate, recipe)
 	}
 }

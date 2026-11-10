@@ -51,6 +51,7 @@ var canonicalProviderAliasBindings = map[string]int{
 // disposition. bind-error means the second result is a named local; the
 // forwarding shapes below are the only reviewed multi-result pass-throughs.
 var canonicalProviderCalls = map[string]int{
+	"cmd_beads_adopt_custody.go:newBeadsAdoptCustodyCmd:newSessionProviderForCity:bind-error":                                                  1,
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
 	"cmd_citystatus.go:cmdCityStatusLocalFallback:newStatusSessionProviderForCityWithSnapshot:bind-error":                                      1,
 	"cmd_convoy_dispatch.go:runControlDispatcherWithStoreAndConfig:dispatchControlSessionProvider:bind-error":                                  2,
@@ -63,7 +64,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_restart.go:cmdRigRestart:newSessionProvider:bind-error":                                                                               1,
 	"cmd_rig.go:doRigList:rigListSessionProvider:bind-error":                                                                                   1,
 	"cmd_runtime_drain.go:cmdRuntimeDrain:newSessionProvider:bind-error":                                                                       1,
-	"cmd_runtime_drain.go:cmdRuntimeDrainAckResult:newSessionProvider:bind-error":                                                              2,
+	"cmd_runtime_drain.go:cmdRuntimeDrainAckResult:newSessionProvider:bind-error":                                                              1,
 	"cmd_runtime_drain.go:cmdRuntimeDrainCheck:newSessionProvider:bind-error":                                                                  2,
 	"cmd_runtime_drain.go:cmdRuntimeRequestRestart:newSessionProvider:bind-error":                                                              1,
 	"cmd_runtime_drain.go:cmdRuntimeUndrain:newSessionProvider:bind-error":                                                                     1,

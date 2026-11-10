@@ -549,19 +549,17 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 	// the diagnostic change the outcome. Non-injecting runs pass nil and stay
 	// on the plain path.
 	var observation *mailInjectionObservation
-	eventsConfig := config.EventsConfig{}
 	if inject && cityPathErr == nil {
 		observation = &mailInjectionObservation{
 			outcome: continuationOutcomeEmpty,
 			route:   "unknown",
 		}
 		defer func() {
-			observation.record(openCityRecorderAtWithConfig(cityPath, eventsConfig, stderr))
+			observation.record(openCityRecorderAt(cityPath, stderr))
 		}()
 	}
 	if cityPathErr == nil {
 		if cfg, err := loadCityConfig(cityPath, stderr); err == nil {
-			eventsConfig = cfg.Events
 			if citySuspended(cfg) {
 				if inject {
 					observation.skip("suspended")
@@ -849,10 +847,7 @@ func renderMailCheckInjection(mp, localArchiver mail.Provider, messages []mail.M
 		// Keep continuation observations on the priority-sorted display window.
 		// Archiving below is narrower: only complete IDs represented in the
 		// detailed hook output are retrieval-safe after delivery.
-		injectedMessages := sortMailByPriority(messages)
-		if len(injectedMessages) > mailInjectMaxMessages {
-			injectedMessages = injectedMessages[:mailInjectMaxMessages]
-		}
+		injectedMessages := selectMailInjectWindow(messages)
 		observation.injected(injectedMessages, text)
 		if stateFailed {
 			observation.fail(continuationErrorMailState)
@@ -928,11 +923,41 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 	return sorted
 }
 
+// selectMailInjectWindow returns the at-most mailInjectMaxMessages messages
+// that formatInjectOutput displays. Any caller archiving "the injected
+// messages" (doMailCheckTargetWithFormat, sessionStartAutoHandoffInjection)
+// must select the same window so the archived set never diverges from the
+// displayed set (see the "Archive the SAME messages" comments at both call
+// sites).
+//
+// It keeps sortMailByPriority's contract (higher priority first) but, within
+// a priority tier, keeps the NEWEST arrivals rather than the oldest: without
+// this, a backlog of stale same-priority mail permanently fills the
+// mailInjectMaxMessages window and a newly arrived message is never surfaced
+// (gastownhall/gascity ga-18f84o). The returned window is re-sorted ascending
+// by CreatedAt so the rendered block still reads oldest-to-newest.
+func selectMailInjectWindow(messages []mail.Message) []mail.Message {
+	windowed := sortMailByPriority(messages)
+	if len(windowed) > mailInjectMaxMessages {
+		sort.SliceStable(windowed, func(i, j int) bool {
+			if windowed[i].Priority != windowed[j].Priority {
+				return windowed[i].Priority > windowed[j].Priority
+			}
+			return windowed[i].CreatedAt.After(windowed[j].CreatedAt)
+		})
+		windowed = windowed[:mailInjectMaxMessages]
+	}
+	sort.SliceStable(windowed, func(i, j int) bool {
+		return windowed[i].CreatedAt.Before(windowed[j].CreatedAt)
+	})
+	return windowed
+}
+
 // formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook. It priority-
-// sorts before the display clamp so both inject render paths
+// injection into an agent's prompt via a UserPromptSubmit hook. It selects the
+// display window via selectMailInjectWindow so both inject render paths
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
-// priority unread first.
+// priority, then most-recent, unread mail first.
 func formatInjectOutput(messages []mail.Message) string {
 	text, _ := formatInjectOutputWithMessages(messages)
 	return text
@@ -943,16 +968,15 @@ func formatInjectOutput(messages []mail.Message) string {
 // safe to archive after hook delivery: the retrieval instruction can address
 // every archived message.
 func formatInjectOutputWithMessages(messages []mail.Message) (string, []mail.Message) {
-	messages = sortMailByPriority(messages)
+	total := len(messages)
+	// Same window the archive step selects: higher priority first, then the
+	// newest arrivals within a tier (ga-18f84o), rendered oldest-to-newest.
+	messages = selectMailInjectWindow(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
-	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
+	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", total)
 	limit := len(messages)
-	truncated := false
-	if limit > mailInjectMaxMessages {
-		limit = mailInjectMaxMessages
-		truncated = true
-	}
+	truncated := total > limit
 	const retrieval = "\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n"
 	const truncation = "\n[Mail preview truncated; run 'gc mail inbox' for all unread mail.]\n"
 	const closing = "</system-reminder>\n"

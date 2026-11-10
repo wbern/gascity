@@ -48,15 +48,6 @@ func leakedStepsFixture(now time.Time) *beads.MemStore {
 	}, nil)
 }
 
-func statusOf(t *testing.T, store beads.Store, id string) string {
-	t.Helper()
-	b, err := store.Get(id)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", id, err)
-	}
-	return b.Status
-}
-
 var leakedStepsUntouched = []string{
 	"mol-done.working", "mol-done.task", "mol-done.assigned", "mol-done.exempt",
 	"mol-live.step", "orphan.step", "mol-gone-task.step",

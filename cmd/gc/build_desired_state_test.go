@@ -2448,7 +2448,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil, nil, "")
+	}, nil, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2491,7 +2491,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 
 	countListCalls := func(n int) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "")
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -2514,7 +2514,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
 	countListCalls := func(cfg *config.City) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -5995,6 +5995,33 @@ func (s *panickingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	return s.MemStore.Create(bead)
 }
 
+func TestEvaluatePendingPoolsRecoversPanickingProbe(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "alpha"}, {Name: "zulu"}}}
+	pools := []poolEvalWork{
+		{agentIdx: 0, sp: scaleParams{Max: 5, Check: "probe-alpha"}, newDemand: true},
+		{agentIdx: 1, sp: scaleParams{Max: 5, Check: "probe-zulu"}, newDemand: true},
+	}
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		if strings.Contains(command, "probe-alpha") {
+			panic("injected scale_check panic")
+		}
+		return "3", nil
+	}
+	var stderr bytes.Buffer
+
+	counts, partials := evaluatePendingPools(cfg, pools, runner, &stderr, nil)
+
+	if !partials[0] || counts[0] != 0 {
+		t.Fatalf("panicking probe: count=%d partial=%v, want 0 and partial", counts[0], partials[0])
+	}
+	if partials[1] || counts[1] != 3 {
+		t.Fatalf("healthy probe: count=%d partial=%v, want 3 and not partial", counts[1], partials[1])
+	}
+	if !strings.Contains(stderr.String(), "injected scale_check panic") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Fatalf("stderr = %q, want the panic value and its stack", stderr.String())
+	}
+}
+
 func TestCollectOpenSessionInfosRecoversPanickingLeg(t *testing.T) {
 	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: "/c/rigs/rig-A"}}}
 	cityStore := beads.NewMemStore()
@@ -6070,7 +6097,7 @@ func TestCollectOpenUnassignedRoutedWorkRecoversPanickingLeg(t *testing.T) {
 	rigStores := map[string]beads.Store{"repo": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
 	var stderr bytes.Buffer
 
-	got, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, cityStore, rigStores, nil, &stderr, nil)
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, cityStore, rigStores, nil, &stderr, nil, nil)
 
 	if !partial {
 		t.Fatal("partial = false, want the panicking rig leg reported partial")
@@ -13020,6 +13047,99 @@ func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *t
 	}
 }
 
+// TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher is the
+// demand half of the scope-gap arm on the binding topology (mc-zndi7.41). The
+// row is rig-rooted, the rig has no dispatcher, and its durable route names the
+// CITY dispatcher (the #3765 shape). The repair suppresses it from the
+// collected snapshot and reports the gap, but the default scale_check probe
+// re-reads Ready from the binding, which is also the city dispatcher's probe
+// target, and so it saw the stale route. The city dispatcher was then desired
+// for a row the gap event called suppressed, and its serve query (by route, no
+// scope filter) would run the finalize cross-scope.
+func TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 || result.ControlDispatcherScopeGaps[0].SampleBeadID != control.ID {
+		t.Fatalf("scope gaps = %+v, want exactly one naming %s", result.ControlDispatcherScopeGaps, control.ID)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a row the repair suppressed", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a suppressed scope-gap row: %+v", desired)
+		}
+	}
+}
+
+// TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher
+// is the deferred-repair arm of the same rule: the rig HAS a dispatcher, but
+// the repair write fails, so the row keeps its stale city route this tick. The
+// repair suppresses it from the collected snapshot until the write lands; the
+// probe must not count it for the city dispatcher the stale route names.
+func TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := routeRepairUpdateFailStore{Store: beads.NewMemStore(), err: errors.New("route repair write failed")}
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	if _, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}); err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), classBindingDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none: the rig has a dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a rig-rooted row whose route repair was deferred", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a deferred rig-rooted row: %+v", desired)
+		}
+	}
+}
+
 // One scope with many suppressed rows is ONE gap carrying the count — the
 // per-row emission this replaces is exactly what made the condition invisible.
 func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
@@ -13428,6 +13548,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		nil,
 		io.Discard,
 		nil,
+		nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -13496,6 +13617,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
+		nil,
 		nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {

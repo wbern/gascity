@@ -595,6 +595,37 @@ func computePoolDesiredStatesWithOptions(
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
 
+	// Resume tier: actionable assigned work beads whose assignee resolves
+	// to a non-closed session bead. These sessions must stay alive. A bead's
+	// routing does not depend on the agent, so it is resolved once and the
+	// beads bucketed by the template they route to, in order (A3).
+	routedWork := make(map[string][]int)
+	for i, wb := range assignedWorkBeads {
+		routedTo := routedToOrLegacyWorkflowTarget(wb)
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		sessionBeadID := assigneeToSessionBeadID[assignee]
+		if routedTo == "" && sessionBeadID != "" {
+			routedTo = sessionBeadTemplate[sessionBeadID]
+			if routedTo == "" && len(cfg.Agents) == 1 {
+				routedTo = cfg.Agents[0].QualifiedName()
+			}
+		}
+		routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
+		if sessionBeadID != "" {
+			sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+			if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
+				continue
+			}
+		}
+		routedWork[routedTo] = append(routedWork[routedTo], i)
+	}
+
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended {
@@ -607,7 +638,8 @@ func computePoolDesiredStatesWithOptions(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for workIndex, wb := range assignedWorkBeads {
+		for _, workIndex := range routedWork[template] {
+			wb := assignedWorkBeads[workIndex]
 			workStoreRef := ""
 			if len(assignedWorkStoreRefs) == len(assignedWorkBeads) && len(assignedWorkStoreRefs) > 0 {
 				canonical, valid := canonicalContinuationClaimStoreRef(cfg.Workspace.Name, assignedWorkStoreRefs[workIndex])
@@ -626,10 +658,6 @@ func computePoolDesiredStatesWithOptions(
 				// keeps the legacy no-store-ref fallback rather than dropping
 				// the work.
 			}
-			routedTo := routedToOrLegacyWorkflowTarget(wb)
-			if wb.Status != "in_progress" && wb.Status != "open" {
-				continue
-			}
 			// An OPEN bead deferred into the future is not claimable; waking a
 			// session for it just drains and re-wakes each tick (gcw-ehvg P1a).
 			// In-progress work resumes regardless (defer hides from claim, not
@@ -638,26 +666,7 @@ func computePoolDesiredStatesWithOptions(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == "" {
-				continue
-			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
-			if routedTo == "" && sessionBeadID != "" {
-				routedTo = sessionBeadTemplate[sessionBeadID]
-				if routedTo == "" && len(cfg.Agents) == 1 {
-					routedTo = cfg.Agents[0].QualifiedName()
-				}
-			}
-			routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
-			if sessionBeadID != "" {
-				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
-				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
-					continue
-				}
-			}
-			if routedTo != template {
-				continue
-			}
 			if sessionBeadID != "" {
 				// Named-session beads are materialized by the named-session
 				// loop in buildDesiredState, not by the pool path. Skipping
@@ -1178,33 +1187,46 @@ func poolNewDemandRequests(
 ) (map[string][]SessionRequest, map[string][]SessionRequest) {
 	protected := make(map[string][]SessionRequest)
 	inFlight := make(map[string][]SessionRequest)
-	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
-	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
-		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
-			return sortedSessionInfos[i].CreatedAt.Before(sortedSessionInfos[j].CreatedAt)
+	// The rows' indexes in creation order, bucketed by template once: every
+	// test but the agent's own is the same for every agent (A3).
+	sorted := make([]int, len(sessionInfos))
+	for i := range sorted {
+		sorted[i] = i
+	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a, b := &sessionInfos[sorted[i]], &sessionInfos[sorted[j]]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
 		}
-		return sortedSessionInfos[i].ID < sortedSessionInfos[j].ID
+		return a.ID < b.ID
 	})
+	byTemplate := make(map[string][]int)
+	for _, i := range sorted {
+		sb := &sessionInfos[i]
+		if sb.ID == "" || sb.Closed {
+			continue
+		}
+		if sessionHasProviderTerminalErrorInfo(*sb) {
+			continue
+		}
+		if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
+			continue
+		}
+		if !isPoolManagedSessionInfo(*sb) {
+			continue
+		}
+		template := normalizedSessionTemplateInfo(*sb, cfg)
+		byTemplate[template] = append(byTemplate[template], i)
+	}
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
 		template := agent.QualifiedName()
-		for _, sb := range sortedSessionInfos {
-			if sb.ID == "" || sb.Closed {
-				continue
-			}
-			if sessionHasProviderTerminalErrorInfo(sb) {
-				continue
-			}
-			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
-				continue
-			}
-			if !isEphemeralSessionInfoForAgent(sb, agent) || !isPoolManagedSessionInfo(sb) {
-				continue
-			}
-			if normalizedSessionTemplateInfo(sb, cfg) != template {
+		for _, row := range byTemplate[template] {
+			sb := sessionInfos[row]
+			if !isEphemeralSessionInfoForAgent(sb, agent) {
 				continue
 			}
 			req := SessionRequest{

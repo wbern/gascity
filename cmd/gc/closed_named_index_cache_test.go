@@ -56,14 +56,14 @@ func TestClosedNamedIndexIsReusedWithinTTL(t *testing.T) {
 	cfg := onDemandNamedSessionCity()
 	store := &listCallCountingStore{MemStore: beads.NewMemStore()}
 
-	readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+	readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 	first := store.listCalls
 	if first == 0 {
 		t.Fatal("first pass issued no store.List; the closed index was never built")
 	}
 
 	now = now.Add(closedNamedIndexTTL / 2)
-	readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+	readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 	if got := store.listCalls - first; got != 0 {
 		t.Fatalf("second pass within TTL issued %d store.List calls; want 0 (cached index reused)", got)
 	}
@@ -80,18 +80,18 @@ func TestClosedNamedIndexRebuildsAfterTTL(t *testing.T) {
 	runtimeName := config.NamedSessionRuntimeName("test-city", cfg.Workspace, identity)
 	store := &listCallCountingStore{MemStore: beads.NewMemStore()}
 
-	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, ""); containsString(got, runtimeName) {
+	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil); containsString(got, runtimeName) {
 		t.Fatalf("runtime name %q enumerated before any phantom exists", runtimeName)
 	}
 	closePhantomNamedSession(t, store, identity)
 
 	now = now.Add(closedNamedIndexTTL / 2)
-	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, ""); containsString(got, runtimeName) {
+	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil); containsString(got, runtimeName) {
 		t.Fatalf("runtime name %q enumerated within TTL; want the cached (pre-phantom) index", runtimeName)
 	}
 
 	now = now.Add(closedNamedIndexTTL)
-	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, ""); !containsString(got, runtimeName) {
+	if got := readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil); !containsString(got, runtimeName) {
 		t.Fatalf("runtime name %q not enumerated after TTL; got %v (index must rebuild and see the new phantom)", runtimeName, got)
 	}
 }
@@ -114,9 +114,9 @@ func TestClosedNamedIndexDoesNotCacheFailedOrPartialBuilds(t *testing.T) {
 			inner := &closedIndexStore{MemStore: beads.NewMemStore(), hard: tc.hard}
 			store := &closedIndexCountingStore{closedIndexStore: inner}
 
-			readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+			readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 			first := store.listCalls
-			readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+			readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 			if got := store.listCalls - first; got != first {
 				t.Fatalf("second pass issued %d store.List calls after a %s; want %d (no caching of a degraded build)", got, tc.name, first)
 			}
@@ -137,8 +137,8 @@ func TestClosedNamedIndexIsPerStore(t *testing.T) {
 	withPhantom := &listCallCountingStore{MemStore: beads.NewMemStore()}
 	closePhantomNamedSession(t, withPhantom, identity)
 
-	readyAssignedWorkAssignees(cfg, empty, nil, nil, nil, "")
-	if got := readyAssignedWorkAssignees(cfg, withPhantom, nil, nil, nil, ""); !containsString(got, runtimeName) {
+	readyAssignedWorkAssignees(cfg, empty, nil, nil, nil, "", nil)
+	if got := readyAssignedWorkAssignees(cfg, withPhantom, nil, nil, nil, "", nil); !containsString(got, runtimeName) {
 		t.Fatalf("store with a phantom did not enumerate %q; another store's cached index leaked: got %v", runtimeName, got)
 	}
 	if withPhantom.listCalls == 0 {

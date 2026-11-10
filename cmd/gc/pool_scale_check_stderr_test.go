@@ -104,7 +104,7 @@ func TestScaleCheckTrace_AttachesStderr(t *testing.T) {
 		},
 	}
 
-	counts, partials := evaluatePendingPools(cfg, pending, io.Discard, trace)
+	counts, partials := evaluatePendingPools(cfg, pending, nil, io.Discard, trace)
 	if len(counts) != 1 || counts[0] != 0 {
 		t.Fatalf("counts = %v, want [0]", counts)
 	}

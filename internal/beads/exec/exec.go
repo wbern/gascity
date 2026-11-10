@@ -215,7 +215,17 @@ func (w *beadWire) toBead() beads.Bead {
 		CreatedBy:   w.CreatedBy,
 		Owner:       w.Owner,
 		Notes:       w.Notes,
+		CloseReason: closeReasonFor(status, w.CloseReason),
 	}
+}
+
+// closeReasonFor keeps a script's close_reason only on a closed bead: a bead
+// that is not closed has no close reason.
+func closeReasonFor(status, reason string) string {
+	if status != "closed" {
+		return ""
+	}
+	return reason
 }
 
 func cloneTimePtr(v *time.Time) *time.Time {

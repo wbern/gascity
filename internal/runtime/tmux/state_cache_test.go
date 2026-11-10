@@ -11,9 +11,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // mockFetcher implements StateFetcher for testing.
@@ -69,6 +71,7 @@ type controlledRefreshFetcher struct {
 	mu        sync.Mutex
 	calls     int
 	state     runtimeStateSnapshot
+	err       error
 	blockCall int
 	entered   chan struct{}
 	release   chan struct{}
@@ -79,6 +82,7 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 	f.calls++
 	call := f.calls
 	state := f.state
+	err := f.err
 	f.mu.Unlock()
 
 	if call == f.blockCall {
@@ -89,13 +93,20 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return state, nil
+	return state, err
 }
 
 func (f *controlledRefreshFetcher) getCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *controlledRefreshFetcher) setResult(state runtimeStateSnapshot, err error) {
+	f.mu.Lock()
+	f.state = state
+	f.err = err
+	f.mu.Unlock()
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -311,6 +322,266 @@ func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
 	}
 }
 
+func TestProviderInvalidateLivenessForcesFreshSnapshot(t *testing.T) {
+	fetcher := &mockFetcher{sessions: map[string]bool{"agent-1": false}}
+	provider := &Provider{cache: NewStateCache(fetcher, time.Hour)}
+	if provider.IsRunning("agent-1") {
+		t.Fatal("initial cached liveness = true, want false")
+	}
+	fetcher.setResult(map[string]bool{"agent-1": true}, nil)
+	if provider.IsRunning("agent-1") {
+		t.Fatal("cached liveness refreshed without invalidation")
+	}
+
+	provider.InvalidateLiveness("agent-1")
+	if !provider.IsRunning("agent-1") {
+		t.Fatal("liveness after invalidation = false, want refreshed true state")
+	}
+	if calls := fetcher.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want initial and invalidated refresh", calls)
+	}
+}
+
+func TestProviderObserveFreshLivenessFollowsSupersedingFreshGeneration(t *testing.T) {
+	fetcher := &controlledRefreshFetcher{
+		state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{},
+			ProcessesAvailable: true,
+		},
+		blockCall: 1,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	cache := NewStateCache(fetcher, time.Hour)
+	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	})
+	provider := &Provider{cache: cache}
+	target := gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"}
+
+	first := make(chan gcruntime.Liveness, 1)
+	go func() { first <- provider.ObserveFreshLiveness(target) }()
+	select {
+	case <-fetcher.entered:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first fresh observation did not enter its fetch")
+	}
+	second := make(chan gcruntime.Liveness, 1)
+	go func() { second <- provider.ObserveFreshLiveness(target) }()
+	select {
+	case got := <-second:
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("superseding fresh observation = %#v, want complete absence", got)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("superseding fresh observation did not complete")
+	}
+
+	close(fetcher.release)
+	select {
+	case got := <-first:
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("superseded fresh observation = %#v, want the newer complete absence", got)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("superseded fresh observation did not follow the newer generation")
+	}
+}
+
+// TestStateCacheFreshStateBoundsRetriesUnderSustainedSupersession pins that a
+// fresh observation stops chasing a generation that keeps moving. Every fetch
+// here is superseded by an invalidation landing while it is in flight — the
+// shape sustained session churn produces — so an unbounded retry never
+// returns. Giving up must report the observation as incomplete, since no
+// generation it saw ever settled, while keeping the positive evidence the
+// superseded fetches did publish.
+func TestStateCacheFreshStateBoundsRetriesUnderSustainedSupersession(t *testing.T) {
+	var cache *StateCache
+	var churning atomic.Bool
+	churning.Store(true)
+	// Let a spinning reader settle once the test is over instead of leaking
+	// a goroutine that refreshes forever.
+	t.Cleanup(func() { churning.Store(false) })
+	fetcher := &scriptedFetcher{fn: func(context.Context, int64) (runtimeStateSnapshot, error) {
+		if churning.Load() {
+			cache.Invalidate() // lands while this fetch is in flight
+		}
+		return runningSnapshot("agent-1"), nil
+	}}
+	cache = NewStateCache(fetcher, time.Hour)
+
+	type freshResult struct {
+		state    runtimeStateSnapshot
+		complete bool
+	}
+	done := make(chan freshResult, 1)
+	go func() {
+		state, complete := cache.freshState()
+		done <- freshResult{state: state, complete: complete}
+	}()
+	var got freshResult
+	select {
+	case got = <-done:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("freshState never returned under sustained supersession: its retry loop is unbounded")
+	}
+
+	if calls, want := fetcher.calls.Load(), int64(maxRefreshRetries+1); calls != want {
+		t.Fatalf("fetch calls = %d, want %d: the first refresh plus maxRefreshRetries", calls, want)
+	}
+	if got.complete {
+		t.Fatal("freshState reported a complete observation although no generation it saw settled")
+	}
+	if !got.state.Sessions["agent-1"].Running {
+		t.Fatalf("freshState state = %#v, want the superseded fetches' running agent-1 kept as positive evidence", got.state.Sessions)
+	}
+}
+
+func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
+	completedScan := func(string, time.Time) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	}
+	liveSession := runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true, Panes: []paneRuntimeState{{Command: "bash", PID: "101"}}},
+		},
+		Processes:          newProcessSnapshot([]processRuntimeState{{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"}}),
+		ProcessesAvailable: true,
+	}
+
+	t.Run("complete empty snapshot", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete absence", got)
+		}
+	})
+
+	t.Run("refreshes a cached empty snapshot", func(t *testing.T) {
+		fetcher := &mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}
+		cache := NewStateCache(fetcher, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+		if provider.IsRunning("agent-1") {
+			t.Fatal("initial cache unexpectedly reports agent-1 running")
+		}
+		fetcher.mu.Lock()
+		fetcher.state = liveSession
+		fetcher.mu.Unlock()
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+		if !got.Running || !got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete live observation", got)
+		}
+		if calls := fetcher.getCalls(); calls != 2 {
+			t.Fatalf("fetch calls = %d, want cached prime plus forced refresh", calls)
+		}
+	})
+
+	t.Run("no server and degraded process detail are incomplete", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			state runtimeStateSnapshot
+			err   error
+		}{
+			{name: "unprimed no server", err: ErrNoServer},
+			{name: "primed no server", state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}, err: ErrNoServer},
+			{name: "degraded process snapshot", state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}}, ProcessesAvailable: false}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fetcher := &mockFetcher{state: tc.state, err: tc.err}
+				cache := NewStateCache(fetcher, time.Hour)
+				cache.setScanBySessionID(completedScan)
+				provider := &Provider{cache: cache}
+				if tc.name == "primed no server" {
+					cache.state = runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}
+					cache.fetchedAt = time.Now()
+				}
+
+				got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+				if got.Complete {
+					t.Fatalf("ObserveFreshLiveness = %#v, want incomplete observation", got)
+				}
+			})
+		}
+	})
+
+	t.Run("absent pane does not require unavailable process detail", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{
+			Sessions:           map[string]sessionRuntimeState{},
+			ProcessesAvailable: false,
+		}}, time.Hour)
+		cache.setScanBySessionID(completedScan)
+		provider := &Provider{cache: cache}
+
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1", ProcessNames: []string{"codex"}})
+		if got.Running || got.Alive || !got.Complete {
+			t.Fatalf("ObserveFreshLiveness = %#v, want complete absence without a named pane", got)
+		}
+	})
+
+	t.Run("exact session scan is positive and partial scans remain incomplete", func(t *testing.T) {
+		cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}, ProcessesAvailable: true}}, time.Hour)
+		incarnationStartedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+		cache.setScanBySessionID(func(id string, gotStartedAt time.Time) exactProcessScan {
+			if id != "sid-1" {
+				t.Fatalf("scan session ID = %q, want sid-1", id)
+			}
+			if !gotStartedAt.Equal(incarnationStartedAt) {
+				t.Fatalf("scan incarnation boundary = %v, want %v", gotStartedAt, incarnationStartedAt)
+			}
+			return exactProcessScan{
+				runtimes: []gcruntime.LiveRuntime{{SessionID: id, PID: 42}},
+				complete: true,
+			}
+		})
+		provider := &Provider{cache: cache}
+		got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{
+			SessionID:            "sid-1",
+			SessionName:          "agent-1",
+			IncarnationStartedAt: incarnationStartedAt,
+		})
+		if !got.Running || !got.Alive || !got.Complete {
+			t.Fatalf("exact-ID process observation = %#v, want complete live", got)
+		}
+
+		cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+			return exactProcessScan{}
+		})
+		got = provider.ObserveFreshLiveness(gcruntime.LivenessTarget{SessionID: "sid-1", SessionName: "agent-1"})
+		if got.Complete {
+			t.Fatalf("partial process scan = %#v, want incomplete", got)
+		}
+	})
+}
+
+func TestProviderObserveFreshLivenessLastSessionUsesDrainedServerAbsence(t *testing.T) {
+	exec := &fakeExecutor{
+		outs: []string{"agent-1\t0\tclaude\t123", ""},
+		errs: []error{nil, ErrNoCurrentTarget},
+	}
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: exec}}, time.Hour)
+	cache.setScanBySessionID(func(string, time.Time) exactProcessScan {
+		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}
+	})
+	provider := &Provider{cache: cache}
+
+	if !provider.IsRunning("agent-1") {
+		t.Fatal("prime: expected agent-1 to be running")
+	}
+
+	got := provider.ObserveFreshLiveness(gcruntime.LivenessTarget{
+		SessionID:   "sid-1",
+		SessionName: "agent-1",
+	})
+	if got.Running || got.Alive || !got.Complete {
+		t.Fatalf("ObserveFreshLiveness = %#v, want complete absence on a live drained server", got)
+	}
+}
+
 // FetchState must report an unreachable tmux server as an observation FAILURE
 // (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
 // form let refresh() overwrite last-known-good and instantly report every
@@ -475,6 +746,50 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	if calls := f.getCalls(); calls != 2 {
 		t.Fatalf("fetch calls = %d, want 2", calls)
 	}
+}
+
+func TestStateCache_CoalescesRefreshesWithinGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fetcher := &controlledRefreshFetcher{
+			state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
+			blockCall: 2,
+			entered:   make(chan struct{}),
+			release:   make(chan struct{}),
+		}
+		cache := NewStateCache(fetcher, time.Hour)
+		if cache.IsRunning("agent-1") {
+			t.Fatal("primed liveness = true, want false")
+		}
+
+		fetcher.setResult(runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}},
+		}, nil)
+		cache.Invalidate()
+
+		results := make(chan bool, 2)
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		select {
+		case <-fetcher.entered:
+		default:
+			t.Fatal("first invalidated refresh did not enter")
+		}
+
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		callsBeforeRelease := fetcher.getCalls()
+		close(fetcher.release)
+		synctest.Wait()
+
+		if callsBeforeRelease != 2 {
+			t.Fatalf("fetch calls before release = %d, want prime plus one coalesced generation refresh", callsBeforeRelease)
+		}
+		for range 2 {
+			if got := <-results; !got {
+				t.Fatal("coalesced IsRunning call = false, want live result")
+			}
+		}
+	})
 }
 
 // TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the

@@ -156,6 +156,7 @@ func TestArchivePrivateDirectoryRejectsAlias(t *testing.T) {
 }
 
 func TestWorktreeArchiveCapabilitiesJSON(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
 	stdout, stderr, code := runWorktreeJSONCommand(t, "worktree", "archive-reap", "--capabilities", "--json")
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)

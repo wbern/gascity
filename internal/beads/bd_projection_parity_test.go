@@ -65,7 +65,6 @@ var knownProjectionGaps = map[string]string{
 	"spec_id":             "UNMODELLED",
 	"started_at":          "UNMODELLED",
 	"closed_at":           "UNMODELLED",
-	"close_reason":        "UNMODELLED",
 	"closed_by_session":   "UNMODELLED",
 	"work_type":           "UNMODELLED",
 	"source_formula":      "UNMODELLED",

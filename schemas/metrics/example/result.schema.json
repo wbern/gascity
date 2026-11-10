@@ -219,12 +219,14 @@
               "storage-preflight",
               "nudge-drop",
               "beads-city-migrate-proxied",
-              "worktree-scan",
+              "storage-repair-sequence",
               "mcp-validate",
               "worktree-reap",
               "run-cancel",
               "analyze-continuity",
-              "worktree-archive-reap"
+              "worktree-archive-reap",
+              "worktree-scan",
+              "beads-adopt-custody"
             ]
           },
           "event_id": {
