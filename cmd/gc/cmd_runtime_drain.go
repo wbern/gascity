@@ -787,20 +787,36 @@ func cmdRuntimeDrainAckResult(args []string, jsonOutput, operator bool, stdout, 
 }
 
 // runtimeDrainAckResult decides the city's mode once. A legacy city runs
-// doRuntimeDrainAckResult exactly as before E3. A v2 city first binds the ack
-// to the session row (ackDrainRow) and runs the runtime ack only once that
-// row ack has landed, so a refused or failed row ack releases no claim and
-// sets no env key. envToken is the caller's GC_INSTANCE_TOKEN.
+// doRuntimeDrainAckResult exactly as before E3. A v2 city keeps legacy's order
+// and binds the ack to the session row (CONTRACT v5.7 D5): the incarnation
+// check, which writes nothing; the held-claim release; the row CAS; then the
+// env ack and the poke. A refused check releases nothing. A CAS that loses
+// after the release exits non-zero with no row or env write; the claims it
+// released stay released, which is safe because they were unexecuted.
+// envToken is the caller's GC_INSTANCE_TOKEN.
 func runtimeDrainAckResult(dops drainOps, target sessionRuntimeTarget, operator bool, envToken string, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
-	if cfg, strict := drainAckCityMode(target.cityPath); strict {
-		if code := ackDrainRow(target.cityPath, cfg, target.sessionName, target.sessionID, operator, envToken, stderr); code != 0 {
-			if code == drainAckRefused {
-				return code, errDrainAckRefused
-			}
-			return code, fmt.Errorf("row drain-ack failed with status %d", code)
+	cfg, strict := drainAckCityMode(target.cityPath)
+	if !strict {
+		return doRuntimeDrainAckResult(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	}
+	commit, code := checkDrainAckRowAt(target.cityPath, cfg, target.sessionName, target.sessionID, operator, envToken, stderr)
+	if code != 0 {
+		if code == drainAckRefused {
+			return code, errDrainAckRefused
+		}
+		return code, fmt.Errorf("row drain-ack failed with status %d", code)
+	}
+	if err := drainAckReleaseHeldClaims(target.cityPath, target.sessionName, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort diagnostic
+		return 1, err
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: held claims released; row ack not written, nothing acknowledged (safe to re-run): %v\n", err) //nolint:errcheck // best-effort stderr
+			return drainAckRefused, errDrainAckRefused
 		}
 	}
-	return doRuntimeDrainAckResult(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAckResult(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1186,19 @@ func doRuntimeDrainAckResult(dops drainOps, cityPath, targetName, sn, sessionID 
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort diagnostic
 		return 1, err
 	}
+	return finishRuntimeDrainAckResult(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+}
+
+// finishRuntimeDrainAck is the ack after the release: the env flag, the poke
+// and the report.
+func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	code, _ := finishRuntimeDrainAckResult(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	return code
+}
+
+// finishRuntimeDrainAckResult is finishRuntimeDrainAck with the ack outcome
+// error: a timed-out or failed write must not read as acknowledged to the hook.
+func finishRuntimeDrainAckResult(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
 	bound, err := bindDrainAckAdmission(dops, cityPath, sn)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: qualifying acknowledgement: %v\n", err) //nolint:errcheck // best-effort diagnostic
@@ -1220,8 +1249,9 @@ func doRuntimeDrainAckResult(dops drainOps, cityPath, targetName, sn, sessionID 
 	return 0, ackOutcomeErr
 }
 
-// drainAckRefused is runtimeDrainAck's status for a v2 ack that wrote nothing
-// because the row check or its CAS refused it. The process still exits 1; the
+// drainAckRefused is runtimeDrainAck's status for a v2 ack that the row check
+// or its CAS refused. Neither writes the row or the env ack; only a CAS
+// refusal follows the held-claim release. The process still exits 1; the
 // distinct value lets the hook tell a refusal from a failed ack.
 const drainAckRefused = 2
 
@@ -1255,12 +1285,13 @@ func drainAckStrictConfig(cfg *config.City) bool {
 	return err == nil && mode == reconcilerV2
 }
 
-// ackDrainRow writes the row-bound ack (CONTRACT v5 D5) in a v2 city, before
-// any other side effect of the drain-ack. It returns 0 once the ack is in the
-// row, or when the store has no conditional writer (with a warning: v2 refuses
-// to boot on such a store, C0.7); otherwise drainAckRefused with nothing
-// written. The pane's token is compared in process and never leaves it.
-func ackDrainRow(cityPath string, cfg *config.City, sessionName, sessionID string, operator bool, envToken string, stderr io.Writer) int {
+// checkDrainAckRowAt is the v2 ack's incarnation check (CONTRACT v5.7 D5),
+// before any side effect of the drain-ack. It writes nothing. On a match it
+// returns the row CAS to run after the held-claim release, or a nil commit
+// when the store has no conditional writer (with a warning: v2 refuses to
+// boot on such a store, C0.7); otherwise drainAckRefused. The pane's token is
+// compared in process and never leaves it.
+func checkDrainAckRowAt(cityPath string, cfg *config.City, sessionName, sessionID string, operator bool, envToken string, stderr io.Writer) (func() error, int) {
 	store, id, err := drainAckOpenSessionRow(cityPath, cfg, sessionName, sessionID)
 	var commit func() error
 	if err == nil {
@@ -1269,16 +1300,12 @@ func ackDrainRow(cityPath string, cfg *config.City, sessionName, sessionID strin
 	switch {
 	case errors.Is(err, errDrainAckRowUnfenced):
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 0
+		return nil, 0
 	case err != nil:
 		fmt.Fprintf(stderr, "gc runtime drain-ack: refused, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
-		return drainAckRefused
+		return nil, drainAckRefused
 	}
-	if err := commit(); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: row ack not written, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
-		return drainAckRefused
-	}
-	return 0
+	return commit, 0
 }
 
 // drainAckOpenSessionRow is a mutable global test seam over

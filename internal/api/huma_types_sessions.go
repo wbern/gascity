@@ -159,6 +159,7 @@ type SessionSubmitInput struct {
 		Message    string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent     session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
 		ReplaceKey string               `json:"replace_key,omitempty" maxLength:"128" pattern:"^[^\\x00-\\x1F\\x7F]*$" doc:"Optional key that replaces an equivalent pending deferred submit."`
+		Resume     bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -176,6 +177,7 @@ type SessionMessageInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
+		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 

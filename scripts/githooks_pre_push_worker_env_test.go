@@ -159,6 +159,7 @@ func (w *prePushWorkerEnv) setIssues(t *testing.T, titleURL ...string) {
 }
 
 func TestPrePushSuiteWorkerEnvGuard(t *testing.T) {
+	skipIfPrePushSuiteDisabled(t)
 	const issueURL = "https://github.com/gastownhall/gascity/issues/9001"
 	for _, tc := range []struct {
 		name      string

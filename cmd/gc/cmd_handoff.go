@@ -259,7 +259,7 @@ func cmdHandoffRemoteWithForce(args []string, target string, force bool, stdout,
 		return 1
 	}
 	rec := openCityRecorder(stderr)
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
+	return doHandoffRemoteWithForce(cityPath, msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
 }
 
 func sessionRestartPersister(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
@@ -531,10 +531,10 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemote(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
+	return doHandoffRemoteWithForce("", msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
 }
 
-func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
+func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
 	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
@@ -584,7 +584,7 @@ func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Record
 	agentIdentity := sessionAgentMetricIdentityByName(sessStore, sessionName)
 	continuation := handoffContinuationObservation(sessStore, sessionName)
 	continuation.Boundary = continuationBoundaryRuntimeStop
-	if err := workerKillSessionTargetWithConfig("", sessStore, sp, nil, sessionName); err != nil {
+	if err := workerKillSessionTargetWithConfig(cityPath, sessStore, sp, nil, sessionName); err != nil {
 		continuation.Outcome = continuationOutcomeFailed
 		continuation.ErrorCode = continuationErrorRuntimeStop
 		recordContinuationObservation(rec, continuation)

@@ -733,6 +733,8 @@ func (c *OrphanSessionsCheck) CanFix() bool { return c.attributed != nil }
 // otherwise widen the kill set rather than narrow it. It also refuses while a
 // controller is running (GH#5742): the controller's own health patrol already
 // reconciles orphan sessions, and an uncoordinated Stop here would race it.
+// Like ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
+// orphan whose tmux server died after the listing counts as removed.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -753,7 +755,7 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 		if tracked[s] {
 			continue
 		}
-		if err := c.sp.Stop(s); err != nil {
+		if err := runtime.StopForCleanup(c.sp, s); err != nil {
 			return fmt.Errorf("killing orphan session %q: %w", s, err)
 		}
 	}

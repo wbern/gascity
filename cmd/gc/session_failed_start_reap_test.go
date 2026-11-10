@@ -34,7 +34,7 @@ func TestOneFailedStartDoesNotLoseTheSession(t *testing.T) {
 	}
 	env.clk.Advance(5 * time.Second)
 	var log bytes.Buffer
-	if n := reapStaleSessionBeads(env.store, env.sp, env.dt, nil, env.clk, &log); n != 0 {
+	if n := reapStaleSessionBeads("", env.store, env.sp, env.dt, nil, env.clk, &log); n != 0 {
 		t.Fatalf("the next tick's reap closed %d row(s) after one failed start: %s", n, log.String())
 	}
 	delete(env.sp.StartErrors, "worker")

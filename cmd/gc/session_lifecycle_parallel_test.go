@@ -815,7 +815,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
 			SessionName:  sessionName,
 			WorkDir:      concreteWorkDir,
 		},
-	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPa
 			SessionName:  sessionName,
 			WorkDir:      concreteWorkDir,
 		},
-	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -982,7 +982,7 @@ func TestBuildPreparedStartRejectsConcretePoolTemplateWorkDir(t *testing.T) {
 		},
 	}, cityPath, cfg, store, func(startCandidate, *config.City) string {
 		return templateWorkDir
-	})
+	}, dispatchOptionSources{})
 	if err == nil {
 		t.Fatal("buildPreparedStartWithWorkDirResolver error = nil, want template work_dir rejection")
 	}
@@ -1385,7 +1385,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}))
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}), dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -5026,7 +5026,7 @@ func TestRefreshConfiguredNamedStartCandidateRefreshesProviderProjection(t *test
 			tp:   TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude"},
 		},
 		cityPath, cfg.Workspace.Name, cfg, sp, store,
-		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil,
+		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{},
 	)
 	if err != nil {
 		t.Fatalf("prepare named start: %v", err)
@@ -5089,7 +5089,7 @@ func TestRefreshConfiguredNamedStartCandidateRefreshesProviderProjection(t *test
 			tp:   TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude"},
 		},
 		cityPath, cfg.Workspace.Name, cfg, failingRuntime, failingStore,
-		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil,
+		&clock.Fake{Time: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "persisting named session provider projection") {
 		t.Fatalf("prepare with failed provider projection error = %v, want projection error", err)
@@ -7656,14 +7656,14 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name":         "test-agent",
-			"session_key":          "stale-key-abc",
-			"template":             "worker",
-			"state":                "active",
-			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
-			"wake_attempts":        "2",
-			"started_config_hash":  "keep-hash",
-			"continuation_command": "resume",
+			"session_name":              "test-agent",
+			"session_key":               "stale-key-abc",
+			"template":                  "worker",
+			"state":                     "active",
+			"last_woke_at":              clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":             "2",
+			"started_config_hash":       "keep-hash",
+			"test_continuation_command": "resume",
 		},
 	})
 	if err != nil {
@@ -8597,7 +8597,7 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 		info:  sessiontest.SeedBead(t, session),
 		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
 		order: 0,
-	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}

@@ -101,7 +101,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableDefersOrdinaryDrainCompletion(t
 		t.Fatalf("Get before: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -695,7 +695,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
@@ -751,7 +751,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with no token: %v", err)
 	}
@@ -785,7 +785,7 @@ func verifiedStopTokenFixture(t *testing.T, readErr error) (beads.Store, *runtim
 func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
 	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable))
 
-	err := verifiedStop(info, store, sp, nil)
+	err := verifiedStop("", info, store, sp, nil)
 	if !errors.Is(err, errTokenUnverifiable) || errors.Is(err, errTokenMismatch) {
 		t.Fatalf("verifiedStop error = %v, want errTokenUnverifiable (not errTokenMismatch)", err)
 	}
@@ -799,7 +799,7 @@ func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
 func TestVerifiedStopProceedsOnMetaUnsupported(t *testing.T) {
 	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("exec get-meta: %w", runtime.ErrMetaUnsupported))
 
-	if err := verifiedStop(info, store, sp, nil); err != nil {
+	if err := verifiedStop("", info, store, sp, nil); err != nil {
 		t.Fatalf("verifiedStop error = %v, want nil on ErrMetaUnsupported", err)
 	}
 	if sp.IsRunning(info.SessionNameMetadata) {
@@ -994,7 +994,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1048,7 +1048,7 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1095,7 +1095,7 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	// A desired pool slot still has WakeConfig, which should cancel the drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1152,7 +1152,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 
 	// Simulate next tick: wake reasons reappear (store recovered) → cancel drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1220,7 +1220,7 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		store,
@@ -1292,7 +1292,7 @@ func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		store,
@@ -1384,7 +1384,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 
 	// Simulate next tick: wake reasons reappear → cancel drain before interrupt.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1434,7 +1434,7 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	})
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1481,7 +1481,7 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1535,7 +1535,7 @@ func TestAdvanceSessionDrains_TimeoutUnverifiableTokenKeepsDrain(t *testing.T) {
 	})
 	trace := newPoolDesiredStateTestTrace("worker")
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, trace)
@@ -1703,7 +1703,7 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 		generation: 3,
 	})
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1747,7 +1747,7 @@ func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
 		t.Fatal("expected idle probe to start")
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -1865,7 +1865,7 @@ func TestS1CanonicalDrainCancellationReopensAdmission(t *testing.T) {
 				t.Fatalf("ACK did not establish drain gate: %v", readErr)
 			}
 			tracker.get(fixture.seat.ID).admissionAttempt = cell.Drain.Attempt
-			advanceSessionDrainsWithSessionsTraced(tracker, sp, fixture.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+			advanceSessionDrainsWithSessionsTraced("", tracker, sp, fixture.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 				row, err := fixture.store.Get(id)
 				if err != nil {
 					return nil
@@ -1958,7 +1958,7 @@ func TestS1ControllerDrainIssueAndTimeoutUseCapturedAttempt(t *testing.T) {
 				return &row
 			})
 			advance := func(wake map[string]wakeEvaluation) {
-				advanceSessionDrainsWithSessionsTraced(env.dt, env.sp, interleaved, lookup, wake, env.cfg, env.clk, nil)
+				advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, interleaved, lookup, wake, env.cfg, env.clk, nil)
 			}
 			advance(nil)
 			if scenario == "cancel-before-timeout" {
@@ -2046,7 +2046,7 @@ func TestS1DelayedControllerPublicationCannotAdoptReplacementDrain(t *testing.T)
 	})
 	done := make(chan struct{})
 	go func() {
-		advanceSessionDrainsWithSessionsTraced(env.dt, paused, mem, lookup, nil, env.cfg, env.clk, nil)
+		advanceSessionDrainsWithSessionsTraced("", env.dt, paused, mem, lookup, nil, env.cfg, env.clk, nil)
 		close(done)
 	}()
 	select {

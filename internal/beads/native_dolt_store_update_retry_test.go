@@ -90,11 +90,12 @@ var errNativeSerializationConflict = errors.New(
 func conflictThenSucceedStorage(conflicts int32) (*nativeDoltStorageSpy, *int32) {
 	var attempts int32
 	spy := &nativeDoltStorageSpy{
-		runInTransaction: func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		runInTransaction: func(_ context.Context, _ string, _ func(beadslib.Transaction) error) error {
 			if atomic.AddInt32(&attempts, 1) <= conflicts {
 				return errNativeSerializationConflict
 			}
-			return fn(nil)
+			// The update's write body is not under test, only how often it is attempted.
+			return nil
 		},
 	}
 	return spy, &attempts
@@ -116,7 +117,7 @@ func TestNativeDoltStoreUpdateRetriesSerializationConflictWithWriteRetryDisabled
 		t.Fatal("test store has writeRetryEnabled set; this must assert the production default (off)")
 	}
 
-	if err := store.Update("gc-1", UpdateOpts{}); err != nil {
+	if err := store.Update("gc-1", UpdateOpts{Metadata: map[string]string{"state": "suspended"}}); err != nil {
 		t.Fatalf("Update() = %v, want the lost serialization race retried and committed", err)
 	}
 	if got := atomic.LoadInt32(attempts); got != 2 {
@@ -130,7 +131,7 @@ func TestNativeDoltStoreUpdateSerializationConflictIsBounded(t *testing.T) {
 	spy, attempts := conflictThenSucceedStorage(1 << 30)
 	store := newNativeDoltStoreForTest(spy)
 
-	err := store.Update("gc-1", UpdateOpts{})
+	err := store.Update("gc-1", UpdateOpts{Metadata: map[string]string{"state": "suspended"}})
 	if err == nil {
 		t.Fatal("Update() = nil, want the exhausted conflict surfaced")
 	}
@@ -157,7 +158,7 @@ func TestNativeDoltStoreUpdateConflictRetryDoesNotReconnect(t *testing.T) {
 		return spy, nil
 	}
 
-	if err := store.Update("gc-1", UpdateOpts{}); err != nil {
+	if err := store.Update("gc-1", UpdateOpts{Metadata: map[string]string{"state": "suspended"}}); err != nil {
 		t.Fatalf("Update() = %v, want the conflict retried to success", err)
 	}
 	if got := atomic.LoadInt32(attempts); got != 2 {
@@ -181,7 +182,7 @@ func TestNativeDoltStoreUpdateDoesNotRetryAmbiguousError(t *testing.T) {
 	}
 	store := newNativeDoltStoreForTest(spy)
 
-	err := store.Update("gc-1", UpdateOpts{})
+	err := store.Update("gc-1", UpdateOpts{Metadata: map[string]string{"state": "suspended"}})
 	if err == nil {
 		t.Fatal("Update() = nil, want the ambiguous write error surfaced")
 	}
@@ -190,5 +191,33 @@ func TestNativeDoltStoreUpdateDoesNotRetryAmbiguousError(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Fatalf("RunInTransaction attempts = %d, want exactly 1 (no blind replay)", got)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflict(t *testing.T) {
+	var attempts int32
+	store := newNativeDoltStoreForTest(conflictThenOKStorage(1, &attempts))
+
+	if err := store.SetMetadataBatch("gc-1", map[string]string{"gc.step_ref": "build"}); err != nil {
+		t.Fatalf("SetMetadataBatch after one serialization conflict: got %v, want nil", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("transaction attempts = %d, want 2 (one conflict, one retry)", got)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchStopsAtAttemptLimit(t *testing.T) {
+	var attempts int32
+	store := newNativeDoltStoreForTest(conflictThenOKStorage(int32(nativeWriteAttempts), &attempts))
+
+	err := store.SetMetadataBatch("gc-1", map[string]string{"gc.step_ref": "build"})
+	if err == nil {
+		t.Fatal("SetMetadataBatch with unrelenting conflicts: got nil, want the serialization error")
+	}
+	if !isNativeDoltSerializationConflict(err) {
+		t.Fatalf("returned error lost its serialization-conflict identity: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != int32(nativeWriteAttempts) {
+		t.Fatalf("transaction attempts = %d, want %d", got, nativeWriteAttempts)
 	}
 }

@@ -480,7 +480,7 @@ func stringSlicesEqual(a, b []string) bool {
 // --- End-to-end: nextWorkflowServeBeads wiring (cache + fallback) ---
 
 // setUpControlReadyFileStoreCity builds a scope-local FileStore-backed city
-// so tryControlReadyFromCacheOrFallback's cache path can PrimeActive() and
+// so tryControlReadyScan's cache path can PrimeActive() and
 // CachedReady() without any bd/dolt process at all, and returns the opened
 // store for seeding fixture beads directly.
 func setUpControlReadyFileStoreCity(t *testing.T) (cityDir string, store *beads.FileStore) {
@@ -663,12 +663,12 @@ func TestTryControlReadyFromCacheOrFallbackReadsLiveLegWithZeroSubprocessCalls(t
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
+		t.Fatalf("tryControlReadyScan: handled = false, want true for a control-ready query")
 	}
 
 	var gotIDs []string
@@ -683,7 +683,7 @@ func TestTryControlReadyFromCacheOrFallbackReadsLiveLegWithZeroSubprocessCalls(t
 
 func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
-	_, handled, err := tryControlReadyFromCacheOrFallback("bd ready --json --limit=20", cityDir, nil)
+	_, handled, err := tryControlReadyScan("bd ready --json --limit=20", cityDir, nil)
 	if handled {
 		t.Fatalf("handled = true, want false for a non-control-ready query")
 	}
@@ -735,9 +735,9 @@ esac
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true")
@@ -1086,7 +1086,7 @@ func TestControlReadySummaryFailureBackoffIncludesEphemeralQueries(t *testing.T)
 			env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd"}
 			check := func(dir string) {
 				t.Helper()
-				queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+				queue, handled, err := tryControlReadyScan(query, dir, env)
 				if !handled || len(queue) != 0 || err == nil {
 					t.Fatalf("result = %#v, %v, %v; want error without scheduled work", queue, handled, err)
 				}
@@ -1138,7 +1138,7 @@ func TestControlReadySummaryPrimeFailureBacksOffPerDirectory(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	env := map[string]string{citylayout.RealBdEnvVar: "/real/bd", "GC_BEADS": "bd", "GC_STORE_SCOPE": "rig"}
 	for i := 0; i < 2; i++ {
-		queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+		queue, handled, err := tryControlReadyScan(query, dir, env)
 		var integrityErr *controlReadySummaryIntegrityError
 		if !handled || queue != nil || !errors.As(err, &integrityErr) {
 			t.Fatalf("attempt %d = queue:%#v handled:%v err:%v; want typed fail-closed error", i+1, queue, handled, err)
@@ -1243,9 +1243,9 @@ func TestControlReadySummaryPathIssuesExactlyOneBdCall(t *testing.T) {
 		env[parts[0]] = parts[1]
 	}
 
-	_, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, env)
+	_, handled, err := tryControlReadyScan(query, cityDir, env)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true for a control-ready query")
@@ -1387,9 +1387,9 @@ func TestTryControlReadyFallsBackToScopedSummariesWhenWholeSetSummaryIncomplete(
 	}
 
 	dir := t.TempDir()
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	queue, handled, err := tryControlReadyScan(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v (an incomplete whole-set summary must fall back, not blind the dispatcher)", err)
+		t.Fatalf("tryControlReadyScan: %v (an incomplete whole-set summary must fall back, not blind the dispatcher)", err)
 	}
 	if !handled {
 		t.Fatal("handled = false, want true for a control-ready query")
@@ -1426,7 +1426,7 @@ func TestTryControlReadyIncompleteSummaryFallbackStaysLoudWhenScopedFails(t *tes
 	}
 
 	dir := t.TempDir()
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
+	queue, handled, err := tryControlReadyScan(query, dir, map[string]string{citylayout.RealBdEnvVar: "/real/bd"})
 	if err == nil {
 		t.Fatalf("err = nil, queue = %#v; a failed scoped fallback must stay loud", queue)
 	}
@@ -1481,8 +1481,8 @@ func controlReadyIncompleteFallbackHarness(t *testing.T, perCall time.Duration) 
 		t.Helper()
 		// A scan that reuses a memoized round must not be counted as a new one.
 		lastRoundStart = -1
-		if _, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env); err != nil || !handled {
-			t.Fatalf("tryControlReadyFromCacheOrFallback: handled=%v err=%v", handled, err)
+		if _, handled, err := tryControlReadyScan(query, dir, env); err != nil || !handled {
+			t.Fatalf("tryControlReadyScan: handled=%v err=%v", handled, err)
 		}
 	}
 	return &clock, &roundCount, scan
@@ -1538,4 +1538,17 @@ func TestControlReadyFallbackTTL(t *testing.T) {
 			t.Errorf("controlReadyFallbackTTL(%s) = %s, want %s", tc.round, got, tc.want)
 		}
 	}
+}
+
+// resetControlReadyCache clears the per-dir readiness snapshot registry so a
+// test observes a fresh scan rather than one memoized inside controlReadyCacheTTL.
+func resetControlReadyCache(t *testing.T) {
+	t.Helper()
+	flush := func() {
+		controlReadyCacheRegistry.mu.Lock()
+		defer controlReadyCacheRegistry.mu.Unlock()
+		controlReadyCacheRegistry.byDir = make(map[string]*controlReadyCacheEntry)
+	}
+	flush()
+	t.Cleanup(flush)
 }

@@ -86,6 +86,7 @@ func (f *prePushFixture) pushRefLine() string {
 }
 
 func TestPrePushSuiteModeSelection(t *testing.T) {
+	skipIfPrePushSuiteDisabled(t)
 	for _, tc := range []struct {
 		name      string
 		bazel     bool
@@ -164,6 +165,7 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 // without bazel, or a mistyped mode, must fail the push instead of quietly
 // running a different suite.
 func TestPrePushSuiteRejectsUnusableModes(t *testing.T) {
+	skipIfPrePushSuiteDisabled(t)
 	for _, tc := range []struct {
 		name     string
 		bazel    bool
@@ -210,6 +212,7 @@ func TestPrePushSuiteRejectsUnusableModes(t *testing.T) {
 // TestPrePushSuitePropagatesBazelFailure: a failing bazel suite blocks the
 // push with bazel's exit code, and never retries under go test.
 func TestPrePushSuitePropagatesBazelFailure(t *testing.T) {
+	skipIfPrePushSuiteDisabled(t)
 	f := newPrePushFixture(t)
 	f.withFakeBazel(t, announceHome)
 	f.env = append(f.env, "GC_PREPUSH_SUITE=", "BAZEL_EXIT=3")
@@ -229,6 +232,7 @@ func TestPrePushSuitePropagatesBazelFailure(t *testing.T) {
 // the go suite instead; remote execution and an explicit cache mode are
 // unaffected.
 func TestPrePushSuiteAutoNeedsGoOnPinnedPath(t *testing.T) {
+	skipIfPrePushSuiteDisabled(t)
 	for _, tc := range []struct {
 		name      string
 		goOnPath  bool

@@ -57,3 +57,16 @@ filegroup(
     ),
     visibility = ["//visibility:public"],
 )
+
+go_test(
+    name = "watchdog_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":watchdog_lib"],
+    deps = [
+        "//internal/testenv",
+        "//scripts/prwatchdog",
+    ],
+)

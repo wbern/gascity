@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,10 +78,7 @@ type controllerState struct {
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
-	// onDeathGate is the city runtime's on_death start interlock, set when
-	// its inventory lane starts; nil holds nothing.
-	onDeathGate atomic.Pointer[onDeathGate]
-	cfg         *config.City
+	cfg           *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -951,8 +947,6 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
-	// Only the v2 router asks whether the event landed in the sessions store.
-	appliedToSessions := wake.routes() && slices.Contains(stores, resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv))
 	cs.mu.RUnlock()
 
 	// A cache event (either actor) carries a CachingStore's own post-absorb
@@ -976,7 +970,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
+	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheReconcileActor {
 			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })
@@ -1836,14 +1830,6 @@ func (cs *controllerState) IsQuarantined(sessionName string) bool {
 	}
 	return ct.isQuarantined(sessionName, time.Now())
 }
-
-// OnDeathHookPending reports whether sessionName's on_death hook is queued
-// or running, so an API start must leave it to the reconciler.
-func (cs *controllerState) OnDeathHookPending(sessionName string) bool {
-	return cs.onDeathGate.Load().Pending(sessionName)
-}
-
-var _ api.OnDeathHookGate = (*controllerState)(nil)
 
 // ClearCrashHistory removes in-memory crash tracking for a session.
 func (cs *controllerState) ClearCrashHistory(sessionName string) {

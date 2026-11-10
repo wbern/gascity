@@ -789,7 +789,7 @@ var controlReadyNow = time.Now
 //
 // The snapshots are taken over the SAME ledgers
 // runControlDispatcherWithStoreAndConfig dispatches against —
-// controlReadyCacheSources applies the routing rule controlBeadLedger resolves
+// controlReadyLegSources applies the routing rule controlBeadLedger resolves
 // against — so the queue and the mutation are the same set. They must not
 // diverge. A queue drawn from the work store while the dispatch closes the
 // binding's copy re-offers the same id every tick -- ProcessControl no-ops on
@@ -880,11 +880,11 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City, env map[string
 }
 
 // primeControlReadyCaches opens and primes one CachingStore snapshot per leg
-// (see controlReadyCacheSources), closing the scoped backing it opened once
+// (see controlReadyLegSources), closing the scoped backing it opened once
 // every leg is in memory. It returns nil when any leg cannot be opened or
 // primed.
 func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
-	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
+	sources, owned, err := controlReadyLegSourcesFn(dir, cityPath, cfg)
 	if err != nil {
 		return nil
 	}
@@ -899,7 +899,7 @@ func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.Ca
 	// mark. This defer fires on BOTH the prime-failure early return and the
 	// success path, so a prime that fails partway still closes whatever it
 	// opened. Only owned legs are closed; the graph binding is process-shared
-	// (see controlReadyCacheSources).
+	// (see controlReadyLegSources).
 	defer func() {
 		for _, s := range owned {
 			if err := closeBeadStoreHandle(s); err != nil {
@@ -922,7 +922,7 @@ func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.Ca
 	return caches
 }
 
-// controlReadyCacheSources returns the ordered ledgers to snapshot, applying the
+// controlReadyLegSources returns the ordered ledgers to snapshot, applying the
 // same routing rule as controlReadyFallbackReady so the cached answer and the
 // fallback answer cannot disagree about which stores hold this scope's queue.
 //
@@ -942,8 +942,8 @@ func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.Ca
 // before an error return would have nothing to close it. Today the sole error
 // return IS the failed open, so nothing is open on that path; an arm added
 // later that can fail after a successful open must close what it opened before
-// returning. The same obligation binds any controlReadyCacheSourcesFn seam.
-func controlReadyCacheSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
+// returning. The same obligation binds any controlReadyLegSourcesFn seam.
+func controlReadyLegSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
 	// A relocated CITY scope does not open its scope store at all — that would
 	// be a bd process this scan never reads. The binding is process-shared, so
 	// nothing here owns it.
@@ -960,10 +960,10 @@ func controlReadyCacheSources(dir, cityPath string, cfg *config.City) (sources, 
 	return []beads.Store{scoped}, []beads.Store{scoped}, nil
 }
 
-// controlReadyCacheSourcesFn is the test seam for controlReadyCacheSources,
+// controlReadyLegSourcesFn is the test seam for controlReadyLegSources,
 // following the package's own var-seam idiom (cf. controlDispatcherServe,
-// dispatch_runtime.go). Production always uses controlReadyCacheSources.
-var controlReadyCacheSourcesFn = controlReadyCacheSources
+// dispatch_runtime.go). Production always uses controlReadyLegSources.
+var controlReadyLegSourcesFn = controlReadyLegSources
 
 // cachedControlReadyUnion merges the cached ready sets, requiring EVERY leg to
 // answer from cache. A leg that is dirty or still priming sends the whole scan
@@ -987,13 +987,13 @@ func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) 
 	return mergeControlReadyLegs(legs...), true
 }
 
-// controlReadyLiveLegsReady reads the same authoritative legs as dispatch,
+// controlReadyLegsReady reads the same authoritative legs as dispatch,
 // once each, without a primed snapshot or a bounded discovery projection.
 // This is the live-read path from upstream #7404/#7446. Unlike the shell
 // fallback, it keeps the complete ready set until route selection: truncating
 // before selection can hide a control behind unrelated ready work.
-func controlReadyLiveLegsReady(dir, cityPath string, cfg *config.City) ([]beads.Bead, bool, error) {
-	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
+func controlReadyLegsReady(dir, cityPath string, cfg *config.City) ([]beads.Bead, bool, error) {
+	sources, owned, err := controlReadyLegSourcesFn(dir, cityPath, cfg)
 	if err != nil {
 		log.Printf("control-ready scan: opening ledgers for %s: %v; using discovery fallback", dir, err)
 		return nil, false, nil
@@ -1025,7 +1025,7 @@ func controlReadyLiveLegsReady(dir, cityPath string, cfg *config.City) ([]beads.
 	return mergeControlReadyLegs(legs...), true, nil
 }
 
-// tryControlReadyFromCacheOrFallback answers a control-dispatcher readiness
+// tryControlReadyScan answers a control-dispatcher readiness
 // scan in-process instead of running workflowServeControlReadyQueryForBeads's
 // shell script. handled reports whether workQuery was even recognized as a
 // control-ready query; when handled is false the caller must run workQuery
@@ -1033,7 +1033,7 @@ func controlReadyLiveLegsReady(dir, cityPath string, cfg *config.City) ([]beads.
 // control-dispatcher readiness, not the decision logic (ga-ak6rt1): candidate
 // precedence, legacy/bare route aliasing, and the instantiating-metadata
 // dedup filter are reproduced exactly by evaluateControlReady.
-func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]string) (queue []hookBead, handled bool, err error) {
+func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []hookBead, handled bool, err error) {
 	parsed, ok := parseControlReadyQuery(workQuery)
 	if !ok {
 		return nil, false, nil
@@ -1043,7 +1043,7 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
-	if ready, opened, err := controlReadyLiveLegsReady(dir, cityPath, cfg); opened {
+	if ready, opened, err := controlReadyLegsReady(dir, cityPath, cfg); opened {
 		if err != nil {
 			return nil, true, err
 		}

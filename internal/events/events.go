@@ -493,6 +493,10 @@ const (
 	// envelope. Adding the typed projection (and KnownEventTypes membership) is a
 	// follow-up, tracked alongside the store-side breaker event (gcw-aknw).
 	PoolRespawnBackoffArmed = "pool.respawn_backoff_armed"
+	// ReconcilerAlert is the v2 session reconciler's operator alert: a
+	// condition that should never happen, or that needs an operator. The
+	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
+	ReconcilerAlert = "reconciler.alert"
 
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
@@ -612,12 +616,12 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert, SessionStartStalled, and PoolRespawnBackoffArmed
-	// are intentionally omitted from KnownEventTypes. They are emitted by the
-	// reconciler but their typed SSE payloads are not yet registered in
-	// internal/api (the payload registration lives in a follow-up that adds the
-	// full SSE projection). Until then, subscribers receive them via the
-	// custom-event envelope.
+	// ProviderHealthGateAlert, SessionStartStalled, PoolRespawnBackoffArmed and
+	// ReconcilerAlert are intentionally omitted from KnownEventTypes. They are
+	// emitted by the reconciler but their typed SSE payloads are not yet
+	// registered in internal/api (the payload registration lives in a follow-up
+	// that adds the full SSE projection). Until then, subscribers receive them
+	// via the custom-event envelope.
 }
 
 // Event is a single recorded occurrence in the system.

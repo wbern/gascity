@@ -888,6 +888,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 		Message    string `json:"message"`
 		Intent     string `json:"intent"`
 		ReplaceKey string `json:"replace_key"`
+		Resume     bool   `json:"resume"`
 	}
 	var sawPost bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -932,6 +933,10 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	}
 	if gotBody.ReplaceKey != "campaign:daily:v1" {
 		t.Fatalf("replace_key = %q, want campaign:daily:v1", gotBody.ReplaceKey)
+	}
+	// `gc session submit` is an operator's own send (CONTRACT v5.9 D8).
+	if !gotBody.Resume {
+		t.Fatal("resume = false, want gc session submit to resume a held session")
 	}
 	if resp.Status != "accepted" || resp.ID != "sess-123" || !resp.Queued || resp.Intent != session.SubmitIntentInterruptNow {
 		t.Fatalf("response = %#v, want accepted queued interrupt_now for sess-123", resp)

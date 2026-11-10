@@ -34,7 +34,7 @@ func runPackScript(t *testing.T, script, binDir string, skipEnv map[string]struc
 	t.Helper()
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+1+len(extraEnv))
+	env := make([]string, 0, len(inherited)+2+len(extraEnv))
 	for _, entry := range inherited {
 		if key, _, ok := strings.Cut(entry, "="); ok {
 			if _, skip := skipEnv[key]; skip {
@@ -44,6 +44,10 @@ func runPackScript(t *testing.T, script, binDir string, skipEnv map[string]struc
 		env = append(env, entry)
 	}
 	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// escalate.py keeps a per-subject dedup ledger under GC_PACK_STATE_DIR.
+	// Isolate it per test so identical subjects across tests are not
+	// suppressed and no state lands in the package directory.
+	env = append(env, "GC_PACK_STATE_DIR="+t.TempDir())
 	env = append(env, extraEnv...)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()

@@ -821,7 +821,7 @@ func TestS1NoArgumentDelayedAckCannotSurviveCanonicalCancellation(t *testing.T) 
 	env.addDesired("worker-1", "worker", false)
 	now := env.clk.Now()
 	env.dt.set(f.seat.ID, &drainState{reason: "wait-hold", generation: 7, admissionAttempt: oldAttempt, startedAt: now.Add(-time.Second), deadline: now.Add(time.Minute)})
-	advanceSessionDrainsWithSessionsTraced(env.dt, sp, f.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", env.dt, sp, f.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		row, err := f.store.Get(id)
 		if err != nil {
 			return nil
@@ -1212,7 +1212,7 @@ func TestS1OverwrittenControllerFrameRepublishesCapturedAttempt(t *testing.T) {
 	dt.set(info.ID, ds)
 	env := newReconcilerTestEnv()
 	ds.deadline = env.clk.Now().Add(time.Hour)
-	advanceSessionDrainsWithSessionsTraced(dt, sp, f.store, func(id string) (session.Info, bool) { return info, id == info.ID }, map[string]wakeEvaluation{}, f.cfg, env.clk, nil)
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, f.store, func(id string) (session.Info, bool) { return info, id == info.ID }, map[string]wakeEvaluation{}, f.cfg, env.clk, nil)
 	frame, err := readDrainAckFrame(info, sp, "worker-1")
 	if err != nil || frame.Attempt != b || frame.Reason != ds.reason || !ds.ackSet || ds.admissionAttempt != b {
 		t.Fatalf("captured B not republished: frame=%+v state=%+v err=%v", frame, ds, err)

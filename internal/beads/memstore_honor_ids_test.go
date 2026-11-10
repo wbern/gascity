@@ -239,7 +239,9 @@ func TestMemStorePinnedIDSuffixConsumption(t *testing.T) {
 	}{
 		{"gc-42", "gc-43"},
 		{"gc-0", "gc-1"},
-		{"42", "gc-43"},
+		// A bare number is not a "<prefix>-<n>" id, so it cannot collide with a minted
+		// id and consumes no slot (upstream strict suffix parse, #6834).
+		{"42", "gc-1"},
 		{"gc-wisp-abc", "gc-1"},
 		{"gc-", "gc-1"},
 		{"gc-12x", "gc-1"},

@@ -270,6 +270,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		managedDoltDataDir = layout.DataDir
 	}
 
+	var reconcilerCheck *sessionReconcilerDoctorCheck
+
 	// Core checks — always run.
 	register(&doctor.CityStructureCheck{})
 	register(&doctor.CityConfigCheck{})
@@ -296,7 +298,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewSlingTargetsOverrideCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
-		register(newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv))
+		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
+		register(reconcilerCheck)
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
@@ -458,6 +461,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
+			if !cityStoreStopped {
+				reconcilerCheck.capabilities = func() ([]v2StoreCapability, error) {
+					store, err := storeFactory(cityPath)
+					if err != nil {
+						return nil, err
+					}
+					routes := cliStorageRoutes(cityPath)
+					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil), true), nil
+				}
+			}
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newBacklogDepthCheck(cityPath, storeFactory))
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))

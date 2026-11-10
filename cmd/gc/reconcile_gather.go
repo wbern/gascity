@@ -41,9 +41,14 @@ type gatherEnv struct {
 	Env                func() *reconcileEnv
 	// Sessions is the sessions-class store: the census's leading leg and the
 	// demand gather's city store.
-	Sessions     func() beads.Store
-	RigStores    func() map[string]beads.Store
-	Recording    func() *externalReadsRecording // K1's latest; nil before the first
+	Sessions   func() beads.Store
+	RigStores  func() map[string]beads.Store
+	Recording  func() *externalReadsRecording // K1's latest; nil before the first
+	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
+	// Nudges and WorkStore are the nudges-class and city work stores C8's
+	// steps write through.
+	Nudges       func() beads.NudgesStore
+	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
 	Capacity     func() *endpointCapacityGuard
 	Health       func() *providerHealthSnapshot
@@ -61,9 +66,10 @@ type gatherEnv struct {
 // World is one pass's inputs (architecture §1.2), immutable once gathered:
 // every map is the pass's own or never mutated after publish.
 type World struct {
-	Now    time.Time
-	Env    *reconcileEnv
-	Census *sessionCensus
+	Now      time.Time
+	CityPath string // the runtime name locks' city (lockRuntimeName)
+	Env      *reconcileEnv
+	Census   *sessionCensus
 	// Mislabelled are the canonical rows with no template and no session
 	// name: beads labeled gc:session that are not sessions. Arm A1 makes
 	// each None with one trace (CONTRACT v5 AL1).
@@ -86,8 +92,25 @@ type World struct {
 	Episodes          map[string]session.StartupHealthEpisode
 	SleepPolicies     map[string]resolvedSessionSleepPolicy // by bead ID
 	TransportRefused  map[string]string                     // by qualified name
-	ReadyWaits        map[string]bool                       // nil until P4.3
+	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
+	// ExecutionStalled are the execution backstop's drain requests by row
+	// ID, for arm A16 (C7b1).
+	ExecutionStalled map[string]executionStalledRequest
+	// LegStores holds the sessions leg's store by its ref, which effects
+	// reach only as a fenced writer (newEffectPass). No other leg's store is
+	// here: a census-only row has no writer (AL1, armCensusOnly).
+	LegStores map[string]beads.Store
+	// InputAges are the inputs' ages at Now, for the pass record.
+	InputAges map[string]time.Duration
+	// SessionsStore and RigStores are the stores the census was planned
+	// over, which only creates reach (newCreatePass). The sessions leg's
+	// ref is Census.sessionsLeg().
+	SessionsStore beads.Store
+	RigStores     map[string]beads.Store
+	// fresh is one row's fresh runtime read, which the fresh accessors read
+	// in its pass's stead (withRuntime): set only inside an effect.
+	fresh *freshRow
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -104,7 +127,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()
@@ -116,7 +139,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	store, rigs := e.Sessions(), e.RigStores()
 	cache, ok := demandLabelKey(store).(interface{ IsLive() bool }) // a *beads.CachingStore
-	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.AllPrimed()}
+	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.allPrimedOrConfirmedDead()}
 	if !w.Boot.CachePrimed {
 		p.boot = w.Boot
 		return w, errGatherCacheUnprimed
@@ -129,6 +152,17 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
+	w.ExecutionStalled = p.executionStalled(w.Census)
+	if e.ReadyWaits != nil {
+		w.ReadyWaits = e.ReadyWaits()
+	}
+	w.SessionsStore, w.RigStores = store, rigs
+	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
+	all := make(map[string]beads.Store, len(legs))
+	for _, l := range legs {
+		all[l.ref] = l.store
+	}
+	w.InputAges = inputAges(now, all, w.Obs, rec)
 	rows := w.Census.Canonical()
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {
@@ -170,7 +204,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 }
 
 // gatherGates reads each endpoint's breaker the pass may act on: every
-// census row's and every configured agent's (endpointKeyForAgent), with the
+// census row's (rowEndpoint) and every configured agent's, with the
 // census rows' refusals this episode.
 func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) map[endpointKey]endpointView {
 	gates := make(map[endpointKey]endpointView)
@@ -187,7 +221,7 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 		}
 	}
 	for _, row := range rows {
-		k := endpointKeyForAgent(cfg, findAgentByTemplate(cfg, normalizedSessionTemplateInfo(row.Info, cfg)), row.Info)
+		k := rowEndpoint(cfg, row.Info)
 		if k == "" {
 			continue
 		}
@@ -240,7 +274,15 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	if err != nil {
 		return externalReadsEnv{}, err
 	}
-	return k1Env(e, env, suspended, censusDemandEnv(census, store, rigs)), nil
+	k1 := k1Env(e, env, suspended, censusDemandEnv(census, store, rigs))
+	k1.SP = env.SP
+	if e.Nudges != nil {
+		k1.Nudges = e.Nudges()
+	}
+	if e.WorkStore != nil {
+		k1.WorkStore = e.WorkStore()
+	}
+	return k1, nil
 }
 
 // censusDemandEnv is the demand gather's stores and its two session inputs

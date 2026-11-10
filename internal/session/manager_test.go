@@ -621,7 +621,7 @@ func TestStartRefusesResumeWhenOrphanNotConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator)
 	if err == nil {
 		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -671,7 +671,7 @@ func TestStartProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -734,7 +734,7 @@ func TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead(t *testing.T) {
 	}
 	sp.events = nil
 
-	err = mgr.Start(context.Background(), b.ID, "claude", runtime.Config{WorkDir: "/tmp"})
+	err = mgr.Start(context.Background(), b.ID, "claude", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err == nil {
 		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -2341,7 +2341,7 @@ func TestStartRefusesControllerManagedFreshStart(t *testing.T) {
 		t.Fatalf("SetMetadata(continuation_reset_pending): %v", err)
 	}
 
-	err = mgr.Start(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	err = mgr.Start(context.Background(), info.ID, "claude --resume", runtime.Config{}, ResumeOperator)
 	if !errors.Is(err, ErrFreshStartPending) {
 		t.Fatalf("Start error = %v, want %v", err, ErrFreshStartPending)
 	}
@@ -2483,6 +2483,72 @@ func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
 	}
 	if got.State != StateSuspended {
 		t.Fatalf("State = %q, want %q", got.State, StateSuspended)
+	}
+}
+
+// TestSuspend_DownedServerSucceeds pins suspend as a cleanup path: tmux
+// Provider.Stop reports a missing server as ErrNoServer, and a long-lived
+// process's state cache can still report the session running for its stale
+// TTL. Without runtime.StopForCleanup, `gc suspend` and the `gc stop` sweep
+// fail against a dead server with nothing left to stop. A real stop failure,
+// alone or joined beside a missing-server answer, still fails the suspend. The
+// fake has no runtime.ServerDeathConfirmer, so the missing server is taken as
+// dead; TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds pins the
+// confirmation against real tmux.
+func TestSuspend_DownedServerSucceeds(t *testing.T) {
+	stopFailed := errors.New("terminate: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session sky: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		for _, entry := range []struct {
+			name    string
+			suspend func(*Manager, string) error
+		}{
+			{name: "Suspend", suspend: (*Manager).Suspend},
+			{name: "SuspendForShutdown", suspend: (*Manager).SuspendForShutdown},
+		} {
+			t.Run(tc.name+"/"+entry.name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				sp := runtime.NewFake()
+				mgr := NewManagerWithOptions(store, sp)
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				// The fake keeps reporting the session running, as a stale cache does.
+				sp.StopErrors[info.SessionName] = tc.stopErr
+
+				err = entry.suspend(mgr, info.ID)
+				if !providerSawStop(sp, info.SessionName) {
+					t.Fatal("suspend did not ask the provider to stop the session")
+				}
+				got, getErr := mgr.Get(info.ID)
+				if getErr != nil {
+					t.Fatalf("Get: %v", getErr)
+				}
+				if tc.wantErr == nil {
+					if err != nil {
+						t.Fatalf("%s against a downed server: %v", entry.name, err)
+					}
+					if got.State != StateSuspended {
+						t.Fatalf("State = %q, want %q", got.State, StateSuspended)
+					}
+					return
+				}
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("%s with a real stop failure = %v, want %v", entry.name, err, tc.wantErr)
+				}
+				if got.State == StateSuspended {
+					t.Fatal("suspend recorded the session suspended over a live runtime")
+				}
+			})
+		}
 	}
 }
 
@@ -3730,7 +3796,7 @@ func TestSendResumesSuspendedSession(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3769,7 +3835,7 @@ func TestSendImmediateUsesImmediateNudge(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if err := mgr.SendImmediate(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.SendImmediate(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("SendImmediate: %v", err)
 	}
 
@@ -3798,7 +3864,7 @@ func TestSendImmediateFallsBackToDefaultNudge(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{}); err != nil {
+	if _, err := mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator); err != nil {
 		t.Fatalf("SendImmediate: %v", err)
 	}
 
@@ -3829,9 +3895,9 @@ func TestSendResumesSuspendedSession_SyncsGCDirFromBeadWorkDir(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{
 		Env: map[string]string{"GC_DIR": "/stale/worktree"},
-	})
+	}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -3871,7 +3937,7 @@ func TestSendResumesSuspendedSession_PersistsBackfilledInstanceToken(t *testing.
 		t.Fatalf("clear instance_token: %v", err)
 	}
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3898,7 +3964,7 @@ func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3934,7 +4000,7 @@ func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
 
 	autoSP.Unroute(info.SessionName)
 
-	if err := mgr.Send(context.Background(), info.ID, "hello again", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello again", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3992,7 +4058,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 		return ""
 	}))
 
-	if err := mgr.Send(context.Background(), legacy.ID, "hello from legacy", "", runtime.Config{}); err != nil {
+	if _, err := mgr.Send(context.Background(), legacy.ID, "hello from legacy", "", runtime.Config{}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -4321,7 +4387,7 @@ func TestSendConvergesWhenSessionAlreadyResumed(t *testing.T) {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -4357,7 +4423,7 @@ func TestSendRequiresResumeCommandForSuspendedSession(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
 	if !errors.Is(err, ErrResumeRequired) {
 		t.Fatalf("Send error = %v, want ErrResumeRequired", err)
 	}
@@ -4376,7 +4442,7 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("Send error = %v, want ErrSessionClosed", err)
 	}
@@ -4400,7 +4466,7 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	}
 	sp.startErr = errors.New("out of memory")
 
-	err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
 	}
@@ -4708,7 +4774,7 @@ func TestSendRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
 	if !errors.Is(err, ErrPendingInteraction) {
 		t.Fatalf("Send error = %v, want %v", err, ErrPendingInteraction)
 	}
@@ -4735,7 +4801,7 @@ func TestSendImmediateRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	err = mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{})
+	_, err = mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
 	if !errors.Is(err, ErrPendingInteraction) {
 		t.Fatalf("SendImmediate error = %v, want %v", err, ErrPendingInteraction)
 	}
@@ -5224,7 +5290,7 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 	sp.armed = true
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should retry without stale resume flag but failed: %v", err)
 	}
@@ -5270,7 +5336,7 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 
 	sp.callCount = 0
 	resumeCmd := "claude --dangerously --resume " + b.Metadata["session_key"]
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 
 	if err == nil {
 		t.Fatal("Send should fail when both stale-key resume and fresh retry fail")
@@ -5308,7 +5374,8 @@ func TestEnsureRunning_StaleKeyDetectionWaitHonorsContextCancellation(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- mgr.Send(ctx, info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"})
+		_, err := mgr.Send(ctx, info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+		result <- err
 	}()
 	awaitStaleKeyWaiterEntry(t, waiter, info.SessionName)
 	cancel()
@@ -5365,7 +5432,8 @@ func TestManagersUseIndependentStaleKeyDetectionWaiters(t *testing.T) {
 	resume := func(r resumable) <-chan error {
 		result := make(chan error, 1)
 		go func() {
-			result <- r.mgr.Send(context.Background(), r.info.ID, "hello", "claude --resume "+r.info.SessionKey, runtime.Config{WorkDir: "/tmp"})
+			_, err := r.mgr.Send(context.Background(), r.info.ID, "hello", "claude --resume "+r.info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			result <- err
 		}()
 		return result
 	}
@@ -5430,7 +5498,7 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	sp.armed = true
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should retry after startup-death error but failed: %v", err)
 	}
@@ -5492,7 +5560,7 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 
 	// The resume command carries no --resume token, so it is already a valid
 	// fresh-start command. Recovery must succeed rather than wedge.
-	err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume command has no key to strip, got: %v", err)
 	}
@@ -5549,7 +5617,7 @@ func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
 	// keyed strip ("--resume key-B-current") is a no-op against this command;
 	// only the value-agnostic fallback can produce a clean fresh start.
 	resumeCommand := "claude --dangerously --resume key-A-diverged"
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
 	}
@@ -5593,7 +5661,7 @@ func TestEnsureRunning_RetriesWhenResumeKeyDivergedKeepsEarlierResumeText(t *tes
 	sp.armed = true
 
 	resumeCommand := `claude --label "--resume keep-me" --resume key-A-diverged`
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
 	}
@@ -5639,7 +5707,7 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 	sp.armed = true
 
 	resumeCommand := "claude --resume key-A-diverged --dangerously-skip-permissions"
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when explicit resume_command key diverged, got: %v", err)
 	}
@@ -5696,7 +5764,7 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 	// strip ("--session-id key-B-current") cannot match it; only the
 	// value-agnostic fallback produces a clean fresh start.
 	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
 	}
@@ -5767,7 +5835,7 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 	// For a session without resume capability the "resume command"
 	// passed to Send is just the original start command — there is no
 	// --resume flag to add or strip.
-	err = mgr.Send(context.Background(), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err != nil {
 		t.Fatalf("Send should retry fresh when resume_flag is empty but failed: %v", err)
 	}
@@ -5817,7 +5885,7 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 
 	sp.armed = true
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err == nil {
 		t.Fatal("Send should fail when stale resume metadata cannot be cleared")
 	}

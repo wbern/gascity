@@ -31,7 +31,7 @@ func TestSetMetadataBatchBounded_TimesOutWhenStoreBlocks(t *testing.T) {
 	defer close(store.release) // let the leaked write goroutine finish after the test
 
 	start := time.Now()
-	got := setMetadataBatchBounded(store, bead.ID, map[string]string{"k": "v"}, 50*time.Millisecond)
+	got := setMetadataBatchBounded(store, bead.ID, map[string]string{"test_k": "v"}, 50*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if !errors.Is(got, errStartWriteTimedOut) {
@@ -48,14 +48,14 @@ func TestSetMetadataBatchBounded_PassesThroughOnSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setMetadataBatchBounded(mem, bead.ID, map[string]string{"k": "v"}, time.Second); err != nil {
+	if err := setMetadataBatchBounded(mem, bead.ID, map[string]string{"test_k": "v"}, time.Second); err != nil {
 		t.Fatalf("setMetadataBatchBounded: %v", err)
 	}
 	got, err := mem.Get(bead.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Metadata["k"] != "v" {
-		t.Errorf("metadata k = %q, want %q", got.Metadata["k"], "v")
+	if got.Metadata["test_k"] != "v" {
+		t.Errorf("metadata test_k = %q, want %q", got.Metadata["test_k"], "v")
 	}
 }

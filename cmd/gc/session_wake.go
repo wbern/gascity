@@ -901,6 +901,7 @@ func cancelRecoveredSessionDrainAttemptInfoResult(info sessions.Info, sp runtime
 }
 
 func advanceSessionDrainsWithSessionsTraced(
+	cityPath string,
 	dt *drainTracker,
 	sp runtime.Provider,
 	store beads.Store,
@@ -1138,7 +1139,7 @@ func advanceSessionDrainsWithSessionsTraced(
 					}
 				}
 			}
-			if err := verifiedStop(info, store, sp, cfg); err != nil {
+			if err := verifiedStop(cityPath, info, store, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
@@ -1206,7 +1207,7 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := info.SessionNameMetadata
 	expectedToken := info.InstanceToken
 	if expectedToken != "" {
@@ -1217,10 +1218,7 @@ func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cf
 			return &tokenUnverifiableError{sessionID: info.ID, cause: err}
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, info.ID)
-	if err != nil {
-		return err
-	}
-	observeAutonomousKillLiveSubagentsForHandle("session drain timeout", name, handle, log.Writer())
-	return handle.Kill(context.Background())
+	// Decided again under the lease, on a fresh read (controllerKillSessionRow).
+	observeAutonomousKillLiveSubagents("session drain timeout", workerHandleForSessionWithConfig, cityPath, store, sp, cfg, info.ID, log.Writer())
+	return controllerKillSessionRow(cityPath, store, sp, cfg, info)
 }

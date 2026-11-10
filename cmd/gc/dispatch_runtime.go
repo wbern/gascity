@@ -323,6 +323,13 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, cfg, stderr)
@@ -518,6 +525,23 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	stores := workflowServeStores(cityPath, agentCfg, storePath, workEnv, cfg)
+	// Execution emits are deferred per scope store: a root's projection runs
+	// against the store its controls were read from, so a federated serve keeps
+	// one deferral per store it drains.
+	emitsByStore := map[string]*executionEmitDeferral{}
+	emitsFor := func(dir string) *executionEmitDeferral {
+		if emits, ok := emitsByStore[dir]; ok {
+			return emits
+		}
+		emits := newExecutionEmitDeferral(cityPath, dir, stderr)
+		emitsByStore[dir] = emits
+		return emits
+	}
+	defer func() {
+		for _, emits := range emitsByStore {
+			emits.flush()
+		}
+	}()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		var queue []workflowServeStoreCandidate
@@ -532,6 +556,9 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 				return result, fmt.Errorf("querying control work for %s (store %s): %w", agentCfg.QualifiedName(), store.dir, err)
 			}
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emitsFor(store.dir).flushSettled(beadsForStore)
 			for _, b := range beadsForStore {
 				queue = append(queue, workflowServeStoreCandidate{bead: b, storePath: store.dir})
 			}
@@ -563,7 +590,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, candidateStorePath, beadID, io.Discard, stderr); err != nil {
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
+			if err := controlDispatcherServe(cityPath, candidateStorePath, beadID, io.Discard, stderr, emitsFor(candidateStorePath)); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -603,7 +631,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
@@ -1043,7 +1072,7 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
-	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+	if queue, handled, err := tryControlReadyScan(workQuery, dir, env); handled {
 		if err != nil {
 			log.Printf("control-ready query failed for %s: %v; continuing serve loop", dir, err)
 			return nil, nil

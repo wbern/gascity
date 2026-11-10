@@ -40,11 +40,11 @@ func (s *controlReadyScanCountingStore) CloseStore() error { //nolint:unparam //
 // a real backend just to reach the discovery path they own.
 func unavailableControlReadyLiveSources(t *testing.T) {
 	t.Helper()
-	previous := controlReadyCacheSourcesFn
-	controlReadyCacheSourcesFn = func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	previous := controlReadyLegSourcesFn
+	controlReadyLegSourcesFn = func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return nil, nil, errors.New("fixture: live store unavailable")
 	}
-	t.Cleanup(func() { controlReadyCacheSourcesFn = previous })
+	t.Cleanup(func() { controlReadyLegSourcesFn = previous })
 }
 
 // A worker's shim environment must not turn one ledger scan into a failed
@@ -55,7 +55,7 @@ func TestControlReadyShimmedScanReadsOneCompleteLiveLeg(t *testing.T) {
 	dir := t.TempDir()
 	mem := beads.NewMemStore()
 	store := &controlReadyScanCountingStore{Store: mem}
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{store}, nil, nil
 	})
 	for range controlReadyFallbackLimit + 1 {
@@ -83,7 +83,7 @@ func TestControlReadyShimmedScanReadsOneCompleteLiveLeg(t *testing.T) {
 	env := map[string]string{"GC_BEADS": "bd", citylayout.RealBdEnvVar: "/opt/bd"}
 	scan := func() []hookBead {
 		t.Helper()
-		queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+		queue, handled, err := tryControlReadyScan(query, dir, env)
 		if err != nil || !handled {
 			t.Fatalf("scan: handled=%t err=%v", handled, err)
 		}
@@ -114,11 +114,11 @@ func TestControlReadyLiveLegsCloseOwnedHandlesAndRejectPartialReads(t *testing.T
 			if failure >= 0 {
 				sources[failure].err = readErr
 			}
-			installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+			installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 				// The second source represents a shared graph binding.
 				return []beads.Store{first, second}, []beads.Store{first}, nil
 			})
-			rows, opened, err := controlReadyLiveLegsReady(dir, dir, nil)
+			rows, opened, err := controlReadyLegsReady(dir, dir, nil)
 			if !opened {
 				t.Fatal("opened legs were reported unavailable")
 			}
@@ -150,7 +150,7 @@ func TestControlReadyLiveReadFailureCannotUseStaleSummary(t *testing.T) {
 	dir := t.TempDir()
 	readErr := errors.New("live read failed")
 	store := &controlReadyScanCountingStore{Store: beads.NewMemStore(), err: readErr}
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{store}, []beads.Store{store}, nil
 	})
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
@@ -174,7 +174,7 @@ func TestControlReadyLiveReadFailureCannotUseStaleSummary(t *testing.T) {
 	if len(evaluateControlReady(cached.ready, parsed, mergeRuntimeEnv(os.Environ(), env))) != 1 {
 		t.Fatal("fixture snapshot would not offer the stale control")
 	}
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, env)
+	queue, handled, err := tryControlReadyScan(query, dir, env)
 	if !handled || !errors.Is(err, readErr) || queue != nil {
 		t.Fatalf("scan: queue=%v handled=%t err=%v; want live error, not stale success", queue, handled, err)
 	}
@@ -201,10 +201,10 @@ func TestControlReadyLiveLegBypassesPrimedCache(t *testing.T) {
 	if !ok || len(stale) != 1 || stale[0].ID != control.ID {
 		t.Fatalf("fixture did not preserve a stale snapshot: ready=%v ok=%t", stale, ok)
 	}
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{cache}, nil, nil
 	})
-	rows, opened, err := controlReadyLiveLegsReady(dir, dir, nil)
+	rows, opened, err := controlReadyLegsReady(dir, dir, nil)
 	if err != nil || !opened || len(rows) != 0 {
 		t.Fatalf("live read through cache wrapper: rows=%v opened=%t err=%v", rows, opened, err)
 	}
@@ -214,7 +214,7 @@ func TestControlReadyUnavailableLiveLegUsesBoundedFallback(t *testing.T) {
 	for _, openErr := range []bool{false, true} {
 		t.Run(fmt.Sprintf("open_error=%t", openErr), func(t *testing.T) {
 			dir := t.TempDir()
-			installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+			installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 				if openErr {
 					return nil, nil, errors.New("fixture: unavailable")
 				}
@@ -231,7 +231,7 @@ func TestControlReadyUnavailableLiveLegUsesBoundedFallback(t *testing.T) {
 				return `{"schema_version":"1","kind":"gc.bead_summary","verb":"ready","total":0,"omitted":0,"beads":[]}`, nil
 			}
 			query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-			queue, handled, err := tryControlReadyFromCacheOrFallback(query, dir, map[string]string{"GC_BEADS": "bd", citylayout.RealBdEnvVar: "/opt/bd"})
+			queue, handled, err := tryControlReadyScan(query, dir, map[string]string{"GC_BEADS": "bd", citylayout.RealBdEnvVar: "/opt/bd"})
 			if err != nil || !handled || len(queue) != 0 || commands != 1 {
 				t.Fatalf("fallback: queue=%v handled=%t err=%v commands=%d; want one complete bounded read", queue, handled, err, commands)
 			}
@@ -262,10 +262,10 @@ func TestControlReadyLiveBdLegPreservesBlockedWorkOutcome(t *testing.T) {
 					return nil, fmt.Errorf("unexpected bd command: %v", args)
 				}
 			})
-			installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+			installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 				return []beads.Store{store}, nil, nil
 			})
-			rows, opened, err := controlReadyLiveLegsReady(dir, dir, nil)
+			rows, opened, err := controlReadyLegsReady(dir, dir, nil)
 			if err != nil || !opened {
 				t.Fatalf("live read: opened=%t err=%v", opened, err)
 			}

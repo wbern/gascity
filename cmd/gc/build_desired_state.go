@@ -578,6 +578,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var poolNewDemandLoadVetoDecision poolNewDemandLoadVeto
 	var admissionVerdicts map[string]AdmissionVerdict
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
@@ -1837,6 +1838,7 @@ func refreshDesiredStateWithSessionBeads(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.decisionTime = time.Now().UTC()
 	bp.sessionBeads = sessionBeads
 	// Re-apply the respawn-backoff set so the dependency-floor create path this
 	// overlay drives is gated by the same invariant as the demand path (#3279).
@@ -5718,9 +5720,10 @@ type poolCreateView struct {
 	// allocator mints it at plan time as its ledger marker.
 	instanceToken string
 	// beforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none). The allocator's effect
-	// uses it to tell a panic before the write from one after it.
-	beforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write. The allocator's effect uses it to tell a panic before the write
+	// from one after it, and to check its context last.
+	beforeWrite func(rowID string) error
 	// respawnBackoffTemplates names the pool templates inside their respawn
 	// backoff window (#3279); legacy's view carries the build params' set.
 	respawnBackoffTemplates map[string]bool

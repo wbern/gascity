@@ -1,5 +1,0 @@
-<<<<<<<< HEAD:internal/api/dashboardspa/dist/assets/Field-Bs1iaAS5.js
-import{j as e}from"./index-BTsxDiPN.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
-========
-import{j as e}from"./index-BQrr_UeM.js";function i({label:t,children:s,variant:a="definition"}){return a==="form"?e.jsxs("label",{className:"block space-y-1.5",children:[e.jsx("span",{className:"text-label uppercase tracking-wider text-fg-muted",children:t}),s]}):e.jsxs("div",{children:[e.jsx("dt",{className:"text-label uppercase tracking-wider text-fg-faint mb-1",children:t}),e.jsx("dd",{className:"text-body text-fg",children:s})]})}export{i as F};
->>>>>>>> d7ecf246f0:internal/api/dashboardspa/dist/assets/Field-GZ5Nq2GP.js
