@@ -23,7 +23,7 @@ type StateFileQueue struct {
 // ones move to the dead bucket with a "superseded" reason (the replace-key
 // contract of session submit).
 func (q StateFileQueue) EnqueueDeferred(item Item) error {
-	return WithState(q.CityPath, func(state *State) error {
+	return WithStateFor(q.CityPath, "enqueue_deferred", func(state *State) error {
 		if item.Reference != nil {
 			now := item.CreatedAt
 			remaining := state.Pending[:0]

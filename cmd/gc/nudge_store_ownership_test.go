@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
 // TestNudgeMaintenanceFrameLeavesTheStorageRoutesServingALiveStore pins the
@@ -232,16 +231,8 @@ func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing
 			}
 		}},
 		{"maintenance sweep", func(t *testing.T, cityPath string, _ queuedNudge) {
-			now := time.Now()
-			if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
-				for i := range state.Pending {
-					state.Pending[i].ExpiresAt = now.Add(-time.Second)
-				}
-				return nil
-			}); err != nil {
-				t.Fatalf("mark queued nudge expired: %v", err)
-			}
-			if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+			// A day on the item expires, so the sweep has a shadow debt to pay.
+			if err := runNudgeQueueMaintenanceSweep(cityPath, time.Now().Add(defaultQueuedNudgeTTL+time.Minute)); err != nil {
 				t.Fatalf("maintenance sweep: %v", err)
 			}
 		}},

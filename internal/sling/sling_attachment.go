@@ -33,26 +33,79 @@ func BeadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
 }
 
 // CollectAttachedBeads finds all molecule/workflow attachments for a parent bead.
+// Every attachment is read from store; a caller whose attachments may live in
+// a different store from the parent (a city that relocates the graph class)
+// uses CollectAttachments instead.
 func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier BeadChildQuerier) ([]beads.Bead, error) {
+	located, err := CollectAttachments(parent, childQuerier, store)
+	attachments := make([]beads.Bead, 0, len(located))
+	for _, a := range located {
+		attachments = append(attachments, a.Bead)
+	}
+	return attachments, err
+}
+
+// AttachedBead is an attachment together with the store that holds it, so a
+// caller that mutates the attachment (burn, close) writes to its own store.
+type AttachedBead struct {
+	Bead  beads.Bead
+	Store beads.Store
+}
+
+// CollectAttachments finds all molecule/workflow attachments for a parent bead
+// across the stores an attachment may live in.
+//
+// A molecule_id / workflow_id names a bead that was poured through the graph
+// store, which on a city that relocates the graph class is a different store
+// from the parent's work store; a work-class molecule (a v1 poured recipe, or a
+// pre-split one) stays on the work ledger. stores lists the candidates in
+// lookup order, graph store first; the first store that resolves an id owns
+// it. An id that no store holds is reported as the probe error (ErrNotFound),
+// exactly as a single store reports it. A read that failed is reported in its
+// place: a not-found is a dangling stamp a guard may pass, a failed read is
+// not, so it is never hidden behind one.
+//
+// DB-child attachments (beads whose parent is this bead) are listed through
+// childQuerier and are attributed to the LAST store in stores — the parent's
+// own store, since a child shares its parent's ledger.
+//
+// Ordering risk: on a migrated city the binding holds relics whose ids keep
+// their work prefix, and bd can mint a work id that collides with one. A
+// molecule_id naming such a reused id resolves to the binding's relic, not to
+// the work-store molecule, because the graph store is asked first. The guard
+// then decides on the relic's status; it never mutates the work molecule.
+// Collisions are rare (bd reuses an id only after its row is gone) and the
+// relic census bounds the population; the by-id residency plan is the place to
+// settle it if it ever matters.
+func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores ...beads.Store) ([]AttachedBead, error) {
+	stores = nonNilStores(stores)
 	var (
-		attachments []beads.Bead
-		firstErr    error
+		attachments          []AttachedBead
+		hardErr, notFoundErr error
 	)
+	noteErr := func(err error) {
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			if notFoundErr == nil {
+				notFoundErr = err
+			}
+		case hardErr == nil:
+			hardErr = err
+		}
+	}
 	seen := make(map[string]struct{})
 
 	addByID := func(id string) {
 		id = strings.TrimSpace(id)
-		if id == "" || store == nil {
+		if id == "" || len(stores) == 0 {
 			return
 		}
 		if _, ok := seen[id]; ok {
 			return
 		}
-		attached, err := beads.HandlesFor(store).Live.Get(id)
+		attached, owner, err := getFromStores(id, stores)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 			return
 		}
 		seen[id] = struct{}{}
@@ -62,21 +115,25 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 		if coordclass.ControllerOwned(attached) {
 			return
 		}
-		attachments = append(attachments, attached)
+		attachments = append(attachments, AttachedBead{Bead: attached, Store: owner})
 	}
 
 	addByID(parent.Metadata[beadmeta.MoleculeIDMetadataKey])
 	addByID(parent.Metadata["workflow_id"])
 
+	// The parent's own store is the last candidate: a child shares its parent's
+	// ledger.
+	var childStore beads.Store
+	if len(stores) > 0 {
+		childStore = stores[len(stores)-1]
+	}
 	if childQuerier != nil {
 		children, err := childQuerier.List(beads.ListQuery{
 			ParentID: parent.ID, IncludeClosed: true, Live: true,
 			Sort: beads.SortCreatedAsc,
 		})
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			noteErr(err)
 		} else {
 			for _, child := range children {
 				if !IsAttachedRoot(child) || coordclass.ControllerOwned(child) {
@@ -86,36 +143,158 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 					continue
 				}
 				seen[child.ID] = struct{}{}
-				attachments = append(attachments, child)
+				attachments = append(attachments, AttachedBead{Bead: child, Store: childStore})
 			}
 		}
 	}
 	// A legacy launcher could overwrite molecule_id without parenting the old
-	// root. Query the durable source links too; pointer-only discovery cannot
-	// reconcile those families. Filter roots explicitly because vars also occur
-	// on executable children. Live reads fence cached admission decisions.
-	if store != nil && parent.ID != "" {
-		for _, key := range []string{beadmeta.SourceBeadIDMetadataKey, "gc.var.issue"} {
-			roots, err := store.List(beads.ListQuery{Metadata: map[string]string{key: parent.ID}, IncludeClosed: true, Live: true, TierMode: beads.TierBoth})
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			for _, root := range roots {
-				if !IsMoleculeAttachment(root) || IsWorkflowAttachment(root) || root.Metadata[key] != parent.ID {
+	// root. Query the durable source links too, in every store an attachment may
+	// live in; pointer-only discovery cannot reconcile those families. Filter
+	// roots explicitly because vars also occur on executable children. Live
+	// reads fence cached admission decisions.
+	if parent.ID != "" {
+		for _, store := range stores {
+			for _, key := range []string{beadmeta.SourceBeadIDMetadataKey, "gc.var.issue"} {
+				roots, err := store.List(beads.ListQuery{Metadata: map[string]string{key: parent.ID}, IncludeClosed: true, Live: true, TierMode: beads.TierBoth})
+				if err != nil {
+					noteErr(&storeLegError{Store: store, Err: err})
 					continue
 				}
-				if _, ok := seen[root.ID]; !ok {
-					seen[root.ID] = struct{}{}
-					attachments = append(attachments, root)
+				for _, root := range roots {
+					if !IsMoleculeAttachment(root) || IsWorkflowAttachment(root) || root.Metadata[key] != parent.ID {
+						continue
+					}
+					if _, ok := seen[root.ID]; !ok {
+						seen[root.ID] = struct{}{}
+						attachments = append(attachments, AttachedBead{Bead: root, Store: store})
+					}
 				}
 			}
 		}
 	}
 
-	return attachments, firstErr
+	if hardErr != nil {
+		return attachments, hardErr
+	}
+	return attachments, notFoundErr
+}
+
+// getFromStores reads id from the first store that holds it. A store that
+// answers ErrNotFound passes the lookup on; any other error is remembered and
+// returned only when no later store resolves the id.
+func getFromStores(id string, stores []beads.Store) (beads.Bead, beads.Store, error) {
+	var hardErr, notFoundErr error
+	for _, s := range stores {
+		// Live read: attachment admission decisions must not trust a cached row.
+		b, err := beads.HandlesFor(s).Live.Get(id)
+		if err == nil {
+			return b, s, nil
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			if notFoundErr == nil {
+				notFoundErr = err
+			}
+			continue
+		}
+		if hardErr == nil {
+			hardErr = &storeLegError{Store: s, Err: err}
+		}
+	}
+	if hardErr != nil {
+		return beads.Bead{}, nil, hardErr
+	}
+	return beads.Bead{}, nil, notFoundErr
+}
+
+// residency:allow — filters the caller's own handle list; resolves no owner.
+func nonNilStores(stores []beads.Store) []beads.Store {
+	out := stores[:0:0]
+	for _, s := range stores {
+		if s != nil {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// attachmentScope names where a source bead and its attachments live: the
+// source bead (and the molecule_id / workflow_id it carries) in work, and the
+// attachments themselves in graph first, then work. On a single-store city the
+// two are the same store and every lookup is the pre-split one.
+type attachmentScope struct {
+	work  beads.Store
+	graph beads.Store
+	// graphRef names the graph leg ("graph:<city>", sourceworkflow.GraphStoreRef)
+	// in a store fault, so a split-city refusal says which store could not be
+	// read. Empty leaves faults unlabeled.
+	graphRef string
+}
+
+// storeLegError ties a store fault to the store that raised it, so the guard
+// that reports it can name the leg. It reads as the fault itself.
+type storeLegError struct {
+	Store beads.Store
+	Err   error
+}
+
+func (e *storeLegError) Error() string { return e.Err.Error() }
+func (e *storeLegError) Unwrap() error { return e.Err }
+
+// labelFault prefixes a store fault with the graph leg it came from when this
+// scope is split and the fault names the graph store; otherwise it is returned
+// unchanged.
+func (s attachmentScope) labelFault(err error) error {
+	if err == nil || s.graphRef == "" || s.graph == nil || s.work == nil || sameStoreValue(s.graph, s.work) {
+		return err
+	}
+	var leg *storeLegError
+	if errors.As(err, &leg) && sameStoreValue(leg.Store, s.graph) {
+		return fmt.Errorf("%s: %w", s.graphRef, err)
+	}
+	return err
+}
+
+// singleStoreAttachmentScope is the scope of a caller that hands one store for
+// both the source bead and its attachments.
+func singleStoreAttachmentScope(store beads.Store) attachmentScope {
+	return attachmentScope{work: store, graph: store}
+}
+
+// attachmentScope is the scope of this sling: the source bead in Store, its
+// attachments wherever graphStore() poured them.
+func (deps SlingDeps) attachmentScope() attachmentScope {
+	return attachmentScope{work: deps.Store, graph: deps.graphStore(), graphRef: sourceworkflow.GraphStoreRef(deps.CityName)}
+}
+
+// stores returns the stores an attachment may live in, in lookup order: the
+// graph store the sling pours through, then the work store that holds the
+// source bead. On a single-store city both are the same store, listed once.
+//
+// residency:allow — the sling's own two handles (the work store it was given
+// and the graph store it pours through), in lookup order; no topology, no
+// binding census and no namespace is consulted.
+func (s attachmentScope) stores() []beads.Store {
+	switch {
+	case s.graph == nil && s.work == nil:
+		return nil
+	case s.graph == nil:
+		return []beads.Store{s.work} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
+	case s.work == nil || sameStoreValue(s.graph, s.work):
+		return []beads.Store{s.graph} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
+	default:
+		return []beads.Store{s.graph, s.work} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
+	}
+}
+
+// sameStoreValue reports whether a and b are the same store value; a store
+// type that is not comparable reads as different.
+func sameStoreValue(a, b beads.Store) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
 
 // liveConvoyTrackedWorkflowRoots returns the live (non-terminal, per
@@ -256,34 +435,54 @@ func IsMoleculeAttachment(b beads.Bead) bool {
 // was found -- a discovered live attachment is definitive even if the probe was
 // partial. Callers that must fail closed can inspect the error to tell "no
 // attachment" apart from "probe failed". Read-only -- does not auto-burn.
-func findBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string, err error) {
-	parent, ok := BeadFromGetters(beadID, q, store)
+func findBlockingMolecule(q BeadQuerier, beadID string, scope attachmentScope) (label, id string, err error) {
+	att, err := findBlockingAttachment(q, beadID, scope)
+	if att == nil {
+		return "", "", err
+	}
+	return AttachmentLabel(att.Bead), att.Bead.ID, nil
+}
+
+// findBlockingAttachment is findBlockingMolecule returning the live attachment
+// itself (nil when none was found).
+func findBlockingAttachment(q BeadQuerier, beadID string, scope attachmentScope) (*AttachedBead, error) {
+	parent, ok := BeadFromGetters(beadID, q, scope.work)
 	if !ok {
-		return "", "", nil
+		return nil, nil
 	}
 	var childQuerier BeadChildQuerier
 	if cq, ok := q.(BeadChildQuerier); ok {
 		childQuerier = cq
-	} else if cq, ok := any(store).(BeadChildQuerier); ok {
+	} else if cq, ok := any(scope.work).(BeadChildQuerier); ok {
 		childQuerier = cq
 	}
-	attachments, probeErr := CollectAttachedBeads(parent, store, childQuerier)
-	for _, attached := range attachments {
-		if attached.Status != "closed" {
-			return AttachmentLabel(attached), attached.ID, nil
+	attachments, probeErr := CollectAttachments(parent, childQuerier, scope.stores()...)
+	for i := range attachments {
+		if attachments[i].Bead.Status != "closed" {
+			return &attachments[i], nil
 		}
 	}
 	// No live attachment found. A probe error here means we cannot conclude the
 	// bead is unattached, so report it rather than a clean "none".
-	return "", "", probeErr
+	return nil, probeErr
 }
 
 // FindBlockingMolecule checks if the bead has any open attached molecule
 // or wisp children. Returns the blocking attachment's label and ID, or
 // empty strings if none (or if the attachment probe could not complete).
-// Read-only -- does not auto-burn.
+// Read-only -- does not auto-burn. Attachments are read from store; a caller
+// that holds SlingDeps uses SlingDeps.FindBlockingMolecule, which also reads
+// the graph store the sling pours through.
 func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
-	label, id, _ = findBlockingMolecule(q, beadID, store)
+	label, id, _ = findBlockingMolecule(q, beadID, singleStoreAttachmentScope(store))
+	return label, id
+}
+
+// FindBlockingMolecule is the package-level FindBlockingMolecule over this
+// sling's stores: the source bead in Store, its attachments in the graph store
+// first, then Store.
+func (deps SlingDeps) FindBlockingMolecule(q BeadQuerier, beadID string) (label, id string) {
+	label, id, _ = findBlockingMolecule(q, beadID, deps.attachmentScope())
 	return label, id
 }
 
@@ -294,7 +493,11 @@ func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (labe
 // safe state instead of mistaking a probe failure for "no molecule". Read-only
 // -- does not auto-burn.
 func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) (bool, error) {
-	label, _, err := findBlockingMolecule(q, beadID, store)
+	return hasMoleculeChildrenIn(q, beadID, singleStoreAttachmentScope(store))
+}
+
+func hasMoleculeChildrenIn(q BeadQuerier, beadID string, scope attachmentScope) (bool, error) {
+	label, _, err := findBlockingMolecule(q, beadID, scope)
 	return label != "", err
 }
 
@@ -310,8 +513,8 @@ func CloseAttachedSubtree(store beads.Store, attached beads.Bead) (int, error) {
 	return molecule.CloseSubtree(store, attached.ID)
 }
 
-func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, _ *SlingResult, allowLiveWorkflow bool) error {
-	parent, ok := BeadFromGetters(beadID, q, store)
+func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope, _ *SlingResult, allowLiveWorkflow bool) error {
+	parent, ok := BeadFromGetters(beadID, q, scope.work)
 	if !ok {
 		return nil
 	}
@@ -319,15 +522,14 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, _ 
 	var childQuerier BeadChildQuerier
 	if cq, ok := q.(BeadChildQuerier); ok {
 		childQuerier = cq
-	} else if cq, ok := any(store).(BeadChildQuerier); ok {
+	} else if cq, ok := any(scope.work).(BeadChildQuerier); ok {
 		childQuerier = cq
 	}
-	attachments, err := CollectAttachedBeads(parent, store, childQuerier)
-	if err != nil {
-		return fmt.Errorf("inspect attachments for %s: %w", beadID, err)
-	}
+	attachments, err := CollectAttachments(parent, childQuerier, scope.stores()...)
+	probeErr := attachmentProbeFailure(beadID, err, scope)
 
-	for _, attached := range attachments {
+	for _, located := range attachments {
+		attached := located.Bead
 		if attached.Status == "closed" {
 			continue
 		}
@@ -340,9 +542,73 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, _ 
 				WorkflowIDs:  []string{attached.ID},
 			}
 		}
-		return &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
+		molErr := &MoleculeAttachedError{BeadID: beadID, Label: AttachmentLabel(attached), AttachmentID: attached.ID}
+		if probeErr != nil {
+			// A reference the probe could not read may be a second live
+			// attachment: report the store fault beside the conflict.
+			return errors.Join(molErr, probeErr)
+		}
+		return molErr
 	}
-	return nil
+	return probeErr
+}
+
+// attachmentProbeFailure is the refusal the attach guards return for err,
+// CollectAttachments' error, when no live attachment refuses first. A
+// reference no store holds is a dangling stamp (the molecule was purged):
+// there is nothing attached there to refuse or burn, so a pure not-found is no
+// refusal. Any other failure means the guard cannot tell whether a live
+// molecule is attached, even beside the attachments it did read, so it fails
+// closed rather than pour a second one.
+func attachmentProbeFailure(beadID string, err error, scope attachmentScope) error {
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		return nil
+	}
+	return &AttachmentProbeError{BeadID: beadID, Err: scope.labelFault(err)}
+}
+
+// AttachmentProbeError reports that the attach guard could not read a source
+// bead's attachment (a store error, not a not-found), so it cannot tell
+// whether a live molecule is attached and refuses rather than risk pouring a
+// second one, or could not read the subtree of a stale attachment it would
+// replace (subtreeProbeError), so it cannot tell whether a worker holds a step.
+// It is a store fault, not a conflict: the API answers it 5xx.
+type AttachmentProbeError struct {
+	BeadID string
+	Err    error
+}
+
+func (e *AttachmentProbeError) Error() string {
+	return fmt.Sprintf("could not verify molecule attachment for %s: %v", e.BeadID, e.Err)
+}
+
+func (e *AttachmentProbeError) Unwrap() error { return e.Err }
+
+// subtreeProbeError is the AttachmentProbeError for an attachment whose
+// subtree could not be read (attachmentActiveWork's unreadable): the guard
+// read the attachment but could not tell whether a worker holds a step.
+func subtreeProbeError(beadID, label, attachmentID string, unreadable error) *AttachmentProbeError {
+	return &AttachmentProbeError{BeadID: beadID, Err: fmt.Errorf("reading the subtree of attached %s %s: %w", label, attachmentID, unreadable)}
+}
+
+// attachmentActiveWork reports why an unassigned source's stale attachment may
+// not be burned to make room for a new one: the beads of its subtree a worker
+// holds (in_progress, or hooked), or the error that kept the subtree from
+// being read. Fails closed: an unreadable subtree is never burned.
+func attachmentActiveWork(a AttachedBead) (held []string, unreadable error) {
+	if a.Store == nil {
+		return nil, errors.New("its store is unavailable")
+	}
+	subtree, err := molecule.ListSubtree(a.Store, a.Bead.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range subtree {
+		if b.Status == "in_progress" || b.Status == "hooked" {
+			held = append(held, b.ID)
+		}
+	}
+	return held, nil
 }
 
 // MoleculeAttachedError reports that a bead already has a live, non-workflow
@@ -357,23 +623,48 @@ type MoleculeAttachedError struct {
 	BeadID       string
 	Label        string // AttachmentLabel(attached), e.g. "molecule" or "wisp"
 	AttachmentID string
+	// ActiveSteps are the attachment's beads a worker holds (in_progress or
+	// hooked), when that is why an unassigned source's attachment was not
+	// burned to make room.
+	ActiveSteps []string
+	// Unreadable is why the attachment's subtree could not be read, when that
+	// is why it was not burned (the guard fails closed).
+	Unreadable error
 }
 
 func (e *MoleculeAttachedError) Error() string {
-	return fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
+	msg := fmt.Sprintf("bead %s already has attached %s %s", e.BeadID, e.Label, e.AttachmentID)
+	if e.Unreadable != nil {
+		msg += fmt.Sprintf("; it was not replaced because its subtree could not be read (%v), so whether a worker holds a step is unknown", e.Unreadable)
+	}
+	if len(e.ActiveSteps) > 0 {
+		msg += fmt.Sprintf("; it was not replaced because a worker holds %s. If that step is stale (its worker is gone), release it with `gc bd update <step> --status open --assignee \"\"` or close it with `gc bd close <step>`, then sling again", strings.Join(e.ActiveSteps, ", "))
+	}
+	return msg
+}
+
+// Unwrap reports an unreadable subtree as the AttachmentProbeError it also
+// is: a store fault kept the guard from deciding, which a retry can clear, so
+// a caller (the API) answers it as one rather than as a conflict. A refusal
+// for any other reason wraps nothing.
+func (e *MoleculeAttachedError) Unwrap() error {
+	if e.Unreadable == nil {
+		return nil
+	}
+	return subtreeProbeError(e.BeadID, e.Label, e.AttachmentID, e.Unreadable)
 }
 
 // CheckNoMoleculeChildren returns an error if the bead already has an attached
 // molecule or wisp child that is still open. This probe never retires families:
 // an unassigned source is not proof that its descendants have no live custody.
 func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, store, result, false)
+	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, false)
 }
 
 // CheckBatchNoMoleculeChildren checks all open children for existing molecule
 // attachments before any wisps are created.
 func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, store, result, false)
+	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, false)
 }
 
 // CheckNoMoleculeChildrenAllowLiveWorkflow is like CheckNoMoleculeChildren
@@ -381,16 +672,16 @@ func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 // launches that will supersede the existing root under the source-workflow
 // lock).
 func CheckNoMoleculeChildrenAllowLiveWorkflow(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, store, result, true)
+	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, true)
 }
 
 // CheckBatchNoMoleculeChildrenAllowLiveWorkflow is the batch variant of
 // CheckNoMoleculeChildrenAllowLiveWorkflow.
 func CheckBatchNoMoleculeChildrenAllowLiveWorkflow(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, store, result, true)
+	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, true)
 }
 
-func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, _ *SlingResult, allowLiveWorkflow bool) error {
+func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope attachmentScope, _ *SlingResult, allowLiveWorkflow bool) error {
 	var problems []string
 	// workflowConflicts tracks children whose already-attached root is a
 	// live workflow. We emit a typed *sourceworkflow.ConflictError for
@@ -404,12 +695,16 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 		workflowID string
 	}
 	var workflowConflicts []workflowConflict
+	var probeErrs []error
 	for _, child := range open {
-		attachments, err := CollectAttachedBeads(child, store, q)
-		if err != nil {
-			return fmt.Errorf("inspect attachments for %s: %w", child.ID, err)
+		attachments, err := CollectAttachments(child, q, scope.stores()...)
+		probeErr := attachmentProbeFailure(child.ID, err, scope)
+		if probeErr != nil {
+			probeErrs = append(probeErrs, probeErr)
+			problems = append(problems, fmt.Sprintf("%s (could not verify molecule attachment: %v)", child.ID, err))
 		}
-		for _, attached := range attachments {
+		for _, located := range attachments {
+			attached := located.Bead
 			if attached.Status == "closed" {
 				continue
 			}
@@ -429,6 +724,11 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	}
 	summary := fmt.Errorf("cannot use --on: beads already have attached molecules: %s",
 		strings.Join(problems, ", "))
+	if len(probeErrs) > 0 {
+		// A probe that could not complete is a store fault, not a conflict:
+		// carry the typed errors so a caller (the API) answers it as one.
+		summary = errors.Join(append([]error{summary}, probeErrs...)...)
+	}
 	if len(workflowConflicts) == 0 {
 		return summary
 	}

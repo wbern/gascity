@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -75,7 +76,7 @@ func TestTryDeliverQueuedNudgesByPollerPinsTheDeliveryKey(t *testing.T) {
 			t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 		}
 		// Make the failed item due again at once.
-		if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		if err := withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
 			for i := range state.Pending {
 				state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
 			}
@@ -168,7 +169,7 @@ func (h *keyedPollerHarness) pass(nudgeErr error) {
 
 func (h *keyedPollerHarness) makeDue() {
 	h.t.Helper()
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.Pending {
 			state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
 		}
@@ -181,7 +182,7 @@ func (h *keyedPollerHarness) makeDue() {
 // expireLeases lapses every in-flight claim, as when its claimer died.
 func (h *keyedPollerHarness) expireLeases() {
 	h.t.Helper()
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.InFlight {
 			state.InFlight[i].LeaseUntil = time.Now().Add(-time.Second)
 		}
@@ -246,7 +247,7 @@ func (h *keyedPollerHarness) failWithdrawOf(nudgeID string) (restore func()) {
 			return err
 		}
 		if failed {
-			return fmt.Errorf("acking %s: %w", nudgeID, errNudgeQueueBusyForTest)
+			return fmt.Errorf("acking %s: %w", nudgeID, nudgequeue.ErrQueueBusy)
 		}
 		return nil
 	}
@@ -453,7 +454,7 @@ func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
 	h.enqueue("nudge B")
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(h.dir, "test", func(state *nudgeQueueState) error {
 		for i := range state.Pending {
 			state.Pending[i].DeliveryBatch = "batch-k"
 		}

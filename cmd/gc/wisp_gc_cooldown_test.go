@@ -29,7 +29,7 @@ func TestOrphanInvocationCompletionLog(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })
 	gc := newWispGC(15*time.Minute, time.Hour, 0).(*memoryWispGC)
-	_, err := gc.runGCContext(context.Background(), beads.GraphStore{Store: beads.NewMemStore()}, beads.SessionStore{}, beads.MailStore{}, time.Now())
+	_, err := gc.runGCContext(context.Background(), nil, beads.GraphStore{Store: beads.NewMemStore()}, beads.SessionStore{}, beads.MailStore{}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestOrphanCooldownFailureCancelFallbackAndEnforcement(t *testing.T) {
 			m.orphanCooldown = &cr.orphanCooldown
 			m.orphanIdentity = key
 			m.orphanNow = clock.now
-			_, err := m.runGCContext(ctx, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
+			_, err := m.runGCContext(ctx, nil, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
 			if scenario == "failure" && !errors.Is(err, sentinel) {
 				t.Fatalf("original error lost: %v", err)
 			}
@@ -297,7 +297,7 @@ func TestOrphanCooldownFailureCancelFallbackAndEnforcement(t *testing.T) {
 			}
 			before := s.orphanLists.Load()
 			clock.advance(time.Minute)
-			_, _ = m.runGCContext(context.Background(), graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
+			_, _ = m.runGCContext(context.Background(), nil, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
 			skipped := scenario == "failure" || scenario == "fast"
 			want := before + 1
 			if skipped {

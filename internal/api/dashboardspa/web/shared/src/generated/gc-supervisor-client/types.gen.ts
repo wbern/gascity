@@ -1168,7 +1168,7 @@ export type ConversationOpResult = {
      */
     coalesced_into?: string;
     /**
-     * Context epoch the operation ran in.
+     * Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.
      */
     context_epoch?: number;
     /**
@@ -1176,7 +1176,7 @@ export type ConversationOpResult = {
      */
     delivery?: ConversationOpDelivery;
     /**
-     * Session generation the operation ran in.
+     * Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.
      */
     generation?: number;
     /**

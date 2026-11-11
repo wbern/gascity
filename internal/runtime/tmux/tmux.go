@@ -5160,6 +5160,16 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 	if err != nil {
 		return false, err
 	}
+	return ClassifyIdlePane(lines, promptPrefix)
+}
+
+// ClassifyIdlePane classifies captured pane lines the way every pane-scanning
+// idle check does: a busy-indicator string anywhere in lines is the busy
+// reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
+// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
+// pane showing neither is not evidence of work. The tmux idle wait and its
+// exec twin both classify each capture through it.
+func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
 	}
@@ -5192,6 +5202,13 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// option ("❯ 1. Yes") matches the ready-prompt prefix: text delivered now
 	// would answer the prompt instead of reaching the composer (#2892).
 	if parseApprovalPrompt(strings.Join(lines, "\n")) != nil {
+		return false
+	}
+
+	// An open AskUserQuestion dialog is no idle boundary either: its focused
+	// row ("❯ 1. …") matches the ready prefix, and the nudge's Enter would
+	// select that option.
+	if parseAskUserQuestion(lines) != nil {
 		return false
 	}
 
@@ -5231,8 +5248,9 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 //  2. Requires IdleRequiredObservations consecutive idle polls before
 //     confirming idle state.
 //
-// Returns nil if the agent becomes idle within the timeout.
-// Returns an error if the timeout expires while the agent is still busy.
+// Returns nil if the agent becomes idle within the timeout. At the timeout it
+// returns ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless
+// a reading showed the session busy.
 //
 // Its twin is the exec provider's waitForPaneIdle loop
 // (internal/runtime/exec/idle.go), which runs the same check over the exec
@@ -5251,6 +5269,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	}
 
 	consecutiveIdle := 0
+	sawBusy := false
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -5278,12 +5297,23 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 		} else {
 			consecutiveIdle = 0
+			sawBusy = true
 		}
 		if err := waitForIdlePoll(ctx); err != nil {
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawBusy)
+}
+
+// idleTimeout is the error an idle or interrupt-boundary wait returns at its
+// deadline: ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well when
+// no reading showed the session busy.
+func idleTimeout(sawBusy bool) error {
+	if sawBusy {
+		return ErrIdleTimeout
+	}
+	return fmt.Errorf("%w: %w", ErrIdleTimeout, runtime.ErrWaitUnobserved)
 }
 
 func waitForIdlePoll(ctx context.Context) error {
@@ -5326,22 +5356,28 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 }
 
 // waitForCodexInterruptBoundary waits until the Codex rollout at path records
-// no running turn (codexRolloutRecordsNoRunningTurn): the interrupted turn
+// no running turn (codexRolloutTurnState reads idle): the interrupted turn
 // ended, whether the interrupt aborted it or it completed before the interrupt
 // landed. Codex records nothing when an interrupt reaches it between turns, so
 // a session that was running no turn reads that way at once and the wait
 // returns at once. Where the rollout cannot tell (it records no lifecycle
 // event, ends in a torn row, or its latest turn start lies beyond the
 // lifecycle scan), the rollout written since since recording the interrupted
-// turn's turn_aborted marker ends the wait.
+// turn's turn_aborted marker ends the wait. At the timeout it returns
+// ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless a poll
+// read the rollout recording a running turn.
 func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.Time, timeout time.Duration) error {
+	sawRunning := false
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if codexRolloutRecordsNoRunningTurn(path) {
+		switch codexRolloutTurnState(path) {
+		case codexTurnIdle:
 			return nil
+		case codexTurnRunning:
+			sawRunning = true
 		}
 		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(since) {
 			tail, err := readFileTail(path, codexInterruptBoundaryTailBytes)
@@ -5353,17 +5389,39 @@ func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawRunning)
 }
 
-// codexRolloutRecordsNoRunningTurn reports whether the Codex rollout at path
-// records its latest turn start as ended, read from its lifecycle events as
-// the session's activity is (sessionlog.ExtractCodexTailMeta reads idle). A
-// rollout whose activity cannot be told, or that cannot be read, reports
-// false.
-func codexRolloutRecordsNoRunningTurn(path string) bool {
+// codexTurnState is one reading of a Codex rollout's latest turn.
+type codexTurnState int
+
+const (
+	// codexTurnUnknown: the rollout cannot be read, or its activity cannot
+	// be told.
+	codexTurnUnknown codexTurnState = iota
+	// codexTurnIdle: the rollout records its latest turn start as ended.
+	codexTurnIdle
+	// codexTurnRunning: the rollout records a turn start with no end.
+	codexTurnRunning
+)
+
+// codexRolloutTurnState reads the Codex rollout at path the way the
+// session's activity is read (sessionlog.ExtractCodexTailMeta): idle when its
+// latest turn start has ended, running when it has not, and unknown when the
+// rollout cannot be read or its activity cannot be told.
+func codexRolloutTurnState(path string) codexTurnState {
 	meta, err := sessionlog.ExtractCodexTailMeta(path)
-	return err == nil && meta != nil && meta.Activity == "idle"
+	if err != nil || meta == nil {
+		return codexTurnUnknown
+	}
+	switch meta.Activity {
+	case "idle":
+		return codexTurnIdle
+	case "in-turn":
+		return codexTurnRunning
+	default:
+		return codexTurnUnknown
+	}
 }
 
 func readFileTail(path string, maxBytes int64) (_ string, err error) {

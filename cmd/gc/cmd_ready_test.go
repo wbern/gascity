@@ -680,7 +680,7 @@ func TestReadyFailsLoudWhenALegErrors(t *testing.T) {
 		mustCreateReadyBead(t, cityStore, beads.Bead{Title: "city work", Type: "task"})
 
 		var stdout, stderr bytes.Buffer
-		code := cmdReady(readywork.Query{}, &stdout, &stderr)
+		code := cmdReady(readyFlags{}, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("gc ready exited 0 with the %q rig leg unopened; stdout=%s — a short array is indistinguishable from \"no work\", and stderr is not part of the answer any work query parses", readyBrokenRigName, stdout.String())
 		}
@@ -1067,7 +1067,7 @@ func TestCmdReadyOnALegacyCityFederatesCityAndRigStores(t *testing.T) {
 func runCmdReady(t *testing.T, opts readywork.Query) []readywork.ReadyBead {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(opts, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{query: opts}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc ready = %d, stderr:\n%s", code, stderr.String())
 	}
 	var rows []readywork.ReadyBead
@@ -1347,7 +1347,7 @@ func TestReadyLoadsCityConfigOnce(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
@@ -1367,7 +1367,7 @@ func TestReadyResolvesTheCityWithoutARigContext(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
@@ -1382,7 +1382,7 @@ func TestReadyResolvesTheCityWithoutARigContext(t *testing.T) {
 func TestReadyRejectsAMalformedQueryBeforeOpeningAnyStore(t *testing.T) {
 	newReadyCityWithBrokenRig(t)
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{Status: "bogus"}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readyFlags{query: readywork.Query{Status: "bogus"}}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc ready --status bogus exited 0; stdout=%s", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), `unknown --status "bogus"`) {

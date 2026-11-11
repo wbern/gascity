@@ -2,7 +2,6 @@ package materialize
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,16 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
-
-var teamProviderConfig = map[string]string{
-	MCPProviderClaude:      `{"mcpServers":{"team":{"command":"team-mcp"}}}`,
-	MCPProviderCodex:       "[mcp_servers.team]\ncommand = \"team-mcp\"\n",
-	MCPProviderGemini:      `{"mcpServers":{"team":{"command":"team-mcp"}}}`,
-	MCPProviderOpenCode:    `{"mcp":{"team":{"type":"local","command":["team-mcp"]}}}`,
-	MCPProviderMimoCode:    `{"mcp":{"team":{"type":"local","command":["team-mcp"]}}}`,
-	MCPProviderCursor:      `{"mcpServers":{"team":{"command":"team-mcp"}}}`,
-	MCPProviderAntigravity: `{"mcpServers":{"team":{"command":"team-mcp"}}}`,
-}
 
 func notesProjection(t *testing.T, provider, root string) MCPProjection {
 	t.Helper()
@@ -43,7 +32,7 @@ func writeTarget(t *testing.T, proj MCPProjection, content string) {
 }
 
 // assertRefusedAndUntouched applies proj, which must be refused, and checks
-// that nothing under root changed and that the read-only plan reports the same refusal.
+// that nothing under root changed and that Plan reports the same refusal.
 func assertRefusedAndUntouched(t *testing.T, proj MCPProjection, root string) *MCPAdoptionRefusedError {
 	t.Helper()
 	before := treeSnapshot(t, root)
@@ -70,64 +59,6 @@ func assertRefusedAndUntouched(t *testing.T, proj MCPProjection, root string) *M
 		t.Fatalf("AdoptionRefusal = %v, %v; want %q", direct, err, refused)
 	}
 	return refused
-}
-
-func markMCPManaged(t *testing.T, root, provider string) {
-	t.Helper()
-	marker := filepath.Join(root, ".gc", "mcp-managed", provider+".json")
-	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(marker, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func treeSnapshot(t *testing.T, root string) map[string]string {
-	t.Helper()
-	snapshot := make(map[string]string)
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == root {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			snapshot[rel] = "symlink:" + link
-			return nil
-		}
-		if entry.IsDir() {
-			snapshot[rel] = fmt.Sprintf("dir:%o", info.Mode().Perm())
-			return nil
-		}
-		if !info.Mode().IsRegular() {
-			snapshot[rel] = fmt.Sprintf("special:%s:%o", info.Mode().Type(), info.Mode().Perm())
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		snapshot[rel] = fmt.Sprintf("file:%o:%s", info.Mode().Perm(), data)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("snapshot %s: %v", root, err)
-	}
-	return snapshot
 }
 
 // A file gc does not manage that holds a server of the user's own is left as

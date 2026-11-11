@@ -29,6 +29,12 @@ type QueryTopology struct {
 	//
 	// The zero value is the single-store city every deployment has today, and
 	// the generated command for it is byte-for-byte the one it already runs.
+	//
+	// It is also the switch for reading through the federated reader on a city
+	// that relocates nothing: cmd/gc sets it per agent for the discovery
+	// placeholders a cross-store-eligible agent's prompt renders on a city with
+	// rigs (promptQueryTopology). A topology built that way describes that
+	// agent's prompt, not the city.
 	FederatedReady bool
 }
 
@@ -200,6 +206,21 @@ func heldLabelCountJQ() string {
 	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
 
+// openBlockerCountJQ counts the blockers in a blocked_by array that are not
+// closed. Status interpretation is otherwise left to the shared Go filter, so
+// any non-closed status counts.
+const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+
+// strictOpenBlockerCountJQ is openBlockerCountJQ for evidence that must be
+// well formed: a blocked_by that is not an array of {id, status} objects is an
+// error, never a count. The federated window filter uses it so malformed
+// blocker evidence makes jq fail, the filter fail open, and the strict serve
+// gate downstream fail the query, instead of the lax count silently dropping
+// the row and returning an empty, successful window.
+const strictOpenBlockerCountJQ = `if type != "array" then error("invalid blocker evidence") else ` +
+	`[.[] | if type != "object" or (.id | type) != "string" or (.status | type) != "string" then error("incomplete blocker evidence") else ` +
+	`select((.status | ascii_downcase) != "closed") end] | length end`
+
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
 // builders use it so embedded key spellings stay anchored to the beadmeta
@@ -256,7 +277,14 @@ func (r PoolDemandServeRules) ShellArgs() string {
 	for _, typ := range r.ExcludeTypes {
 		args += " --exclude-type=" + typ
 	}
-	for _, label := range r.ExcludeLabels {
+	return args + excludeLabelArgs(r.ExcludeLabels)
+}
+
+// excludeLabelArgs renders labels as the repeated --exclude-label flags both
+// readers take.
+func excludeLabelArgs(labels []string) string {
+	var args string
+	for _, label := range labels {
 		args += ` --exclude-label "` + label + `"`
 	}
 	return args
@@ -710,19 +738,86 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 //     deferral time. Adoption of an in_progress row performs no status CAS, and
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
+//
+// The federated read is not one row. `gc ready` merges every store into one
+// ready-ordered answer, so --limit=1 there is one row for the whole city, and
+// the serve gate skips that row when it is blocked or held: a claim the session
+// could resume, in another store or further down the same one, was then never
+// read, and the fresh-claim tiers behind it handed the session another bead —
+// the accumulation this tier exists to stop. A single-store `bd list` answers
+// for one store, and `gc hook` runs it once per store, so there one store's
+// blocked row never costs another store its read. The federated form reads the
+// candidates window instead, with the dispatch holds excluded and the answer
+// ended at its first unblocked row (`gc ready --until-unblocked`), and keeps
+// its first servable row (servableInProgressRowsScript).
+//
+// The cut keeps the window from widening the read's failure. The reader fails a
+// read whose rows' blockers it cannot resolve, so a window read whole failed on
+// a row the tier never serves: a claim behind the session's resumable one,
+// blocked by a bead no store holds, hid the resumable claim and failed the
+// query. With the holds excluded the first unblocked row is the first servable
+// one, so a row past it is never resolved, and one at or ahead of it still
+// fails the query, as the one-row read did.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+	if topo.FederatedReady {
+		return assignedInProgressRead(shellVar, topo, " --until-unblocked", inProgressCandidatesLimit) +
+			servableInProgressRowsScript(1)
+	}
+	return assignedInProgressRead(shellVar, topo, "", 1)
 }
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
 // after the stock one-row recovery tier has identified a graph workflow root.
-// This prevents the root from hiding another in-progress step owned by the
-// same session while retaining the same discovery and serving gates.
+// This keeps that tier's discovery and serving gates, byte and fail-open
+// contracts while preventing the root from hiding another in-progress step
+// owned by the same session. The federated form keeps only the window's
+// servable rows, so the first non-anchor row
+// serveOrdinaryInProgressCandidateScript picks is one the gate can serve.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
+	command := assignedInProgressRead(shellVar, topo, "", inProgressCandidatesLimit)
+	if topo.FederatedReady {
+		command += servableInProgressRowsScript(0)
+	}
+	return command
 }
 
-func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
+// inProgressCandidatesLimit bounds the crash-recovery tier's multi-row reads:
+// the candidates read behind a graph anchor, and the federated tier's own read.
+// A servable claim behind more than this many gated ones is not read, and the
+// tier falls through as it does when its window has no servable row.
+const inProgressCandidatesLimit = 20
+
+// servableInProgressRowsScript narrows the federated in_progress read held in
+// $r to the rows the crash-recovery serve gate would serve, in the reader's
+// order, keeping the first limit of them (0 keeps them all).
+//
+// It reads each row the way the gate reads a federated row: the carried
+// blocked_by, where an open blocker skips the row (the reader attaches the field
+// to every row with a blocking edge, so a row without it has none), and the
+// dispatch hold labels. On the tier's own read the reader has already excluded
+// the holds and ended the answer at its first unblocked row, so the row kept is
+// that one; on the candidates read behind a graph anchor every servable row is
+// kept. It runs before the gate, not instead of it: the row it keeps still goes
+// through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
+// for a row that carries no blocked_by.
+//
+// It fails open like the gate. Output jq cannot parse leaves $r as the reader
+// printed it, and the gate then serves it unchanged; a window with no servable
+// row becomes "[]", so the tier falls through to the ready tiers, as it did when
+// its one row was blocked.
+func servableInProgressRowsScript(limit int) string {
+	filter := `[.[] | select(((.blocked_by // []) | ` + strictOpenBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + `]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `gc_servable_in_progress=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$gc_servable_in_progress" ] && r="$gc_servable_in_progress"; `
+}
+
+// assignedInProgressRead is the crash-recovery tier's in_progress read for one
+// identity, with args after the assignee, bounded to limit rows. The failure
+// clause names the reader alone, whatever args the read carries.
+func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
 	reader := bdListInProgressCommand
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
@@ -732,8 +827,11 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 		holdArgs += " --exclude-label=" + shellquote.Quote(label)
 	}
 	// Discovery filters before limiting and omits bodies before the output
-	// firewall measures the response. Ownership/existence probes do neither.
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --brief` + holdArgs + ` --limit=` + strconv.Itoa(limit) +
+	// firewall measures the response (--brief, the hold exclusion). Ownership/
+	// existence probes do neither. args carries only what a topology adds on top
+	// (the federated window's --until-unblocked): the dispatch holds are excluded
+	// here for every read, so they are not repeated in args.
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --brief` + holdArgs + ` --limit=` + strconv.Itoa(limit) +
 		`)` + workQueryReadFailure(reader) + `; `
 }
 
@@ -1270,10 +1368,9 @@ func (a *Agent) EffectiveAssignedInProgressQuery() string {
 }
 
 // EffectiveAssignedInProgressQueryFor returns the assigned-in-progress query
-// built for a city topology. It is topology-BLIND today: the crash-recovery tier
-// reads `bd list`, not the ready set — see
-// standardAssignedInProgressWorkQueryScript for why federating it is ga-601v2's
-// slice and not this one's.
+// built for a city topology. On a federated topology its crash-recovery read is
+// `gc ready --status in_progress` rather than single-store `bd list` — see
+// assignedInProgressTierCommand.
 func (a *Agent) EffectiveAssignedInProgressQueryFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryAssignedInProgress, topo)
 }

@@ -44,7 +44,8 @@ func (c *mcpAdoptionDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		Status:  doctor.StatusWarning,
 		Message: summarizeMCPIssues(findings),
 		Details: findings,
-		FixHint: "each finding includes a remedy; for a previously adopted file, restore a snapshot and remove its managed marker as described",
+		FixHint: "each finding says what to do; to hand a file gc adopted back, stop the city, restore the file from its " +
+			"snapshot, and delete <root>/.gc/mcp-managed/<provider>.json, and gc leaves it alone from then on",
 	}
 }
 
@@ -65,7 +66,7 @@ func inspectMCPAdoption(cityPath string, cfg *config.City, lookPath config.LookP
 	byKey := make(map[string]*target)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
-		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
+		view, err := resolveConfiguredAgentMCPProjectionWith(cityPath, cfg, agent, lookPath, true)
 		if err != nil || (view.Delivery != "stage1" && view.Delivery != "stage2") || len(view.Projection.Servers) == 0 {
 			continue
 		}
@@ -102,11 +103,9 @@ func inspectMCPAdoption(cityPath string, cfg *config.City, lookPath config.LookP
 		}
 		findings = append(findings, fmt.Sprintf(
 			"%s (%s): gc adopted this file and replaced MCP servers it held that gc does not project (%s); "+
-				"their definitions are saved under %s. Define the ones you still need in gc's MCP catalog (an mcp/ directory). "+
-				"To restore the provider file: stop the city, copy a snapshot from %q to %q, then remove managed marker %q. "+
-				"Delete the snapshots after recovery to clear this warning",
-			t.projection.Target, t.projection.Provider, strings.Join(quoted, ", "), dir,
-			dir, t.projection.Target, filepath.Join(t.projection.Root, ".gc", "mcp-managed", t.projection.Provider+".json")))
+				"their definitions are saved under %s. Define the ones you still need in gc's MCP catalog (an mcp/ directory); "+
+				"delete those snapshots once you no longer need them to clear this warning",
+			t.projection.Target, t.projection.Provider, strings.Join(quoted, ", "), dir))
 	}
 	return findings
 }

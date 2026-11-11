@@ -333,6 +333,12 @@ func TestNudgeKeyedReceiptMatchesTheTurnsRequestedAt(t *testing.T) {
 	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
 	t.Cleanup(server.Close)
 	server.setCommandHook(func(payload map[string]interface{}) {
+		// Only the turn start creates the turn. The nudge also appends a
+		// gc.nudge.sent activity moments later, stamped with its own createdAt;
+		// following that command would move requestedAt off the receipt.
+		if kind, _ := payload["type"].(string); kind != "thread.turn.start" {
+			return
+		}
 		created, _ := payload["createdAt"].(string)
 		snapshot := boundThreadSnapshot("running")
 		thread := snapshot["threads"].([]interface{})[0].(map[string]interface{})

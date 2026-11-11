@@ -15,25 +15,153 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
-// Routing probes are indirect so tests need no live controller or supervisor.
+// Indirected for tests. apiClient's branch between a standalone controller
+// (which binds cfg.API.Port) and a supervisor-managed city (which is reached
+// on the supervisor's port via city-scoped routes) depends on the hosting mode
+// the live per-city controller socket reports and on whether the supervisor
+// requires city grants, so tests swap these to exercise each route without a
+// running controller or supervisor. (gascity ga-tp7)
 var (
 	apiRouteControllerIdentityHook = probeControllerIdentity
 	apiRouteSupervisorClientHook   = supervisorCityAPIClient
+	apiRouteSupervisorGrantsHook   = supervisorRequiresCityGrants
 )
 
-// apiClient routes general commands through the serving controller. A
-// supervisor-hosted city ignores its standalone API configuration. Commands
-// retain their local fallback when the supervisor requires grants
-// the bundled client cannot mint.
+// apiClient returns an API client if a controller with a mutable API server
+// is running for the city at cityPath. Returns nil if no controller is running,
+// the API is not configured, GC_NO_API is set truthy (operator escape hatch),
+// or the API is bound to a non-localhost address without allow_mutations.
+// CLI commands use this to route reads/writes through the API when available,
+// falling back to direct bd or file mutation.
+//
+// A standalone controller (gc controller / gc serve) and a supervisor-managed
+// city both answer the per-city controller socket — the supervisor hosts that
+// controller in-process — so apiClient routes on the hosting mode the socket
+// reports through identify. A supervisor-hosted city gets the
+// supervisor-managed client: the supervisor ignores the city's [api] port and
+// serves it on its own port, and a process-owned runtime (such as an ACP
+// session) lives only in the supervisor's memory, out of reach of a local
+// fallback. When that supervisor requires a signed grant on city routes
+// (supervisorRequiresCityGrants), apiClient returns nil instead: this client
+// mints no grant, so the supervisor would refuse the gated calls with a 401
+// that no caller falls back from, and apiClient cannot tell a caller's read
+// from its write. A standalone controller, or one predating identify (hosting
+// mode unknown), gets its [api] port's HTTP endpoint, or nil when none is
+// usable so the caller uses its local fallback. With no live socket apiClient
+// returns the supervisor-managed client. Callers whose local fallback is
+// missing or prohibitively expensive use supervisorFallthroughAPIClient
+// instead. (gascity ga-tp7, ra-r9hm6v, #5262)
 func apiClient(cityPath string) *api.Client {
-	return routeAPIClient(cityPath, false)
+	return routeAPIClient(cityPath, apiRouteGeneral)
 }
 
-func routeAPIClient(cityPath string, preferSupervisor bool) *api.Client {
-	return routeAPIClientWithGrantPolicy(cityPath, preferSupervisor, supervisorRequiresCityGrants)
+// supervisorFallthroughAPIClient resolves an API client the way apiClient
+// does, for callers whose local fallback is missing or prohibitively
+// expensive: maintenance commands have no local fallback at all, and
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health — far more expensive than
+// the supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
+// ~0.35s warm API). Where apiClient returns nil for its caller's local
+// fallback, it routes to the supervisor-managed client instead in two shapes:
+// a supervisor-hosted city whose supervisor requires grants (these callers
+// handle a refusal as they handle any other API error), and a live controller
+// of unknown hosting mode without a usable [api] port — the shape of a
+// supervisor-managed city whose supervisor predates identify. A controller
+// that identifies as standalone serves only its own [api] port, so it is
+// never sent to the supervisor, and each call resolves the supervisor-managed
+// client at most once.
+func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
+	if c := routeAPIClient(cityPath, apiRoutePreferSupervisor); c != nil {
+		return c, ""
+	}
+	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisor)
 }
 
-func routeAPIClientWithGrantPolicy(cityPath string, preferSupervisor bool, requiresGrants func() bool) *api.Client {
+// localWhenSupervisorHostedAPIClient resolves an API client the way apiClient
+// does, for a read whose local path renders the command's own JSON contract
+// from on-disk state, except that a supervisor-hosted city gets nil with
+// reason "supervisor-hosted", so its caller reads locally. `gc session list`
+// is that read: its local rows carry the fields
+// schemas/session/list/result.schema.json defines (agent_name, closed, the
+// summary), which the API's session rows do not, and the API fills each active
+// session's active bead by reading every rig store, a suspended rig's
+// included. Pool-slot lookups parse agent_name, and the core orphan-sweep
+// order lists sessions in cities whose rigs may be suspended.
+func localWhenSupervisorHostedAPIClient(cityPath string) (*api.Client, string) {
+	if c := routeAPIClient(cityPath, apiRouteLocalWhenSupervisorHosted); c != nil {
+		return c, ""
+	}
+	return nil, routeFallbackReason(cityPath, apiRouteLocalWhenSupervisorHosted)
+}
+
+// apiRoute selects how routeAPIClient routes the shapes in which its callers
+// differ.
+type apiRoute int
+
+const (
+	// apiRouteGeneral is apiClient's routing.
+	apiRouteGeneral apiRoute = iota
+	// apiRoutePreferSupervisor is supervisorFallthroughAPIClient's routing: the
+	// supervisor-managed client in the shapes where apiClient returns nil for
+	// its caller's local fallback. It never consults the grant requirement;
+	// its callers handle a refusal as they handle any other API error.
+	apiRoutePreferSupervisor
+	// apiRouteLocalWhenSupervisorHosted is localWhenSupervisorHostedAPIClient's
+	// routing: nil for a supervisor-hosted city.
+	apiRouteLocalWhenSupervisorHosted
+	// apiRouteStatusRead is statusReadAPIClient's routing: the warm supervisor
+	// view for status-shaped reads (fork). It resolves like
+	// apiRoutePreferSupervisor, but fails closed on the supervisor's READ grant
+	// requirement, which a write-only grant policy does not trigger.
+	apiRouteStatusRead
+)
+
+// routeRequiresGrants reports whether route must keep its local fallback
+// because the supervisor requires a grant this client never mints. General
+// commands honour any grant requirement (upstream hook); status reads honour
+// the read grant requirement only (fork); the fall-through and
+// local-when-hosted routes never consult it.
+func routeRequiresGrants(route apiRoute) bool {
+	switch route {
+	case apiRouteGeneral:
+		return apiRouteSupervisorGrantsHook()
+	case apiRouteStatusRead:
+		return supervisorRequiresCityReadGrants()
+	}
+	return false
+}
+
+// routeFallsThroughToSupervisor reports whether route sends a live controller
+// of unknown hosting mode without a usable [api] port to the supervisor.
+func routeFallsThroughToSupervisor(route apiRoute) bool {
+	return route == apiRoutePreferSupervisor || route == apiRouteStatusRead
+}
+
+// statusReadAPIClient resolves warm API views for status-shaped read commands.
+// Read grant requirements fail closed; write-only requirements leave GETs usable.
+func statusReadAPIClient(cityPath string) (*api.Client, string) {
+	if c := routeAPIClient(cityPath, apiRouteStatusRead); c != nil {
+		return c, ""
+	}
+	return nil, routeFallbackReason(cityPath, apiRouteStatusRead)
+}
+
+// routeAPIClient is the routing ladder apiClient,
+// supervisorFallthroughAPIClient, localWhenSupervisorHostedAPIClient and
+// statusReadAPIClient share; route selects which of them it resolves for.
+func routeAPIClient(cityPath string, route apiRoute) *api.Client {
+	// Remote routing is NOT handled here. A remote target is refused upstream by
+	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
+	// served by a resolution-aware remote transport keyed on
+	// resolvedContext.Remote (Phase 2) — never by sniffing global flags/env in
+	// this local loopback ladder. Sniffing here is wrong: a local --city command
+	// that merely has a stray GC_CITY_URL in its environment resolves LOCAL (flag
+	// beats env), and must still route through its live local controller.
+	// GC_NO_API + a resolved remote target is already a loud error at resolution
+	// (guardNoAPI), so no remote op can reach the GC_NO_API nil-return below.
+	//
+	// Operator escape hatch: GC_NO_API=1|true|yes → always fall back.
+	// Unknown values warn to stderr and fail open (fall through to normal path).
 	if disabled, warn := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return nil
 	} else if warn != "" {
@@ -41,40 +169,38 @@ func routeAPIClientWithGrantPolicy(cityPath string, preferSupervisor bool, requi
 	}
 	identity := apiRouteControllerIdentityHook(cityPath)
 	switch {
-	case identity.PID == 0 || identity.HostingMode == controllerHostingSupervisor:
-		if requiresGrants() {
+	case identity.PID == 0:
+		// No controller socket: the supervisor-managed client, nil unless the
+		// supervisor runs the city. A supervisor that requires grants keeps
+		// the local fallback for the routes that honour that requirement.
+		if routeRequiresGrants(route) {
 			return nil
 		}
 		return apiRouteSupervisorClientHook(cityPath)
-	default:
-		c := standaloneControllerClient(cityPath)
-		if c == nil && preferSupervisor && identity.HostingMode == controllerHostingUnknown {
-			if requiresGrants() {
-				return nil
-			}
-			return apiRouteSupervisorClientHook(cityPath)
+	case identity.HostingMode == controllerHostingSupervisor:
+		// The supervisor hosts the city in-process and serves it on its own
+		// port via city-scoped routes, ignoring [api] port.
+		if route == apiRouteLocalWhenSupervisorHosted || routeRequiresGrants(route) {
+			return nil
 		}
-		return c
+		return apiRouteSupervisorClientHook(cityPath)
 	}
-}
-
-// supervisorRequiresCityGrants reports whether general commands need a local
-// fallback because the supervisor requires a read or write grant. Unreadable
-// supervisor policy fails closed instead of sending an unauthenticated request.
-func supervisorRequiresCityGrants() bool {
-	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
-	if err != nil {
-		return true
+	// Standalone controller, or one predating identify (hosting mode
+	// unknown): its configured [api] port is the only endpoint it serves.
+	c := standaloneControllerClient(cityPath)
+	if c == nil && routeFallsThroughToSupervisor(route) && identity.HostingMode == controllerHostingUnknown {
+		if routeRequiresGrants(route) {
+			return nil
+		}
+		return apiRouteSupervisorClientHook(cityPath)
 	}
-	policy := cfg.Supervisor
-	return policy.WriteAuthRequired || policy.ReadAuthRequired ||
-		strings.TrimSpace(policy.WriteAuthVerifyKey) != "" || strings.TrimSpace(policy.ReadAuthVerifyKey) != "" ||
-		strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY")) != "" || strings.TrimSpace(os.Getenv("GC_CITY_READ_PUBKEY")) != "" ||
-		os.Getenv("GC_CITY_WRITE_REQUIRED") == "1" || os.Getenv("GC_CITY_READ_REQUIRED") == "1"
+	return c
 }
 
 // supervisorRequiresCityReadGrants applies only read policy to status requests.
 // A write-only grant policy must not disable the supervisor's warm GET views.
+// Unreadable supervisor policy fails closed instead of sending an
+// unauthenticated request.
 func supervisorRequiresCityReadGrants() bool {
 	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
 	if err != nil {
@@ -85,9 +211,10 @@ func supervisorRequiresCityReadGrants() bool {
 }
 
 // standaloneControllerClient builds an API client for a standalone controller
-// that binds cfg.API.Port from city.toml. It returns nil when no usable
-// standalone HTTP endpoint exists: the config is unreadable, [api] port is
-// unset, or the listener binds a non-loopback address without allow_mutations.
+// that binds cfg.API.Port from city.toml. It returns nil, which apiClient hands
+// back to its caller, when no usable standalone HTTP endpoint exists: the
+// config is unreadable, [api] port is unset, or the listener binds a
+// non-loopback address without allow_mutations.
 func standaloneControllerClient(cityPath string) *api.Client {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
@@ -115,53 +242,54 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	return loadedCityName(cfg, cityPath)
 }
 
-// supervisorFallthroughAPIClient prefers the supervisor for commands with no
-// local fallback, or a costly one. Explicit standalone hosting never falls
-// through to the supervisor; unknown legacy hosting may do so without a port.
-func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
-	if c := routeAPIClient(cityPath, true); c != nil {
-		return c, ""
-	}
-	return nil, routeFallbackReason(cityPath, true)
-}
-
-// statusReadAPIClient resolves warm API views for status-shaped read commands.
-// Read grant requirements fail closed; write-only requirements leave GETs usable.
-func statusReadAPIClient(cityPath string) (*api.Client, string) {
-	if c := routeAPIClientWithGrantPolicy(cityPath, true, supervisorRequiresCityReadGrants); c != nil {
-		return c, ""
-	}
-	return nil, routeFallbackReasonWithGrantPolicy(cityPath, true, supervisorRequiresCityReadGrants)
-}
-
-// apiClientFallbackReason explains why general API routing fell back locally.
+// apiClientFallbackReason returns a reason code describing why apiClient
+// returned nil for cityPath. Read-path CLI commands call this when the
+// client is nil to emit a route=fallback reason=<code> log line.
+//
+// The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
+// (GC_NO_API truthy), "non-loopback-bind" (a standalone controller's API bound
+// to non-localhost with mutations disallowed), "grant-required" (a
+// supervisor-hosted city whose supervisor requires city grants),
+// "controller-down" (everything else — no controller, config missing, API
+// port unset, no supervisor-managed client).
 func apiClientFallbackReason(cityPath string) string {
-	return routeFallbackReason(cityPath, false)
+	return routeFallbackReason(cityPath, apiRouteGeneral)
 }
 
-func routeFallbackReason(cityPath string, preferSupervisor bool) string {
-	return routeFallbackReasonWithGrantPolicy(cityPath, preferSupervisor, supervisorRequiresCityGrants)
-}
-
-func routeFallbackReasonWithGrantPolicy(cityPath string, preferSupervisor bool, requiresGrants func() bool) string {
+// routeFallbackReason returns the apiClientFallbackReason code for a nil from
+// routeAPIClient with the same route, or "supervisor-hosted" for a
+// supervisor-hosted city on localWhenSupervisorHostedAPIClient's route. A
+// supervisor-hosted city's [api] bind is never the reason: the supervisor
+// ignores that port.
+func routeFallbackReason(cityPath string, route apiRoute) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
 	}
 	identity := apiRouteControllerIdentityHook(cityPath)
-	if identity.PID > 0 && identity.HostingMode == controllerHostingUnknown && preferSupervisor && standaloneControllerClient(cityPath) == nil && requiresGrants() {
-		return "grant-required"
-	}
-	if identity.PID == 0 || identity.HostingMode == controllerHostingSupervisor {
-		if requiresGrants() {
+	switch {
+	case identity.PID == 0:
+		// No controller socket: a supervisor that requires grants is why a
+		// route that honours them got nil.
+		if routeRequiresGrants(route) {
 			return "grant-required"
 		}
-		return "controller-down"
-	}
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
-		bind := cfg.API.BindOrDefault()
-		if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
-			return "non-loopback-bind"
+	case identity.HostingMode == controllerHostingSupervisor:
+		if route == apiRouteLocalWhenSupervisorHosted {
+			return "supervisor-hosted"
+		}
+		if routeRequiresGrants(route) {
+			return "grant-required"
+		}
+	default:
+		if identity.HostingMode == controllerHostingUnknown && routeFallsThroughToSupervisor(route) && standaloneControllerClient(cityPath) == nil && routeRequiresGrants(route) {
+			return "grant-required"
+		}
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
+			bind := cfg.API.BindOrDefault()
+			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+				return "non-loopback-bind"
+			}
 		}
 	}
 	return "controller-down"

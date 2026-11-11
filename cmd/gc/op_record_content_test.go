@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -306,7 +308,7 @@ func TestSessionNudgeOpRefusedBehindAPendingPrompt(t *testing.T) {
 // nudge before any effect.
 func TestSessionNudgeOpOffAndRequire(t *testing.T) {
 	t.Run("off", func(t *testing.T) {
-		c := newContentOpCity(t, "")
+		c := newContentOpCity(t, "off")
 		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
 		if code != 0 || stderr != "" {
 			t.Fatalf("nudge = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
@@ -370,7 +372,7 @@ func deliveredTextIsUnchangedByTheGate(t *testing.T, provider string) {
 		}
 		return r
 	}
-	off := runAll("")
+	off := runAll("off")
 	if len(off.calls)+len(off.queued) != 3 {
 		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
 	}
@@ -507,7 +509,7 @@ func submitOpCity(t *testing.T, mode string, srv *httptest.Server) (*cliOpHarnes
 	}
 	h := newCLIOpHarness(t, env)
 	c := newCLIOpCity(t, h, nil)
-	oldAlive, oldClient := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	oldIdentity, oldClient, oldGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
 	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{} }
 	apiRouteSupervisorClientHook = func(string) *api.Client {
 		if srv == nil {
@@ -515,7 +517,10 @@ func submitOpCity(t *testing.T, mode string, srv *httptest.Server) (*cliOpHarnes
 		}
 		return api.NewCityScopedClient(srv.URL, filepath.Base(c.dir))
 	}
-	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = oldIdentity, oldClient, oldGrants
+	})
 	return h, c
 }
 
@@ -798,7 +803,7 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 	t.Run("off sends no key", func(t *testing.T) {
 		var got string
 		srv := serve(t, &got)
-		h, c := submitOpCity(t, "", srv)
+		h, c := submitOpCity(t, "off", srv)
 		var stdout, stderr bytes.Buffer
 		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 			t.Fatalf("submit = %d, want the test server's refusal; stderr=%s", code, stderr.String())
@@ -1028,6 +1033,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 		{name: "runtime session not found", err: fmt.Errorf("nudging: %w", runtime.ErrSessionNotFound), arm: opjournal.ArmFailed, reason: opjournal.ReasonSessionGone},
 		{name: "provider unavailable", err: runtime.ErrRuntimeUnavailable, arm: opjournal.ArmFailed, reason: opjournal.ReasonProviderUnavailable},
 		{name: "timeout", err: context.DeadlineExceeded, arm: opjournal.ArmFailed, reason: opjournal.ReasonDeadlineInFlight},
+		{name: "nudge queue busy", err: fmt.Errorf("gc session nudge: %w", nudgequeue.ErrQueueBusy), arm: opjournal.ArmFailed, reason: opjournal.RefusedReasonPrefix + "nudge_queue_busy"},
 		{name: "other", err: errors.New("boom"), arm: opjournal.ArmFailed, reason: opjournal.ReasonOther},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1065,7 +1071,10 @@ func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 }
 
 // A submit the API records and runs live (not a replay) reports the API's op
-// and the key under --json, with no replayed field.
+// and the key under --json, with no replayed field. A supervisor-hosted city
+// reaches that API even when its city.toml names an [api] port nothing serves:
+// supervisor mode ignores the port, and a local delivery could not reach the
+// supervisor's process-owned runtime (#5262).
 func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1096,21 +1105,49 @@ func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	h, c := submitOpCity(t, "auto", srv)
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
-		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-	}
-	contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
-	got := cliOpJSON(t, stdout.Bytes())
-	if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
-		t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
-	}
-	if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
-		t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
-	}
-	if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
-		t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+	for _, tc := range []struct {
+		name string
+		host func(t *testing.T, c *cliOpCity)
+	}{
+		{name: "controller down"},
+		{name: "supervisor-hosted city with a dead [api] port", host: func(t *testing.T, c *cliOpCity) {
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+			}
+			// Port 1 is privileged and unassigned, so loopback refuses it.
+			f, err := os.OpenFile(filepath.Join(c.dir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("opening city.toml: %v", err)
+			}
+			if _, err := f.WriteString("\n[api]\nport = 1\n"); err != nil {
+				t.Fatalf("appending [api] to city.toml: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatalf("closing city.toml: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := submitOpCity(t, "auto", srv)
+			if tc.host != nil {
+				tc.host(t, c)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+			}
+			contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+			got := cliOpJSON(t, stdout.Bytes())
+			if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
+				t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
+			}
+			if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
+				t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
+			}
+			if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
+				t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+			}
+		})
 	}
 }
 
@@ -1257,5 +1294,26 @@ func TestSessionSubmitThroughTheAPIUnrecordedKeyWarns(t *testing.T) {
 		if got := strings.Contains(stderr.String(), "warning: --key not recorded"); got != tc.warn {
 			t.Fatalf("submit key %q stderr = %q, want the unrecorded --key warning = %v", tc.key, stderr.String(), tc.warn)
 		}
+	}
+}
+
+// A broadcast notify under the builtin default over a store that cannot
+// record ops prints no op-journal warning, for any recipient.
+func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	c := newContentOpCity(t, "")
+	c.h.opStore = cliOpIncapableStore{c.h.opStore}
+	var warn bytes.Buffer
+	nudgeWarningWriter = &warn
+	mp := beadmail.New(beads.NewMemStore())
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
+	}
+	recipients := map[string]bool{"human": true, "a": true, "b": true, "c": true}
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send --all = %d; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(warn.String()+stderr.String(), "op journal") {
+		t.Fatalf("warnings = %q, stderr = %q; want no op-journal warning under the builtin default", warn.String(), stderr.String())
 	}
 }

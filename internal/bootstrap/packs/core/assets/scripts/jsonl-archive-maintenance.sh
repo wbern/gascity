@@ -11,8 +11,18 @@ archive_lock() {
         echo 'jsonl-export: flock is required for archive exclusion' >&2
         return 1
     }
-    mkdir -p "$ARCHIVE_REPO" || return 1
-    archive_real=$(cd "$ARCHIVE_REPO" && pwd -P) || return 1
+    # Never create the archive path here: a first export initializes the repo
+    # beside its final path and renames it into place so the path never exists
+    # without .git (a doctor run in that window reports the archive malformed).
+    # The lock is keyed on the real path, resolved through the parent while the
+    # archive does not exist yet.
+    if [ -e "$ARCHIVE_REPO" ]; then
+        archive_real=$(cd "$ARCHIVE_REPO" && pwd -P) || return 1
+    else
+        mkdir -p "$(dirname "$ARCHIVE_REPO")" || return 1
+        archive_real=$(cd "$(dirname "$ARCHIVE_REPO")" && pwd -P) || return 1
+        archive_real="$archive_real/$(basename "$ARCHIVE_REPO")"
+    fi
     # Never unlink the lock inode: another exporter may already have it open.
     exec 8>"${archive_real}.export.lock" || return 1
     flock -n -E 75 8 || lock_rc=$?

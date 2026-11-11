@@ -17,11 +17,16 @@ package main
 // once, with or without a running controller, and so does a busy one whose
 // runtime an immediate nudge can steer (Caps.Steer). The pass never waits
 // for a boundary; a busy session it cannot deliver to leaves the op to the
-// controller's lane host. It is a full pass: it may close any op of the
-// conversation by rule, run control before content, and carry other
-// producers' notices in its batch. The CLI hosts no observer and writes no
-// turn fact; it never requests a wake itself (the lane host's pass does,
-// after the ring). Queue mode runs no pass and makes no runtime call.
+// controller's lane host. A full pass may close any op of the conversation
+// by rule and carry other producers' notices in its batch, but it runs no
+// control (opjournal.Caps.ContentOnly): an interrupt, a respond or a
+// deliver-now unit waits for the controller's lane host, and so does
+// content queued behind one (I10), so a CLI nudge never starts a turn that
+// an earlier stop then kills. An interrupt's waits do not fit the CLI's
+// lease, and the CLI keeps no interrupt record. The CLI hosts no observer
+// and writes no turn fact; it never requests a wake itself (the lane host's
+// pass does, after the ring). Queue mode runs no pass and makes no runtime
+// call.
 //
 // After it reports, a lane-routed nudge rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort, so the host refreshes the
@@ -53,6 +58,9 @@ const (
 	cliLaneLeaseTTL = 30 * time.Second
 	// cliLaneRingTimeout bounds each leg of the CLI's ring.
 	cliLaneRingTimeout = time.Second
+	// cliReconcilerModeLeg bounds each leg of the inline pass's ask for the
+	// controller's latched session reconciler (controllerStopReading).
+	cliReconcilerModeLeg = 500 * time.Millisecond
 )
 
 // cliLaneExecutesMessage reports whether [ops] authoritative lists message.
@@ -203,7 +211,7 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		return true, 1
 	}
 	n.st = st
-	view, _, absent, err := readConversationLaneView(sessionFrontDoor(n.sessions), target.sessionID)
+	view, absent, err := readConversationLaneViewOnly(sessionFrontDoor(n.sessions), target.sessionID)
 	switch {
 	case err != nil:
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
@@ -308,9 +316,17 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		return opjournal.PassResult{}, err
 	}
 	armLaneFailpoints(lane, cliLaneHostName)
-	view, info, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID)
+	// The CLI holds no latch, so it reads the stop request by the mode the
+	// controller latched, asked right before the row read so the answer is
+	// as fresh as the row: a request it holds back waits for the
+	// controller's lane host, which reads by the same mode.
+	reading, modeErr := controllerStopReading(n.target.cityPath, cliReconcilerModeLeg)
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, reading)
 	if err != nil {
 		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
+	}
+	if note := unknownModeStopNote(row, modeErr); note != "" {
+		n.warnf("%s", note)
 	}
 	live := newConversationLaneExec(laneExecDeps{
 		cityPath: n.target.cityPath,
@@ -319,7 +335,7 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 		sp:       n.sp,
 		lane:     n.st,
 		clk:      cliOpClock,
-	}, info)
+	}, row)
 	exec := &cliLaneExec{conversationLaneExec: live, ownsInput: live.target.sessionTransport() != "acp"}
 	res, err := lane.Pass(ctx, view, exec)
 	laneFailpointAfterPass(cliLaneHostName, res)
@@ -438,7 +454,8 @@ func (n *cliLaneNudge) json(queued bool, id string, replayed bool) sessionNudgeJ
 
 // cliLaneQueuedNote says why the pass left op waiting, from its wait in
 // res; none in queue mode, which runs no pass, and none for a wait it does
-// not name.
+// not name. A pending interaction is worded for both kinds: the pass's probe
+// carries a request id and no kind.
 func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 	for _, w := range res.Waits {
 		if w.ID != op.ID {
@@ -448,7 +465,7 @@ func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 		case opjournal.WaitBusy, opjournal.WaitBoundaryUnknown:
 			return " (the session is mid-turn; the controller delivers it at the next idle boundary)"
 		case opjournal.WaitPendingInteraction:
-			return " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"
+			return " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"
 		case opjournal.WaitNotRunning, opjournal.WaitDormant, opjournal.WaitNoSession:
 			if op.Policy.Message.Wake == opjournal.WakeLiveOnly {
 				return " (the session is not running; the nudge is delivered the next time it runs)"
@@ -491,14 +508,15 @@ var _ opjournal.Executor = (*cliLaneExec)(nil)
 // Probe implements opjournal.Executor: without the session's input it
 // reports a runtime this process cannot type into, so the pass takes
 // nothing and asks no wake; otherwise the live executor's probe under the
-// CLI's lease.
+// CLI's lease. Either way the pass is content-only (Caps.ContentOnly): it
+// runs no control.
 func (e *cliLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
 	if !e.ownsInput {
 		return opjournal.Probe{
 			Available: true,
 			Fence:     laneFence(conv),
 			TurnLive:  opjournal.TriUnknown,
-			Caps:      opjournal.Caps{Input: opjournal.FenceNone, Text: opjournal.TextReminder, LeaseTTL: cliLaneLeaseTTL},
+			Caps:      opjournal.Caps{Input: opjournal.FenceNone, Text: opjournal.TextReminder, LeaseTTL: cliLaneLeaseTTL, ContentOnly: true},
 		}, nil
 	}
 	p, err := e.conversationLaneExec.Probe(ctx, conv)
@@ -506,5 +524,6 @@ func (e *cliLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView
 		return p, err
 	}
 	p.Caps.LeaseTTL = cliLaneLeaseTTL
+	p.Caps.ContentOnly = true
 	return p, nil
 }

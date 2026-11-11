@@ -52,13 +52,6 @@ type MCPAdoptionRefusedError struct {
 	Symlink string
 }
 
-func refusalOrErr(refused *MCPAdoptionRefusedError, err error) error {
-	if err != nil {
-		return err
-	}
-	return refused
-}
-
 func (e *MCPAdoptionRefusedError) Error() string {
 	return "not adopting " + e.Target + ": " + e.Reason()
 }

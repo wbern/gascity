@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 const teamMCPJSON = `{"mcpServers":{"team-db":{"command":"team-db-mcp"}}}` + "\n"
@@ -201,9 +200,11 @@ func TestStage2MCPRefusalWarningsStayBoundedForAgentsSharingAWorkDir(t *testing.
 }
 
 // A pack overlay that ships a provider file the hook installer does not own
-// (here .gemini/settings.json) is merged into the work dir's file on every
-// tick, rewriting the same bytes once merged. gc's own rewrite is not a
-// change: the refusal is reported once.
+// (here .gemini/settings.json) is merged into the work dir's file. Staging
+// leaves an already-merged file alone, so each tick first restores the team's
+// own settings (as a checkout would): every tick then has gc rewrite the file
+// to the same merged bytes. gc's own rewrite is not a change: the refusal is
+// reported once.
 func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
 	cityPath := t.TempDir()
 	var stderr bytes.Buffer
@@ -217,11 +218,11 @@ func TestStage2MCPRefusalWarningsIgnoreGCsOwnRewrites(t *testing.T) {
 	}
 	params.packOverlayDirs = []string{overlayDir}
 	workDir := filepath.Join(cityPath, ".gc", "worktrees", "worker-1")
-	writeTeamGeminiSettings(t, workDir)
 	target := filepath.Join(workDir, ".gemini", "settings.json")
 	agent := &config.Agent{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/worker-1"}
 	old := time.Unix(1_000_000, 0)
 	for tick := 0; tick < 4; tick++ {
+		writeTeamGeminiSettings(t, workDir)
 		// Backdate the file, so the tick's rewrite shows in its mtime.
 		if err := os.Chtimes(target, old, old); err != nil {
 			t.Fatal(err)
@@ -616,40 +617,6 @@ command = "uvx"
 	}
 }
 
-func TestPlanStage1MCPProjectionReportsRefusalWithoutWriting(t *testing.T) {
-	cityPath := t.TempDir()
-	target := filepath.Join(cityPath, ".mcp.json")
-	if err := os.WriteFile(target, []byte(teamMCPJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
-name = "notes"
-command = "uvx"
-`)
-	cfg := &config.City{
-		PackMCPDir: filepath.Join(cityPath, "mcp"),
-		Session:    config.SessionConfig{Provider: "tmux"},
-		Providers:  builtinProviderAliasesForTest("claude"),
-		Agents:     []config.Agent{{Name: "mayor", Scope: "city", Provider: "claude"}},
-	}
-
-	lines, err := planStage1MCPProjection(cityPath, cfg, stubLookPath, io.Discard)
-	if err != nil {
-		t.Fatalf("planStage1MCPProjection: %v", err)
-	}
-	if got := strings.Join(lines, "\n"); !strings.Contains(got, "leave "+target) || !strings.Contains(got, `MCP server "team-db"`) {
-		t.Fatalf("plan = %q, want refusal for team-db", got)
-	}
-	if got, err := os.ReadFile(target); err != nil || string(got) != teamMCPJSON {
-		t.Fatalf("plan changed target: %q (err %v)", got, err)
-	}
-	for _, path := range []string{filepath.Join(cityPath, ".gitignore"), filepath.Join(cityPath, ".gc", "mcp-managed", "claude.json"), filepath.Join(cityPath, ".gc", "mcp-adopted")} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("plan wrote %s (stat error %v)", path, err)
-		}
-	}
-}
-
 // A target that fails fails the pass, but the files gc projected before it
 // stay ignored: .gitignore is written on the way out.
 func TestRunStage1MCPProjectionIgnoresWhatItProjectedWhenALaterTargetFails(t *testing.T) {
@@ -970,7 +937,7 @@ command = "uvx"
 	if code := run([]string{"mcp", "list", "--agent", "mayor", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc mcp list --json exited %d: %s", code, stderr.String())
 	}
-	validateMCPListResultSchema(t, stdout.Bytes())
+	contentOpValidate(t, "schemas/mcp/list/result.schema.json", stdout.String())
 	var got projectedMCPJSON
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
@@ -979,34 +946,6 @@ command = "uvx"
 	if notAdopted == nil || strings.Join(notAdopted.UnmanagedServers, ",") != "team-db" ||
 		strings.Join(notAdopted.RedefinedServers, ",") != "notes" || notAdopted.Remedy == "" {
 		t.Fatalf("projection.not_adopted = %+v", notAdopted)
-	}
-}
-
-func validateMCPListResultSchema(t *testing.T, data []byte) {
-	t.Helper()
-	const schemaPath = "../../schemas/mcp/list/result.schema.json"
-	rawSchema, err := os.ReadFile(schemaPath)
-	if err != nil {
-		t.Fatalf("read MCP list result schema: %v", err)
-	}
-	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
-	if err != nil {
-		t.Fatalf("parse MCP list result schema: %v", err)
-	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("parse MCP list JSON: %v", err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource("mcp/list/result.schema.json", schemaDoc); err != nil {
-		t.Fatalf("add MCP list result schema: %v", err)
-	}
-	compiled, err := compiler.Compile("mcp/list/result.schema.json")
-	if err != nil {
-		t.Fatalf("compile MCP list result schema: %v", err)
-	}
-	if err := compiled.Validate(instance); err != nil {
-		t.Fatalf("MCP list payload does not validate: %v", err)
 	}
 }
 

@@ -20,6 +20,7 @@ dolt-topology
 dolt-drift
 config-valid
 sling-default-targets
+bd-command-inventory
 legacy-suspended-field
 daemon-session-reconciler
 beads-ledger-feed
