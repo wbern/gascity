@@ -100,12 +100,3 @@ func TestUnboundedReadStoreNeverSeesManifest(t *testing.T) {
 		t.Fatalf("read args %v are missing --allow-unbounded", got)
 	}
 }
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
-}

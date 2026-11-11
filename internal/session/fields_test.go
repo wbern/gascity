@@ -175,7 +175,7 @@ func TestSessionFieldRegistryCatches(t *testing.T) {
 		{"no class", edit("state", func(f *Field) { f.Class = 0 }), "state: no class"},
 		{"no writer, no ruling", edit("slept_at", func(f *Field) { f.Writers = nil }), "slept_at: needs writers or a NoWriter ruling"},
 		{"per-tick premise key", edit("execution_claim_hold", func(f *Field) { f.Premise = true }), "per-tick key cannot be in the premise"},
-		{"pending with no bead", edit("wake_request", func(f *Field) { f.Clears[3].Pending = "" }), "names no pending bead"},
+		{"pending with no bead", edit("wake_request", func(f *Field) { f.Clears[4].Pending = "" }), "names no pending bead"},
 		{"legacy writer of a new key", edit(DrainAckAtKey, func(f *Field) { f.Writers[0].Mode = ModeLegacy }), "new key with a legacy writer"},
 		{"request with no v2 clear", edit("wake_request", func(f *Field) { f.Clears = f.Clears[:1] }), "wake_request: written under mode 2 with no consumer or clear point"},
 		{"request with no legacy consumer", edit("restart_requested", func(f *Field) { f.Readers = f.Readers[1:] }), "restart_requested: written under mode 1"},
@@ -196,7 +196,7 @@ var premiseGolden = strings.Fields(`archived_at churn_count close_reason closed_
 	drain_intent_incarnation drain_intent_reason generation held_until idle_respawn_attempts idle_respawn_bead_id
 	instance_token last_woke_at operator_drain pending_create_claim pending_create_started_at pin_awake
 	provider_terminal_error provider_terminal_error_at quarantine_cycle quarantined_until reset_committed_at
-	restart_requested session_circuit_open_restart_count session_circuit_opened_at
+	restart_requested resume_failures resume_launch session_circuit_open_restart_count session_circuit_opened_at
 	session_circuit_reset_generation session_circuit_restarts session_circuit_state session_drainable
 	session_health session_health_reason session_key sleep_intent sleep_policy_fingerprint sleep_reason slept_at
 	started_config_hash startup_dialog_verified state state_reason stranded_event_emitted_at suspended_at

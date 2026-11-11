@@ -262,6 +262,15 @@ func (t nudgeTarget) sessionTransport() string {
 	return t.agent.Session
 }
 
+// processNames are the agent processes the target's provider runs, by
+// which a runtime handle tells a crashed agent in a pane still up.
+func (t nudgeTarget) processNames() []string {
+	if t.resolved == nil {
+		return nil
+	}
+	return t.resolved.ProcessNames
+}
+
 func (t nudgeTarget) providerName() string {
 	if t.resolved != nil && strings.TrimSpace(t.resolved.Name) != "" {
 		return strings.TrimSpace(t.resolved.Name)
@@ -273,6 +282,27 @@ func (t nudgeTarget) providerName() string {
 		return strings.TrimSpace(t.cfg.Workspace.Provider)
 	}
 	return ""
+}
+
+// providerFamily returns the builtin provider family the target runs, which is
+// what the claude wait-idle gates compare against. A resolved provider reports
+// its BuiltinAncestor; otherwise the family is derived from the configured
+// provider name through the city's providers, so a wrapped alias such as a
+// provider with base = "builtin:claude" is still claude-family. A name with no
+// builtin family falls back to the raw configured name.
+func (t nudgeTarget) providerFamily() string {
+	if t.resolved != nil {
+		if family := strings.TrimSpace(t.resolved.BuiltinAncestor); family != "" {
+			return family
+		}
+	}
+	name := t.providerName()
+	if t.cfg != nil {
+		if family := strings.TrimSpace(config.BuiltinFamily(name, t.cfg.Providers)); family != "" {
+			return family
+		}
+	}
+	return name
 }
 
 type queuedNudgeOptions struct {
@@ -1265,7 +1295,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	// live in-process and non-claude returns immediately (see
 	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
-	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running &&
 			(nudgeObservationBusy(obs) || nudgeTargetAtInteractivePrompt(target, sp)) {
 			// The session is running but not safe for live delivery: either
@@ -1317,12 +1347,15 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if result.Undelivered == worker.NudgeQueuedHeld {
-		// The session is held and queued the nudge itself (CONTRACT v5.9 D8);
-		// a held wait-idle nudge (NudgeUndeliveredHeld) is queued below.
+	if result.Undelivered == worker.NudgeQueued {
+		// The session could not take it now and queued the nudge itself
+		// (CONTRACT v5.9 D8); a held wait-idle nudge (NudgeUndeliveredHeld) is
+		// queued below.
 		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
-	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+	if !result.Delivered {
+		// Not delivered and not queued: a wait-idle nudge that found no
+		// boundary, or any nudge to an agent dead in its pane (mc-48az4).
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	// Stamp every delivered nudge: a resumed session's manager already
@@ -1530,9 +1563,9 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 			sp,
 			target.cfg,
 			target.sessionName,
-			strings.TrimSpace(target.providerName()),
+			strings.TrimSpace(target.providerFamily()),
 			strings.TrimSpace(target.sessionTransport()),
-			nil,
+			target.processNames(),
 		)
 		if err == nil {
 			return handle, nil
@@ -1550,9 +1583,9 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		sp,
 		target.cfg,
 		target.sessionName,
-		strings.TrimSpace(target.providerName()),
+		strings.TrimSpace(target.providerFamily()),
 		strings.TrimSpace(target.sessionTransport()),
-		nil,
+		target.processNames(),
 	)
 }
 
@@ -1734,6 +1767,10 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
 	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
 		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeQueued:
+		return " (the session cannot take it now: it is held by an operator or a wait, not running, or its agent is down; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeUndeliveredAgentDead:
+		return " (the session's agent is down; the nudge is delivered once the controller restarts it, and expires after 24h)"
 	default:
 		return ""
 	}
@@ -1854,7 +1891,15 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
+	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
+}
+
+// resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a
+// city, config and nudges store the caller already holds. A zero store resolves
+// nothing and reports identifier as not found, so a caller that must tell an
+// unopened store from a missing session opens the store itself and checks the
+// open error first.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
@@ -2011,6 +2056,13 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	// A pane whose agent is dead (a crash the controller has not healed)
+	// takes no queued delivery: the text would be lost with the pane. The
+	// incarnation the heal brings up claims it (mc-48az4). Alive is Running
+	// for a provider with no process names to check.
+	if !obs.Alive {
+		return false, nil
+	}
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
@@ -2025,7 +2077,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
@@ -2060,7 +2112,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	// Bookkeeping for fence-mismatched and blocked items is best-effort: a
 	// failure there must not abort delivery of the remaining claimable items.
 	// Items whose bookkeeping failed stay in-flight; lease expiry returns
-	// them to pending and a later pass retries.
+	// them to pending and a later pass retries. They keep the batch key, so
+	// the remaining items move to a new one before delivery
+	// (rekeyQueuedNudgesAfterFailedBookkeeping).
 	var bookkeepErr error
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
@@ -2089,6 +2143,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing stale mail nudges: %w", termErr))
 		}
 	}
+	items, bookkeepErr = rekeyQueuedNudgesAfterFailedBookkeeping(target.cityPath, items, bookkeepErr)
 	if len(items) == 0 {
 		return false, bookkeepErr
 	}
@@ -2104,10 +2159,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
-		Text:     msg,
-		Delivery: worker.NudgeDeliveryDefault,
-		Source:   "queue",
-		Wake:     worker.NudgeWakeLiveOnly,
+		Text:        msg,
+		Delivery:    worker.NudgeDeliveryDefault,
+		Source:      "queue",
+		Wake:        worker.NudgeWakeLiveOnly,
+		DeliveryKey: queuedNudgeDeliveryKey(items),
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
@@ -2283,7 +2339,7 @@ func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 
 // splitQueuedNudgesForTarget partitions claimed nudges into deliverable items
 // and rejects. Items whose fence (SessionID / ContinuationEpoch) does not match
-// the current target's fence are re-fenced in memory to the target's fence and
+// the current target's fence are re-fenced onto it (refencedQueuedNudge) and
 // returned as deliverable when the target itself is resolved to a live session
 // bead. Claim already admitted the item: either the SessionID still matches
 // (stale-epoch Leg A) or the fenced session is no longer a live occupant
@@ -2304,19 +2360,26 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 	var deliverable []queuedNudge
 	var rejected []queuedNudge
 	for _, item := range items {
-		if queuedNudgeMatchesTargetFence(target, item) {
-			deliverable = append(deliverable, item)
-			continue
-		}
-		if target.sessionID == "" {
+		item = refencedQueuedNudge(target, item)
+		if !queuedNudgeMatchesTargetFence(target, item) {
 			rejected = append(rejected, item)
 			continue
 		}
-		item.SessionID = target.sessionID
-		item.ContinuationEpoch = target.continuationEpoch
 		deliverable = append(deliverable, item)
 	}
 	return deliverable, rejected
+}
+
+// refencedQueuedNudge returns item with target's fence (SessionID /
+// ContinuationEpoch) when its own fence does not match target's and target is
+// resolved to a session to fence it onto. Otherwise it returns item unchanged.
+func refencedQueuedNudge(target nudgeTarget, item queuedNudge) queuedNudge {
+	if target.sessionID == "" || queuedNudgeMatchesTargetFence(target, item) {
+		return item
+	}
+	item.SessionID = target.sessionID
+	item.ContinuationEpoch = target.continuationEpoch
+	return item
 }
 
 // splitQueuedNudgesForDelivery partitions claimed nudges into deliverable items
@@ -2420,7 +2483,13 @@ func blockedQueuedMailNudgeReason(mp mail.Provider, item queuedNudge) (string, b
 	return "", false, nil
 }
 
-func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queuedNudge) error {
+// terminalizeBlockedQueuedNudges withdraws the blocked items by acking them
+// failed with their reason. It is a seam so a test can make the withdrawal of
+// chosen items fail, as an ack that cannot take the queue lock does. Tests
+// that replace it must stay serial.
+var terminalizeBlockedQueuedNudges = ackBlockedQueuedNudgesWithdrawn
+
+func ackBlockedQueuedNudgesWithdrawn(cityPath string, blocked map[string][]queuedNudge) error {
 	for reason, items := range blocked {
 		if err := ackQueuedNudgesWithOutcome(cityPath, queuedNudgeIDs(items), "failed", reason, "delivery-withdrawn"); err != nil {
 			return err
@@ -2618,6 +2687,85 @@ func newQueuedNudgeID() string {
 	return "nudge-" + hex.EncodeToString(buf[:])
 }
 
+// queuedNudgeDeliveryKey is the delivery key of the claimed batch items: the
+// batch id pinned on them at claim time (claimDueQueuedNudgeBatchForTarget),
+// or "" when they carry no common pin and the delivery goes unkeyed.
+func queuedNudgeDeliveryKey(items []queuedNudge) string {
+	if len(items) == 0 {
+		return ""
+	}
+	key := items[0].DeliveryBatch
+	for _, item := range items[1:] {
+		if item.DeliveryBatch != key {
+			return ""
+		}
+	}
+	return key
+}
+
+// newQueuedNudgeBatchID mints the delivery key a newly claimed batch is
+// pinned to.
+func newQueuedNudgeBatchID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("nudge-batch-%d", time.Now().UnixNano())
+	}
+	return "nudge-batch-" + hex.EncodeToString(buf[:])
+}
+
+// rekeyQueuedNudgesAfterFailedBookkeeping moves the claimed items about to be
+// delivered onto a new delivery key when withdrawing a withheld sibling of
+// their batch failed (bookkeepErr). That sibling stays in flight on the old
+// key, and lease expiry returns it to pending still pinned there, so it later
+// goes out alone under that key. Had the rest of the batch been delivered
+// under the key, the runtime would answer the sibling with the receipt of a
+// delivery that never contained it, acking it unseen. After a successful
+// withdraw the key stays: the withdrawn items are terminal, the items left
+// are the whole batch, and a redelivery after an unknown outcome must replay
+// the first attempt. The new key is persisted before delivery, so a retry of
+// this delivery reuses it. When it cannot be persisted, the claims are
+// released and nothing is delivered.
+func rekeyQueuedNudgesAfterFailedBookkeeping(cityPath string, items []queuedNudge, bookkeepErr error) ([]queuedNudge, error) {
+	if bookkeepErr == nil || len(items) == 0 {
+		return items, bookkeepErr
+	}
+	batch := newQueuedNudgeBatchID()
+	if err := pinQueuedNudgeClaims(cityPath, queuedNudgeIDs(items), batch); err != nil {
+		relErr := releaseQueuedNudgeClaims(cityPath, queuedNudgeIDs(items))
+		return nil, errors.Join(bookkeepErr, fmt.Errorf("moving the delivery onto a new key: %w", err), relErr)
+	}
+	rekeyed := make([]queuedNudge, len(items))
+	for i, item := range items {
+		item.DeliveryBatch = batch
+		rekeyed[i] = item
+	}
+	return rekeyed, bookkeepErr
+}
+
+// pinQueuedNudgeClaims pins the in-flight nudges ids to delivery key batch,
+// writing nothing unless every one of them is still in flight. It runs no
+// maintenance pass and opens no bead store, so it works while the bead store
+// whose failed write made the caller re-key is still failing.
+func pinQueuedNudgeClaims(cityPath string, ids []string, batch string) error {
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		pinned := 0
+		for i := range state.InFlight {
+			if want[state.InFlight[i].ID] {
+				state.InFlight[i].DeliveryBatch = batch
+				pinned++
+			}
+		}
+		if pinned != len(want) {
+			return fmt.Errorf("%d of %d claimed nudges are no longer in flight", len(want)-pinned, len(want))
+		}
+		return nil
+	})
+}
+
 func queuedNudgeIDs(items []queuedNudge) []string {
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
@@ -2697,8 +2845,8 @@ func sessionHoldsNudgeFence(info session.Info) bool {
 // The two fence predicates agree this way:
 //   - matching fence (same SessionID, including stale epoch) → claimable (Leg A)
 //   - mismatched SessionID whose fenced session is no longer live, and whose
-//     successor target is in the census → claimable (Leg B);
-//     splitQueuedNudgesForTarget re-fences onto the successor
+//     successor target is in the census → claimable (Leg B); the item is
+//     re-fenced onto the successor (refencedQueuedNudge)
 //   - mismatched SessionID that is still live → not claimable (sibling fence)
 //   - census unavailable, empty, or missing the target → fail closed
 func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge, liveSessions func() map[string]struct{}) bool {
@@ -2803,7 +2951,27 @@ func nudgeDrainExplicitCityPath() (string, bool) {
 	return resolveExplicitCityPathEnv()
 }
 
+// claimDueQueuedNudgesForTarget claims every due nudge for target, pinned or
+// not, and pins nothing. Its caller, the hook drain, prints them into the
+// agent's own hook output with no delivery key, so taking part of a pinned
+// batch is safe: no runtime records a receipt under the pin for that part, and
+// the rest of the batch later goes out under its key, where the runtime either
+// replays a receipt of the whole batch or commits the rest as new. A delivery
+// under a key claims through claimDueQueuedNudgeBatchForTarget instead.
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	match, err := snapshotNudgeMatcher(cityPath, target, now)
+	if err != nil || match == nil {
+		return nil, err
+	}
+	return claimDueQueuedNudgesMatching(cityPath, now, match)
+}
+
+// snapshotNudgeMatcher judges target's eligibility against one lock-free queue
+// snapshot and returns a matcher that accepts exactly the identities judged
+// eligible there, or nil when none is. The locked claim then takes only those:
+// an item that appears after the snapshot has no census decision and stays
+// queued, and the census read is not made under the queue lock.
+func snapshotNudgeMatcher(cityPath string, target nudgeTarget, now time.Time) (func(queuedNudge) bool, error) {
 	eligible, err := claimableNudgeSnapshot(cityPath, target, now)
 	if err != nil || len(eligible) == 0 {
 		return nil, err
@@ -2811,9 +2979,9 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 	if nudgeClaimAfterSnapshot != nil {
 		nudgeClaimAfterSnapshot()
 	}
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+	return func(item queuedNudge) bool {
 		return eligible[nudgeClaimIdentity(item)]
-	})
+	}, nil
 }
 
 // nudgeClaimAfterSnapshot lets the regression test insert work between the
@@ -2838,40 +3006,25 @@ func claimableNudgeSnapshotWithCensus(cityPath string, target nudgeTarget, now t
 	liveLoaded := false
 	var live map[string]struct{}
 	eligible := make(map[queuedNudgeClaimIdentity]bool)
+	liveSessions := func() map[string]struct{} {
+		if !liveLoaded {
+			if readCensus != nil {
+				live = readCensus()
+			}
+			liveLoaded = true
+		}
+		return live
+	}
 	consider := func(item queuedNudge) {
 		if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
 			return
 		}
-		if !target.matchesQueueAgent(item.Agent) {
-			return
+		// Not-yet-due items stay eligible here: the locked claim applies the due
+		// test to unpinned items, and a pinned batch is redelivered whole whatever
+		// its items' DeliverAfter says.
+		if queuedNudgeClaimableForTarget(target, item, liveSessions) {
+			eligible[nudgeClaimIdentity(item)] = true
 		}
-		if item.DeliverAfter.After(now) {
-			return
-		}
-		if item.SessionID != "" && item.SessionID != target.sessionID {
-			if target.sessionID == "" {
-				return
-			}
-			if !liveLoaded {
-				if readCensus != nil {
-					live = readCensus()
-				}
-				liveLoaded = true
-			}
-			if live == nil {
-				return
-			}
-			if _, targetLive := live[target.sessionID]; !targetLive {
-				return
-			}
-			if _, oldLive := live[item.SessionID]; oldLive {
-				return
-			}
-		}
-		if item.ContinuationEpoch != "" && target.continuationEpoch == "" {
-			return
-		}
-		eligible[nudgeClaimIdentity(item)] = true
 	}
 	for _, item := range snapshot.Pending {
 		consider(item)
@@ -2906,6 +3059,36 @@ func nudgeClaimIdentity(item queuedNudge) queuedNudgeClaimIdentity {
 }
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+	return claimDueQueuedNudges(cityPath, now, match, nil)
+}
+
+// claimDueQueuedNudgeBatchForTarget claims target's next delivery batch and
+// pins it to a delivery key (queuedNudgeDeliveryKey). When a due item already
+// carries a pin and its batch can be claimed whole (wholePinnedBatch), the
+// batch is that pinned batch, all of its pending items and nothing else: a
+// redelivery after an unknown outcome must be the same delivery. Otherwise it
+// is every due unpinned item, pinned to a new key.
+//
+// The claim also moves each item it takes onto target's fence in the queue
+// (refencedQueuedNudge), not only in the delivered copy. A batch thus carries
+// the fence of the session that last tried to deliver it, and its items match
+// or fail to match a target together. Were a nudge taken from a drained
+// predecessor's fence to keep that fence, the predecessor waking again would
+// leave the batch split for both sessions (wholePinnedBatch) until it expired.
+func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	match, err := snapshotNudgeMatcher(cityPath, target, now)
+	if err != nil || match == nil {
+		return nil, err
+	}
+	return claimDueQueuedNudges(cityPath, now, match, &target)
+}
+
+// claimDueQueuedNudges claims every due nudge match accepts and pins nothing
+// (claimDueQueuedNudgesMatching), or, given a batchTarget, that target's next
+// delivery batch (claimDueQueuedNudgeBatchForTarget).
+func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge) bool, batchTarget *nudgeTarget) ([]queuedNudge, error) {
+	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := runNudgeQueueMutationAt(cityPath, "claim", beads.NudgesStore{}, true, now, func(state *nudgeQueueState) error {
 		claimed = claimed[:0]
@@ -2920,16 +3103,33 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
+		due := func(item queuedNudge) bool {
+			return item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
+		}
+		claim := func(item queuedNudge) bool { return match(item) && due(item) }
+		stamp := func(item queuedNudge) queuedNudge { return item }
+		if batchTarget != nil {
+			pinned := wholePinnedBatch(state, claim, match)
+			batch := pinned
+			if pinned != "" {
+				claim = func(item queuedNudge) bool { return item.DeliveryBatch == pinned && match(item) }
+			} else {
+				batch = newQueuedNudgeBatchID()
+				claim = func(item queuedNudge) bool { return item.DeliveryBatch == "" && match(item) && due(item) }
+			}
+			stamp = func(item queuedNudge) queuedNudge {
+				item = refencedQueuedNudge(*batchTarget, item)
+				item.DeliveryBatch = batch
+				return item
+			}
+		}
 		pending := state.Pending[:0]
 		for _, item := range state.Pending {
-			if !match(item) {
+			if !claim(item) {
 				pending = append(pending, item)
 				continue
 			}
-			if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-				pending = append(pending, item)
-				continue
-			}
+			item = stamp(item)
 			item.ClaimedAt = now.UTC()
 			item.LeaseUntil = now.Add(defaultQueuedNudgeClaimTTL).UTC()
 			state.InFlight = append(state.InFlight, item)
@@ -2940,6 +3140,36 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		return nil
 	})
 	return claimed, err
+}
+
+// wholePinnedBatch returns the first pinned delivery batch that has a due,
+// claimable item and can be claimed whole: every pending item carrying its pin
+// matches, and none of its items is in flight. A batch is only ever delivered
+// whole under its key; a strict subset would let the runtime commit the
+// partial text and later replay that receipt for the missing items, acking
+// them unseen. A batch that cannot be claimed whole waits this pass, to be
+// reassembled on a later pass or retired when its items expire.
+func wholePinnedBatch(state *nudgeQueueState, claimable, match func(queuedNudge) bool) string {
+	inFlight := make(map[string]bool, len(state.InFlight))
+	for _, item := range state.InFlight {
+		if item.DeliveryBatch != "" {
+			inFlight[item.DeliveryBatch] = true
+		}
+	}
+	split := map[string]bool{}
+	for _, item := range state.Pending {
+		if item.DeliveryBatch != "" && !match(item) {
+			split[item.DeliveryBatch] = true
+		}
+	}
+	for _, item := range state.Pending {
+		batch := item.DeliveryBatch
+		if batch == "" || inFlight[batch] || split[batch] || !claimable(item) {
+			continue
+		}
+		return batch
+	}
+	return ""
 }
 
 func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
@@ -3375,6 +3605,10 @@ func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 		return time.Time{}, true
 	case errors.Is(err, runtime.ErrPendingInteraction):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
+	// The runtime could not be observed, so nothing was delivered: back off
+	// without spending an attempt, so an outage cannot dead-letter the queue.
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		return now.Add(defaultQueuedNudgeRetryDelay), true
 	case errors.Is(err, runtime.ErrSessionNotFound):
 		return time.Time{}, true
 	// The runtime refused before typing anything (the composer was not ready):
@@ -3569,6 +3803,11 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 		errors.Is(cause, tmux.ErrNudgeSubmitDeliveredUnobserved) {
 		item.DeadAt = now.UTC()
 		return item, true
+	}
+	if errors.Is(cause, runtime.ErrNudgeRejected) {
+		// The runtime refused the batch, so nothing was delivered: unpin it,
+		// so the next claim delivers it as a new batch under a new key.
+		item.DeliveryBatch = ""
 	}
 	if item.Attempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
 		item.DeadAt = now.UTC()

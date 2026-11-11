@@ -143,6 +143,10 @@ cmd_gc_integration_tests=(
   TestPhase2WorkerCoreRealTransportProof
   TestReconcilerColdTmuxMetadataAllowsFirstStart
   TestRigAddIncludeResolvesScopedRegistryPackName
+  TestStartRecyclePinsThePeeksObjectOnRealTmux
+  TestStartRecycleQuarantinesARateLimitCorpseOnRealTmux
+  TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux
+  TestStopRefusesARuntimeReplacedAtTheCallOnRealTmux
   TestStorageGateServesACityFromItsBeadsWorkspace
 )
 

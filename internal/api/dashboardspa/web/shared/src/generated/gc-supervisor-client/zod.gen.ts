@@ -1114,6 +1114,7 @@ export const zOutboundEventPayload = z.object({
 });
 
 export const zOutputTurn = z.object({
+    id: z.string().optional(),
     role: z.string(),
     text: z.string(),
     timestamp: z.string().optional()
@@ -1492,7 +1493,8 @@ export const zRequestFailedPayload = z.object({
         'session.submit',
         'rig.create'
     ]),
-    request_id: z.string()
+    request_id: z.string(),
+    session_id: z.string().optional()
 });
 
 export const zRigActionBody = z.object({
@@ -1774,6 +1776,7 @@ export const zSessionCreateBody = z.object({
     async: z.boolean().optional(),
     kind: z.string().optional(),
     message: z.string().optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
     name: z.string().optional(),
     options: z.record(z.string(), z.string()).optional(),
     project_id: z.string().optional(),
@@ -1857,6 +1860,7 @@ export const zSessionMessageSucceededPayload = z.object({
 
 export const zSessionPatchBody = z.object({
     alias: z.string().optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
     title: z.string().min(1).optional()
 });
 
@@ -5073,6 +5077,24 @@ export const zTypedEventStreamEnvelopeSessionContinuationObserved = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.conversation_reset
+ */
+export const zTypedEventStreamEnvelopeSessionConversationReset = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.conversation_reset'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export const zTypedEventStreamEnvelopeSessionCrashed = z.object({
@@ -5818,6 +5840,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
     zTypedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedEventStreamEnvelopeSessionContinuationObserved.extend({ type: z.literal('session.continuation_observed') }),
+    zTypedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
@@ -7292,6 +7315,25 @@ export const zTypedTaggedEventStreamEnvelopeSessionContinuationObserved = z.obje
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.conversation_reset
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionConversationReset = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.conversation_reset'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.crashed
  */
 export const zTypedTaggedEventStreamEnvelopeSessionCrashed = z.object({
@@ -8074,6 +8116,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
     zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedTaggedEventStreamEnvelopeSessionContinuationObserved.extend({ type: z.literal('session.continuation_observed') }),
+    zTypedTaggedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedTaggedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
     zTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence.extend({ type: z.literal('session.demand_claim_divergence') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.extend({ type: z.literal('session.drain_acked_with_assigned_work') }),
@@ -10205,6 +10248,20 @@ export const zPostV0CityByCityNameSessionByIdPermissionModePath = z.object({
  */
 export const zPostV0CityByCityNameSessionByIdPermissionModeResponse = zSessionResponse;
 
+export const zPostV0CityByCityNameSessionByIdPinHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdPinPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdPinResponse = zSessionResponse;
+
 export const zPostV0CityByCityNameSessionByIdRenameBody = zSessionRenameInputBody;
 
 export const zPostV0CityByCityNameSessionByIdRenameHeaders = z.object({
@@ -10253,7 +10310,8 @@ export const zRespondSessionPath = z.object({
 export const zRespondSessionResponse = zSessionRespondOutputBody;
 
 export const zPostV0CityByCityNameSessionByIdStopHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdStopPath = z.object({
@@ -10388,8 +10446,23 @@ export const zGetV0CityByCityNameSessionByIdTranscriptQuery = z.object({
  */
 export const zGetV0CityByCityNameSessionByIdTranscriptResponse = zSessionTranscriptGetResponse;
 
-export const zPostV0CityByCityNameSessionByIdWakeHeaders = z.object({
+export const zPostV0CityByCityNameSessionByIdUnpinHeaders = z.object({
     'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdUnpinPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdUnpinResponse = zSessionResponse;
+
+export const zPostV0CityByCityNameSessionByIdWakeHeaders = z.object({
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdWakePath = z.object({

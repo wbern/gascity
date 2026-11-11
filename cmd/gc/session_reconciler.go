@@ -20,6 +20,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -482,8 +483,12 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 		clearErr = dops.clearDrain(name)
 	}
 	if err := clearErr; err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
-		return false
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
+			return false
+		}
+		// The ack is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': warning: %v\n", name, err) //nolint:errcheck
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, "min-floor", "cancel")
 	return true
@@ -1255,6 +1260,9 @@ func reconcileDrainAckStopPending(
 		return false, drainAckFinalizeResult{}
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
+	if v2SignaledStopHeldForAttach(store, sp, info, name, stderr) {
+		return true, drainAckFinalizeResult{}
+	}
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, tp.Hints.ProcessNames)
 	if err != nil || obs.Running || obs.Alive {
 		// Async-stop: queueDrainAckAsyncStop takes the session ID and mutates only
@@ -1269,6 +1277,64 @@ func reconcileDrainAckStopPending(
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
+}
+
+// v2SignaledStopHeldForAttach reports, and logs, a stop-pending row that v2
+// signaled whose runtime a client is attached to (CONTRACT v5.10v). v2's
+// signal writes legacy's stop-pending projection, which legacy reads as an
+// agent's ack and stops on a token check alone; v2's stop verb holds while
+// a client is attached (L3). After a rollback to legacy (C9 rung 1) such a
+// row must not be stopped under the client. The row is v2's when it carries
+// the controller half of a stop request at its generation and no ack half
+// (v2SignaledUnacked): an agent's or an operator's ack keeps legacy's
+// behavior. Presence and attachment both come from the fresh, error-aware
+// attach probe, never IsRunning (tmux's can read a stale cache and report a
+// present, attached session absent; #7858 review): a session not found is
+// gone, and so is one whose probe is unavailable with its server confirmed
+// dead (no tmux server left; mc-7i9i7), so a dead runtime still finalizes;
+// an attached client holds, and any other probe error holds, as v2's L3
+// does. A row the store cannot read keeps legacy's behavior.
+func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info sessionpkg.Info, name string, stderr io.Writer) bool {
+	if store == nil || sp == nil || name == "" {
+		return false
+	}
+	b, err := store.Get(info.ID)
+	if err != nil || !v2SignaledUnacked(b.Metadata) {
+		return false
+	}
+	attached, err := runtime.IsAttachedWithError(sp, name)
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return false // gone
+	case errors.Is(err, runtime.ErrRuntimeUnavailable) && serverConfirmedDead(sp, name):
+		return false // no server left to run it: gone
+	case err == nil && !attached:
+		return false
+	}
+	fmt.Fprintf(stderr, "session reconciler: holding the v2-signaled stop of %s: a client is attached\n", name) //nolint:errcheck // best-effort stderr
+	return true
+}
+
+// serverConfirmedDead reports that sp, or the leaf it routes name to,
+// confirms its runtime server dead (runtime.ServerDeathConfirmer): no
+// session of it can exist. A provider without the capability confirms
+// nothing.
+func serverConfirmedDead(sp runtime.Provider, name string) bool {
+	for _, p := range []runtime.Provider{sp, resolvedLeaf(sp, name)} {
+		if c, ok := p.(runtime.ServerDeathConfirmer); ok && c.ServerConfirmedDead() {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedLeaf is the leaf sp routes name to, or nil.
+func resolvedLeaf(sp runtime.Provider, name string) runtime.Provider {
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if !known {
+		return nil
+	}
+	return leaf
 }
 
 // drainAckStopPendingProcessNames resolves the configured agent process-name
@@ -1317,6 +1383,9 @@ func finalizeDrainAckStopPendingSessions(
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
+		if v2SignaledStopHeldForAttach(store, sp, info, name, stderr) {
+			continue
+		}
 		// Resolve the configured agent process-name hints for this persisted
 		// stop-pending session, exactly as the reset-driven path threads
 		// tp.Hints.ProcessNames (see reconcileDrainAckStopPending). Without them
@@ -1512,7 +1581,11 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk))
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk), manualCreateStartInFlightAt(i, now, startupTimeout))
 }
 
 // pendingCreateSessionStillLeasedAt is pendingCreateSessionStillLeasedInfo at
@@ -1522,14 +1595,36 @@ func pendingCreateSessionStillLeasedAt(i sessionpkg.Info, cfg *config.City, now 
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now))
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now), manualCreateStartInFlightAt(i, now, startupTimeout))
+}
+
+// manualCreateStartInFlightAt reports whether i is a client-created session
+// whose create may still be starting its runtime. Manager.CreateSession writes
+// the bead (state=active, session_origin=manual, no pending-create claim)
+// before it starts the runtime, and stamps creation_complete_at only once the
+// start succeeds. Until then the bead has no live runtime and may be missing
+// from a desired-state snapshot taken before it existed, so the orphan close
+// would reap it mid-start. The window matches the pending-create in-flight
+// lease; a create that is still unconfirmed after it is treated as dead.
+func manualCreateStartInFlightAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	if i.PendingCreateClaim || i.CreatedAt.IsZero() ||
+		strings.TrimSpace(i.SessionOrigin) != "manual" ||
+		strings.TrimSpace(i.CreationCompleteAt) != "" {
+		return false
+	}
+	if startupTimeout <= 0 {
+		startupTimeout = time.Minute
+	}
+	return now.Before(i.CreatedAt.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
 // pendingCreateSessionStillLeased composes the lease answers. Template
 // resolution uses normalizedSessionTemplateInfo with an Info.Template fallback
 // (Info.Template is the raw metadata["template"] mirror), and
-// findAgentByTemplate keys off the resolved template.
-func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested bool) bool {
+// findAgentByTemplate keys off the resolved template. A manual create still
+// starting (manualCreateStartInFlight) holds the same lease as a requested
+// start, under the same rule: its template's agent must still be configured.
+func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested, manualCreateStartInFlight bool) bool {
 	if i.PendingCreateClaim {
 		if !leaseActive {
 			return false
@@ -1544,7 +1639,7 @@ func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseA
 		}
 		return true
 	}
-	if !startRequested {
+	if !startRequested && !manualCreateStartInFlight {
 		return false
 	}
 	template := normalizedSessionTemplateInfo(i, cfg)
@@ -2186,6 +2281,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// resolves the non-unique SessionName last-write-wins, so topo order is load-
 	// bearing.
 	tick := newReconcileTick(orderedInfos)
+	healAlive := &healAliveConfirmer{sp: sp}
 	infoByID := tick.infoByID
 	orderedIDs := tick.orderedIDs
 
@@ -2583,6 +2679,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 			}
+			// A client's create still starting its runtime keeps the row as the
+			// create wrote it. The heal below would read the not-yet-started runtime
+			// as missing and reset the continuation (session_key,
+			// started_config_hash, continuation_reset_pending), which the create's
+			// start confirmation does not restore. A preserved named session keeps
+			// its own precedence below.
+			if !preserveNamed && manualCreateStartInFlightAt(infoByID[id], clk.Now(), startupTimeout) && pendingCreateSessionStillLeasedInfo(infoByID[id], cfg, clk) {
+				template := normalizedSessionTemplateInfo(infoByID[id], cfg)
+				if template == "" {
+					template = infoByID[id].Template
+				}
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"pending_create_claim":    strings.TrimSpace(infoByID[id].PendingCreateClaimMetadata),
+						"manual_create_in_flight": true,
+						"provider_alive":          providerAlive,
+						"state":                   infoByID[id].MetadataState,
+					})
+				}
+				continue
+			}
 			// Heal state using provider liveness, not agent membership.
 			// rollbackAvailable mirrors the rollback gate at line ~639: when
 			// storeQueryPartial=true the formal rollback is deferred, so the
@@ -2591,7 +2708,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, nil, providerAlive), livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
@@ -3191,15 +3308,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// rollback reason, so a normal start arms no auto-trace.
 					// The line names why, one standing condition per reason,
 					// so a hold that moves from the window to the lease says so.
+					// An unverifiable lease has said it already, in the WARNING.
 					kind, why := "start_in_flight.pending_create_rollback", "its start is in flight"
-					switch live {
-					case ownStartLeaseHeld:
+					if live == ownStartLeaseHeld {
 						kind, why = "start_lease_held.pending_create_rollback", "its start holds the runtime lease"
-					case ownStartLeaseUnverifiable:
-						kind, why = "start_lease_unverifiable.pending_create_rollback", "its runtime lease cannot be verified"
 					}
-					logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
-						"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					if live != ownStartLeaseUnverifiable {
+						logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
+							"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,
@@ -3862,7 +3979,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, !capacityHeld)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !capacityHeld)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue
@@ -3912,7 +4029,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp), rec); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -3972,7 +4089,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
 			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(cityPath, infoByID[id], tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(cityPath, infoByID[id], tp, cfg, store, sp, clk, stderr, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -5538,6 +5655,32 @@ func sessionHasInProgressAssignedWorkForReachableStore(sw *SeatWork, info sessio
 	return sw.has(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: []string{"in_progress"}})
 }
 
+// healAliveConfirmer is the liveness the state heal reads for a row, one per
+// reconcile pass. A runtime read alive that would wake an asleep row is
+// confirmed on a fresh read first (mc-pvonx): the tick's read can be served
+// from a listing taken before another process stopped the runtime (the tmux
+// state cache after a `gc session kill`), and a heal on it wrote state=awake
+// over the killed row, which the next pass restarted in place on its claim
+// instead of freeing the slot. A fresh read that fails wakes nothing. The
+// pass's first confirmation fixes since, so the later ones reuse the fresh
+// listing (and process snapshot) it took rather than each paying for one.
+type healAliveConfirmer struct {
+	sp    runtime.Provider
+	since time.Time
+}
+
+// alive is the liveness the heal reads for info's row, read alive.
+func (c *healAliveConfirmer) alive(info sessionpkg.Info, name string, processNames []string, alive bool) bool {
+	if !alive || strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAsleep) {
+		return alive
+	}
+	if c.since.IsZero() {
+		c.since = time.Now()
+	}
+	fresh, err := runtime.ObserveLivenessSince(c.sp, name, processNames, c.since)
+	return err == nil && fresh.Alive
+}
+
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
 // in-progress work bead is assigned to the given session on sw's legs. It
 // fails CLOSED on a leg that could not be read: a smaller answer presented as
@@ -5645,15 +5788,77 @@ func drainStepRootFormulaName(root beads.Bead) string {
 // ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
 func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	scope := releaseScope(info, sw.Legs().cfg)
-	// Readiness is not sw's to answer, so it only picks the legs: a leg with
-	// no open or in_progress row for the seat holds no awake work.
-	legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
-	for _, s := range legs {
-		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
-			return has, err
+	if sw == nil || sw.ids == nil {
+		// The legacy tick's read: it only picks the legs (readiness is not
+		// sw's to answer; a leg with no open or in_progress row for the seat
+		// holds no awake work), and each identity and tier is probed live.
+		legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
+		for _, s := range legs {
+			if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
+				return has, err
+			}
+		}
+		return false, unknown
+	}
+	// One seat's live read (a v2 effect's L5, a one-shot command): it lists
+	// every leg, identity and status at once, so it answers the in-progress
+	// half itself; the ready query, which a SeatWork cannot answer, runs
+	// only where the seat holds open rows, concurrently. On a slow store the
+	// answer costs two round trips, not one per identity, status and tier in
+	// series, which outran v2's 5s fence bound for a seat holding only
+	// non-ready work (mc-m4fgc).
+	if hits, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"in_progress"}}, true); len(hits) > 0 || err != nil {
+		return len(hits) > 0, err
+	}
+	open, unknown := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"open"}}, false)
+	return readyAssignedWorkIn(open, unknown)
+}
+
+// readyAssignedWorkIn reports whether the ready query, run once per (leg,
+// assignee) that holds an open row in open, concurrently and on both tiers,
+// finds unheld non-session work; unknown is the seat read's incomplete
+// legs, which fail the answer closed when nothing is found.
+func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
+	type probe struct {
+		store    beads.Store
+		assignee string
+	}
+	var probes []probe
+	seen := make(map[probe]bool)
+	for _, hit := range open {
+		p := probe{store: hit.store, assignee: strings.TrimSpace(hit.bead.Assignee)}
+		if !seen[p] {
+			seen[p] = true
+			probes = append(probes, p)
 		}
 	}
-	return false, unknown
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		found bool
+		errs  = unknown
+	)
+	for _, p := range probes {
+		for _, tier := range []beads.TierMode{beads.TierIssues, beads.TierWisps} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				has, err := func() (has bool, err error) {
+					defer recoverLeg(&err, "ready assigned work", log.Writer()) // a panic counts as work
+					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier)
+				}()
+				mu.Lock()
+				defer mu.Unlock()
+				found = found || has
+				errs = errors.Join(errs, err)
+			}()
+		}
+	}
+	wg.Wait()
+	if found {
+		return true, nil
+	}
+	return false, errs
 }
 
 // firstOpenClaimableAssignedWorkBeadForReachableStore returns the first OPEN,
@@ -7903,6 +8108,10 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// The relaunch started a committed manual conversation fresh.
+	if prepared.conversationReset {
+		rec.Record(staleKeyConversationResetEvent(info, tp))
+	}
 	// Rebaseline the Core baseline (started_config_hash) and the partition
 	// sub-hashes so the next tick sees no Core drift. The hashes come from
 	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT
@@ -8039,6 +8248,19 @@ func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.Res
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}
 	return resolveResumeCommand(command, sessionKey, rp)
+}
+
+// sessionCommandResumes reports whether resolveSessionCommand, given the same
+// inputs, launches a resume of the session's own conversation: not a fresh
+// start with its own id, and not a fork, which resumes its parent (mc-bm1af).
+func sessionCommandResumes(parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) bool {
+	switch {
+	case firstStart && !forceFresh && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "":
+		return false
+	case (firstStart || forceFresh) && rp.SessionIDFlag != "":
+		return false
+	}
+	return rp.ResumeCommand != "" || rp.ResumeFlag != ""
 }
 
 // resolveResumeCommand returns the command to use when resuming a session.

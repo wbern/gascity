@@ -47,6 +47,9 @@ var allowedNonMetadata = map[string]string{
 	// field of a JSON document, never into bead.Metadata.
 	"gc.bead_summary":    "bounded discovery envelope kind; declared once as bddispatch.BeadSummaryKind and referenced by its cmd/gc reader",
 	"gc.output_firewall": "managed output-firewall manifest kind. internal/outputfirewall (the writer) imports no gascity package by design, so internal/beads mirrors the literal to detect truncation; TestShowSummariesReportTruncationInsteadOfEmptiness pins writer and reader together end-to-end",
+	// HMAC domain-separation tags (MAC input prefixes, never stored anywhere).
+	"gc.connect.bearer.v1":   "connect bearer HMAC domain tag (internal/connect/bearer.go)",
+	"gc.connect.sentinel.v1": "connect token-file sentinel HMAC domain tag (internal/connect/bearer.go)",
 
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
@@ -90,6 +93,7 @@ var excludedDirs = []string{
 	"internal/events",           // gc.* event-type names (events.KnownEventTypes)
 	"internal/telemetry",        // gc.* metric/counter names
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
+	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
 	"internal/api/genclient",    // generated client code
 }
 

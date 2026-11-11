@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -274,6 +275,21 @@ type preparedStart struct {
 	// preWakeUndo is what a capacity refusal needs to undo this attempt's
 	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
 	preWakeUndo preWakeUndo
+	// transcriptRoots is launchTranscriptRoots of the launch the start was
+	// prepared for, for commitStartFailure's conversation probe.
+	transcriptRoots []string
+	// resumed reports that the launch resumes the session's own conversation
+	// (sessionCommandResumes), for the resume backstop: its commit records it
+	// (resume_launch) and a failed start reads it.
+	resumed bool
+	// conversationReset reports that the stale-resume clear reset a committed
+	// manual conversation, which the caller records as
+	// session.conversation_reset (staleKeyConversationResetEvent).
+	conversationReset bool
+	// runtimeBinding is the patch recording the thread the runtime hosts
+	// the session in, read once the start succeeded (startedRuntimeBinding);
+	// the start commit applies it.
+	runtimeBinding sessionpkg.MetadataPatch
 }
 
 type startResult struct {
@@ -317,6 +333,11 @@ type startResult struct {
 	// configured named session's pending-create should be preserved for a
 	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
 	diedDuringStartup bool
+	// diedPane is the last pane output of a resume launch the post-start
+	// liveness check found dead, redacted (postStartDeathPane). That check's
+	// error carries no pane, so this is where the resume backstop
+	// (startResumeFailure) reads a provider's refusal of the resume.
+	diedPane string
 	// provider is the runtime provider the start ran against. commitStartFailure
 	// uses it to tear down a bead-scoped pool runtime before rolling its row
 	// back (releaseBeadScopedPoolRuntime). Nil on test-built results, which
@@ -1286,11 +1307,13 @@ func buildPreparedStartWithTranscript(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
+	transcriptRoots := launchTranscriptRoots(cfg, tp)
+	conversationReset, resumed := false, false
 	if transcript != nil {
 		transcriptState = *transcript
 	} else if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		present, probeable := staleResumeKeyProbe(transcriptRoots, provider, agentCfg.WorkDir, sk)
 		if probeable {
 			if present {
 				transcriptState = sessTranscriptPresent
@@ -1298,7 +1321,14 @@ func buildPreparedStartWithTranscript(
 				transcriptState = sessTranscriptAbsent
 			}
 		}
-		if probeable && !present {
+		// Only a committed key is stale: a key with no started_config_hash
+		// was allocated for a start that has not committed yet (CreateSession,
+		// or a first start that failed) and has no transcript until that start
+		// writes one, so it is kept and launched with --session-id. The probe
+		// still runs for it, since firstStart reads its result. A provider with
+		// no session_id_flag would resume any key it is handed, so its key is
+		// still cleared (staleResumeKeyClears).
+		if probeable && !present && staleResumeKeyClears(candidate.info, tp.ResolvedProvider) {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -1308,6 +1338,7 @@ func buildPreparedStartWithTranscript(
 			// started_config_hash / continuation_reset_pending are all in
 			// Info.ApplyPatch's switch), so no re-Get is needed for the post-prep
 			// reads (session_key at runPreparedStartCandidate; recordWakeFailure).
+			conversationReset = sessionpkg.HasStartedManualConversation(candidate.info) // read before the clear empties the key
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
 		}
 	}
@@ -1358,7 +1389,7 @@ func buildPreparedStartWithTranscript(
 		parentStale := false
 		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
 			provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+			if present, probeable := staleResumeKeyProbe(transcriptRoots, provider, agentCfg.WorkDir, parentSID); probeable && !present {
 				parentStale = true
 			}
 		}
@@ -1368,6 +1399,7 @@ func buildPreparedStartWithTranscript(
 	}
 	if sk := candidate.info.SessionKey; sk != "" && tp.ResolvedProvider != nil && !tp.IsACP {
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, parentSID, tp.ResolvedProvider, firstStart, forceFresh)
+		resumed = sessionCommandResumes(parentSID, tp.ResolvedProvider, firstStart, forceFresh)
 	}
 	hasResumeKey := strings.TrimSpace(candidate.info.SessionKey) != ""
 	// S19 priming confirmation (write-only in Stage 2): a marker is stamped only
@@ -1458,15 +1490,18 @@ func buildPreparedStartWithTranscript(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
+		candidate:         candidate,
+		cfg:               agentCfg,
+		coreHash:          coreHash,
+		coreBreakdown:     coreBreakdown,
+		liveHash:          liveHash,
+		provisionHash:     provisionHash,
+		launchHash:        launchHash,
+		promptDelivered:   promptDelivered,
+		promptHash:        promptHash,
+		transcriptRoots:   transcriptRoots,
+		conversationReset: conversationReset,
+		resumed:           resumed,
 	}, candidate.info, nil
 }
 
@@ -1905,8 +1940,11 @@ func runPreparedStartCandidate(
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
-	// (e.g., "No conversation found"). Report as a failure so
-	// recordWakeFailure clears the key for the next attempt.
+	// (e.g., "No conversation found"). Report as a failure, with
+	// the dead resume's pane for the resume backstop to read that
+	// refusal from, so recordWakeFailure clears the key for the
+	// next attempt.
+	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
 		if stabilityWaiter(startCtx, item.candidate.name()) {
@@ -1925,6 +1963,7 @@ func runPreparedStartCandidate(
 			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				diedDuringStartup = true
+				diedPane = postStartDeathPane(ctx, item, cityPath, sp, store, cfg)
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -1953,6 +1992,7 @@ func runPreparedStartCandidate(
 		attribution = identity.attribution()
 	}
 	if attribution == pendingCreateRuntimeOurs {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 		return startResult{
 			prepared:            item,
 			err:                 nil,
@@ -2014,6 +2054,9 @@ func runPreparedStartCandidate(
 	if err == nil {
 		rateLimitScreen = false
 	}
+	if outcome == TraceOutcomeSuccess || (err == nil && outcome == TraceOutcomeSessionExists) {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
+	}
 	return startResult{
 		prepared:            item,
 		err:                 err,
@@ -2024,6 +2067,7 @@ func runPreparedStartCandidate(
 		rateLimitScreen:     rateLimitScreen,
 		providerStartCalled: startedFresh,
 		diedDuringStartup:   diedDuringStartup,
+		diedPane:            diedPane,
 		unattributedErr:     unattributedErr,
 		provider:            sp,
 		phases:              phases,
@@ -2085,6 +2129,33 @@ func startupRateLimitScreenDetected(
 		)
 	})
 	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
+}
+
+// postStartDeathPane is the last pane output of a resume launch the post-start
+// liveness check found dead, redacted against the launch's secrets as the
+// runtime's own startup-failure capture is. A provider that refused the resume
+// says so there. The peek is held to postStartObservationBound; one that fails
+// or does not answer reads empty, so the death counts instead of resetting.
+func postStartDeathPane(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+) string {
+	if !item.resumed {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
+	pane, err := observeSessionBounded(ctx, cityPath, item.candidate.name(), func() (string, error) {
+		return workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, item.candidate.name(), rateLimitPeekLines, item.cfg.ProcessNames)
+	})
+	if err != nil {
+		return ""
+	}
+	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(item.cfg.Env))
 }
 
 func enqueuePreparedStartWaveForCity(
@@ -2613,16 +2684,104 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	return obs.Running, obs.Alive, err
 }
 
+// staleResumeKeyClears reports whether the stale-resume clear resets info's
+// key once its keyed transcript reads absent: a committed key (a
+// started_config_hash beside it), or any key of a provider with no
+// session_id_flag, which resolveSessionCommand would hand to a resume even
+// on a first start. An allocated key of a provider that can name a new
+// conversation is kept and launched with that flag.
+func staleResumeKeyClears(info sessionpkg.Info, rp *config.ResolvedProvider) bool {
+	return strings.TrimSpace(info.StartedConfigHash) != "" || rp == nil || rp.SessionIDFlag == ""
+}
+
 // staleResumeKeyProbe reports whether the keyed transcript a resume would
 // reattach to is present (present), and whether the provider exposes a keyed
 // transcript that can be probed on disk at all (probeable). It is a package var
 // so tests can model a present or absent transcript without materializing
 // provider-specific transcript trees. Production delegates to the transcript
-// discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of the supplied claude default, so
-// claude/kimi/pi each probe their real location.
-var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
-	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+// discovery layer, which knows each provider's on-disk layout, over
+// keyedProbeRoots(searchPaths, provider).
+var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
+}
+
+// keyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: [daemon] observe_paths are Claude roots, and pi
+// walks every root it is given recursively.
+func keyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return worker.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
+// launchTranscriptRoots is the roots a keyed probe searches for a launch of
+// tp (mc-bm1af). When the operator's env for it (tp.OperatorEnv: workspace,
+// provider and agent env) names an absolute CLAUDE_CONFIG_DIR, only that
+// dir's projects, the one root the launch reads: a conversation an agent
+// left under another observed root when it moved reads gone rather than
+// resumable. Otherwise sessionTranscriptSearchPaths(cfg):
+//   - a CLAUDE_CONFIG_DIR passed through from gc's own environment is
+//     ambient, not the launch's choice, and is not read;
+//   - a relative or ~ value is resolved by the provider against its own
+//     working dir and home, which the probe cannot reproduce, so it does
+//     not pin the probe.
+//
+// A wrapper that sets its own CLAUDE_CONFIG_DIR wins at runtime: an
+// operator value beside such a wrapper pins the probe to a root the launch
+// does not read, and every start reads its conversation gone.
+func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
+	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		return []string{filepath.Join(dir, "projects")}
+	}
+	return sessionTranscriptSearchPaths(cfg)
+}
+
+// staleKeyConversationResetEvent is session.conversation_reset for info, a
+// committed manual conversation (session.HasStartedManualConversation, the
+// rule that keeps it across runtime loss) whose session key the stale-resume
+// clear reset because its keyed transcript is gone: the next start is fresh.
+// Legacy records it when the clear lands in prepare (the planned start, and
+// a launch-drift relaunch once it succeeds), v2 when its PreWake lands.
+func staleKeyConversationResetEvent(info sessionpkg.Info, tp TemplateParams) events.Event {
+	return conversationResetEvent(info, tp.DisplayName(), tp.TemplateName, "stale-key", "the transcript of its conversation is gone")
+}
+
+// resumeFailedConversationResetEvent is session.conversation_reset for info,
+// a committed manual conversation whose resume the provider refused, or lost
+// maxResumeFailuresBeforeReset times in a row (resumeBackstop), so a wake
+// failure reset it although its transcript reads present. subject is the
+// agent.
+func resumeFailedConversationResetEvent(info sessionpkg.Info, subject string) events.Event {
+	return conversationResetEvent(info, subject, info.Template, "resume-failed", "its resume failed")
+}
+
+// conversationResetEvent is session.conversation_reset for info with reason
+// and why, a short account of it.
+func conversationResetEvent(info sessionpkg.Info, subject, template, reason, why string) events.Event {
+	return events.Event{
+		Type:      events.SessionConversationReset,
+		Actor:     "gc",
+		Subject:   subject,
+		SessionID: info.ID,
+		Message:   fmt.Sprintf("session %s: %s; its next start is fresh", info.ID, why),
+		Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, reason),
+	}
+}
+
+// sessionTranscriptSearchPaths is the transcript roots the stale-resume probe
+// searches for a claude-family provider (keyedProbeRoots): the defaults plus
+// [daemon] observe_paths, the same roots history discovery reads
+// (newWorkerFactory). Probing the defaults alone reads a conversation kept
+// under a configured root as gone and resets it.
+func sessionTranscriptSearchPaths(cfg *config.City) []string {
+	if cfg == nil {
+		return worker.DefaultSearchPaths()
+	}
+	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
 // validateForkLaunch enforces fork-launch invariants before command resolution.
@@ -2735,6 +2894,7 @@ func clearStaleResumeKeyMetadata(handle string, sessFront *sessionpkg.Store) map
 		sessionpkg.PrimingAttemptedAtMetadataKey: "",
 		sessionpkg.PromptHashMetadataKey:         "",
 	}
+	sessionpkg.ClearResumeRun(patch) // the fresh conversation's run starts anew (mc-bm1af)
 	if sessFront != nil && strings.TrimSpace(handle) != "" {
 		_ = sessFront.ApplyPatch(handle, patch)
 	}
@@ -2868,7 +3028,17 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
+	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator's suspend landed while the start ran (CONTRACT S1
+		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
+		// this start's to release, and the caller stops the runtime it
+		// spawned as a stale start's.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		fmt.Fprintf(stderr, "session reconciler: discarding the start of %s: %v\n", name, err) //nolint:errcheck
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "user_held", result.started, result.finished, nil, result.phases)
+		return startCommitStale
+	}
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2988,7 +3158,7 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		primedAt = now
 		promptHash = prepared.promptHash
 	}
-	return sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+	patch := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
 		LiveHash:      prepared.liveHash,
 		ProvisionHash: prepared.provisionHash,
@@ -3008,7 +3178,22 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		RuntimeBinding:      prepared.runtimeBinding,
 	})
+	// The resume backstop (mc-bm1af): whether this incarnation was launched
+	// as a resume, for a later rapid crash; a fresh launch starts a new
+	// conversation, which ends the old one's run of resume failures. Written
+	// only when they change.
+	launch := ""
+	if prepared.resumed {
+		launch = "true"
+	} else {
+		maps.Copy(patch, resumeFailuresPatch(info, 0))
+	}
+	if launch != info.ResumeLaunch {
+		patch["resume_launch"] = launch
+	}
+	return patch
 }
 
 // startCommitMCPPatch is a start commit's MCP keys for prepared on info: the
@@ -3318,7 +3503,8 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, result.diedPane)
+	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName(), rf, rec)
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
@@ -3357,14 +3543,19 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 //
 // The heal is a start's commit, so it runs under the runtime lease like one
 // (I-LEASE): taken without waiting before the rebuild's writes, and the
-// commit is refused once the lease was taken over.
+// commit is refused once the lease was taken over. Like the async commit, it
+// refuses a row an operator suspended (StartCommitRefusingHolds) and stops
+// the start's runtime through sp, as a stale start's (CONTRACT S1 v5.6,
+// §12.2 row 65).
 func recoverRunningPendingCreate(
 	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	cfg *config.City,
 	store beads.Store,
+	sp runtime.Provider,
 	clk clock.Clock,
+	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
@@ -3455,8 +3646,24 @@ func recoverRunningPendingCreate(
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		// The runtime is already live: record the thread it hosts the
+		// session in, as every confirmed start does.
+		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease)
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator suspended the row before its start committed (CONTRACT
+		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
+		// hold, and the runtime the suspend did not stop is stopped as the
+		// start's own, under the lease still held.
+		stopStaleAsyncStartRuntime(startResult{prepared: *prepared}, sp, stderr)
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateSuperseded, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, traceRecordPayload{
+				"user_held": true,
+			})
+		}
+		return true, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -4312,6 +4519,9 @@ func executePlannedStartsTraced(
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					drop("failed", err)
 					continue
+				}
+				if item.conversationReset && rec != nil {
+					rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
 				}
 				item.capacityTicket = ticket
 				if ticket != nil && ticket.probe {

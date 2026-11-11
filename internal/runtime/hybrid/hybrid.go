@@ -19,30 +19,31 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.InputClearProvider            = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
-	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
-	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
-	_ runtime.SessionEventProvider          = (*Provider)(nil)
-	_ runtime.BackendListingProvider        = (*Provider)(nil)
-	_ runtime.BackendsProvider              = (*Provider)(nil)
-	_ runtime.ListingAttestation            = (*Provider)(nil)
-	_ runtime.Router                        = (*Provider)(nil)
-	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
-	_ runtime.DialogProvider                = (*Provider)(nil)
-	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
-	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
-	_ runtime.SessionRosterProvider         = (*Provider)(nil)
-	_ runtime.SessionObjectKiller           = (*Provider)(nil)
-	_ runtime.TurnEventProvider             = (*Provider)(nil)
+	_ runtime.Provider                        = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker       = (*Provider)(nil)
+	_ runtime.InteractionProvider             = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider            = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider   = (*Provider)(nil)
+	_ runtime.TurnInterruptCapabilityProvider = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider    = (*Provider)(nil)
+	_ runtime.InputClearProvider              = (*Provider)(nil)
+	_ runtime.RelaunchProvider                = (*Provider)(nil)
+	_ runtime.LivenessObserver                = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper        = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError       = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider            = (*Provider)(nil)
+	_ runtime.BackendListingProvider          = (*Provider)(nil)
+	_ runtime.BackendsProvider                = (*Provider)(nil)
+	_ runtime.ListingAttestation              = (*Provider)(nil)
+	_ runtime.Router                          = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer            = (*Provider)(nil)
+	_ runtime.DialogProvider                  = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider        = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
+	_ runtime.SessionRosterProvider           = (*Provider)(nil)
+	_ runtime.SessionObjectKiller             = (*Provider)(nil)
+	_ runtime.TurnEventProvider               = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -171,6 +172,24 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
 }
 
+// SessionBinding reports the routed backend's thread binding for name when
+// that backend hosts sessions in threads of its own, and no binding otherwise.
+func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	if bp, ok := p.route(name).(runtime.SessionBindingProvider); ok {
+		return bp.SessionBinding(name)
+	}
+	return runtime.SessionBinding{}, nil
+}
+
+// NudgeKeyed delegates to the routed backend with its delivery key when that
+// backend deduplicates keyed deliveries, and to its Nudge otherwise.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
+		return kp.NudgeKeyed(name, content, key)
+	}
+	return p.route(name).Nudge(name, content)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
@@ -227,6 +246,12 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+// TurnInterruptMode reports how the routed backend cancels the session's
+// in-flight turn.
+func (p *Provider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
+	return runtime.TurnInterruptModeFor(p.route(name), name)
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

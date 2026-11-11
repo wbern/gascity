@@ -91,6 +91,12 @@ const (
 	executionClaimNudgeStoreRefKey = "execution_claim_nudge_store_ref"
 	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
 	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
+	// executionClaimNudgeTokenKey records the instance_token of the
+	// incarnation the marker observed (v5.10x): a later incarnation holding
+	// the same claim starts its own grace window and attempt count, rather
+	// than inheriting an expired window and escalating the moment its pane
+	// goes quiet.
+	executionClaimNudgeTokenKey = "execution_claim_nudge_token"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
@@ -112,13 +118,17 @@ const (
 const (
 	executionHoldMultiClaim = "multi_claim"
 	executionHoldNotQuiet   = "not_quiet"
-	executionHoldExecuting  = "executing"
 	// executionHoldSnapshotNotIdle and executionHoldSnapshotError name the
 	// idle-snapshot gate apart from the activity clock: activity is already
 	// stale, but the snapshot still showed the busy indicator, or could not be
 	// taken.
 	executionHoldSnapshotNotIdle = "snapshot_not_idle"
-	executionHoldSnapshotError   = "snapshot_error"
+	// executionHoldExecuting names execution evidence (v5.10x): the claimed
+	// bead's step started since the seat's wake, so it is being executed,
+	// however quiet its pane. The fork holds on the same reason when the
+	// execution protocol recorded a start for the claim (work_started).
+	executionHoldExecuting     = "executing"
+	executionHoldSnapshotError = "snapshot_error"
 )
 
 // executionStalledLatchRetryAfter bounds how long a latch silences
@@ -309,6 +319,13 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 			return backstopTarget{}, backstopResolutionHold
 		}
 	}
+	// Execution evidence vetoes "unexecuted" (v5.10x): read only once this
+	// incarnation's window has run out, so a seat inside its grace pays no
+	// read, and every action past it (a nudge, the escalation) waits on it.
+	if same, attempts, last := p.state(s, target); same && decideBackstopAction(attempts, last, p.now) != backstopActionWait && p.executedSinceWake(s, claim.BeadID) {
+		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
+	}
 	return target, backstopResolutionOutstanding
 }
 
@@ -322,17 +339,24 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	last, err := p.sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() || p.now.Sub(last) < idleClaimNudgeGrace {
+	return sessionQuietHold(p.sp, s, sessName, p.now)
+}
+
+// sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
+// session sessName (its row s) from being treated as quiet at now, "" when it
+// is quiet. The pool-claim backstop reads it before its terminal drain.
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	last, err := sp.GetLastActivity(sessName)
+	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
 	if !executionSnapshotVetoApplies(s.Metadata) {
 		return ""
 	}
-	return p.snapshotHold(sessName)
+	return snapshotHoldFor(sp, sessName)
 }
 
-// snapshotHold asks the runtime whether a session whose activity clock is
+// snapshotHoldFor asks the runtime sp whether a session whose activity clock is
 // already stale still shows its provider's busy indicator. Tmux activity
 // measures pane output, not whether an agent turn is still running, so a long
 // model turn or a quiet tool call can age past the grace while the indicator
@@ -345,8 +369,8 @@ func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 // was displaced reports indefinitely), and a runtime that cannot take the
 // observation, whether it lacks IdleSnapshotProvider or is a composite (auto,
 // hybrid) whose routed backend reports ErrInteractionUnsupported.
-func (p poolExecutionBackstop) snapshotHold(sessName string) string {
-	snap, ok := p.sp.(runtime.IdleSnapshotProvider)
+func snapshotHoldFor(sp runtime.Provider, sessName string) string {
+	snap, ok := sp.(runtime.IdleSnapshotProvider)
 	if !ok {
 		return ""
 	}
@@ -384,7 +408,8 @@ func executionSnapshotVetoApplies(meta map[string]string) bool {
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
-		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
+		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef &&
+		strings.TrimSpace(s.Metadata[executionClaimNudgeTokenKey]) == strings.TrimSpace(s.Metadata["instance_token"])
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
@@ -413,6 +438,45 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
+}
+
+// executionEvidenceTailBytes bounds how far back the execution-evidence read
+// walks the event log from its end: the evidence it looks for is from the
+// seat's current incarnation, so a recent window answers it.
+const executionEvidenceTailBytes = 8 << 20
+
+// executionEvidenceTailEvents caps the matching events that read returns.
+const executionEvidenceTailEvents = 20
+
+// executedSinceWake reports execution evidence for the claim (v5.10x): an
+// execution.step_started of beadID, from this session, at or after the row's
+// last_woke_at. `gc hook --claim` records it when the seat takes up its
+// claimed step, the existing assignment after a restart included, so a seat
+// that started its step this incarnation is executing it, however quiet its
+// pane (a long model turn, a human-approval wait). It answers only from a
+// recorder that can be read, and with a wake time to read from; otherwise it
+// reports no evidence and the activity clock decides, as before.
+func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bool {
+	tail, ok := p.rec.(events.TailProvider)
+	if !ok || strings.TrimSpace(beadID) == "" {
+		return false
+	}
+	woke := parseRFC3339OrZero(s.Metadata["last_woke_at"])
+	if woke.IsZero() {
+		return false
+	}
+	evts, err := tail.ListTail(events.Filter{
+		Type: events.ExecutionStepStarted, Subject: beadID, Since: woke, MaxScanBytes: executionEvidenceTailBytes,
+	}, executionEvidenceTailEvents)
+	if err != nil {
+		return false
+	}
+	for _, e := range evts {
+		if e.SessionID == s.ID || e.Actor == s.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
@@ -459,18 +523,26 @@ func (p poolExecutionBackstop) clearHold(store beads.Store, s *beads.Bead, stdou
 // executionStalledLatchRetryAfter. An unparseable latch time holds, so a
 // corrupt value can never turn the latch into a per-tick drain.
 func (p poolExecutionBackstop) stalledLatchHolds(s *beads.Bead) bool {
-	latchedAt := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey])
+	return stalledLatchHolds(s, executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey, p.now)
+}
+
+// stalledLatchHolds reports whether a backstop's terminal-drain latch on s
+// (atKey when, tokenKey for which incarnation) still holds at now: written for
+// the current incarnation within executionStalledLatchRetryAfter. An
+// unreadable time holds, so a corrupt latch never re-arms the drain.
+func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) bool {
+	latchedAt := strings.TrimSpace(s.Metadata[atKey])
 	if latchedAt == "" {
 		return false
 	}
-	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
+	if strings.TrimSpace(s.Metadata[tokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
 		return false
 	}
 	ts, err := time.Parse(time.RFC3339, latchedAt)
 	if err != nil {
 		return true
 	}
-	return p.now.Sub(ts) < executionStalledLatchRetryAfter
+	return now.Sub(ts) < executionStalledLatchRetryAfter
 }
 
 // exhausted turns a spent attempt budget into one observable fact and one drain
@@ -554,6 +626,7 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
+		executionClaimNudgeTokenKey:    strings.TrimSpace(s.Metadata["instance_token"]),
 	}, "execution-claim-nudge", stdout)
 }
 
@@ -568,6 +641,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeStoreRefKey,
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
+		executionClaimNudgeTokenKey,
 		executionClaimNudgeStalledKey,
 		executionClaimNudgeStalledTokenKey,
 		executionClaimHoldKey,

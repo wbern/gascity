@@ -247,7 +247,11 @@ type CityRuntime struct {
 	storageRoutes *storageRoutes
 
 	// Bead-driven reconciler state (Phase 2f).
-	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
+	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	// ownerlessRuntimes is the closed-bead reap's memory of runtimes whose
+	// owner row the store does not hold, across ticks (CONTRACT v5.10j); a
+	// restart forgets it.
+	ownerlessRuntimes  ownerlessSightings
 	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
 	asyncStartLimiter  *asyncStartLimiter
 	asyncStarts        asyncStartTracker
@@ -1642,7 +1646,9 @@ func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 // name's current owner can rebind it and attach lands on the right runtime.
 func (cr *CityRuntime) phaseReapRuntimesBoundToClosedBeads(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, cr.stderr)
+	sessions := cr.sessionsBeadStore().Store
+	ownerless := newOwnerlessReap(cr.cityPath, cr.cfg, sessions, cr.rigBeadStores, &cr.ownerlessRuntimes, cr.rec, time.Now()) // residency:allow — the census frame; sessionCensusStoreCandidates plans the legs (storeref.Plan)
+	reapRuntimesBoundToClosedBeadsWith(sessions, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, ownerless, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, p.inv.closedBoundPhaseFields())
 	return false
 }
@@ -2498,7 +2504,11 @@ var errConfigTransactionInProgress = errors.New("config mutation in progress; re
 // loadReloadCandidate reads one candidate config generation. With a
 // controller state it reads only while no config transaction is in flight, so
 // a multi-file write is never observed half-done; it does not wait, so a slow
-// import cannot stall the reconciler.
+// import cannot stall the reconciler at the read. A candidate read before a
+// transaction began still waits for it at publication (updateFromRuntime takes
+// the publication lock the transaction holds). That stall is accepted: it ends
+// with the transaction, and publication then rejects the candidate if the
+// transaction's generation superseded it.
 func (cr *CityRuntime) loadReloadCandidate(configName, cityRoot string) (*reloadResult, error) {
 	if cr.cs == nil {
 		return tryReloadConfig(cr.tomlPath, configName, cityRoot)
@@ -3112,6 +3122,13 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
+// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
+// trigger against this controller's config (isUnclaimedTrigger: a pool
+// template assignee is demand, not a claim).
+func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
+}
+
 // newWarmClaimTriggerResolver returns the reader the warm-bind claim probe asks
 // for one bound trigger bead, resolved over this controller's own topology: the
 // binding it opened at boot, its city work ledger, and the rig legs it is handed.
@@ -3413,7 +3430,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(buildWarmClaimTriggerProbe(triggerResolver, cr.stderr)),
+		withWarmClaimProbe(cr.warmClaimTriggerProbe(triggerResolver)),
 		// The launch-time opt_* lookup reads a pool slot's trigger bead through the same residency reader.
 		withTriggerBeadResolver(triggerResolver),
 	}
@@ -3500,7 +3517,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		claimWorkStoreRefs := make([]string, len(claimWork))
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), poolClaimDrainOver(cr.workLegs(), cr.requestExecutionStalledDrain), cr.stdout)
 		nudgeStalledPoolContinuations(
 			cr.sp,
 			cr.cfg,

@@ -1778,7 +1778,8 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ClaimAs", "ConditionalWritesModeSource", "Count", "DepListBatch",
-			"MetadataPatchCASWriterHandle", "NamespaceCensusHandle", "ReadOnly", "SawRows",
+			"EventsJournalActive", "MetadataPatchCASWriterHandle", "NamespaceCensusHandle",
+			"ReadEventsJournalPage", "ReadOnly", "SawRows",
 			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
 		},
 	}

@@ -208,14 +208,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Create a bead",
 		DefaultStatus: http.StatusCreated,
 		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
-		Description:   sessionRowGuardDescription,
+		Description:   ownedRowGuardDescription,
 	}, (*Server).humaHandleBeadCreate)
 	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
 	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
-	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict), describes(sessionRowGuardDescription))
-	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict), describes(sessionRowGuardDescription))
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(ownedRowGuardDescription))
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(ownedRowGuardDescription))
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPost(sm, "/bead/{id}/claim", (*Server).humaHandleBeadClaim, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict),
@@ -399,7 +399,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
-	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+
@@ -420,6 +420,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		describes("Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. "+
 			"409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. "+
 			"`gc session wake` applies the same rules."))
+	cityPost(sm, "/session/{id}/pin", (*Server).humaHandleSessionPin, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Pins the session awake (pin_awake), as gc session pin does; a configured named session not yet materialized is. 409 on a closed session."))
+	cityPost(sm, "/session/{id}/unpin", (*Server).humaHandleSessionUnpin, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Clears the session's pin (pin_awake), as gc session unpin does. 409 on a closed session."))
 	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
@@ -493,6 +497,6 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }
 
-// sessionRowGuardDescription documents the generic bead write guard
-// (refuseGenericSessionWrite) on create and update.
-const sessionRowGuardDescription = "Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[]."
+// ownedRowGuardDescription documents the generic bead write guard
+// (refuseGenericWrite, architecture B) on create and update.
+const ownedRowGuardDescription = "Refused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root; or a coordination row: a mail message (type message), a session wait (the gc:wait label, or a gate carrying session:<session_id>), a queued nudge (gc:nudge, gc:nudge-queue), an order's run record (order-tracking, order-run:*) or an external-messaging row (gc:extmsg-*); types and labels matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler, /mail, gc session wait, the nudge queue, order dispatch, /extmsg/*). Each refusal names the offending field in errors[]."

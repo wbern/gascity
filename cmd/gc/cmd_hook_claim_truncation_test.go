@@ -165,11 +165,18 @@ func TestDoHookReportsWithheldWorkQueryLoudly(t *testing.T) {
 		return "", fmt.Errorf("running work query: %w", beads.ErrOutputTruncated)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr, hookVisibility{}); code != 1 {
-		t.Fatalf("doHook() = %d, want a reported failure", code)
+	// A withheld read is an unknown answer, not an empty queue. The dispatcher
+	// already treats it as the availability tier (re-read next tick, gcw-qap3.16),
+	// and the hook shares that classification, so it reports the published
+	// store-unavailable contract: the token and exit 2, not exit 1.
+	if code := doHook("bd ready --json", ".", false, runner, &stdout, &stderr, hookVisibility{}); code != 2 {
+		t.Fatalf("doHook() = %d, want 2 (a reported unknown answer)", code)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("doHook() published %q as work", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("stderr=%q does not carry the store-unavailable token", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "truncated by the managed output firewall") {
 		t.Fatalf("stderr=%q does not name the truncation", stderr.String())

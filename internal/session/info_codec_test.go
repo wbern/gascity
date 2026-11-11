@@ -125,6 +125,8 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ClaimHolderRecycleCount:        b.Metadata["claim_holder_recycle_count"],
 		ClaimHolderRecycleAt:           b.Metadata["claim_holder_recycle_at"],
 		ClaimHolderRecycleClaims:       b.Metadata["claim_holder_recycle_claims"],
+		ResumeFailures:                 b.Metadata["resume_failures"],
+		ResumeLaunch:                   b.Metadata["resume_launch"],
 		IdleRespawnAttempts:            b.Metadata["idle_respawn_attempts"],
 		IdleRespawnBeadID:              b.Metadata["idle_respawn_bead_id"],
 		WakeMode:                       b.Metadata["wake_mode"],

@@ -1953,7 +1953,7 @@ export type MailReplyInputBody = {
      */
     body?: string;
     /**
-     * Sender name.
+     * Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
      */
     from?: string;
     /**
@@ -1968,7 +1968,7 @@ export type MailSendInputBody = {
      */
     body?: string;
     /**
-     * Sender name.
+     * Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
      */
     from?: string;
     /**
@@ -2323,6 +2323,7 @@ export type OutboundResult = {
 };
 
 export type OutputTurn = {
+    id?: string;
     role: string;
     text: string;
     timestamp?: string;
@@ -2815,6 +2816,10 @@ export type RequestFailedPayload = {
      * Correlation ID from the 202 response.
      */
     request_id: string;
+    /**
+     * Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
+     */
+    session_id?: string;
 };
 
 export type RigActionBody = {
@@ -3372,6 +3377,12 @@ export type SessionCreateBody = {
      */
     message?: string;
     /**
+     * External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row.
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    /**
      * Agent or provider name.
      */
     name?: string;
@@ -3498,6 +3509,12 @@ export type SessionPatchBody = {
      * Session alias. Empty string clears the alias.
      */
     alias?: string;
+    /**
+     * External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key.
+     */
+    metadata?: {
+        [key: string]: string;
+    };
     /**
      * Session title. If provided, must be non-empty.
      */
@@ -5916,6 +5933,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.continuation_observed';
 } & TypedEventStreamEnvelopeSessionContinuationObserved) | ({
+    type: 'session.conversation_reset';
+} & TypedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -7344,6 +7363,24 @@ export type TypedEventStreamEnvelopeSessionContinuationObserved = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.conversation_reset
+ */
+export type TypedEventStreamEnvelopeSessionConversationReset = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.conversation_reset';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -8163,6 +8200,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.continuation_observed';
 } & TypedTaggedEventStreamEnvelopeSessionContinuationObserved) | ({
+    type: 'session.conversation_reset';
+} & TypedTaggedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -9662,6 +9701,25 @@ export type TypedTaggedEventStreamEnvelopeSessionContinuationObserved = {
     subject?: string;
     ts: string;
     type: 'session.continuation_observed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.conversation_reset
+ */
+export type TypedTaggedEventStreamEnvelopeSessionConversationReset = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.conversation_reset';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11804,7 +11862,7 @@ export type GetV0CityByCityNameAgentsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -12086,6 +12144,14 @@ export type PatchV0CityByCityNameBeadByIdErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type PatchV0CityByCityNameBeadByIdError = PatchV0CityByCityNameBeadByIdErrors[keyof PatchV0CityByCityNameBeadByIdErrors];
@@ -12446,6 +12512,14 @@ export type PostV0CityByCityNameBeadByIdUpdateErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdUpdateError = PostV0CityByCityNameBeadByIdUpdateErrors[keyof PostV0CityByCityNameBeadByIdUpdateErrors];
@@ -12473,7 +12547,7 @@ export type GetV0CityByCityNameBeadsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -12745,7 +12819,7 @@ export type GetV0CityByCityNameBeadsReadyData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -13367,7 +13441,7 @@ export type GetV0CityByCityNameConvoysData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -13494,7 +13568,7 @@ export type GetV0CityByCityNameEventsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -15227,7 +15301,7 @@ export type GetV0CityByCityNameMailData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -18028,7 +18102,7 @@ export type GetV0CityByCityNameRigsData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**
@@ -19044,6 +19118,74 @@ export type PostV0CityByCityNameSessionByIdPermissionModeResponses = {
 
 export type PostV0CityByCityNameSessionByIdPermissionModeResponse = PostV0CityByCityNameSessionByIdPermissionModeResponses[keyof PostV0CityByCityNameSessionByIdPermissionModeResponses];
 
+export type PostV0CityByCityNameSessionByIdPinData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/pin';
+};
+
+export type PostV0CityByCityNameSessionByIdPinErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdPinError = PostV0CityByCityNameSessionByIdPinErrors[keyof PostV0CityByCityNameSessionByIdPinErrors];
+
+export type PostV0CityByCityNameSessionByIdPinResponses = {
+    /**
+     * OK
+     */
+    200: SessionResponse;
+};
+
+export type PostV0CityByCityNameSessionByIdPinResponse = PostV0CityByCityNameSessionByIdPinResponses[keyof PostV0CityByCityNameSessionByIdPinResponses];
+
 export type PostV0CityByCityNameSessionByIdRenameData = {
     body: SessionRenameInputBody;
     headers: {
@@ -19255,6 +19397,10 @@ export type PostV0CityByCityNameSessionByIdStopData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -19295,6 +19441,10 @@ export type PostV0CityByCityNameSessionByIdStopErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
     /**
      * Service Unavailable
      */
@@ -19668,6 +19818,74 @@ export type GetV0CityByCityNameSessionByIdTranscriptResponses = {
 
 export type GetV0CityByCityNameSessionByIdTranscriptResponse = GetV0CityByCityNameSessionByIdTranscriptResponses[keyof GetV0CityByCityNameSessionByIdTranscriptResponses];
 
+export type PostV0CityByCityNameSessionByIdUnpinData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/unpin';
+};
+
+export type PostV0CityByCityNameSessionByIdUnpinErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdUnpinError = PostV0CityByCityNameSessionByIdUnpinErrors[keyof PostV0CityByCityNameSessionByIdUnpinErrors];
+
+export type PostV0CityByCityNameSessionByIdUnpinResponses = {
+    /**
+     * OK
+     */
+    200: SessionResponse;
+};
+
+export type PostV0CityByCityNameSessionByIdUnpinResponse = PostV0CityByCityNameSessionByIdUnpinResponses[keyof PostV0CityByCityNameSessionByIdUnpinResponses];
+
 export type PostV0CityByCityNameSessionByIdWakeData = {
     body?: never;
     headers: {
@@ -19675,6 +19893,10 @@ export type PostV0CityByCityNameSessionByIdWakeData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -19937,7 +20159,7 @@ export type GetV0CityByCityNameStatusData = {
          */
         index?: string;
         /**
-         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+         * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
          */
         wait?: string;
         /**

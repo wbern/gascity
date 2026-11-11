@@ -2701,7 +2701,7 @@ func TestTryDeliverQueuedNudgesByPollerSkipsHeldSession(t *testing.T) {
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil || delivered || fake.CountCalls("Nudge", info.SessionName) != 0 {
@@ -2737,7 +2737,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -2823,7 +2823,7 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 				resolved:    &config.ResolvedProvider{Name: "codex"},
 				sessionName: info.SessionName,
 			}
-			obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+			obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 			delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 			if err != nil {
@@ -2912,7 +2912,7 @@ func TestTryDeliverQueuedNudgesByPollerDropsStaleMailReminder(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	// No mail sent -- the recipient has nothing unread, so the deferred
 	// reminder is already stale and must not be delivered.
@@ -3003,7 +3003,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3087,7 +3087,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsMailReminderWhenMailStoreRelocated(t
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3143,7 +3143,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true}
+	obs := worker.LiveObservation{Running: true, Alive: true}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3300,7 +3300,7 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3349,7 +3349,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
 		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
@@ -3405,7 +3405,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	// One pass past the attempt cap: a refusal charged as a failed attempt
 	// would back the item off after the first pass and dead-letter it here.
@@ -3457,6 +3457,7 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, time.Time{}},
 		{"permission prompt the runtime would not type into", fmt.Errorf("sending message to session: %w: sess-worker", runtime.ErrPendingInteraction), true, backoff},
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
+		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
 		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false, time.Time{}},
 		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false, time.Time{}},
 	}
@@ -3599,7 +3600,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3671,7 +3672,7 @@ func TestTryDeliverQueuedNudgesByPollerCoalescesStaleFenceOntoLiveIncarnation(t 
 		resolved:          &config.ResolvedProvider{Name: "codex"},
 		sessionName:       info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3929,7 +3930,7 @@ func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
 			// ever reaches claimDueQueuedNudgesForTarget -- the #5317 root
 			// cause.
 			last := time.Now()
-			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
 		}
 		// End the busy window under test and let the poller exit cleanly.
 		if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
@@ -4008,7 +4009,7 @@ func TestCmdNudgePollDoesNotRecordSkipWithoutQueuedWork(t *testing.T) {
 			// Same continuously busy shape as the positive test, but with
 			// nothing queued for this target.
 			last := time.Now()
-			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
 		}
 		// Empty queue, so shouldKeepNudgePollerAlive lets the poller exit.
 		return worker.LiveObservation{Running: false}, nil
@@ -6579,10 +6580,10 @@ func TestNudgeObservationBusy(t *testing.T) {
 		obs  worker.LiveObservation
 		want bool
 	}{
-		{"nil LastActivity is not busy", worker.LiveObservation{Running: true}, false},
-		{"zero LastActivity is not busy", worker.LiveObservation{Running: true, LastActivity: &zero}, false},
-		{"activity within quiescence is busy", worker.LiveObservation{Running: true, LastActivity: &recent}, true},
-		{"activity past quiescence is not busy", worker.LiveObservation{Running: true, LastActivity: &stale}, false},
+		{"nil LastActivity is not busy", worker.LiveObservation{Running: true, Alive: true}, false},
+		{"zero LastActivity is not busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &zero}, false},
+		{"activity within quiescence is busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &recent}, true},
+		{"activity past quiescence is not busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &stale}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -7241,7 +7242,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt(t 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -7265,4 +7266,369 @@ func TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt(t 
 	if !pending[0].DeliverAfter.After(time.Now()) {
 		t.Fatalf("deliver after = %v, want a later pass while the prompt waits for an answer", pending[0].DeliverAfter)
 	}
+}
+
+func TestNudgeTargetProviderFamily(t *testing.T) {
+	muxBase := "builtin:claude"
+	wrapped := map[string]config.ProviderSpec{"claude-mux": {Base: &muxBase}}
+	custom := map[string]config.ProviderSpec{"homegrown": {Command: "homegrown"}}
+	for _, tc := range []struct {
+		name   string
+		target nudgeTarget
+		want   string
+	}{
+		{
+			name:   "resolved builtin claude",
+			target: nudgeTarget{resolved: &config.ResolvedProvider{Name: "claude", BuiltinAncestor: "claude"}},
+			want:   "claude",
+		},
+		{
+			name:   "resolved wrapped claude takes its ancestor",
+			target: nudgeTarget{resolved: &config.ResolvedProvider{Name: "claude-mux", BuiltinAncestor: "claude"}},
+			want:   "claude",
+		},
+		{
+			name:   "resolved wrapped codex stays codex family",
+			target: nudgeTarget{resolved: &config.ResolvedProvider{Name: "codex-strip", BuiltinAncestor: "codex"}},
+			want:   "codex",
+		},
+		{
+			name: "resolved without ancestor consults the city providers",
+			target: nudgeTarget{
+				resolved: &config.ResolvedProvider{Name: "claude-mux"},
+				cfg:      &config.City{Providers: wrapped},
+			},
+			want: "claude",
+		},
+		{
+			name: "unresolved agent provider consults the city providers",
+			target: nudgeTarget{
+				agent: config.Agent{Name: "worker", Provider: "claude-mux"},
+				cfg:   &config.City{Providers: wrapped},
+			},
+			want: "claude",
+		},
+		{
+			name: "unresolved workspace provider consults the city providers",
+			target: nudgeTarget{
+				agent: config.Agent{Name: "worker"},
+				cfg:   &config.City{Workspace: config.Workspace{Provider: "claude-mux"}, Providers: wrapped},
+			},
+			want: "claude",
+		},
+		{
+			name:   "unresolved without config keeps the raw name",
+			target: nudgeTarget{agent: config.Agent{Name: "worker", Provider: "claude-mux"}},
+			want:   "claude-mux",
+		},
+		{
+			name: "fully custom provider keeps the raw name",
+			target: nudgeTarget{
+				agent: config.Agent{Name: "worker", Provider: "homegrown"},
+				cfg:   &config.City{Providers: custom},
+			},
+			want: "homegrown",
+		},
+		{
+			name:   "empty target has no family",
+			target: nudgeTarget{},
+			want:   "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.target.providerFamily(); got != tc.want {
+				t.Fatalf("providerFamily() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// claudeFamilyNudgeRows are two targets that must take the same wait-idle
+// delivery gates: the builtin claude provider and a wrapped alias of it
+// ([providers.claude-mux] base = "builtin:claude").
+func claudeFamilyNudgeRows() []struct {
+	name     string
+	resolved *config.ResolvedProvider
+} {
+	return []struct {
+		name     string
+		resolved *config.ResolvedProvider
+	}{
+		{name: "claude", resolved: &config.ResolvedProvider{Name: "claude", Kind: "claude", BuiltinAncestor: "claude"}},
+		{name: "claude-mux", resolved: &config.ResolvedProvider{Name: "claude-mux", Kind: "claude", BuiltinAncestor: "claude"}},
+	}
+}
+
+// TestDeliverSessionNudgeWithProviderWaitIdleDeliversLiveToIdleClaudeFamily
+// pins that a wait-idle nudge to an idle wrapped claude seat is delivered live,
+// like builtin claude, instead of being queued behind a provider-unsupported
+// downgrade.
+func TestDeliverSessionNudgeWithProviderWaitIdleDeliversLiveToIdleClaudeFamily(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	for _, row := range claudeFamilyNudgeRows() {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.WaitForIdleErrors["sess-worker"] = nil // idle at its prompt
+			prev := startNudgePoller
+			startNudgePoller = func(string, string, string) error { return nil }
+			t.Cleanup(func() { startNudgePoller = prev })
+
+			target := nudgeTarget{
+				cityPath:    dir,
+				agent:       config.Agent{Name: "worker"},
+				resolved:    row.resolved,
+				sessionName: "sess-worker",
+			}
+			var stdout, stderr bytes.Buffer
+			code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Nudged worker") {
+				t.Errorf("stdout = %q, want live delivery (\"Nudged worker\")", stdout.String())
+			}
+			counts := map[string]int{}
+			for _, call := range fake.Calls {
+				counts[call.Method]++
+			}
+			if counts["WaitForIdle"] != 1 || counts["NudgeNow"] != 1 {
+				t.Errorf("WaitForIdle=%d NudgeNow=%d, want 1 and 1", counts["WaitForIdle"], counts["NudgeNow"])
+			}
+			pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != 0 {
+				t.Errorf("pending queued nudges = %d, want 0 for an idle target", len(pending))
+			}
+		})
+	}
+}
+
+// TestDeliverSessionNudgeWithProviderWaitIdleQueuesBusyClaudeFamilyWithoutBlocking
+// pins the busy short-circuit for the same pair of targets: a busy seat is
+// queued at once with the no-idle-boundary reason and the caller never enters
+// the worker's blocking WaitForIdle. This must ship with the live-delivery fix:
+// without it a busy wrapped seat would stall in WaitForIdle where it is today
+// merely queued by the provider-unsupported refusal.
+func TestDeliverSessionNudgeWithProviderWaitIdleQueuesBusyClaudeFamilyWithoutBlocking(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	for _, row := range claudeFamilyNudgeRows() {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.SetActivity("sess-worker", time.Now()) // pane is repainting
+			gate := make(chan struct{})
+			started := make(chan struct{})
+			fake.WaitForIdleErrors["sess-worker"] = nil
+			fake.WaitForIdleGates = map[string]chan struct{}{"sess-worker": gate}
+			fake.WaitForIdleStarted = map[string]chan struct{}{"sess-worker": started}
+			var once sync.Once
+			release := func() { once.Do(func() { close(gate) }) }
+			t.Cleanup(release)
+			prev := startNudgePoller
+			startNudgePoller = func(string, string, string) error { return nil }
+			t.Cleanup(func() { startNudgePoller = prev })
+
+			target := nudgeTarget{
+				cityPath:    dir,
+				agent:       config.Agent{Name: "worker"},
+				resolved:    row.resolved,
+				sessionName: "sess-worker",
+			}
+			var stdout, stderr bytes.Buffer
+			done := make(chan int, 1)
+			go func() {
+				done <- deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+			}()
+			var code int
+			select {
+			case code = <-done:
+			case <-started:
+				release()
+				code = <-done
+				t.Errorf("caller entered the blocking WaitForIdle for a busy %s target", row.name)
+			case <-time.After(10 * time.Second):
+				release()
+				t.Fatalf("deliverSessionNudgeWithProvider did not return within 10s")
+			}
+			if code != 0 {
+				t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "the session never reached an idle boundary") {
+				t.Errorf("stdout = %q, want the no-idle-boundary downgrade reason", stdout.String())
+			}
+		})
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerSkipsADeadAgent (mc-48az4): a queued
+// message for a session whose pane is up but whose agent is dead (a crash
+// not yet healed) is not delivered into that pane, where it would be lost:
+// it stays pending for the incarnation the heal brings up.
+func TestTryDeliverQueuedNudgesByPollerSkipsADeadAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "after the crash", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: false, LastActivity: &idleSince})
+	if err != nil || delivered || fake.CountCalls("Nudge", info.SessionName) != 0 {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller = %v, %v (nudges %d); want no delivery to a dead agent", delivered, err, fake.CountCalls("Nudge", info.SessionName))
+	}
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending %d (%v), want the message kept for the next incarnation", len(pending), err)
+	}
+}
+
+// TestCrashQueuedMessageSurvivesEpochRotation (mc-48az4, mc-wdjni): a
+// message submitted over a crashed agent is queued with the current epoch's
+// stamp, held off the dead pane, and delivered to the healed incarnation
+// even after the heal rotated the continuation epoch: delivery re-stamps the
+// live epoch (#5775), so no empty-epoch fence is needed.
+func TestCrashQueuedMessageSurvivesEpochRotation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "3"); err != nil {
+		t.Fatal(err)
+	}
+	hints := runtime.Config{WorkDir: dir, ProcessNames: []string{"codex"}}
+	fake.Zombies[info.SessionName] = true
+	out, err := mgr.Submit(context.Background(), session.Actor{Kind: session.ActorBackground}, info.ID, "after the crash", "", hints, session.SubmitIntentDefault)
+	if err != nil || !out.Queued {
+		t.Fatalf("submit over the crash: %+v %v, want queued", out, err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, continuationEpoch: "3", resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName, alias: info.Alias}
+	if ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: false, LastActivity: &idleSince}); ok || err != nil {
+		t.Fatalf("delivered into the dead pane: %v %v", ok, err)
+	}
+	// The heal: a new incarnation with a rotated epoch (conversation reset).
+	delete(fake.Zombies, info.SessionName)
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "4"); err != nil {
+		t.Fatal(err)
+	}
+	target.continuationEpoch = "4"
+	nudgesBefore := fake.CountCalls("Nudge", info.SessionName)
+	ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince})
+	if !ok || err != nil || fake.CountCalls("Nudge", info.SessionName) == nudgesBefore {
+		t.Fatalf("after the heal: delivered=%v err=%v, want the queued message delivered to the epoch-4 incarnation", ok, err)
+	}
+}
+
+// TestNudgeOverACrashedAgentQueues (mc-48az4, mc-wdjni): gc session nudge
+// (immediate or wait-idle), mail notify and sling's nudge to a running pane
+// whose agent crashed go through the runtime handle with the target's
+// process names: nothing is typed into the dead pane, the nudge is queued
+// for the healed agent, and the CLI says queued (agent down), not "Nudged".
+func TestNudgeOverACrashedAgentQueues(t *testing.T) {
+	crashed := func(t *testing.T) (string, beads.NudgesStore, *runtime.Fake, nudgeTarget, session.Info) {
+		t.Helper()
+		t.Setenv("GC_BEADS", "file")
+		dir := t.TempDir()
+		store := openNudgeBeadStore(dir)
+		fake := runtime.NewFake()
+		mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		fake.Zombies[info.SessionName] = true
+		target := nudgeTarget{
+			cityPath:    dir,
+			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+			sessionID:   info.ID,
+			sessionName: info.SessionName,
+			identity:    "worker",
+			agent:       config.Agent{Name: "worker", Provider: "claude"},
+			resolved:    &config.ResolvedProvider{Name: "claude", ProcessNames: []string{"claude"}},
+		}
+		return dir, store, fake, target, info
+	}
+	typed := func(fake *runtime.Fake, name string, before int) int {
+		n := 0
+		for _, c := range fake.Calls[before:] {
+			if c.Name == name && (c.Method == "Nudge" || c.Method == "NudgeNow") {
+				n++
+			}
+		}
+		return n
+	}
+	queued := func(t *testing.T, dir string, target nudgeTarget) int {
+		t.Helper()
+		pending, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(pending)
+	}
+	for _, mode := range []nudgeDeliveryMode{nudgeDeliveryImmediate, nudgeDeliveryWaitIdle} {
+		t.Run("gc session nudge "+string(mode), func(t *testing.T) {
+			dir, store, fake, target, info := crashed(t)
+			before := len(fake.Calls)
+			var stdout, stderr bytes.Buffer
+			code := deliverSessionNudgeWithWorker(target, store.Store, fake, "check deploy status", mode, false, &stdout, &stderr)
+			if code != 0 || typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {
+				t.Fatalf("code %d, typed %d, queued %d; want 0, none typed, one queued; stderr=%q", code, typed(fake, info.SessionName, before), queued(t, dir, target), stderr.String())
+			}
+			if out := stdout.String(); !strings.Contains(out, "Queued nudge") || !strings.Contains(out, "agent is down") || strings.Contains(out, "Nudged") {
+				t.Fatalf("stdout %q, want it queued because the agent is down", out)
+			}
+		})
+	}
+	t.Run("mail notify", func(t *testing.T) {
+		dir, store, fake, target, info := crashed(t)
+		before := len(fake.Calls)
+		if err := sendMailNotifyWithWorker(target, store.Store, fake, "human", ""); err != nil {
+			t.Fatal(err)
+		}
+		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {
+			t.Fatalf("typed %d, queued %d; want none typed, one queued", typed(fake, info.SessionName, before), queued(t, dir, target))
+		}
+	})
+	t.Run("sling", func(t *testing.T) {
+		dir, store, fake, target, info := crashed(t)
+		before := len(fake.Calls)
+		var stdout, stderr bytes.Buffer
+		deliverSlingNudge(target, fake, store.Store, dir, &stdout, &stderr)
+		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 || strings.Contains(stdout.String(), "Nudged") {
+			t.Fatalf("typed %d, queued %d, stdout %q; want none typed, one queued", typed(fake, info.SessionName, before), queued(t, dir, target), stdout.String())
+		}
+	})
 }

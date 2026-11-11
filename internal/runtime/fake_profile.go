@@ -53,6 +53,7 @@ type ProfileBackend interface {
 	InterruptBoundaryWaitProvider
 	InterruptedTurnResetProvider
 	InventoryProvider
+	KeyedNudgeProvider
 	ListingAttestation
 	LivenessObserver
 	LivenessObserverWithError
@@ -61,6 +62,7 @@ type ProfileBackend interface {
 	ServerDeathConfirmer
 	ServerLifecycleProvider
 	SessionEventProvider
+	SessionBindingProvider
 	SessionObjectKiller
 	SessionRosterProvider
 	TurnEventProvider
@@ -88,21 +90,24 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, timed}
+		return t3bridgeProfile{core, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
 
 // The fixed traits a backend reports.
 type (
-	sleepTrait       struct{ c SessionSleepCapability }
-	freshTrait       struct{}                  // acp and subprocess probe their control socket on every read
-	sidecarTrait     struct{}                  // acp and subprocess keep identity in a local sidecar
-	transportTrait   struct{}                  // acp's
-	probeBudgetTrait struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	sleepTrait         struct{ c SessionSleepCapability }
+	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
+	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
+	transportTrait     struct{}                  // acp's
+	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	turnInterruptTrait struct{ m TurnInterruptMode }
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
+
+func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return t.m }
 
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
@@ -215,8 +220,11 @@ type (
 	}
 	t3bridgeProfile struct {
 		Provider
+		KeyedNudgeProvider
 		LivenessObserverWithError
+		SessionBindingProvider
 		sleepTrait
+		turnInterruptTrait
 	}
 )
 
@@ -237,6 +245,43 @@ func (f FullFake) liveness(method, name string) (Liveness, error) {
 	}
 	_, running := f.sessions[name]
 	return Liveness{Running: running, Alive: running && !f.Zombies[name]}, nil
+}
+
+// NudgeKeyed implements [KeyedNudgeProvider]: it records a Nudge call
+// carrying key and answers as [Fake.Nudge] does.
+func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{
+		Method:      "Nudge",
+		Name:        name,
+		Message:     FlattenText(content),
+		Content:     content,
+		DeliveryKey: key,
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// SessionBinding implements [SessionBindingProvider] from the fake's
+// Bindings.
+func (f FullFake) SessionBinding(name string) (SessionBinding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "SessionBinding", Name: name})
+	if f.broken {
+		return SessionBinding{}, ErrRuntimeUnavailable
+	}
+	b, ok := f.Bindings[name]
+	if !ok {
+		return SessionBinding{}, fmt.Errorf("%w: no thread bound to %q", ErrSessionNotFound, name)
+	}
+	return b, nil
 }
 
 // ObserveLiveness implements [LivenessObserver].

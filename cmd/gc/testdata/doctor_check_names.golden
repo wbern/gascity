@@ -63,6 +63,7 @@ beads-role
 controller
 supervisor-http-api
 supervisor-unit-ownership
+supervisor-binary
 agent-sessions
 zombie-sessions
 orphan-sessions
@@ -84,6 +85,7 @@ order-tracking-retention
 session-model
 routed-work-workable
 startup-health-episodes
+ownerless-runtimes
 gate-sandbox-reads
 dolt-server
 fork-rate

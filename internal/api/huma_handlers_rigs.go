@@ -52,6 +52,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -72,7 +73,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 		rigs = append(rigs, resp)
 	}
 	return &ListOutput[rigResponse]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store),
 		Body:      ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
 	}, nil
@@ -80,6 +81,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 
 // humaHandleRigGet is the Huma-typed handler for GET /v0/rig/{name}.
 func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
+	index := s.latestIndex()
 	name := input.Name
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -92,7 +94,7 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 				resp.Git = fetchGitStatus(rig.Path)
 			}
 			return &IndexOutput[rigResponse]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  resp,
 			}, nil
 		}
@@ -589,7 +591,7 @@ func (s *Server) humaHandleRigRestart(name string) (*RigActionResponse, error) {
 		if workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs) != name {
 			continue
 		}
-		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
+		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
 			if err := sp.Stop(sessionName); err != nil {

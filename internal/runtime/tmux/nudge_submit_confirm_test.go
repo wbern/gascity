@@ -648,14 +648,6 @@ func TestStagedDraftRecoveryIsClaudeAndCodexOnly(t *testing.T) {
 	}
 }
 
-// TestPaneContainsBusyIndicatorHourTimer pins the busy reading of Claude Code's
-// spinner once a turn passes one hour and the timer gains an hour group. The
-// timer alone must read busy, not only the leading glyph and verb: a frame
-// whose glyph is outside the shipped set still carries the timer. Hour-form
-// idle chrome must keep reading idle, since a false busy holds WaitForIdle.
-func TestPaneContainsBusyIndicatorHourTimer(t *testing.T) {
-}
-
 // agentPaneExecutor answers as a pane running provider (its GC_PROVIDER) whose
 // capture is pane however many submits arrive. When after is set, the capture
 // switches to it once the confirm window has run out: from the first capture
@@ -944,6 +936,38 @@ func TestPaneContainsBusyIndicatorBareSpinnerRow(t *testing.T) {
 		{"• Building…", false},
 		{"quoted: · Tinkering…", false},
 		{"✻ Worked for 1m 49s", false},
+	}
+	for _, tt := range tests {
+		if got := paneContainsBusyIndicator([]string{tt.line}); got != tt.want {
+			t.Errorf("paneContainsBusyIndicator(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}
+
+// TestPaneContainsBusyIndicatorHourTimer pins the busy reading of Claude Code's
+// spinner once a turn passes one hour and the timer gains an hour group. The
+// timer alone must read busy, not only the leading glyph and verb: a frame
+// whose glyph is outside the shipped set still carries the timer. Hour-form
+// idle chrome must keep reading idle, since a false busy holds WaitForIdle.
+func TestPaneContainsBusyIndicatorHourTimer(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		// Live pane lines from long turns.
+		{"✽ Canoodling… (5h 52m 12s · ↓ 39.5k tokens)", true},
+		{"· Flibbertigibbeting… (2h 12m 40s · thinking with max effort)", true},
+		{"* Orbiting… (6h 16m 34s · ↓ 443 tokens · thought for 1s)", true},
+		{"* Orbiting… (6h 16m 27s)", true}, // bare frame, no separator yet
+		// The timer is what makes these busy: no known glyph leads the line.
+		{"⚡ Puttering… (1h 21m 34s · ↓ 45.3k tokens)", true},
+		{"  (1h 2m 3s · ↓ 18.5k tokens)", true},
+		{"• Waiting for background terminal (1h 05m 07s • esc to interrupt)", true},
+		{"✻ Worked for 1h 2m 3s", false}, // done marker, hour form
+		{"  edited (2h ago)", false},
+		{"  Retrying in (5s)", false},
+		{"🧠 Sonnet 4.6 | 📁 witness | ⏱️  Jun 3 20:10:09", false},
+		{"  … +9 lines (ctrl+o to expand)", false},
 	}
 	for _, tt := range tests {
 		if got := paneContainsBusyIndicator([]string{tt.line}); got != tt.want {
