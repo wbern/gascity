@@ -61,6 +61,13 @@ const (
 
 const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
+// defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
+// started its step, the execution backstop's started seat: PHASE1-2 §6.6's
+// started-rung text. It carries no --drain-ack, which on a hook answer of no
+// work, the started step gate- or hold-blocked, acked a drain and gave the
+// claim back (mc-ilr3b).
+const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -252,8 +259,15 @@ func (p poolContinuationBackstop) content(s beads.Bead) string {
 }
 
 func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateContinuation(target)
+	return res
+}
+
+// revalidateContinuation is revalidate's verdict on target, with the step as
+// the live read found it (the zero bead when it held).
+func revalidateContinuation(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Assigned-work snapshots normally carry a CachingStore. A plain Get can
 	// therefore return the pre-claim row after another process has already
@@ -273,11 +287,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	// leg-vs-owner grouping work in ga-m4sj2.
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
 	// proved for this row, not the leg it was read from: inside a class binding a
@@ -291,11 +305,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(current.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(current.Metadata[beadmeta.ContinuationGroupMetadataKey]) == "" ||
 		strings.TrimSpace(current.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
 	root, err := live.Get(target.RootID)
 	if err != nil || root.ID != target.RootID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
 	// live, not who owns this step. gc.session_name on the root is a dashboard
@@ -308,9 +322,9 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 func (p poolContinuationBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
@@ -636,6 +650,21 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	}
 	if nudge == "" {
 		return defaultPoolClaimNudge
+	}
+	return nudge
+}
+
+// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
+// has started: its configured nudge, else defaultHeldClaimNudge naming the
+// claim, and "" when its template names no configured agent. A configured
+// nudge that carries --drain-ack is not sent to a started seat either: the
+// default stands in for it, since an ack on the nudge's no-work answer is how
+// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
+// whose start was recorded.
+func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
+		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 	}
 	return nudge
 }

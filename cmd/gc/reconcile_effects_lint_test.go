@@ -51,6 +51,7 @@ var effectBannedMethods = []string{
 	"AcceptControllerDrainStop", "AcceptDrainStop", "ApplyPatchWithExecutionFence", "BeginControllerDrainAdmission",
 	"BeginDrainAdmission", "CancelDrainAdmission", "CompleteClaimRelease", "FinishDrainAdmission", "RecordStartedClaim",
 	"ReserveClaimRelease", "ReserveDrainClaimRelease",
+	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
 	"NewStore", // session.NewStore: the raw session front door
 }
 

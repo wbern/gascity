@@ -224,6 +224,42 @@ func TestGcBdWriteGuardKeepsTheReadWhereBdResolvesFuzzily(t *testing.T) {
 	}
 }
 
+// TestGcBdWriteGuardCloseKeepsTheClaimIdentityOnExactIDBackends pins why
+// close-shaped writes keep the read where bd resolves ids exactly: a session
+// closing work it claimed closes it under the identity the claim recorded,
+// and that identity comes from the bead the guard read.
+func TestGcBdWriteGuardCloseKeepsTheClaimIdentityOnExactIDBackends(t *testing.T) {
+	for _, args := range [][]string{
+		{"close", "demo-abc"},
+		{"update", "demo-abc", "--status", "closed"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, cityDir := bdSQLRefusalCityDir(t, "")
+			setCwd(t, cityDir)
+			writeBoundBackendMetadata(t, cityDir, "http")
+			binDir := t.TempDir()
+			logPath := filepath.Join(t.TempDir(), "bd-calls.log")
+			script := "#!/bin/sh\nprintf '%s actor=%s\\n' \"$*\" \"${BEADS_ACTOR:-}\" >> " + logPath + "\n" +
+				"if [ \"$1\" = show ]; then printf '[{\"id\":\"demo-abc\",\"status\":\"in_progress\",\"assignee\":\"sess-1\"}]\\n'; fi\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_SESSION_ID", "sess-1")
+			t.Setenv("BEADS_ACTOR", "someone-else")
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", args, code, stderr.String())
+			}
+			want := strings.Join(args, " ") + " actor=sess-1"
+			if log := readBdCallLog(t, logPath); !strings.Contains(log, want) {
+				t.Fatalf("bd calls = %q, want the close to run as the claim's identity (%q)", log, want)
+			}
+		})
+	}
+}
+
 // guardRigCityDir is bdSQLRefusalCityDir plus one bound rig, r1 (prefix rr),
 // whose workspace lives outside the city. cityBackend and rigBackend set each
 // workspace's metadata (see writeScopeBackendMetadata).

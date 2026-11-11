@@ -115,11 +115,16 @@ filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
---watch" (or "show --current --watch", or the "view" alias) on a scope that
-uses bd's proxied-server transport (the default for a new city), where bd
-refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
-seconds and redraws when the bead's status or update time changes, until
-Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+--watch" (or "show --current --watch", or the "view" alias) is served by gc
+on two kinds of scope: one that uses bd's proxied-server transport (the
+default for a new city), where bd refuses watch mode, and one whose store bd
+reaches over http, where enterprise bd refuses it and OSS bd would poll the
+shared server every 2 seconds. gc re-runs "bd show" every 2 seconds on a
+proxied scope and every 10 to 12 seconds on an http scope, and redraws when
+the bead's status or update time changes, until Ctrl+C. A failing read is
+reported once, with bd's error; the last view stays up and the wait between
+reads doubles, up to 5 minutes, until a read succeeds, which is reported
+too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
@@ -526,13 +531,15 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 		return 1
 	}
 
-	// Use the full config load path (includes pack expansion + site
+	// Use the full composed load (includes pack expansion + site
 	// binding overlay) so migrated rigs (path only in .gc/site.toml)
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
-	// in resolveBdScopeTarget / bdRigScopeTarget.
+	// in resolveBdScopeTarget / bdRigScopeTarget. The passthrough loader
+	// is that same composition without the builtin readiness pass; see
+	// loadCityConfigForBdPassthrough.
 	endLoadConfig := profiler.phase("load_city_config")
-	cfg, err := loadCityConfigProfiled(cityPath, profiler, stderr)
+	cfg, err := loadBdPassthroughConfig(cityPath, stderr)
 	endLoadConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -783,18 +790,19 @@ func doBdWithProfiler(args []string, stdout, stderr io.Writer, profiler *bdInvoc
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
 	// for a new city, and bd cannot call back into gc. gc serves the watch
-	// itself there by polling plain `bd show` reads; every other scope keeps
-	// bd's own watch. Every bd call the watch makes goes through the same
-	// trace and the same silent-fallback / dolt-start stderr checks as this
-	// passthrough. See cmd_bd_show_watch.go.
-	if req, ok := parseBdShowWatchArgs(bdArgs); ok {
-		watchEnv := workQueryEnvForDir(env, target.ScopeRoot)
-		if bdScopeRefusesShowWatch(cityPath, target, watchEnv) {
-			return serveBdShowWatch(req, &bdWatchRunner{
-				bdPath: bdPath, dir: target.ScopeRoot, env: watchEnv,
-				cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
-			}, stdout, stderr)
-		}
+	// itself there by polling plain `bd show` reads at bd's own interval. It
+	// does the same on a remote (http) scope, where enterprise bd refuses
+	// --watch and OSS bd would poll the server every 2s, but at the slower
+	// remote interval. Every other scope keeps bd's own watch. Every bd call
+	// the watch makes goes through the same trace and the same
+	// silent-fallback / dolt-start stderr checks as this passthrough. See
+	// cmd_bd_show_watch.go.
+	watchEnv := workQueryEnvForDir(env, target.ScopeRoot)
+	if req, interval, ok := bdShowWatchServedByGC(bdArgs, cityPath, target, watchEnv); ok {
+		return serveBdShowWatch(req, &bdWatchRunner{
+			bdPath: bdPath, dir: target.ScopeRoot, env: watchEnv,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+		}, interval, stdout, stderr)
 	}
 
 	endBdSubprocess := profiler.phase("bd_subprocess")
@@ -1071,11 +1079,25 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	return 0
 }
 
+// resolveBdCityPath and loadBdPassthroughConfig are the passthrough's city
+// resolution and its one config load. They are variables only so the routing
+// parity tests can run doBd with the full loaders (resolveCity, loadCityConfig)
+// and compare; production never reassigns them.
+var (
+	resolveBdCityPath       = resolveCityPathOnly
+	loadBdPassthroughConfig = loadCityConfigForBdPassthrough
+)
+
+// resolveBdCity names the city a gc bd invocation runs against. It resolves
+// the city only: every rig decision the passthrough makes is
+// resolveBdScopeTarget's, from the composed config, so the rig name the
+// general resolver derives from cwd (with a full config load) would be
+// discarded unread.
 func resolveBdCity(cityName string) (string, error) {
 	if strings.TrimSpace(cityName) != "" {
 		return validateCityPath(cityName)
 	}
-	return resolveCity()
+	return resolveBdCityPath()
 }
 
 // extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
@@ -1175,7 +1197,9 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// The second release operand is an identity, often a city session bead ID.
 	// It must never participate in either prefix routing or existence probes.
 	probeArgs := args
+	isRelease := false
 	if id, _, release, err := parseBdReleaseIfCurrentArgs(args); release {
+		isRelease = true
 		if err != nil {
 			return execStoreTarget{}, err
 		}
@@ -1201,6 +1225,16 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			return prefixTarget, nil
 		}
 	}
+	// A by-id read or write routes by its subjects' prefix: the verb's flag
+	// manifest says which tokens are ids, and an id's prefix names its store.
+	// release-if-current is gc's own verb, outside bd's manifest, and was
+	// handled above.
+	if !isRelease {
+		if target, ok := bdSubjectPrefixTarget(cfg, cityTarget, cityPath, args); ok {
+			return target, nil
+		}
+	}
+
 	// Bead-ID auto-detect accepts a candidate store only when the id actually
 	// exists there, which costs a full bd round trip per probe. A probe can only
 	// matter when some outcome differs from another, so when every candidate

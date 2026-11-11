@@ -220,14 +220,15 @@
               "nudge-drop",
               "beads-city-migrate-proxied",
               "storage-repair-sequence",
+              "runtime-workdir-export",
+              "agent-is-foreign",
               "mcp-validate",
               "worktree-reap",
               "run-cancel",
               "analyze-continuity",
               "worktree-archive-reap",
               "worktree-scan",
-              "beads-adopt-custody",
-              "runtime-workdir-export"
+              "beads-adopt-custody"
             ]
           },
           "event_id": {

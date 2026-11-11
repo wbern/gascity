@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -285,26 +286,17 @@ func filterSkillEntries(entries []materialize.SkillEntry, include, exclude []str
 	return out
 }
 
-// skillFingerprintPresenceMarker is the stable value stored for every
-// desired skill. It is deliberately content-independent: see
-// mergeSkillFingerprintEntries.
-const skillFingerprintPresenceMarker = "present"
-
-// mergeSkillFingerprintEntries adds one "skills:<name>" entry to fpExtra
-// for each desired skill, using a stable presence marker as the value.
-//
-// The value is intentionally NOT a content hash. Set membership — adding
-// or removing a skill from an agent — still drifts the config fingerprint
-// via the "skills:<name>" keyspace (a new/absent key changes the hashed
-// map), which is a structural change that legitimately needs
-// re-materialization. But a byte-level edit to a skill's *content* (e.g. a
-// SKILL.md documentation rewrite) no longer changes the fingerprint, so it
-// no longer triggers a config-drift recycle. Hashing content here was the
-// gci-rgfm foot-gun: on 2026-07-05 a single benign SKILL.md edit to a
-// shared skill recycled ~every session and destroyed attended context.
-// Skills are re-materialized at session start, so a content change is
-// picked up on the next natural restart rather than forcing a
-// context-destroying recycle of live sessions.
+// mergeSkillFingerprintEntries adds one "skills:<name>" → content-hash
+// entry to fpExtra for each desired skill, hashed with
+// runtime.HashPathContent. The entries are NextStart
+// (runtime.FingerprintExtraChangePolicy): the core and provision
+// fingerprints leave them out, so a skill edit reaches the next start
+// without draining a running session. The diagnostic drift breakdown still
+// hashes every key, and the v6 recomputation that migrates a session
+// started before the policy hashes them too
+// (runtime.PrePolicyCoreFingerprint). Adding an agent's first skill or
+// removing its last can still drain it, through the stage-2
+// materialize-skills PreStart entry (resolveTemplate).
 //
 // Nil-map safe: allocates fpExtra if the caller passed nil. Returns
 // the (possibly new) map. The "skills:" prefix partitions the key
@@ -318,7 +310,7 @@ func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materiali
 		fpExtra = make(map[string]string, len(desired))
 	}
 	for _, e := range desired {
-		fpExtra["skills:"+e.Name] = skillFingerprintPresenceMarker
+		fpExtra["skills:"+e.Name] = runtime.HashPathContent(e.Source)
 	}
 	return fpExtra
 }

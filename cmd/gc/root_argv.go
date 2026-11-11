@@ -36,10 +36,18 @@ func rootCommandSkipsPackDiscovery(command string) bool {
 }
 
 // managedHookSkipsPackDiscovery avoids loading packs before the provider's
-// built-in hook invocations. Other children of these command groups still
+// built-in hook invocations and the work-query ready reader. Other children of these command groups still
 // discover imports, which may add non-colliding commands beneath them.
 func managedHookSkipsPackDiscovery(command string, tail []string) bool {
 	switch command {
+	case "ready":
+		// The work-query reader (GET /work/ready client) runs several times
+		// per claim and never names a child: only flags and their values
+		// follow. A bare word after a flag could be an imported child, so
+		// the shape is accepted only when every bare word directly follows
+		// a space-separated value flag. (T5 PROVISIONAL: a bare word after
+		// a boolean flag is read as that flag's value.)
+		return readyTailNamesNoChild(tail)
 	case "prime":
 		return len(tail) > 0 && tail[0] == "--hook"
 	case "nudge":
@@ -59,6 +67,23 @@ func managedHookSkipsPackDiscovery(command string, tail []string) bool {
 	default:
 		return false
 	}
+}
+
+// readyTailNamesNoChild reports whether tail is flags (and their values) only.
+func readyTailNamesNoChild(tail []string) bool {
+	if len(tail) == 0 || !strings.HasPrefix(tail[0], "-") {
+		return false
+	}
+	for i := 1; i < len(tail); i++ {
+		if strings.HasPrefix(tail[i], "-") {
+			continue
+		}
+		prev := tail[i-1]
+		if !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") {
+			return false
+		}
+	}
+	return true
 }
 
 func isBuiltinBdInvocation(args []string) bool {

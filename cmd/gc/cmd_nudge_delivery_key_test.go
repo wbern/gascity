@@ -10,7 +10,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -247,7 +246,7 @@ func (h *keyedPollerHarness) failWithdrawOf(nudgeID string) (restore func()) {
 			return err
 		}
 		if failed {
-			return fmt.Errorf("acking %s: %w", nudgeID, nudgequeue.ErrQueueBusy)
+			return fmt.Errorf("acking %s: %w", nudgeID, errNudgeQueueBusyForTest)
 		}
 		return nil
 	}
@@ -624,3 +623,7 @@ func TestRekeyQueuedNudgesAfterFailedBookkeepingReleasesWhenAClaimIsGone(t *test
 		t.Fatalf("queue: pending=%+v inFlight=%+v err=%v, want nudge A back in pending on key %q", pending, inFlight, err, key)
 	}
 }
+
+// errNudgeQueueBusyForTest stands in for the queue-busy error a withdraw sees
+// when its ack cannot take the queue lock.
+var errNudgeQueueBusyForTest = errors.New("nudge queue busy")

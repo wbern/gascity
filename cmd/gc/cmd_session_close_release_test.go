@@ -245,7 +245,9 @@ func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", drainAckReleaseBudget, &stderr)
+	if err := releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", drainAckCaller{}, &stderr); err != nil {
+		t.Logf("release held claims: %v", err)
+	}
 
 	got, err := work.Get(claimed.ID)
 	if err != nil {

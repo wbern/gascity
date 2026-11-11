@@ -284,6 +284,11 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 	if opts.Inject {
 		return 0
 	}
+	// One composed city config for the whole invocation. The front door loads
+	// it, and the claim's helpers and the drain-ack load it again on their own;
+	// each composition walks city.toml and every pack include, ~0.15-0.2 s on
+	// maintainer-city (see beginInvocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// Accepted for compatibility with installed hook commands; non-inject
 	// gc hook output ignores provider-specific formatting.
 	_ = opts.HookFormat
@@ -341,7 +346,10 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		return 1
 	}
 
-	cityPath, err := resolveCity()
+	// The rig context `gc hook` resolves agents against is its own
+	// (currentRigContext), so the city resolution skips the full config load a
+	// rig name costs.
+	cityPath, err := resolveCityPathOnly()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -356,6 +364,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 	// Other CLI entry points (cmd_sling, cmd_start, cmd_rig, cmd_supervisor)
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	city := newHookCity(cityPath, cfg)
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns
@@ -387,7 +396,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
 			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
 		}
-		code, handled, info := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
+		code, handled, info := fenceHookClaimSession(city, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
 		if handled {
 			return code
 		}
@@ -603,7 +612,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		if sessionTemplateContext && !opts.SkipTrigger {
 			var code int
 			var handled bool
-			triggerBeadID, triggerStoreRef, code, handled = currentHookClaimTrigger(cityPath, cfg, sessionID, opts, stdout, stderr)
+			triggerBeadID, triggerStoreRef, code, handled = currentHookClaimTriggerVia(city.sessionFront, sessionID, opts, stdout, stderr)
 			if handled {
 				return code
 			}
@@ -635,7 +644,7 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 			return 1
 		}
 		if !requiresEvidence && sessionID != "" {
-			front, err := sessionCurrentClaimFrontDoor()
+			front, err := city.sessionFront()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc hook --claim: execution evidence unavailable: %v\n", err) //nolint:errcheck // best-effort diagnostic
 				return 1
@@ -652,16 +661,11 @@ func cmdHookWithOptionsContext(ctx context.Context, args []string, opts hookComm
 		if requiresEvidence && sessionID != "" {
 			claimOpts.StartedFence = &executionFence
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, workStores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(city, workQuery, workDir, queryEnv, stores, workStores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return doHookDiscoveryWithContext(ctx, workQuery, workDir, false, hookClaimOptions{
-		Env:            queryEnv,
-		DrainAck:       opts.DrainAck,
-		JSON:           opts.JSON,
-		StrictDrainAck: drainAckStrictConfig(cfg),
-	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+	return hookDiscover(ctx, workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), city.claimOps(), runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -702,7 +706,7 @@ const (
 // transient session-store fault all return handled=false so the normal claim
 // path runs — the fence never turns an infrastructure hiccup or an
 // in-progress start into a false refusal.
-func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
+func fenceHookClaimSession(city *hookCity, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
 	if sessionID == "" {
 		// GC_TEMPLATE is the pool-membership signal (set only alongside
 		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
@@ -729,7 +733,7 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 	if instanceToken == "" {
 		return 0, false, nil
 	}
-	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	verdict, reason, info := classifyHookClaimSessionVia(city.sessionFront, sessionID, instanceToken)
 	switch verdict {
 	case hookClaimSessionStale:
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
@@ -753,6 +757,9 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hookClaimSessionStoreUnavailable (transient, fails open), so an infrastructure
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
+//
+// It and classifyHookClaimSessionInfo are test-only: `gc hook`'s fence calls
+// classifyHookClaimSessionVia with the invocation's session front door.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
 	verdict, reason, _ := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
 	return verdict, reason
@@ -762,13 +769,20 @@ func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, inst
 // session Info it read when the verdict is eligible (nil otherwise), so the
 // claim can act on the session bead's persisted identity without a second read.
 func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
-	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
-	// rather than reloading the whole city config inside the open.
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	// cfg is the caller's loaded city config; reuse it rather than reloading
+	// the whole city config inside the open.
+	return classifyHookClaimSessionVia(newHookCity(cityPath, cfg).sessionFront, sessionID, instanceToken)
+}
+
+// classifyHookClaimSessionVia is classifyHookClaimSessionInfo reading the
+// session through front: in `gc hook`, the invocation's one session front door,
+// which the claim's later session reads and writes reuse.
+func classifyHookClaimSessionVia(front sessionFrontGetter, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
+	sessFront, err := front()
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err), nil
 	}
-	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		verdict, reason := classifyHookClaimSessionLookupError(err)
 		return verdict, reason, nil
@@ -841,13 +855,24 @@ func loadHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, inst
 // federated claiming without trusting stale environment values. A session that
 // became stale between the two reads drains fail-closed.
 func currentHookClaimTrigger(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (triggerBeadID, triggerStoreRef string, code int, handled bool) {
+	return currentHookClaimTriggerVia(newHookCity(cityPath, cfg).sessionFront, sessionID, opts, stdout, stderr)
+}
+
+// currentHookClaimTriggerVia is currentHookClaimTrigger reading the session
+// through front: in `gc hook`, the invocation's one session front door, so the
+// reload does not open the city store a second time.
+func currentHookClaimTriggerVia(front sessionFrontGetter, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (triggerBeadID, triggerStoreRef string, code int, handled bool) {
 	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	if sessionID == "" || instanceToken == "" {
 		// Legacy/tokenless runtimes have no authoritative identity fence. Preserve
 		// their established startup-environment behavior for compatibility.
 		return strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_BEAD_ID")), strings.TrimSpace(os.Getenv("GC_TRIGGER_WORK_STORE_REF")), 0, false
 	}
-	info, verdict, reason := loadHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	verdict, reason, infoPtr := classifyHookClaimSessionVia(front, sessionID, instanceToken)
+	var info session.Info
+	if infoPtr != nil {
+		info = *infoPtr
+	}
 	switch verdict {
 	case hookClaimSessionEligible:
 		return strings.TrimSpace(info.TriggerBeadID), strings.TrimSpace(info.TriggerBeadStoreRef), 0, false
@@ -921,19 +946,24 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores, workStores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores, workStores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
 	// routing exists to close — so every failure but one is fatal here. The
 	// exception, a binding with no claim CAS, degrades to unrouted claiming;
 	// see hookClaimRouteVerdict.
-	opened, err := hookClaimClassRouteForCity(cityPath)
+	opened, err := hookClaimClassRouteForCity(city.path)
 	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{WorkStores: workStores}, route)
+	if route != nil {
+		route.recorder = city.recorder
+	}
+	claimOps := city.claimOps()
+	claimOps.WorkStores = workStores
+	ops := classRoutedHookClaimOps(claimOps, route)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
@@ -977,7 +1007,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if env, ok := hookStoreEnvForDir(stores, claimOpts.TriggerStoreDir); ok {
 			claimOpts.Env = env
 		}
-		if code, refused := hookTriggerClaimFenceRefusal(claimOpts, ops, stdout, stderr); refused {
+		if code, refused := hookTriggerClaimFenceRefusal(claimOpts, ops, workDir, stdout, stderr); refused {
 			return code
 		}
 		triggerResult := doHookTriggerClaim(claimOpts.TriggerBeadID, workDir, claimOpts, ops, stdout, stderr)
@@ -1204,10 +1234,10 @@ func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 }
 
 // singleStoreHookWorkQuery returns the agent's work query built for the SAME
-// city with the federated reader turned off — the command the hook ran against
-// every store before the reader was swapped. It is the command
-// scopeFederatedHookStores gives the federated extras, so their cost and
-// coverage stay exactly what they were.
+// city with the federated reader turned off. Nothing runs it: the hook compares
+// it with the federated form (hookStoresScopeToPrimary), and where the two
+// differ the claim reads only the primary store, for the reasons
+// scopeFederatedHookStores gives.
 //
 // It returns "" on a city that federates nothing, so the caller's scoping is a
 // no-op there rather than a second build of the identical string.
@@ -1559,6 +1589,25 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 	return err
 }
 
+// hookDiscoveryOptions are plain `gc hook`'s options for the drain fences it
+// shares with --claim. The drain-ack fence matches a started claim's assignee
+// against the seat's identities, on this door as on --claim, so they travel
+// here too.
+func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCommandOptions, strict bool) hookClaimOptions {
+	return hookClaimOptions{
+		Assignee:           assignee,
+		IdentityCandidates: identities,
+		Env:                env,
+		DrainAck:           opts.DrainAck,
+		JSON:               opts.JSON,
+		StrictDrainAck:     strict,
+	}
+}
+
+// hookDiscover is doHookDiscovery, a seam for tests of what plain `gc hook`
+// hands it. Tests that swap it MUST NOT call t.Parallel().
+var hookDiscover = doHookDiscoveryWithContext
+
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
 // wrapper is where the F-D fence lives for the non-claim path.
@@ -1598,7 +1647,7 @@ func doHookDiscoveryWithContext(ctx context.Context, workQuery, dir string, inje
 			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, dir, stdout, stderr)
 		}
 	}
 	return doHookWithContext(ctx, workQuery, dir, inject, runner, stdout, stderr, visibility)

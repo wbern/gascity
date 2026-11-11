@@ -59,6 +59,12 @@ type SubmitOutcome struct {
 	// Deferred marks a queue the actor caused: the call may not start
 	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
 	Deferred bool
+	// Interrupt is what an interrupt_now did about the turn it targeted when
+	// the session's runtime reports turns (SESSION-RUNTIME-020). It is
+	// set once the fence ran, a failed send or queue write included; nil when
+	// the submit took no turn-fenced path or was refused before the fence (a
+	// stopping or kill-pending row, the runtime lease not taken).
+	Interrupt *TurnInterruptReport
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -95,7 +101,7 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil, runtime.TurnInterruptModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the
@@ -131,6 +137,10 @@ func (m *Manager) Submit(ctx context.Context, by Actor, id, message, resumeComma
 func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, replaceKey string) (SubmitOutcome, error) {
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
+	}
+	var seen turnSighting // lock waits and lease retries fall after it
+	if intent == SubmitIntentInterruptNow {
+		seen = m.sightTurn(ctx, id)
 	}
 	var outcome SubmitOutcome
 	err := withSessionStartLock(ctx, id, func() error {
@@ -170,6 +180,10 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 				if err := m.pendingInteractionLocked(sessName); err != nil {
 					return err
 				}
+			}
+			if tf := m.turnFenceFor(ctx, by, id, b, sessName, seen); tf != nil {
+				outcome, err = m.fencedInterruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, tf, seen, replaceKey)
+				return err
 			}
 			outcome.Queued, err = m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 			outcome.Deferred = outcome.Queued
@@ -217,7 +231,7 @@ func pendingConversationRestart(b beads.Bead) bool {
 func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	return SubmissionCapabilitiesForMetadata(
 		b.Metadata,
-		strings.TrimSpace(m.cityPath) != "",
+		m.deferredQueue() != nil,
 	).SupportsFollowUp
 }
 
@@ -274,7 +288,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
-	if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
@@ -352,13 +366,17 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
 // provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
 // protocol runtime drops keys and is interrupted through Interrupt alone.
-func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-		return nil
+// Every input goes under the fence ctx carries, if any. A session with no
+// turn to interrupt (stopFindsNoTurn) is sent nothing: under a fence its
+// fresh read decides the miss, as it may have stopped since its caller read
+// it running.
+func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
+		return err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
@@ -366,12 +384,12 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.Tur
 		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
-		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
+		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
 	}
-	if err := m.sp.Interrupt(sessName); err != nil {
+	if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 		return fmt.Errorf("interrupting session: %w", err)
 	}
 	return nil
@@ -394,7 +412,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := m.sp.Interrupt(sessName); err != nil {
+			if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
 			}
 			return waitForIdle(15 * time.Second)
@@ -402,7 +420,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		if err := waitForIdle(softInterruptFallbackWait); err == nil {
 			return nil
 		}
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
 		}
 	}
@@ -585,7 +603,7 @@ func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead,
 			return err
 		}
 	}
-	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
+	if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
 	if err := sleepWithContext(ctx, interruptClearDelay); err != nil {
@@ -720,7 +738,8 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, replaceKey string) error {
-	if strings.TrimSpace(m.cityPath) == "" {
+	queue := m.deferredQueue()
+	if queue == nil {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
 	now := time.Now().UTC()
@@ -736,26 +755,11 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, r
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
 	if replaceKey != "" {
+		// The queue supersedes a still-pending item carrying the same
+		// reference (nudgequeue.StateFileQueue.EnqueueDeferred).
 		item.Reference = &nudgequeue.Reference{Kind: "session-submit", ID: replaceKey}
 	}
-	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
-		if item.Reference != nil {
-			remaining := state.Pending[:0]
-			for _, pending := range state.Pending {
-				if pending.SessionID == item.SessionID && pending.ContinuationEpoch == item.ContinuationEpoch && pending.Source == item.Source && pending.Reference != nil && pending.Reference.Kind == item.Reference.Kind && pending.Reference.ID == item.Reference.ID {
-					pending.DeadAt = now
-					pending.LastError = "superseded by newer deferred session submit"
-					state.Dead = append(state.Dead, pending)
-					continue
-				}
-				remaining = append(remaining, pending)
-			}
-			state.Pending = remaining
-		}
-		state.Pending = append(state.Pending, item)
-		nudgequeue.SortState(state)
-		return nil
-	}); err != nil {
+	if err := queue.EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {
@@ -866,13 +870,39 @@ func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessi
 }
 
 func isGoTestExecutable(path string) bool {
+	argv0 := ""
+	if len(os.Args) > 0 {
+		argv0 = os.Args[0]
+	}
+	return isGoTestExecutableFor(path, argv0, os.Getenv("TEST_SRCDIR"))
+}
+
+// isGoTestExecutableFor reports whether path names a Go test binary, given the
+// running process's argv0 and TEST_SRCDIR.
+func isGoTestExecutableFor(path, argv0, testSrcdir string) bool {
 	// The running bazel test binary drops the .test suffix but keeps the
 	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match.
-	if os.Getenv("TEST_SRCDIR") != "" && path == os.Args[0] && strings.HasSuffix(filepath.Base(path), "_test") {
+	// spy binary must not match. Sibling gates such as internal/testenv and
+	// cmd/gc/test_guard.go need no symlink comparison: they classify only the
+	// running process, by an argv0 basename that is <target>_test whether or
+	// not bazel exec'd it through a symlink.
+	if testSrcdir != "" && strings.HasSuffix(filepath.Base(path), "_test") && isRunningBinary(path, argv0) {
 		return true
 	}
 	return strings.HasSuffix(filepath.Base(path), ".test")
+}
+
+// isRunningBinary reports whether path, as reported by os.Executable, is the
+// binary argv0 names. Bazel execs a test through its runfiles path, which is a
+// symlink under local execution; on Linux os.Executable reads /proc/self/exe,
+// which names the symlink's resolved target, so argv0 is also compared after
+// resolving symlinks.
+func isRunningBinary(path, argv0 string) bool {
+	if path == argv0 {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(argv0)
+	return err == nil && resolved == path
 }
 
 func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {

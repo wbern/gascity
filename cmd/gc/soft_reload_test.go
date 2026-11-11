@@ -588,9 +588,7 @@ func TestS1SoftReloadCancelsAdmissionBeforeAcceptingHash(t *testing.T) {
 				}
 			}
 			if scenario == "corrupt-evidence" {
-				if err := store.SetMetadata(row.ID, session.WorkStartedKey, "{ corrupt"); err != nil {
-					t.Fatal(err)
-				}
+				casSetMeta(t, store, row.ID, session.WorkStartedKey, "{ corrupt") // CASOnly: written the way its writers do
 			}
 			if scenario == "cas-failure" {
 				store.fail = true
@@ -675,9 +673,7 @@ func TestS1SoftReloadRecoversExactConfigDriftAttemptWithoutTracker(t *testing.T)
 					}
 				}
 				if scenario == "corrupt" {
-					if err := store.SetMetadata(row.ID, session.WorkStartedKey, "{ corrupt"); err != nil {
-						t.Fatal(err)
-					}
+					casSetMeta(t, store, row.ID, session.WorkStartedKey, "{ corrupt") // CASOnly: written the way its writers do
 				}
 				before, err := store.Get(row.ID)
 				if err != nil {

@@ -714,7 +714,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 	oldLogWriter := log.Writer()
 	log.SetOutput(&observed)
 	t.Cleanup(func() { log.SetOutput(oldLogWriter) })
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -740,7 +740,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -769,7 +769,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -794,7 +794,7 @@ func verifiedStopTokenFixture(t *testing.T, readErr error) (beads.Store, *runtim
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1911,7 +1911,7 @@ func TestS1CanonicalDrainCancellationReopensAdmission(t *testing.T) {
 			tracker.set(fixture.seat.ID, &drainState{startedAt: now.Add(-10 * time.Second), deadline: now.Add(20 * time.Second), reason: "wait-hold", generation: 7})
 			oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
 			t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = oldRelease, oldPoke })
-			drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
+			drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error {
 				return releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, io.Discard)
 			}
 			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,12 +94,15 @@ func TestNudgeClaimSnapshotRequiresACompleteFenceCensus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			censusRead := false
-			eligible, err := claimableNudgeSnapshotWithCensus(cityPath, nudgeTarget{cityPath: cityPath, sessionID: "new-session", agent: config.Agent{Name: "worker"}}, now, func() map[string]struct{} {
-				censusRead = true
-				if err := nudgequeue.WithStateWithin(cityPath, "census-probe", 0, func(*nudgequeue.State) error { return nil }); err != nil {
-					t.Fatalf("census ran under queue lock: %v", err)
-				}
-				return tc.live
+			target := nudgeTarget{cityPath: cityPath, sessionID: "new-session", agent: config.Agent{Name: "worker"}}
+			match, err := snapshotClaimMatcher(cityPath, now, func(item queuedNudge) bool {
+				return queuedNudgeClaimableForTarget(target, item, func() map[string]struct{} {
+					censusRead = true
+					if err := probeNudgeQueueLockFree(cityPath); err != nil {
+						t.Fatalf("census ran under queue lock: %v", err)
+					}
+					return tc.live
+				})
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -104,9 +110,27 @@ func TestNudgeClaimSnapshotRequiresACompleteFenceCensus(t *testing.T) {
 			if !censusRead {
 				t.Fatal("fenced candidate did not read its census")
 			}
-			if got := len(eligible) == 1; got != tc.want {
+			if got := match != nil; got != tc.want {
 				t.Fatalf("candidate eligible=%v want %v", got, tc.want)
 			}
 		})
 	}
+}
+
+// probeNudgeQueueLockFree fails when the queue's exclusive lock is held: a
+// non-blocking attempt to take it must succeed immediately.
+func probeNudgeQueueLockFree(cityPath string) error {
+	path := nudgequeue.LockPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return err
+	}
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

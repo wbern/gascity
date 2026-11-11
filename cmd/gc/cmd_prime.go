@@ -287,6 +287,10 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 // prompt_template was resolved. The first result is named so the deferred
 // SessionStart continuation observation can record the exit code.
 func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) (code int, _ *promptBudgetJSON) {
+	// One composed city-config load for the whole invocation: the session
+	// proof, the provider-key write, the mail and step-reminder injections and
+	// every store open each loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false
@@ -385,12 +389,28 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0, nil
 		}
-		injection := primeHookContextSuffix("", nil, hookMode, hookContext, stderr, consumeHandoff)
+		injection := primeHookContextSuffix("", nil, nil, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0, nil
 	}
 	hookCityPath = cityPath
 	hookSideEffectCityPath = cityPath
+	// The step reminder is the slowest read a hook makes: in process it opens
+	// the rig store at GC_RIG_ROOT and scans that rig by gc.routed_to once per
+	// identity. Ask the controller for it now, so the request runs while this
+	// invocation proves its session, loads its config and starts its poller.
+	var stepLookup *wispStepLookup
+	if hookMode {
+		stepLookup = startWispStepLookup(cityPath, stderr)
+		defer stepLookup.stop()
+	}
+	// Starting a SessionStart hook's poller below reaps the pollers directory
+	// first; reap it now instead, alongside the hook's reads
+	// (startNudgePollerReap). Other hook shapes reap where they start it.
+	reapedEarly := hookMode && primeHookSessionStart(hookContext)
+	if reapedEarly {
+		defer startNudgePollerReap(cityPath)()
+	}
 	// A SessionStart hook proves its live managed session against the city
 	// store; the SessionStart mail context below reuses that same handle rather
 	// than resolving the city and opening its store again.
@@ -411,7 +431,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1, nil
 		}
-		injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
+		injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0, nil
 	}
@@ -494,7 +514,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
-			maybeStartNudgePoller(withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
+			target := withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
 				cfg:               cfg,
@@ -503,7 +523,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}))
+			})
+			if reapedEarly {
+				startNudgePollerUnlessDispatched(target)
+			} else {
+				maybeStartNudgePoller(target)
+			}
 		}
 		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {
 			// A client's provider chat gets no worker persona (see
@@ -541,7 +566,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 						return 1, budget
 					}
 				}
-				injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
+				injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0, budget
 			}
@@ -574,7 +599,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
 					cfg.PackDirsForRig(ctx.RigName), nil, nil)
 				if content != "" {
-					injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
+					injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0, nil
 				}
@@ -586,7 +611,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
+	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
 }
@@ -761,6 +786,13 @@ func primeHookLiveManagedSession(cityPath string, stderr io.Writer) *primeSessio
 	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
 	if sessionName == "" {
 		return nil
+	}
+	// The store open loads the city config first (loadCityConfigForStoreOpen:
+	// this loader, this writer), which runs the builtin readiness pass the
+	// routing read needs. Loading it here instead lets the routing read run
+	// alongside the open (prewarmCLIStorageRoutes); the open then reuses it.
+	if _, err := loadCityConfig(cityPath, io.Discard); err == nil {
+		defer prewarmCLIStorageRoutes(cityPath)()
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {

@@ -256,7 +256,7 @@ func TestNudgeBodyTakesBracketedPastePath(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", body, time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", body, time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestShortKeystrokePayloadStaysOnSendKeys(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", "yes", time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "yes", time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 	if idx := callIndexWithTokens(fe.calls, "send-keys", "-l", "yes"); idx < 0 {
@@ -306,7 +306,7 @@ func TestPasteKeepsLineFeeds(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("line\n", 400), time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("line\n", 400), time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 

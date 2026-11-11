@@ -122,7 +122,7 @@ func TestRecordStartedClaimRefusesRestartDuringCAS(t *testing.T) {
 func TestRecordStartedClaimPreservesUnreadableEvidence(t *testing.T) {
 	mem := beads.NewMemStore()
 	b := executionSessionFixture(t, mem)
-	if err := mem.SetMetadata(b.ID, WorkStartedKey, "{"); err != nil {
+	if err := seedWorkStarted(mem, b.ID, "{"); err != nil {
 		t.Fatal(err)
 	}
 	s := NewStore(beads.SessionStore{Store: mem})
@@ -333,7 +333,7 @@ func TestDrainAdmissionRetryDoesNotTrustStaleCachedCommit(t *testing.T) {
 	}
 	// Model another process canceling through the authoritative backing while
 	// this controller's session cache still carries its committed census.
-	if err := mem.SetMetadata(row.ID, WorkStartedKey, `{"v":1,"claims":[]}`); err != nil {
+	if err := seedWorkStarted(mem, row.ID, `{"v":1,"claims":[]}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishDrainAdmission(row.ID, fence, attempt, true); err == nil {
@@ -577,4 +577,14 @@ func TestExecutionFencedHashPatchPreservesConcurrentEvidenceAndRefusesReplacemen
 			}
 		})
 	}
+}
+
+// seedWorkStarted writes the work_started cell the way its owners do: by a CAS
+// on the row, never blind (the cell is CASOnly, see TestGuardSessionKeysRefusesBlindCASOnlyWrites).
+func seedWorkStarted(mem *beads.MemStore, id, raw string) error {
+	row, err := mem.Get(id)
+	if err != nil {
+		return err
+	}
+	return mem.UpdateIfMatch(id, row.Revision, beads.UpdateOpts{Metadata: map[string]string{WorkStartedKey: raw}})
 }

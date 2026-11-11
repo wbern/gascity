@@ -67,33 +67,33 @@ var forkTimelineExplain = map[string]map[string]string{
 // start sets and clears, the diagnostic session.continuation_observed events,
 // and the immediate stop of a user-held runtime (decision D7, provisional).
 // Every one is a difference of legacy from upstream's legacy, not of legacy from v2.
-const forkTimelineGoldenRuling = "fork keep (gcw-ti3qt): the fork's legacy differs from upstream's (T3, provisional)"
+const forkTimelineGoldenRuling = "fork keep (gcw-ti3qt): the fork's legacy differs from upstream's (T3, provisional; digests re-recorded in T5 under fingerprint v9)"
 
 func init() {
 	timelineGoldenRulings = append(timelineGoldenRulings,
-		goldenRuling{"a crash 29s after wake", forkTimelineGoldenRuling, "909328994b03"},
+		goldenRuling{"a crash 29s after wake", forkTimelineGoldenRuling, "5fe27bd5b8b8"},
 		goldenRuling{"a crash 31s after wake", forkTimelineGoldenRuling, "97a3b1c623fb"},
-		goldenRuling{"a crash 5m0s after wake", forkTimelineGoldenRuling, "579049b722b9"},
-		goldenRuling{"a cutover finds v5 hashes on a live seat", forkTimelineGoldenRuling, "8d5e86383176"},
-		goldenRuling{"a live drift on a seat", forkTimelineGoldenRuling, "60e17351a752"},
+		goldenRuling{"a crash 5m0s after wake", forkTimelineGoldenRuling, "53c267fab544"},
+		goldenRuling{"a cutover finds v5 hashes on a live seat", forkTimelineGoldenRuling, "41b6374e0028"},
+		goldenRuling{"a live drift on a seat", forkTimelineGoldenRuling, "6eb5d26b7357"},
 		goldenRuling{"a live quarantined row 29s after wake", forkTimelineGoldenRuling, "54bf033dac33"},
 		goldenRuling{"a live quarantined row 31s after wake", forkTimelineGoldenRuling, "060ad5819e45"},
-		goldenRuling{"a managed suspend drains, then wake", forkTimelineGoldenRuling, "836ecf912f68"},
-		goldenRuling{"a manual create read between its two writes", forkTimelineGoldenRuling, "652504b3b605"},
-		goldenRuling{"a provider swap stops the runtime", forkTimelineGoldenRuling, "4c7fd4e3969b"},
-		goldenRuling{"a quarantine, then a kill fence, expires", forkTimelineGoldenRuling, "ae2383b4cb41"},
-		goldenRuling{"a waiter sleeps", forkTimelineGoldenRuling, "507f0d2d89d9"},
-		goldenRuling{"an idle named session holding assigned work defers until its streak is exhausted", forkTimelineGoldenRuling, "93e33d24988f"},
+		goldenRuling{"a managed suspend drains, then wake", forkTimelineGoldenRuling, "f122f1da9826"},
+		goldenRuling{"a manual create read between its two writes", forkTimelineGoldenRuling, "3ddd8df558cd"},
+		goldenRuling{"a provider swap stops the runtime", forkTimelineGoldenRuling, "2f71232d9a73"},
+		goldenRuling{"a quarantine, then a kill fence, expires", forkTimelineGoldenRuling, "c2b73b4377b6"},
+		goldenRuling{"a waiter sleeps", forkTimelineGoldenRuling, "5297093fa7ad"},
+		goldenRuling{"an idle named session holding assigned work defers until its streak is exhausted", forkTimelineGoldenRuling, "200391b7e36d"},
 		goldenRuling{"an idle on-demand named session sleeps", forkTimelineGoldenRuling, "4014ebf25083"},
 		goldenRuling{"an unwanted row inside, then past, the wake grace", forkTimelineGoldenRuling, "3da158e19b9e"},
 		goldenRuling{"an unwanted row of a suspended agent", forkTimelineGoldenRuling, "b806b255f900"},
 		goldenRuling{"an unwanted row woken by a clock ten minutes ahead", forkTimelineGoldenRuling, "eb7762e58461"},
 		goldenRuling{"an unwanted row woken by a clock two minutes ahead", forkTimelineGoldenRuling, "f5e77ec3f5c4"},
-		goldenRuling{"drift deferrals through time", forkTimelineGoldenRuling, "a1894ad974b2"},
-		goldenRuling{"idle, then sleep, then the next pass", forkTimelineGoldenRuling, "5c560bc3088a"},
+		goldenRuling{"drift deferrals through time", forkTimelineGoldenRuling, "994f2d3c95cc"},
+		goldenRuling{"idle, then sleep, then the next pass", forkTimelineGoldenRuling, "37f1c7935cc0"},
 		goldenRuling{"kill a seat holding a dep-blocked claim", forkTimelineGoldenRuling, "052357a07a3a"},
-		goldenRuling{"kill a seat holding a ready claim", forkTimelineGoldenRuling, "d5ba42b7dd63"},
-		goldenRuling{"suspend, then wake", forkTimelineGoldenRuling, "efa4c2109100"},
+		goldenRuling{"kill a seat holding a ready claim", forkTimelineGoldenRuling, "7f7d6e923ec9"},
+		goldenRuling{"suspend, then wake", forkTimelineGoldenRuling, "6a850a4ae243"},
 	)
 	// A user hold is the operator's request to free the runtime now, so the
 	// fork's reconciler stops a held, live runtime at once instead of draining

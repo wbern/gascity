@@ -47,11 +47,14 @@ const sessionStartConsumesHandoff = false
 // consumeHandoff is upstream's switch for archiving the handoff after the hook
 // output is delivered; this fork gates it behind sessionStartConsumesHandoff,
 // which is off (see there).
-func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+//
+// step, when non-nil, is the step reminder lookup the caller started for
+// cityPath; nil reads the reminder here. SessionStart carries full detail.
+func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, step *wispStepLookup, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath, true)}
+	injection := primeHookContextInjection{text: step.contentFor(cityPath, true)}
 	if primeHookSessionStart(hookContext) {
 		var startMail sessionStartMail
 		if sessionStart != nil {

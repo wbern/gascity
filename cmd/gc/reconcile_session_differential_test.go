@@ -182,10 +182,6 @@ var parityFindings = map[string]parityEntry{
 		"fork keep: ea8789d87 (observe session continuation boundaries)", "legacy's start commit records a diagnostic session.continuation_observed runtime_start event; v2's A18 start effect does not record one yet. Diagnostic only: no decision reads it",
 		nil,
 	},
-	"fork-fingerprint-version-artifact": {
-		"fork keep: fingerprint v8 (upstream-intake T4)", "an upstream fixture stores a v6 started_config_hash, which is current at upstream's T4 boundary and which both copies keep; the fork's fingerprint is v8, so v2's baseline arm rebaselines the v6 hash as a version artifact (SESS-551/564/567) while legacy leaves it. Upstream's own per-version artifact policy (#8079) lands in a later tranche; revisit then",
-		[]string{"started_config_hash"},
-	},
 	"sleep-policy-keys": {
 		"BEHAVIORS SESS-601 (KEPT: AL1 allocate)", "legacy persists the seven sleep-policy keys on every visited row; the allocate is pure and no v2 arm or effect writes them, and neither CONTRACT v5 nor the plan names a writer",
 		[]string{"requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source", "sleep_capability", "sleep_policy_adjustment_reason", "sleep_policy_fingerprint", "config_wake_suppressed"},
@@ -206,7 +202,7 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 A10, C3; BEHAVIORS MAINT-051, SESS-050..052", "an undesired pool pending create past its never-started deadline: legacy's MAINT-051 sweep closes it first as gc_swept, its claim keys left on the closed row, so its rollback never runs; v2 does not run the sweep, and A10 rolls it back (failed-create, the claim cleared). §12.2 #17 covers only the orphan close's reason",
 		[]string{"state", "close_reason", "pending_create_claim", "pending_create_started_at"},
 	},
-	"rollback-stops-nothing": {"CONTRACT v5 C3, C8.8; BEHAVIORS SESS-052", "legacy stops a bead-scoped pool name before its rollback whether or not anything runs under it (releaseBeadScopedPoolRuntime); v2 stops only a runtime its fresh read finds, whose absence that read has confirmed. §12.2 does not list it", nil},
+	"rollback-stops-nothing": {"CONTRACT v5 C3, C8.8; BEHAVIORS SESS-052", "legacy stops a bead-scoped pool name before its rollback whether or not anything runs under it (releaseRowOwnedRuntime); v2 stops only a runtime its fresh read finds, whose absence that read has confirmed. §12.2 does not list it", nil},
 	"rollback-replacement-slot": {
 		"CONTRACT v5 AL1, A10", "v2 creates a rolled-back seat's replacement in the rollback's pass, while the rolled-back row still occupies its slot, so the replacement takes the next slot; legacy closes the row first and creates the replacement the next tick in the freed slot. §12.2 does not list it",
 		[]string{"agent_name", "canonical_instance_name", "canonical_pool_slot", "pool_slot", "prompt_hash"},
@@ -1125,8 +1121,10 @@ func parityFixtures() []parityFixture {
 	// started is a row id both copies start under name, with legacy's
 	// sleep-policy keys on it and its runtime metadata clears (§12.2 #38).
 	started := func(id, name, _ string, more map[string]string) map[string]string {
-		out := map[string]string{"row:" + id + ":*policy": "sleep-policy-keys", "provider:RemoveMeta " + name: "§12.2#38 start-meta-clears",
-			"event:session.continuation_observed " + name + " [boundary continuation_epoch generation instance_token_fingerprint outcome schema_version session_name source template]": "continuation-observed-start"}
+		out := map[string]string{
+			"row:" + id + ":*policy": "sleep-policy-keys", "provider:RemoveMeta " + name: "§12.2#38 start-meta-clears",
+			"event:session.continuation_observed " + name + " [boundary continuation_epoch generation instance_token_fingerprint outcome schema_version session_name source template]": "continuation-observed-start",
+		}
 		maps.Copy(out, more)
 		return out
 	}
@@ -1199,11 +1197,9 @@ func parityFixtures() []parityFixture {
 			// copies heal it asleep and keep its conversation.
 			Name: "an awake manual conversation whose runtime is gone", Behaviors: []string{"SESS-531", "SESS-725"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc", "session_origin", "manual")}, Work: assigned,
-			// Fork deviation (upstream-intake T4): upstream's fingerprint is v6 at
-			// this boundary, so its "v6:abc" is a current hash both copies keep;
-			// the fork is on v8, where "v6:abc" is a version artifact that v2's
-			// baseline arm rebaselines (baseline:version-artifact, SESS-551/564/567).
-			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:started_config_hash": "fork-fingerprint-version-artifact"},
+			// (T5: the fork-fingerprint-version-artifact finding is retired; upstream
+			// #8079 makes "v6:abc" the pre-policy version both copies treat alike.)
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{
 			Name: "a stranded row past its confirmation window is repaired", Behaviors: []string{"SESS-625"},

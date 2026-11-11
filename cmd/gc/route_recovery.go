@@ -36,14 +36,12 @@ func carriedPoolRoute(b beads.Bead) string {
 	// withheld qualified one, and the restore's read-merge-write can land over
 	// the activation and put the fence back. The same holds for any bead Ready
 	// would never surface: it is not pool work, whatever gc.run_target says.
-	//
-	// A bead deliberately parked behind a dispatch hold (gcw-t8qy) is likewise
-	// not pool work: restoring its legacy route would re-materialize held work
-	// into demand on every pass.
-	if beadHasDispatchHold(b) ||
-		strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" ||
+	// A bead on a dispatch hold is parked rather than lost: its next actor is
+	// not the pool, so its empty gc.routed_to is deliberate too.
+	if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[beadmeta.DeferredRoutedToMetadataKey]) != "" ||
-		beads.IsReadyExcludedBead(b) {
+		beads.IsReadyExcludedBead(b) ||
+		beadmeta.HasDispatchHold(b.Labels) {
 		return ""
 	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route

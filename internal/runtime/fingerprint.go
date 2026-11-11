@@ -62,21 +62,79 @@ type BreakdownCopyEntry struct {
 // destination made starting a session move its own fingerprint, so the next
 // reconcile tick read config drift and restarted it. (gcw-0cv5)
 //
-// v7: both histories above independently claimed v6 with different hashing
-// inputs (the fork also hashes CodexSessionFlags and excludes the "skills:"
-// FingerprintExtra keyspace). The merged inputs match neither v6, so the bump
-// rebaselines either v6 silently instead of draining the fleet once on
-// rollout.
-// v8 includes the explicit local CopyFiles destination. Existing versions
-// rebaseline silently when upgrading to the provider-rooted hook fix.
-const FingerprintVersion = "v8"
+// v7 (fork): both histories above independently claimed v6 with different
+// hashing inputs (the fork also hashes CodexSessionFlags). The merged inputs
+// matched neither v6, so the bump rebaselined either v6 silently.
+//
+// v8 (fork) includes the explicit local CopyFiles destination.
+//
+// v9: the merge of upstream's v7 (#8079) with the fork's v8. FingerprintExtra
+// hashes only its Restart-policy keys (FingerprintExtraChangePolicy), so a
+// pool sizing or skill edit no longer drains the sessions it reaches; this
+// subsumes the fork's "skills:" exclusion. The merged inputs match neither
+// upstream's v7 nor the fork's v8 hash, so both rebaseline silently. Only
+// upstream's v6 (prePolicyFingerprintVersion) keeps the artifact check: a v6
+// hash is an artifact only for config unchanged since (IsCoreHashArtifact), so
+// a session whose config changed under v6 still drains once. The fork's own
+// v6-v8 hashes are plain version mismatches and rebaseline silently, as every
+// fork bump has.
+const FingerprintVersion = "v9"
+
+// ChangePolicy is what a change to one launch input does to a running
+// session. Only a Restart input is hashed into the fingerprints that decide
+// a drain or restart; the other policies keep a change out of them.
+type ChangePolicy int
+
+const (
+	// ChangeRestart drains or restarts the running session onto the change.
+	// The default for any input not declared otherwise.
+	ChangeRestart ChangePolicy = iota
+	// ChangeNextStart takes effect when the session next starts naturally;
+	// it never drains a session.
+	ChangeNextStart
+	// ChangeIgnore is an allocation input, not session identity.
+	ChangeIgnore
+)
+
+// FingerprintExtraChangePolicy returns the declared policy of a
+// FingerprintExtra key. Pool sizing only changes demand; skills are
+// materialized at each start, so an edit reaches the next one; wake_mode
+// only decides how the next wake resumes. Every other key (mcp:*,
+// depends_on, and any new key) is Restart.
+func FingerprintExtraChangePolicy(key string) ChangePolicy {
+	switch {
+	case key == "pool.min" || key == "pool.max":
+		return ChangeIgnore
+	case strings.HasPrefix(key, "skills:") || key == "wake_mode":
+		return ChangeNextStart
+	default:
+		return ChangeRestart
+	}
+}
+
+// restartFingerprintExtra is the Restart-policy subset of extra, the only
+// part any fingerprint hashes; nil when no key is Restart, so an extra of
+// only Ignore and NextStart keys hashes as no extra at all.
+func restartFingerprintExtra(extra map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range extra {
+		if FingerprintExtraChangePolicy(k) != ChangeRestart {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(extra))
+		}
+		out[k] = v
+	}
+	return out
+}
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Lifecycle, Env, OperatorEnv (config-authored env
-// identity), FingerprintExtra (pool config, etc.), PreStart, SessionSetup,
+// identity), FingerprintExtra (Restart-policy keys only), PreStart, SessionSetup,
 // SessionSetupScript, OverlayDir, effective provider overlay slots, CopyFiles,
 // CodexSessionFlags, AcceptStartupDialogs, MouseOn, SessionLive.
 //
@@ -100,6 +158,91 @@ func CoreFingerprint(cfg Config) string {
 	h := sha256.New()
 	hashCoreFields(h, cfg)
 	return fmt.Sprintf("%s:%x", FingerprintVersion, h.Sum(nil))
+}
+
+// prePolicyFingerprintVersion is the version before the FingerprintExtra
+// change policy. Its hashes are the one version whose config the reconciler
+// still checks, so that a session whose Restart inputs changed under v6 drains
+// as it would have there; deleting early only turns such a drain into the
+// silent rebaseline every other version gets.
+//
+// Removal condition: delete it, the PrePolicy* helpers, IsPrePolicyHash and
+// the *HashMatches v6 arms once no session row in any city stores a v6: value
+// in started_config_hash, started_provision_hash, started_launch_hash or
+// started_live_hash, and no supported rollback target predates v7.
+const prePolicyFingerprintVersion = "v6"
+
+// PrePolicyCoreFingerprint is CoreFingerprint as the v6 binary computed it,
+// every FingerprintExtra key hashed: a stored hash equal to it is a session
+// started before the change policy whose config has not changed since.
+func PrePolicyCoreFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashCoreFieldsExtra(h, cfg, cfg.FingerprintExtra)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// PrePolicyProvisionFingerprint is ProvisionFingerprint as the v6 binary
+// computed it, every FingerprintExtra key hashed.
+func PrePolicyProvisionFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashProvisionFieldsExtra(h, cfg, cfg.FingerprintExtra)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// PrePolicyLaunchFingerprint is LaunchFingerprint as the v6 binary computed
+// it: the same digest, which never hashed FingerprintExtra.
+func PrePolicyLaunchFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashLaunchFields(h, cfg)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// PrePolicyLiveFingerprint is LiveFingerprint as the v6 binary computed it:
+// the same digest, which never hashed FingerprintExtra.
+func PrePolicyLiveFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashLiveFields(h, cfg)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// IsPrePolicyHash reports whether a stored hash was computed by the v6
+// binary, before the FingerprintExtra change policy.
+func IsPrePolicyHash(stored string) bool {
+	return strings.HasPrefix(stored, prePolicyFingerprintVersion+":")
+}
+
+// IsCoreHashArtifact reports whether a stored core hash that differs from
+// cfg's CoreFingerprint differs only in how it was computed, not in the
+// config: cfg's v6 hash, or any other legacy or version-mismatched hash. A v6
+// hash of other config is a drift, as it was under v6. The reconciler
+// silently rebaselines an artifact instead of draining.
+func IsCoreHashArtifact(stored string, cfg Config) bool {
+	if IsPrePolicyHash(stored) {
+		return stored == PrePolicyCoreFingerprint(cfg)
+	}
+	return IsLegacyOrMismatchedVersion(stored)
+}
+
+// IsLiveHashArtifact is IsCoreHashArtifact for a stored live hash: cfg's v6
+// live hash, or any other legacy or version-mismatched hash. A v6 hash of
+// another session_live is a live drift, applied without a restart.
+func IsLiveHashArtifact(stored string, cfg Config) bool {
+	if IsPrePolicyHash(stored) {
+		return stored == PrePolicyLiveFingerprint(cfg)
+	}
+	return IsLegacyOrMismatchedVersion(stored)
+}
+
+// ProvisionHashMatches reports whether a stored provision hash is cfg's, as
+// this binary or the v6 one computed it: the box needs no rebuild.
+func ProvisionHashMatches(stored string, cfg Config) bool {
+	return stored == ProvisionFingerprint(cfg) || stored == PrePolicyProvisionFingerprint(cfg)
+}
+
+// LaunchHashMatches reports whether a stored launch hash is cfg's, as this
+// binary or the v6 one computed it: the agent needs no relaunch.
+func LaunchHashMatches(stored string, cfg Config) bool {
+	return stored == LaunchFingerprint(cfg) || stored == PrePolicyLaunchFingerprint(cfg)
 }
 
 // LiveFingerprint returns a hash of only the SessionLive fields.
@@ -226,21 +369,14 @@ func envFingerprintInclude(key string) bool {
 	return envFingerprintAllow[key]
 }
 
-// coreFingerprintExtraInclude reports whether a FingerprintExtra key should
-// contribute to the restart-gating CoreFingerprint (and its Provision half).
-// Excludes the "skills:" keyspace: skill set-membership (add/remove/rename)
-// still needs to reach fpExtra for materialization, but must not force a
-// drain+restart of a live session — skills are re-materialized at the next
-// natural session start. Completes gci-rgfm's content-hash fix (which
-// already stopped skill *content* edits from drifting) for skill *set*
-// changes. All other FingerprintExtra keys (pool.*, wake_mode, mcp:*, etc.)
-// keep drifting as before.
-func coreFingerprintExtraInclude(key string) bool {
-	return !strings.HasPrefix(key, "skills:")
-}
-
 // hashCoreFields writes all config fields except SessionLive to the hash.
 func hashCoreFields(h hash.Hash, cfg Config) {
+	hashCoreFieldsExtra(h, cfg, restartFingerprintExtra(cfg.FingerprintExtra))
+}
+
+// hashCoreFieldsExtra is hashCoreFields with FingerprintExtra replaced by
+// extra.
+func hashCoreFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})           //nolint:errcheck // hash.Write never errors
 
@@ -251,16 +387,10 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	hashMCPServers(h, cfg.MCPServers)
 	hashCodexSessionFlags(h, cfg.CodexSessionFlags)
 
-	// FingerprintExtra carries additional identity fields (pool config, etc.)
-	// that aren't part of the session command but should
-	// trigger a restart on change. Prefixed with "fp:" to avoid collisions
-	// with Env keys. The "skills:" keyspace is excluded — see
-	// coreFingerprintExtraInclude.
-	if len(cfg.FingerprintExtra) > 0 {
-		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMapIncluded(h, cfg.FingerprintExtra, coreFingerprintExtraInclude)
-	}
+	// FingerprintExtra carries additional fields that aren't part of the
+	// session command; only its Restart-policy keys are identity. Prefixed
+	// with "fp:" to avoid collisions with Env keys.
+	hashFingerprintExtra(h, extra)
 
 	// PreStart
 	for _, ps := range cfg.PreStart {
@@ -366,6 +496,17 @@ func hashCodexHookEntries(h hash.Hash, event string, entries []CodexHookEntry) {
 			h.Write([]byte{0})            //nolint:errcheck // hash.Write never errors
 		}
 	}
+}
+
+// hashFingerprintExtra writes extra to h, framed by "fp"; nothing when it is
+// empty.
+func hashFingerprintExtra(h hash.Hash, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
+	hashSortedMap(h, extra)
 }
 
 // hashOptionalString contributes name+value to the hash only when value is
@@ -517,12 +658,10 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		"CodexSessionFlags": fieldHash(func(h hash.Hash) {
 			hashCodexSessionFlags(h, cfg.CodexSessionFlags)
 		}),
+		// Every key, whatever its policy: the breakdown only diagnoses a
+		// drift the core hash found, and stored breakdowns stay comparable.
 		"FPExtra": fieldHash(func(h hash.Hash) {
-			if len(cfg.FingerprintExtra) > 0 {
-				h.Write([]byte("fp"))
-				h.Write([]byte{0})
-				hashSortedMapIncluded(h, cfg.FingerprintExtra, coreFingerprintExtraInclude)
-			}
+			hashFingerprintExtra(h, cfg.FingerprintExtra)
 		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {
@@ -648,7 +787,14 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 		case "MCPServers":
 			fmt.Fprintf(w, "    MCPServers: %+v\n", NormalizeMCPServerConfigs(current.MCPServers)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
-			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", current.FingerprintExtra, len(current.FingerprintExtra)) //nolint:errcheck // best-effort diag
+			extra := restartFingerprintExtra(current.FingerprintExtra)      // the keys that can drift; the breakdown hashes them all
+			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", extra, len(extra)) //nolint:errcheck // best-effort diag
+			if storedBreakdownVersion(storedJSON) == prePolicyFingerprintVersion {
+				// A v6 baseline hashed every key, so a pool or skill edit since
+				// its start is part of the drift it drains once for.
+				prior := nonRestartFingerprintExtra(current.FingerprintExtra)
+				fmt.Fprintf(w, "    FPExtra (v6 baseline, drains once): %v (len=%d)\n", prior, len(prior)) //nolint:errcheck // best-effort diag
+			}
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
@@ -669,6 +815,29 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			}
 		}
 	}
+}
+
+// storedBreakdownVersion is the version a JSON-encoded stored breakdown was
+// written under, "" for a legacy or unreadable one.
+func storedBreakdownVersion(stored string) string {
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stored)), &v); err != nil {
+		return ""
+	}
+	return v.Version
+}
+
+// nonRestartFingerprintExtra is the Ignore and NextStart subset of extra.
+func nonRestartFingerprintExtra(extra map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range extra {
+		if FingerprintExtraChangePolicy(k) != ChangeRestart {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // parseStoredBreakdown decodes the JSON-encoded stored breakdown and

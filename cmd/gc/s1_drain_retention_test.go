@@ -53,7 +53,7 @@ func TestS1DrainAckRetainsWorkAndDoesNotPokeOrAcknowledge(t *testing.T) {
 	oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
 	t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = oldRelease, oldPoke })
 	held := &startedClaimHeldError{Claim: beads.Bead{ID: "task-1", Status: "in_progress", Assignee: "worker-1"}}
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) error { return held }
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error { return held }
 	poked := false
 	drainAckPokeController = func(string, reconcilekey.Key) error { poked = true; return nil }
 	dops := newFakeDrainOps()
@@ -163,8 +163,14 @@ func TestS1DrainAckNeverDowngradesPersistedExecutionEvidence(t *testing.T) {
 	mem := beads.NewMemStore()
 	work := mustCreateDrainAckBead(t, mem, beads.Bead{Title: "unstarted assignment", Type: "task"}, "in_progress", "worker-1")
 	seat, err := mem.Create(beads.Bead{Title: "worker-1", Type: session.BeadType, Metadata: map[string]string{
-		"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7", session.WorkStartedKey: `{"v":1,"claims":[]}`,
+		"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7",
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// work_started is CASOnly: persist the cell the way its writers do.
+	casSetMeta(t, mem, seat.ID, session.WorkStartedKey, `{"v":1,"claims":[]}`)
+	seat, err = mem.Get(seat.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +505,7 @@ func TestS1CensusToAckExcludesInFlightAdmission(t *testing.T) {
 			oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
 			t.Cleanup(func() { drainAckReleaseHeldClaims = oldRelease; drainAckPokeController = oldPoke })
 			censused := false
-			drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
+			drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error {
 				var stderr bytes.Buffer
 				err := releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr)
 				censused = err == nil
@@ -628,7 +634,7 @@ func TestS1HookDoesNotReportAckAfterUncertainProviderTimeout(t *testing.T) {
 		drainAckMutationTimeout, drainAckReleaseHeldClaims, drainAckPokeController = oldTimeout, oldRelease, oldPoke
 	})
 	drainAckMutationTimeout = 20 * time.Millisecond
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) error { return nil }
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error { return nil }
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	base := newFakeDrainOps()
 	release, done := make(chan struct{}), make(chan struct{})
@@ -1053,9 +1059,8 @@ func TestS1ActualUndrainCancelsNativeAttemptBeforeProviderCleanup(t *testing.T) 
 				}
 			}
 			if scenario == "corrupt" {
-				if err := f.store.SetMetadata(f.seat.ID, session.WorkStartedKey, "{ corrupt"); err != nil {
-					t.Fatal(err)
-				}
+				// work_started is CASOnly: corrupt it the way a writer would.
+				casSetMeta(t, f.store, f.seat.ID, session.WorkStartedKey, "{ corrupt")
 			}
 			if scenario == "wrong-runtime" {
 				if err := sp.SetMeta("worker-1", "GC_INSTANCE_TOKEN", "different-runtime"); err != nil {

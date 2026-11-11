@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 218,
+  "next_id": 219,
   "permanent_ids": [
     {
       "name": "help",
@@ -79,6 +79,21 @@
       "classification": "agent-add",
       "owner": "immediate",
       "id": 5
+    },
+    {
+      "path": "gc agent is-foreign",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "agent-is-foreign",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc agent list",
@@ -171,7 +186,7 @@
       "notice_policy": "eligible",
       "classification": "analyze-continuity",
       "owner": "immediate",
-      "id": 213
+      "id": 215
     },
     {
       "path": "gc analyze reliability",
@@ -249,7 +264,7 @@
       "notice_policy": "eligible",
       "classification": "beads-adopt-custody",
       "owner": "immediate",
-      "id": 216
+      "id": 218
     },
     {
       "path": "gc beads city",
@@ -2520,7 +2535,7 @@
       "notice_policy": "eligible",
       "classification": "mcp-validate",
       "owner": "immediate",
-      "id": 210
+      "id": 212
     },
     {
       "path": "gc metrics",
@@ -3457,7 +3472,7 @@
       "notice_policy": "eligible",
       "classification": "run-cancel",
       "owner": "immediate",
-      "id": 212
+      "id": 214
     },
     {
       "path": "gc runtime",
@@ -3610,7 +3625,7 @@
       "notice_policy": "eligible",
       "classification": "runtime-workdir-export",
       "owner": "immediate",
-      "id": 217
+      "id": 210
     },
     {
       "path": "gc service",
@@ -4746,7 +4761,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-archive-reap",
       "owner": "immediate",
-      "id": 214
+      "id": 216
     },
     {
       "path": "gc worktree cleanup",
@@ -4791,7 +4806,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-reap",
       "owner": "immediate",
-      "id": 211
+      "id": 213
     },
     {
       "path": "gc worktree scan",
@@ -4806,7 +4821,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-scan",
       "owner": "immediate",
-      "id": 215
+      "id": 217
     },
     {
       "path": "gc worktree verify",

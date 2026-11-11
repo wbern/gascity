@@ -897,6 +897,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateBeadsModes(root.Beads); err != nil {
 		return nil, nil, err
 	}
+	if err := validateOpsModes(root.Ops); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1176,6 +1179,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
+		ledgerFeed := base.Beads.LedgerFeed
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1192,6 +1196,20 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		if !fragMeta.IsDefined("beads", "native_transport") {
 			base.Beads.NativeTransport = nativeTransport
 		}
+		if !fragMeta.IsDefined("beads", "ledger_feed") {
+			base.Beads.LedgerFeed = ledgerFeed
+		}
+	}
+	// [ops] merges per key: each field is a rollout gate, so a fragment
+	// defining one gate keeps the base's others.
+	if fragMeta.IsDefined("ops", "content") {
+		base.Ops.ContentMode = fragment.Ops.ContentMode
+	}
+	if fragMeta.IsDefined("ops", "control") {
+		base.Ops.ControlMode = fragment.Ops.ControlMode
+	}
+	if fragMeta.IsDefined("ops", "lifecycle") {
+		base.Ops.LifecycleMode = fragment.Ops.LifecycleMode
 	}
 	if fragMeta.IsDefined("bd_guard") {
 		base.BdGuard = fragment.BdGuard
@@ -1205,12 +1223,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
 		sessionReconciler := base.Daemon.SessionReconciler
+		workLadder := base.Daemon.WorkLadder
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
 		}
 		if !fragMeta.IsDefined("daemon", "session_reconciler") {
 			base.Daemon.SessionReconciler = sessionReconciler
+		}
+		if !fragMeta.IsDefined("daemon", "work_ladder") {
+			base.Daemon.WorkLadder = workLadder
 		}
 	}
 	if fragMeta.IsDefined("session") {
@@ -1702,6 +1724,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	warnings = append(warnings, sessionReconcilerWarnings(&cfg, source)...)
+	warnings = append(warnings, workLadderWarnings(&cfg, source)...)
 	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
 	// adjustAgentPaths later sets SourceDir, which takes precedence in
 	// describeSource (FR-1). For the root city.toml, SourceDir is empty

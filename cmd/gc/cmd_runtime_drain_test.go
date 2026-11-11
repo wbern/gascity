@@ -105,7 +105,7 @@ func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
 	}
 	// The environment, then the marker's user-option mirror (C7a-2b).
 	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n" +
-		"-u\n-L\n" + socket + "\nset-option\n-t\n=worker\n-u\n@GC_RESTART_REQUESTED\n"
+		"-u\n-L\n" + socket + "\nset-option\n-t\n=worker:\n-u\n@GC_RESTART_REQUESTED\n"
 	if string(got) != want {
 		t.Fatalf("tmux args = %q, want %q", got, want)
 	}
@@ -1352,7 +1352,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1369,7 +1369,7 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1396,7 +1396,7 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", drainAckCaller{}, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1429,7 +1429,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1459,7 +1459,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1475,7 +1475,7 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}
@@ -2328,7 +2328,9 @@ func TestDoRuntimeDrainAckTimesOutInsteadOfWedging(t *testing.T) {
 
 	done := make(chan int, 1)
 	var stdout, stderr bytes.Buffer
-	go func() { done <- doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr) }()
+	go func() {
+		done <- doRuntimeDrainAck(dops, "", "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	}()
 
 	select {
 	case code := <-done:
@@ -2371,7 +2373,9 @@ func TestDoRuntimeDrainAckDeferredStatusOnTimeout(t *testing.T) {
 
 	done := make(chan int, 1)
 	var stdout, stderr bytes.Buffer
-	go func() { done <- doRuntimeDrainAck(dops, "", "worker", "worker", "", true, &stdout, &stderr) }()
+	go func() {
+		done <- doRuntimeDrainAck(dops, "", "worker", "worker", "", drainAckCaller{}, true, &stdout, &stderr)
+	}()
 
 	select {
 	case code := <-done:

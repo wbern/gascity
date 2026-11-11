@@ -16063,9 +16063,7 @@ func TestS1RecoveredConfigDriftAttachmentCancelsExactAttempt(t *testing.T) {
 				t.Fatal("controller gate missing before simulated restart")
 			}
 			if scenario == "corrupt" {
-				if err := env.store.SetMetadata(seat.ID, sessionpkg.WorkStartedKey, "{ corrupt"); err != nil {
-					t.Fatal(err)
-				}
+				casSetMeta(t, env.store, seat.ID, sessionpkg.WorkStartedKey, "{ corrupt") // CASOnly: written the way its writers do
 			}
 			env.dt = newDrainTracker()
 			env.sp.SetAttached("worker", true)

@@ -103,6 +103,10 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinFastPaths(t *testing.T) {
 		{name: "ordinary mail check", args: []string{"mail", "check"}},
 		{name: "hook wrapper timeout", args: []string{"hook", "run", "--timeout", "15s", "--", "mail", "check", "--inject"}, skip: true},
 		{name: "scoped prime hook", args: []string{"--city", "/tmp/city", "prime", "--hook"}, skip: true},
+		{name: "work query ready read", args: []string{"ready", "--assignee=x", "--json", "--limit=1"}, skip: true},
+		{name: "scoped ready", args: []string{"--city", "/tmp/city", "ready", "--status", "in_progress"}, skip: true},
+		{name: "ready imported child", args: []string{"ready", "custom"}},
+		{name: "ready with no flags", args: []string{"ready"}},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
 		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
@@ -115,6 +119,7 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinFastPaths(t *testing.T) {
 		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
 		{name: "mail after unknown flag", args: []string{"--unknown", "mail"}},
 		{name: "prime is rig value", args: []string{"--rig=x", "--rig", "prime", "status"}},
+		{name: "ready is city value", args: []string{"--city", "ready", "status"}},
 	}
 
 	for _, test := range tests {

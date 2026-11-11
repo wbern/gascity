@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fanout"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -193,10 +194,6 @@ type CityRuntime struct {
 	// directly.
 	inventoryLane *runtimeInventoryLane
 
-	// managedDoltPreflightMu serializes the managed-Dolt preflight, which the
-	// tick, the control dispatcher and the orders lane all run.
-	managedDoltPreflightMu sync.Mutex
-
 	// acpRouteSeed is the input of the last seedACPRoutes. The tick and the
 	// control dispatcher reach it through their snapshot loads, both on the
 	// controller loop; the mutex guards a caller off that loop.
@@ -312,7 +309,7 @@ type CityRuntime struct {
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
-	managedDoltHealth   func(string) error
+	managedDoltHealth   func(context.Context, string) error
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
@@ -422,7 +419,7 @@ type CityRuntimeParams struct {
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
-	ManagedDoltHealth   func(string) error
+	ManagedDoltHealth   func(context.Context, string) error
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
 	// TranscriptMetaEnabled opts this supervisor-owned city runtime into the
@@ -491,7 +488,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
-		managedDoltHealth = healthBeadsProvider
+		managedDoltHealth = healthBeadsProviderForPreflight
 	}
 	managedDoltOwned := p.ManagedDoltOwned
 	if managedDoltOwned == nil {
@@ -507,7 +504,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		logPrefix = "gc start"
 	}
 
-	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
+	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, backgroundManagedDoltHealth(managedDoltHealth), managedDoltOwned, managedDoltPort)
 
 	// Storage-class routing, resolved once and before any store below is opened
 	// for use. A city that authors no [storage] short-circuits inside the gate
@@ -1485,7 +1482,16 @@ func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
-	p.configChanged = p.dirty.Swap(false)
+	if p.dirty.Load() {
+		// Mark the reload in progress before clearing the flag, so ReadyWork
+		// never finds it neither pending nor in progress (configFreshness). Only
+		// this goroutine clears the flag, so a change marked after the Load
+		// stays marked for the next tick.
+		fresh := cr.freshness()
+		fresh.beginChange()
+		defer func() { fresh.endReload(p.manualReply.Outcome) }()
+		p.configChanged = p.dirty.Swap(false)
+	}
 	if p.configChanged {
 		p.dirtyCleared = true
 		source := reloadSourceWatch
@@ -1533,7 +1539,7 @@ func (cr *CityRuntime) tickFSPressureGate(p *tickPass) bool {
 
 func (cr *CityRuntime) tickManagedDoltPreflight(p *tickPass) bool {
 	phaseStart := time.Now()
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(p.ctx)
 	p.recordPhase(TraceSiteControllerTickPhase, "managed_dolt_preflight", phaseStart, nil)
 	return p.ctx.Err() != nil
 }
@@ -1699,7 +1705,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// safety inventory must not be followed by sibling workspace changes.
 		if reapEnabled && len(report.IncompleteScopes) == 0 && report.Deferred == "" {
 			phaseStart = time.Now()
-			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), cr.stderr)
+			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), cr.stderr) // residency:allow — the controller's own rig snapshot (fork keep, T5; move to storeref.Plan with the other fork sweeps)
 			p.recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
 	}
@@ -1938,8 +1944,8 @@ func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 	return p.completed
 }
 
-func (cr *CityRuntime) startupManagedDoltPreflight(_ *tickPass) bool {
-	cr.ensureManagedDoltPublishedForTick()
+func (cr *CityRuntime) startupManagedDoltPreflight(p *tickPass) bool {
+	cr.ensureManagedDoltPublishedForTick(p.ctx)
 	return false
 }
 
@@ -2016,8 +2022,8 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data, active gate-backoff state, and open-work suppression
-// streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// warm last-run data, active gate-backoff state, open-work suppression
+// streaks and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2026,6 +2032,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}
 	cr.od = next
@@ -2305,10 +2312,10 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
-	// Pay shadow debts the queue's immediate writers left behind (a crash, a
-	// deadline or a failing store). This watchdog also runs in legacy-dispatcher
-	// cities, so their nudge queue converges with only the controller running.
-	if err := runNudgeQueueMaintenanceSweepWithStore(cr.cityPath, nudgeStore, now); err != nil && cr.stderr != nil {
+	// Run the queue's maintenance pass. This watchdog also runs in
+	// legacy-dispatcher cities, so their nudge queue converges with only the
+	// controller running.
+	if _, err := openNudgeQueue(cr.cityPath, nudgeStore).Queue.Maintain(context.Background(), now); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
@@ -2336,7 +2343,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	remainingBudget -= (result.NudgeClosed + result.MailClosed)
 
 	if remainingBudget > 0 {
-		rigStores := cr.rigBeadStores()
+		rigStores := cr.rigBeadStores() // residency:allow — the controller's own rig snapshot for the nudge/mail sweep (fork keep, T5; move to storeref.Plan)
 		for rigName, rigStore := range rigStores {
 			if remainingBudget <= 0 {
 				break
@@ -2542,10 +2549,15 @@ func (cr *CityRuntime) applyStartupConfigReload(
 	if cr.tomlPath == "" || cityRoot == "" || cr.configRev == "" || lastProviderName == nil || ctx.Err() != nil {
 		return
 	}
+	// Marked in progress before the flag is cleared, as the tick's reload is.
+	fresh := cr.freshness()
+	fresh.beginChange()
+	var reply reloadControlReply
+	defer func() { fresh.endReload(reply.Outcome) }()
 	if dirty != nil {
 		dirty.Swap(false)
 	}
-	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	reply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
 	if reply.Outcome == reloadOutcomeFailed && dirty != nil {
 		dirty.Store(true)
 	}
@@ -3413,6 +3425,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -4183,7 +4196,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		return
 	}
 
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(ctx)
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	// No respawn-backoff set is threaded here on purpose: this workflow-finalize
@@ -4284,16 +4297,38 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
 
-func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
-	cr.managedDoltPreflightMu.Lock()
-	defer cr.managedDoltPreflightMu.Unlock()
+// healthBeadsProviderForPreflight is the default managed-Dolt health hook: the
+// provider health ladder (healthBeadsProvider), bound to ctx so the caller's
+// lifetime cancels it.
+func healthBeadsProviderForPreflight(ctx context.Context, cityPath string) error {
+	return healthBeadsProviderContext(ctx, cityPath, true)
+}
+
+// backgroundManagedDoltHealth adapts a context-aware health hook to the plain
+// signature ensureManagedDoltPublishedForRuntime takes, for the construction-
+// time preflight: no controller context exists yet, so it runs under
+// context.Background().
+func backgroundManagedDoltHealth(health func(context.Context, string) error) func(string) error {
+	return func(cityPath string) error { return health(context.Background(), cityPath) }
+}
+
+// ensureManagedDoltPublishedForTick runs the managed-Dolt preflight for one
+// caller (the tick, the startup pass, the control dispatcher or the orders
+// lane). The preflight runs as a flight (managed_dolt_flight.go) under ctx, the
+// caller's lifetime context, so shutdown cancels it; the caller waits for it at
+// most managedDoltFlightWindow from the flight's start and then carries on,
+// leaving the recover running. A caller that finds a flight already running
+// joins it, so one city never has two recovers at once. The wait ends with ctx
+// too, and a caller giving up on the recover never cancels it.
+func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
-		healthFn = healthBeadsProvider
+		healthFn = healthBeadsProviderForPreflight
 	}
 	ownedFn := cr.managedDoltOwned
 	if ownedFn == nil {
@@ -4303,7 +4338,66 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
 	if portFn == nil {
 		portFn = currentResolvableManagedDoltPort
 	}
-	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, healthFn, ownedFn, portFn)
+	if !managedDoltPreflightWanted(cr.cityPath, cr.stderr, cr.logPrefix, ownedFn, portFn) {
+		return
+	}
+	flight := joinOrStartManagedDoltFlight(ctx, cr.cityPath, func(flightCtx context.Context) error {
+		return cr.runManagedDoltPreflight(flightCtx, healthFn)
+	})
+	cr.awaitManagedDoltFlight(ctx, flight)
+}
+
+// runManagedDoltPreflight is the body of one managed-Dolt preflight flight: the
+// health ladder under ctx, with a failure logged once by the flight's owner. A
+// panic in the hook is recovered and logged by safeTick, so it ends the flight
+// instead of the process.
+func (cr *CityRuntime) runManagedDoltPreflight(ctx context.Context, healthFn func(context.Context, string) error) error {
+	var err error
+	cr.safeTick(func() {
+		err = healthFn(ctx, cr.cityPath)
+	}, "managed-dolt-preflight")
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt health preflight: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	return err
+}
+
+// awaitManagedDoltFlight waits for flight until managedDoltFlightWindow after
+// it started, or until ctx ends. When the flight is still running at the
+// window it logs that once for the flight, whichever caller notices first, and
+// returns without canceling it; a caller whose own ctx ended logs nothing.
+func (cr *CityRuntime) awaitManagedDoltFlight(ctx context.Context, flight *managedDoltFlight) {
+	waitCtx, cancel := context.WithDeadline(ctx, flight.started.Add(managedDoltFlightWindow))
+	defer cancel()
+	if finished, _ := flight.wait(waitCtx); finished || ctx.Err() != nil {
+		return
+	}
+	if flight.expiryLogged.CompareAndSwap(false, true) {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt preflight still running after %s; continuing without waiting for it\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, managedDoltFlightWindow)
+	}
+}
+
+// managedDoltPreflightWanted reports whether the managed-Dolt preflight has
+// anything to do: the city uses the bd store contract, its Dolt is owned by the
+// lifecycle, and no resolvable port is published. An unreadable ownership state
+// is logged and counts as nothing to do.
+func managedDoltPreflightWanted(
+	cityPath string,
+	stderr io.Writer,
+	logPrefix string,
+	ownedFn func(string) (bool, error),
+	portFn func(string) string,
+) bool {
+	if !cityUsesBdStoreContract(cityPath) {
+		return false
+	}
+	owned, err := ownedFn(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return owned && portFn(cityPath) == ""
 }
 
 func ensureManagedDoltPublishedForRuntime(
@@ -4314,18 +4408,7 @@ func ensureManagedDoltPublishedForRuntime(
 	ownedFn func(string) (bool, error),
 	portFn func(string) string,
 ) {
-	if !cityUsesBdStoreContract(cityPath) {
-		return
-	}
-	owned, err := ownedFn(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	if !owned {
-		return
-	}
-	if portFn(cityPath) != "" {
+	if !managedDoltPreflightWanted(cityPath, stderr, logPrefix, ownedFn, portFn) {
 		return
 	}
 	if err := healthFn(cityPath); err != nil {
@@ -4847,9 +4930,9 @@ type rigStoreOpenFailure struct {
 	err error
 }
 
-// openStandaloneRigStores opens the work store of every BOUND rig in cfg,
-// returning them keyed by rig name plus the rigs that failed to open, in cfg
-// order.
+// openStandaloneRigStores opens the work store of every BOUND rig in rigs,
+// returning them keyed by rig name plus the rigs that failed to open, in the
+// order rigs lists them.
 //
 // It deliberately does NOT decide what a failure means, because the two callers
 // disagree and both are right. The controller (buildStandaloneRigStores) warns
@@ -4858,14 +4941,21 @@ type rigStoreOpenFailure struct {
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
 //
-// open is how each rig store is opened; see rigStoreOpener.
-func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpener) (map[string]beads.Store, []rigStoreOpenFailure) {
-	if cfg == nil || len(cfg.Rigs) == 0 {
-		return nil, nil
-	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
-	for _, rig := range cfg.Rigs {
+// Nor does it decide WHICH rigs to open: the caller hands it the rig list. The
+// controller hands it every configured rig; `gc ready` hands it only the
+// serving frame (readyServingRigs).
+//
+// open is how each rig store is opened; see rigStoreOpener. At most parallelism
+// opens run at once (fanout.Bounded): each open is a preflight subprocess and a
+// round of schema probes, so a walk that opens rigs one after another makes its
+// caller wait for the sum of them. A parallelism of 1 is that walk, unchanged —
+// in order, on the caller's goroutine — which is what every caller except `gc
+// ready` keeps (sequentialRigStoreOpens). Results land in per-rig slots and are
+// assembled in rig order, so neither the map nor the failure list depends on
+// which open finished first.
+func openStandaloneRigStores(rigs []config.Rig, cityPath string, open rigStoreOpener, parallelism int) (map[string]beads.Store, []rigStoreOpenFailure) {
+	bound := make([]config.Rig, 0, len(rigs))
+	for _, rig := range rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
 		// openStoreAtForCity would silently fall back to the city
@@ -4874,17 +4964,44 @@ func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpe
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := open(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		bound = append(bound, rig)
+	}
+	if len(bound) == 0 {
+		return nil, nil
+	}
+	opened := make([]beads.Store, len(bound))
+	openErrs := make([]error, len(bound))
+	fanout.Bounded(len(bound), parallelism, func(i int) {
+		opened[i], openErrs[i] = open(bound[i].Path, cityPath)
+	})
+	stores := make(map[string]beads.Store, len(bound))
+	var failures []rigStoreOpenFailure
+	for i, rig := range bound {
+		if openErrs[i] != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: openErrs[i]})
 			continue
 		}
-		stores[rig.Name] = store
+		stores[rig.Name] = opened[i]
 	}
 	if len(stores) == 0 {
 		return nil, failures
 	}
 	return stores, failures
+}
+
+// sequentialRigStoreOpens is the parallelism every rig-store walk but `gc
+// ready`'s keeps: one open at a time, in config order, on the caller's
+// goroutine. The controller's opens run on its reload path under
+// CityRuntime.safeTick, and none of the other one-shot callers is on a claim's
+// critical path.
+const sequentialRigStoreOpens = 1
+
+// cityRigs is cfg's configured rigs, or none for a nil cfg.
+func cityRigs(cfg *config.City) []config.Rig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Rigs
 }
 
 // rigStoreOpener opens the bead store of one rig of the city at cityPath.
@@ -4908,7 +5025,7 @@ func oneShotRigStoreOpener(cfg *config.City) rigStoreOpener {
 // continues past rigs it cannot open, and every open re-resolves the city
 // config from disk.
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, openStoreAtForCity)
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, openStoreAtForCity, sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 
@@ -4921,7 +5038,7 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 // same cfg.Rigs through the same openStandaloneRigStores enumeration and differs
 // only in the opener it hands that walk, so it adds no store-enumeration logic.
 func buildStandaloneRigStoresWithConfig(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, oneShotRigStoreOpener(cfg), sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 

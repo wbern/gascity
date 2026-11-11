@@ -64,7 +64,7 @@ func loadCityConfigProfiled(cityPath string, profiler *bdInvocationProfiler, war
 	// content-hashing every pack directory for a value no caller can read.
 	// Long-running processes that do compute a Revision load config through
 	// their own paths and keep the default.
-	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
+	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
 	endLoadWithIncludes()
 	if err != nil {
 		return nil, err
@@ -535,7 +535,7 @@ have moved to "gc session" and "gc runtime".`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, list, suspend, resume)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, is-foreign, list, suspend, resume)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc agent: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -544,6 +544,7 @@ have moved to "gc session" and "gc runtime".`,
 	}
 	cmd.AddCommand(
 		newAgentAddCmd(stdout, stderr),
+		newAgentIsForeignCmd(stdout, stderr),
 		newAgentListCmd(stdout, stderr),
 		newAgentResumeCmd(stdout, stderr),
 		newAgentSuspendCmd(stdout, stderr),

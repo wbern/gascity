@@ -40,9 +40,11 @@ func TestCmdAgentLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 			"use config.LoadWithIncludesOptions(..., skipRevisionSnapshot)")
 	}
 
-	calls := regexp.MustCompile(`config\.LoadWithIncludesOptions\([^)]*\)`).FindAllString(text, -1)
+	// T5: the loaders compose through loadComposedCityConfig (the invocation
+	// memo's wrapper around config.LoadWithIncludesOptions), so watch both forms.
+	calls := regexp.MustCompile(`(?:config\.LoadWithIncludesOptions|loadComposedCityConfig)\([^)]*\)`).FindAllString(text, -1)
 	if len(calls) == 0 {
-		t.Fatal("no config.LoadWithIncludesOptions call found in cmd_agent.go; this guard is no longer watching anything")
+		t.Fatal("no config.LoadWithIncludesOptions or loadComposedCityConfig call found in cmd_agent.go; this guard is no longer watching anything")
 	}
 	for _, call := range calls {
 		if strings.Contains(call, "skipRevisionSnapshot") {
@@ -51,7 +53,7 @@ func TestCmdAgentLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 		// loadPrematerializedCityConfig forwards its caller's options, so the
 		// obligation moves to every caller: each must pass an options value
 		// that declines the snapshot.
-		if call == "config.LoadWithIncludesOptions(fs, tomlPath, opts)" {
+		if call == "config.LoadWithIncludesOptions(fs, tomlPath, opts)" || call == "loadComposedCityConfig(fs, tomlPath, opts)" {
 			checkPrematerializedCallersDeclineSnapshot(t, text)
 			continue
 		}

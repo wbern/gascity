@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestIsStage2EligibleSession(t *testing.T) {
@@ -432,8 +433,14 @@ func TestMergeSkillFingerprintEntriesIgnoresContent(t *testing.T) {
 	}
 	after := mergeSkillFingerprintEntries(nil, desired)["skills:alpha"]
 
-	if before != after {
-		t.Errorf("skill content edit changed fingerprint entry (before=%q after=%q); a doc edit must not trigger config-drift", before, after)
+	// T5: upstream's change policy (#8079) carries the skill's content hash in
+	// the entry, but declares skills:* next-start: the core fingerprint hashes
+	// only Restart-policy keys, so a content edit never triggers config-drift.
+	if before == after {
+		t.Errorf("skill content edit left the fingerprint entry unchanged (%q); the entry is the content hash a next start re-reads", before)
+	}
+	if got := runtime.FingerprintExtraChangePolicy("skills:alpha"); got == runtime.ChangeRestart {
+		t.Errorf("skills:alpha has change policy %v; a doc edit must not trigger config-drift", got)
 	}
 
 	// Set membership must still drift: adding a skill adds a keyspace entry.

@@ -4,6 +4,21 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type ActiveWorkStep = {
+    /**
+     * The step bead's description; empty when it has none.
+     */
+    description: string;
+    /**
+     * The step bead's id.
+     */
+    id: string;
+    /**
+     * The step bead's title.
+     */
+    title: string;
+};
+
 export type AdapterCapabilities = {
     MaxMessageLength: number;
     SupportsAttachments: boolean;
@@ -1025,7 +1040,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2217,6 +2232,13 @@ export type OrderHistoryListBody = {
     entries: Array<OrderHistoryEntry> | null;
 };
 
+export type OrderInapplicablePayload = {
+    backend: string;
+    order_name: string;
+    requires_backend: Array<string> | null;
+    scope: string;
+};
+
 export type OrderListBody = {
     /**
      * Registered orders.
@@ -2782,6 +2804,44 @@ export type ReadinessResponse = {
     items: {
         [key: string]: ReadinessItem;
     };
+};
+
+export type ReadyBead = {
+    assignee?: string;
+    blocked_by?: Array<ReadyBeadBlocker> | null;
+    close_reason?: string;
+    created_at: string;
+    defer_until?: string;
+    dependencies?: Array<ReadyBeadDep> | null;
+    description?: string;
+    ephemeral?: boolean;
+    from?: string;
+    id: string;
+    is_blocked?: boolean;
+    issue_type: string;
+    labels?: Array<string> | null;
+    metadata?: {
+        [key: string]: string;
+    };
+    needs?: Array<string> | null;
+    no_history?: boolean;
+    parent?: string;
+    priority?: number;
+    ref?: string;
+    status: string;
+    title: string;
+    updated_at?: string;
+};
+
+export type ReadyBeadBlocker = {
+    id: string;
+    status: string;
+};
+
+export type ReadyBeadDep = {
+    depends_on_id: string;
+    issue_id: string;
+    type: string;
 };
 
 export type Record = {
@@ -5905,6 +5965,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.inapplicable';
+} & TypedEventStreamEnvelopeOrderInapplicable) | ({
     type: 'order.skipped';
 } & TypedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
@@ -6007,6 +6069,20 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedEventStreamEnvelopeWorkReleaseUnfinished) | ({
+    type: 'work.released';
+} & TypedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -7111,6 +7187,24 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope order.inapplicable
+ */
+export type TypedEventStreamEnvelopeOrderInapplicable = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderInapplicablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.inapplicable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.skipped
  */
 export type TypedEventStreamEnvelopeOrderSkipped = {
@@ -8029,6 +8123,132 @@ export type TypedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.escalated
+ */
+export type TypedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudged
+ */
+export type TypedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.released
+ */
+export type TypedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -8172,6 +8392,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.inapplicable';
+} & TypedTaggedEventStreamEnvelopeOrderInapplicable) | ({
     type: 'order.skipped';
 } & TypedTaggedEventStreamEnvelopeOrderSkipped) | ({
     type: 'order.suppressed';
@@ -8274,6 +8496,20 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedTaggedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished) | ({
+    type: 'work.released';
+} & TypedTaggedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -9439,6 +9675,25 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope order.inapplicable
+ */
+export type TypedTaggedEventStreamEnvelopeOrderInapplicable = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OrderInapplicablePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'order.inapplicable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope order.skipped
  */
 export type TypedTaggedEventStreamEnvelopeOrderSkipped = {
@@ -10408,6 +10663,139 @@ export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.escalated
+ */
+export type TypedTaggedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudged
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.released
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope worker.operation
  */
 export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
@@ -10722,6 +11110,34 @@ export type WebhookRejectedPayload = {
      * Configured webhook name (empty only for unresolved routes, which are not evented).
      */
     webhook: string;
+};
+
+export type WorkActiveStepBody = {
+    /**
+     * The session's current formula step, exactly the bead its step reminder names; absent when there is none.
+     */
+    step?: ActiveWorkStep;
+};
+
+export type WorkLadderPayload = {
+    attempt?: number;
+    bead_id: string;
+    generation: number;
+    kind?: string;
+    paused?: boolean;
+    reason?: string;
+    rung?: string;
+    session_id: string;
+    session_name?: string;
+    store_ref?: string;
+    template?: string;
+};
+
+export type WorkReadyBody = {
+    /**
+     * The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.
+     */
+    items: Array<ReadyBead> | null;
 };
 
 export type WorkerOperationEventPayload = {
@@ -20379,6 +20795,144 @@ export type GetV0CityByCityNameWaitsResponses = {
 };
 
 export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
+
+export type GetV0CityByCityNameWorkActiveStepData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query: {
+        /**
+         * The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.
+         */
+        assignee: Array<string> | null;
+        /**
+         * Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.
+         */
+        scope_root?: string;
+    };
+    url: '/v0/city/{cityName}/work/active-step';
+};
+
+export type GetV0CityByCityNameWorkActiveStepErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkActiveStepError = GetV0CityByCityNameWorkActiveStepErrors[keyof GetV0CityByCityNameWorkActiveStepErrors];
+
+export type GetV0CityByCityNameWorkActiveStepResponses = {
+    /**
+     * OK
+     */
+    200: WorkActiveStepBody;
+};
+
+export type GetV0CityByCityNameWorkActiveStepResponse = GetV0CityByCityNameWorkActiveStepResponses[keyof GetV0CityByCityNameWorkActiveStepResponses];
+
+export type GetV0CityByCityNameWorkReadyData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Only work whose assignee is exactly this identity.
+         */
+        assignee?: string;
+        /**
+         * Only work with no assignee.
+         */
+        unassigned?: boolean;
+        /**
+         * Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.
+         */
+        metadata_field?: Array<string> | null;
+        /**
+         * Drop beads of this issue type. Repeatable.
+         */
+        exclude_type?: Array<string> | null;
+        /**
+         * Drop beads carrying this label. Repeatable.
+         */
+        exclude_label?: Array<string> | null;
+        /**
+         * Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
+         */
+        sort?: 'oldest' | 'newest';
+        /**
+         * At most this many rows, cut after the merge and the order; 0 is unlimited.
+         */
+        limit?: number;
+        /**
+         * List beads in this status instead of ready work.
+         */
+        status?: 'open' | 'in_progress' | 'blocked' | 'closed';
+        /**
+         * Return the brief row shape: blocked_by carries only what the claim decision needs.
+         */
+        brief?: boolean;
+    };
+    url: '/v0/city/{cityName}/work/ready';
+};
+
+export type GetV0CityByCityNameWorkReadyErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkReadyError = GetV0CityByCityNameWorkReadyErrors[keyof GetV0CityByCityNameWorkReadyErrors];
+
+export type GetV0CityByCityNameWorkReadyResponses = {
+    /**
+     * OK
+     */
+    200: WorkReadyBody;
+};
+
+export type GetV0CityByCityNameWorkReadyResponse = GetV0CityByCityNameWorkReadyResponses[keyof GetV0CityByCityNameWorkReadyResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;
