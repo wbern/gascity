@@ -229,7 +229,7 @@ func (r coreDrainAckRun) closeStep(t *testing.T, id string, metadata map[string]
 func (r coreDrainAckRun) drainAck(t *testing.T) {
 	t.Helper()
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, r.store, nil, r.session, drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, r.store, nil, r.session, drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatalf("drain-ack release: %v; stderr=%s", err, stderr.String())
 	}
 	for round := 0; round < 10; round++ {

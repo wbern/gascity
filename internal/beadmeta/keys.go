@@ -262,6 +262,15 @@ const (
 	ScopeRoleMetadataKey             = "gc.scope_role"
 	SessionAffinityMetadataKey       = "gc.session_affinity"
 	SessionIDMetadataKey             = "gc.session_id"
+	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
+	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
+	// when it was kept) mark a claim a close kept because no lane serves it
+	// (owner ruling O5, revised): stranded work, which session.stranded_claims
+	// reports while the claim is still assigned as it was kept. A release
+	// clears all three (SessionAffinityMetadataKeys).
+	StrandedMetadataKey         = "gc.stranded"
+	StrandedSessionMetadataKey  = "gc.stranded_session"
+	StrandedAssigneeMetadataKey = "gc.stranded_assignee"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -348,6 +357,16 @@ const (
 	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 	WorkspaceOwnerMetadataKey   = "gc.workspace_owner"
+)
+
+// Custody and workspace keys of the fork's native custody adoption
+// (gc beads adopt-custody) and its worktree reaper.
+const (
+	CustodyManifestSHA256MetadataKey = "gc.custody_manifest_sha256"
+	CustodyTransferredAtMetadataKey  = "gc.custody_transferred_at"
+	UserPausedMetadataKey            = "gc.user_paused"
+	WorkspaceModeMetadataKey         = "gc.workspace_mode"
+	WorkspaceOwnerPriorMetadataKey   = "gc.workspace_owner_prior"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -648,6 +667,9 @@ var KnownMetadataKeys = []string{
 	ScopeRoleMetadataKey,
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
@@ -691,6 +713,11 @@ var KnownMetadataKeys = []string{
 	WorkflowIDMetadataKey,
 	WorkflowExpandedMetadataKey,
 	WorkspaceOwnerMetadataKey,
+	CustodyManifestSHA256MetadataKey,
+	CustodyTransferredAtMetadataKey,
+	UserPausedMetadataKey,
+	WorkspaceModeMetadataKey,
+	WorkspaceOwnerPriorMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that
@@ -719,4 +746,7 @@ var KnownMetadataPrefixes = []string{
 var SessionAffinityMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	ContinuationGroupMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 }

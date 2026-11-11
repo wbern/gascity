@@ -226,7 +226,8 @@
               "analyze-continuity",
               "worktree-archive-reap",
               "worktree-scan",
-              "beads-adopt-custody"
+              "beads-adopt-custody",
+              "runtime-workdir-export"
             ]
           },
           "event_id": {

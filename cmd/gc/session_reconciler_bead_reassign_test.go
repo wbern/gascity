@@ -20,7 +20,7 @@ import (
 // the store (it's a named session) but its conversation lineage is reset so
 // the next wake starts fresh on the newly assigned bead.
 func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	rec := &continuationObservationRecorder{}
 	env.rec = rec
 	env.cfg = &config.City{
@@ -114,7 +114,7 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 // a new bead becomes their work anchor. Unlike on-demand sessions, they are
 // already attended and must not be reset solely to refresh the assignment.
 func TestReconcileSessionBeads_AliveAlwaysFreshModeReassignKeepsConversation(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	rec := &continuationObservationRecorder{}
 	env.rec = rec
 	env.cfg = &config.City{
@@ -182,7 +182,7 @@ func TestReconcileSessionBeads_AliveAlwaysFreshModeReassignKeepsConversation(t *
 // verifies that the always-session exception does not change fresh-cycle
 // behavior for sessions without a configured named-session mode.
 func TestReconcileSessionBeads_AliveUnconfiguredFreshModeReassignCyclesConversation(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -226,7 +226,7 @@ func TestReconcileSessionBeads_AliveUnconfiguredFreshModeReassignCyclesConversat
 // existing conversation is preserved and the agent picks up the new bead
 // from its work query at its next prompt boundary.
 func TestReconcileSessionBeads_AliveResumeModeReassignKeepsConversation(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -282,7 +282,7 @@ func TestReconcileSessionBeads_AliveResumeModeReassignKeepsConversation(t *testi
 // onto the session bead. Without this, the next reassign cycle would have
 // no recorded current bead to compare against.
 func TestReconcileSessionBeads_AsleepWakeRecordsCurrentBead(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -323,7 +323,7 @@ func TestReconcileSessionBeads_AsleepWakeRecordsCurrentBead(t *testing.T) {
 // multiple beads are assigned, the reconciler must anchor on the recorded
 // bead so the agent resumes the work it was last actively processing.
 func TestReconcileSessionBeads_RecoveryPrefersRecordedBead(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -368,7 +368,7 @@ func TestReconcileSessionBeads_RecoveryPrefersRecordedBead(t *testing.T) {
 // progress. No kill, and no currently_processing_bead_id stamp either — the
 // next tick must still see the same divergence and re-evaluate it.
 func TestReconcileSessionBeads_FreshCycleDefers_WhenPreviousBeadStillOpen(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -429,7 +429,7 @@ func TestReconcileSessionBeads_FreshCycleDefers_WhenPreviousBeadStillOpen(t *tes
 // fresh conversation. Missing timing data must fail toward the pre-existing
 // behavior (cycle fires) rather than silently deferring forever.
 func TestReconcileSessionBeads_FreshCycleFires_WhenPreviousBeadClosedWithNoTimingSignal(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -489,7 +489,7 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenPreviousBeadClosedWithNoTimin
 // the current conversation already began fresh for the new assignment, so
 // no cycle is needed.
 func TestReconcileSessionBeads_FreshCycleDefers_WhenIncarnationStartedAfterPreviousClose(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -549,7 +549,7 @@ func TestReconcileSessionBeads_FreshCycleDefers_WhenIncarnationStartedAfterPrevi
 // conversation predates the close and cannot be assumed fresh for the new
 // assignment — the cycle must still fire.
 func TestReconcileSessionBeads_FreshCycleFires_WhenIncarnationPredatesPreviousClose(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -615,7 +615,7 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenIncarnationPredatesPreviousCl
 // the existing recordCurrentBeadIDOnWake backstop (not new code) then
 // catches currently_processing_bead_id up to match.
 func TestReconcileSessionBeads_FreshCycleDefers_WhenSessionAlreadySelfClaimedAnchor(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -678,7 +678,7 @@ func TestReconcileSessionBeads_FreshCycleDefers_WhenSessionAlreadySelfClaimedAnc
 // mismatch does not suppress a fire that would otherwise happen. The cycle
 // must still fire.
 func TestReconcileSessionBeads_FreshCycleFires_WhenSelfClaimMismatchesAnchor(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -743,7 +743,7 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenSelfClaimMismatchesAnchor(t *
 // closed with no defer signal, and fire the cycle. A correct implementation
 // must NOT kill the session here.
 func TestReconcileSessionBeads_FreshCycleGuard_UsesCurrentClaimNotCurrentlyProcessing(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -809,8 +809,9 @@ func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions 
 		}
 	}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	_ = reconcileSessionBeads(
+	_ = reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		sessions,
 		env.desiredState,
 		cfgNames,
@@ -819,6 +820,7 @@ func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions 
 		env.store,
 		nil,
 		assignedWork,
+		nil,
 		nil,
 		env.dt,
 		poolDesired,
@@ -832,6 +834,7 @@ func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions 
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 }
 
@@ -910,7 +913,7 @@ func createPrevBead(t *testing.T, env *restartRequestTestEnv, closedAt *time.Tim
 // last_woke_at at cycle time (tick 1), so a non-empty value here can only
 // have come from this tick's own preWakeCommit.
 func TestReconcileSessionBeads_FreshCycleWakesReliablyNextTick(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},

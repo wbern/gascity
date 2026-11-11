@@ -37,11 +37,11 @@ func TestMessagePersistsExplicitBindingBeforeCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(ctx); err != nil {
+	if err := handle.Start(ctx, handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	_, err = handle.Message(ctx, MessageRequest{
+	_, err = handle.Message(ctx, handleActor(t, handle, sessionpkg.ActorOperator), MessageRequest{
 		Text: "do the bounded work",
 		Binding: &InvocationBinding{
 			City:         "gc2",

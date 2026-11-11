@@ -91,7 +91,7 @@ def send_mail(recipient, subject, message, notify, limit):
                 break
             except subprocess.TimeoutExpired:
                 continue
-        print('escalate: mail to %s sent; wake exceeded %ds and was abandoned' % (recipient, limit), file=sys.stderr)
+        print('escalate: mail to %s sent; gc exceeded %ds after sending it and was abandoned' % (recipient, limit), file=sys.stderr)
         return
     if rc != 0:
         raise subprocess.CalledProcessError(rc, argv)

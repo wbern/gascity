@@ -52,20 +52,22 @@ const (
 // [Tmux.runNoStart]), so the gap between the probe and the create can never be
 // used to start a second server on the same socket (gcw-qap3.28). Only the
 // verified absent/stale-socket path may start the first server.
-func (t *Tmux) runNewSession(args []string, env map[string]string, serverPresent bool) error {
+//
+// It returns the command's output (new-session -P prints the new pane's id,
+// which source-file passes through).
+func (t *Tmux) runNewSession(args []string, env map[string]string, serverPresent bool) (string, error) {
 	if !runtime.EnvHasArgvSecrets(env) {
 		if serverPresent {
-			return t.runNoStart(args...)
+			return t.runNoStartOutput(args...)
 		}
-		_, err := t.run(args...)
-		return err
+		return t.run(args...)
 	}
 	if serverPresent {
-		return t.runCommandFileWith(t.runNoStart, args)
+		return t.runCommandFileWith(t.runNoStartOutput, args)
 	}
 	// source-file needs a server to talk to and, unlike new-session, cannot
 	// create one, so start-server leads.
-	return t.runFromCommandFile(args, "start-server", ";")
+	return t.runFromCommandFileOutput(args, "start-server", ";")
 }
 
 // runFromCommandFile executes one tmux command by writing it to a private
@@ -75,16 +77,19 @@ func (t *Tmux) runNewSession(args []string, env map[string]string, serverPresent
 // It fails closed: when the file cannot be staged the command is not run at
 // all. Callers must not fall back to argv — that fallback is the leak.
 func (t *Tmux) runFromCommandFile(args []string, lead ...string) error {
-	return t.runCommandFileWith(func(sourceArgs ...string) error {
-		_, err := t.run(sourceArgs...)
-		return err
-	}, args, lead...)
+	_, err := t.runFromCommandFileOutput(args, lead...)
+	return err
 }
 
-// runCommandFileWith is [Tmux.runFromCommandFile] with the tmux invocation
+// runFromCommandFileOutput is runFromCommandFile returning the output.
+func (t *Tmux) runFromCommandFileOutput(args []string, lead ...string) (string, error) {
+	return t.runCommandFileWith(t.run, args, lead...)
+}
+
+// runCommandFileWith is [Tmux.runFromCommandFileOutput] with the tmux invocation
 // supplied by the caller, so a witnessed-server create can source the file
-// through [Tmux.runNoStart].
-func (t *Tmux) runCommandFileWith(run func(...string) error, args []string, lead ...string) error {
+// through [Tmux.runNoStartOutput].
+func (t *Tmux) runCommandFileWith(run func(...string) (string, error), args []string, lead ...string) (string, error) {
 	// Opportunistic, best-effort: a process killed between MkdirTemp and its
 	// deferred cleanup leaves a secret-bearing file behind with nothing to
 	// remove it. Staging is the only moment we know the staging directory is in
@@ -93,7 +98,7 @@ func (t *Tmux) runCommandFileWith(run func(...string) error, args []string, lead
 
 	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLine(args))
 	if err != nil {
-		return fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
+		return "", fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
 	}
 	defer cleanup()
 	sourceArgs := make([]string, 0, len(lead)+2)

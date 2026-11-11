@@ -834,7 +834,7 @@ func TestS1SoftReloadRecoversExactConfigDriftAttemptWithoutTracker(t *testing.T)
 						t.Fatal(err)
 					}
 				}
-				env := newReconcilerTestEnv()
+				env := newReconcilerTestEnv(t)
 				env.store = store
 				env.sp = sp
 				env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}

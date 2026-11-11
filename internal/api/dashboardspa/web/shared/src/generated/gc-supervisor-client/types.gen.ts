@@ -73,7 +73,7 @@ export type AgentOutputResponse = {
 };
 
 export type AgentPatch = {
-    Admission: AdmissionConfig;
+    Admission?: AdmissionConfig;
     AppendFragments: Array<string> | null;
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
@@ -81,11 +81,11 @@ export type AgentPatch = {
     AutoReclaimStaleClaims: boolean | null;
     CapacityGroup?: string;
     ClaimHolderStallTimeout: string | null;
-    ContextAdvisory: ContextAdvisory;
+    ContextAdvisory?: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -107,12 +107,12 @@ export type AgentPatch = {
     MouseMode: string | null;
     Name: string;
     Nudge: string | null;
-    OptionDefaults: {
+    OptionDefaults?: {
         [key: string]: string;
     };
     OutputFirewallByteBudget: number | null;
     OverlayDir: string | null;
-    Pool: PoolOverride;
+    Pool?: PoolOverride;
     PreStart: Array<string> | null;
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
@@ -813,7 +813,7 @@ export type ConversationTranscriptRecord = {
     ExplicitTarget: string;
     ID: string;
     Kind: TranscriptMessageKind;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     Provenance: TranscriptProvenance;
@@ -910,7 +910,7 @@ export type DeliveryContextRecord = {
     ID: string;
     LastMessageID: string;
     LastPublishedAt: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     SchemaVersion: number;
@@ -1025,7 +1025,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AdmissionVetoPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadParkedPayload | BeadUnworkablePayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionContinuationObservedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStartupUninitializedPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1566,12 +1566,12 @@ export type InboundEventPayload = {
 };
 
 export type InboundResult = {
-    Binding: SessionBindingRecord;
-    GroupRoute: GroupRouteDecision;
+    Binding?: SessionBindingRecord;
+    GroupRoute?: GroupRouteDecision;
     Message: ExternalInboundMessage;
     TargetAgentName: string;
     TargetSessionID: string;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type ListBodyAgentPatch = {
@@ -2317,9 +2317,9 @@ export type OutboundEventPayload = {
 };
 
 export type OutboundResult = {
-    DeliveryContext: DeliveryContextRecord;
+    DeliveryContext?: DeliveryContextRecord;
     Receipt: PublishReceipt;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type OutputTurn = {
@@ -2557,7 +2557,7 @@ export type ProviderPatch = {
     ArgsAppend: Array<string> | null;
     Base: string | null;
     Command: string | null;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -2763,7 +2763,7 @@ export type PublishReceipt = {
     Delivered: boolean;
     FailureKind: string;
     MessageID: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     RetryAfter: number;
@@ -2917,7 +2917,7 @@ export type RigPatch = {
     BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
-    FormulaVars: {
+    FormulaVars?: {
         [key: string]: string;
     };
     Name: string;
@@ -3701,6 +3701,29 @@ export type SessionStartupUninitializedPayload = {
     session_name: string;
     started_config_present: boolean;
     template: string;
+};
+
+export type SessionStrandedClaimsPayload = {
+    /**
+     * The stranded claims, sorted by bead ID.
+     */
+    claims: Array<StrandedClaim> | null;
+    /**
+     * What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close).
+     */
+    kind: string;
+    /**
+     * Canonical session bead ID of the closed or retired seat holding the claims.
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Template of the seat, when set.
+     */
+    template?: string;
 };
 
 export type SessionStrandedPayload = {
@@ -4943,6 +4966,56 @@ export type SlingBatchSummary = {
     total: number;
 };
 
+export type SlingChildConflict = {
+    /**
+     * Live workflow roots that refused the launch.
+     */
+    blocking_workflow_ids: Array<string> | null;
+    /**
+     * Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+     */
+    hint: string;
+    /**
+     * Source bead whose live workflow refused the launch.
+     */
+    source_bead_id: string;
+};
+
+export type SlingChildOutcome = {
+    /**
+     * Child bead ID.
+     */
+    bead_id: string;
+    /**
+     * Set when the child failed because its source bead already has a live workflow.
+     */
+    conflict?: SlingChildConflict;
+    /**
+     * Formula attached to the child, when one was.
+     */
+    formula?: string;
+    /**
+     * Root of the formula wisp attached to the child, when a non-graph formula was attached.
+     */
+    molecule_id?: string;
+    /**
+     * routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+     */
+    outcome: 'routed' | 'failed' | 'skipped';
+    /**
+     * Why routing the child failed. Present only for outcome failed.
+     */
+    reason?: string;
+    /**
+     * The child's bead status when it was skipped because it was not open.
+     */
+    status?: string;
+    /**
+     * Graph workflow launched for the child, when one was.
+     */
+    workflow_id?: string;
+};
+
 export type SlingInputBody = {
     /**
      * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -5016,6 +5089,10 @@ export type SlingResponse = {
     batch?: SlingBatchSummary;
     bead?: string;
     /**
+     * One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+     */
+    children?: Array<SlingChildOutcome> | null;
+    /**
      * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
      */
     convoy_id?: string;
@@ -5034,7 +5111,10 @@ export type SlingResponse = {
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
      */
     run?: RunRef;
-    status: string;
+    /**
+     * slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+     */
+    status: 'slung' | 'partial';
     target: string;
     warnings?: Array<string> | null;
     workflow_id?: string;
@@ -5469,6 +5549,21 @@ export type StoreMaintenanceFailedPayload = {
     stage: string;
 };
 
+export type StrandedClaim = {
+    /**
+     * The claim's work bead ID.
+     */
+    bead_id: string;
+    /**
+     * Why it was kept: unserved-route.
+     */
+    reason: string;
+    /**
+     * The route the claim would be released into, when it has one: no configured agent serves it.
+     */
+    route?: string;
+};
+
 export type SubmissionCapabilities = {
     supports_follow_up: boolean;
     supports_interrupt_now: boolean;
@@ -5855,6 +5950,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
 } & TypedEventStreamEnvelopeSessionStranded) | ({
+    type: 'session.stranded_claims';
+} & TypedEventStreamEnvelopeSessionStrandedClaims) | ({
     type: 'session.suspended';
 } & TypedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -7553,6 +7650,24 @@ export type TypedEventStreamEnvelopeSessionStranded = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.stranded_claims
+ */
+export type TypedEventStreamEnvelopeSessionStrandedClaims = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionStrandedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded_claims';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.suspended
  */
 export type TypedEventStreamEnvelopeSessionSuspended = {
@@ -8082,6 +8197,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
 } & TypedTaggedEventStreamEnvelopeSessionStranded) | ({
+    type: 'session.stranded_claims';
+} & TypedTaggedEventStreamEnvelopeSessionStrandedClaims) | ({
     type: 'session.suspended';
 } & TypedTaggedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -9872,6 +9989,25 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.stranded_claims
+ */
+export type TypedTaggedEventStreamEnvelopeSessionStrandedClaims = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionStrandedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded_claims';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.suspended
  */
 export type TypedTaggedEventStreamEnvelopeSessionSuspended = {
@@ -11237,6 +11373,10 @@ export type PostV0CityByCityNameAgentByBaseByActionErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -11621,6 +11761,10 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

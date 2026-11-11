@@ -37,7 +37,7 @@ func TestS1DrainAckRetainsCurrentExecution(t *testing.T) {
 
 			var stderr bytes.Buffer
 			var retained *startedClaimHeldError
-			if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, seat, drainAckReleaseBudget, &stderr); !errors.As(err, &retained) || retained.Claim.ID != held.ID {
+			if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, seat, drainAckReleaseBudget, &stderr); !errors.As(err, &retained) || retained.Claim.ID != held.ID {
 				t.Fatalf("retained execution error = %v, want held %s", err, held.ID)
 			}
 
@@ -120,7 +120,7 @@ func TestS1DrainAckRefusesSameOwnerReacquisition(t *testing.T) {
 	}
 	cfg := &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", cfg, racing, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", cfg, racing, nil, seat, drainAckReleaseBudget, &stderr)
 	status, owner := drainAckBeadStatus(t, racing, work.ID)
 	if status != "in_progress" || owner != "worker-1" {
 		t.Fatalf("replacement acquisition lost: status=%q owner=%q", status, owner)
@@ -147,7 +147,7 @@ func TestS1DrainAckUsesOpaqueNonzeroWorkRevisions(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stderr bytes.Buffer
-		err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
+		err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
 		status, owner := drainAckBeadStatus(t, mem, "gc-1")
 		if revision == 0 {
 			if err == nil || status != "in_progress" || owner != "worker-1" {
@@ -169,7 +169,7 @@ func TestS1DrainAckNeverDowngradesPersistedExecutionEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "off"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "off"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
 	status, owner := drainAckBeadStatus(t, mem, work.ID)
 	if err == nil || status != "in_progress" || owner != "worker-1" {
 		t.Fatalf("persisted cell downgraded: status=%s owner=%s err=%v", status, owner, err)
@@ -205,7 +205,7 @@ func TestS1DrainReservationExcludesConcurrentAdoption(t *testing.T) {
 	}
 	racing.workID, racing.sessionID = work.ID, seat.ID
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, racing, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, racing, nil, seat, drainAckReleaseBudget, &stderr)
 	if err != nil || !racing.attempted || !errors.Is(racing.startErr, session.ErrClaimReleasePending) {
 		t.Fatalf("concurrent adoption crossed reserved release: release=%v attempted=%v start=%v stderr=%s", err, racing.attempted, racing.startErr, stderr.String())
 	}
@@ -249,7 +249,7 @@ func TestS1UncertainReleaseKeepsAdoptionExcluded(t *testing.T) {
 		}
 		backend.workID = work.ID
 		var stderr bytes.Buffer
-		err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, backend, nil, seat, drainAckReleaseBudget, &stderr)
+		err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, backend, nil, seat, drainAckReleaseBudget, &stderr)
 		if err == nil || backend.attempts != 1 {
 			t.Fatalf("uncertain release not exercised: writeThenError=%v attempts=%d err=%v", writeThenError, backend.attempts, err)
 		}
@@ -388,7 +388,7 @@ func TestS1CompletedDrainRejectsStaleAdoption(t *testing.T) {
 				staged = true
 				if nextOwner != "unchanged" {
 					var stderr bytes.Buffer
-					if err := releaseUnexecutedClaimsOnDrainAck(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr); err != nil {
+					if err := releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr); err != nil {
 						t.Fatalf("release stage failed: %v stderr=%s", err, stderr.String())
 					}
 					fresh, err := fixture.store.Get(fixture.work.ID)
@@ -501,7 +501,7 @@ func TestS1CensusToAckExcludesInFlightAdmission(t *testing.T) {
 			censused := false
 			drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
 				var stderr bytes.Buffer
-				err := releaseUnexecutedClaimsOnDrainAck(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr)
+				err := releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr)
 				censused = err == nil
 				return err
 			}
@@ -716,7 +716,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			if status, owner := drainAckBeadStatus(t, f.store, late.ID); status != "in_progress" || owner != "worker-1" {
 				t.Fatalf("retry swept late assignment: status=%s owner=%s", status, owner)
 			}
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.store = f.store
 			env.sp = sp
 			env.cfg = f.cfg
@@ -814,7 +814,7 @@ func TestS1NoArgumentDelayedAckCannotSurviveCanonicalCancellation(t *testing.T) 
 		t.Fatalf("census unavailable: %v", err)
 	}
 	oldAttempt := cell.Drain.Attempt
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.store = f.store
 	env.sp = sp
 	env.cfg = f.cfg
@@ -961,7 +961,7 @@ func TestS1AckFlagBeforeFrameCannotBeCleanedAsStale(t *testing.T) {
 	if out.code != 0 || out.err != nil {
 		t.Fatalf("publisher failed: %+v stderr=%s", out, stderr.String())
 	}
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.store = f.store
 	env.sp = sp
 	env.cfg = f.cfg
@@ -1210,7 +1210,7 @@ func TestS1OverwrittenControllerFrameRepublishesCapturedAttempt(t *testing.T) {
 	}
 	dt := newDrainTracker()
 	dt.set(info.ID, ds)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	ds.deadline = env.clk.Now().Add(time.Hour)
 	advanceSessionDrainsWithSessionsTraced("", dt, sp, f.store, func(id string) (session.Info, bool) { return info, id == info.ID }, map[string]wakeEvaluation{}, f.cfg, env.clk, nil)
 	frame, err := readDrainAckFrame(info, sp, "worker-1")
@@ -1345,7 +1345,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 			if inverse {
 				cityStore, rigStore = secondary, primary
 			}
-			return releaseUnexecutedClaimsOnDrainAck(city, cfg, cityStore, map[string]beads.Store{"later": rigStore}, seat, drainAckReleaseBudget, w)
+			return releaseUnexecutedClaimsOnDrainAckProtocol(city, cfg, cityStore, map[string]beads.Store{"later": rigStore}, seat, drainAckReleaseBudget, w)
 		},
 		RecordStartedClaim: func(id string, got session.ExecutionFence, entry session.WorkStartedEntry) error {
 			recorded++
@@ -1462,7 +1462,7 @@ func reconcileS1StopCompletion(t *testing.T, env *reconcilerTestEnv, rows []bead
 // An unreadable native ACK must hold an expired drain even after its desired
 // agent disappears; the next healthy tick may resume the same stop.
 func TestS1NotDesiredUnreadableAckDefersExpiredDrain(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
 	env.addDesired("worker", "worker", true)
 	seat := env.createSessionBead("worker", "worker")

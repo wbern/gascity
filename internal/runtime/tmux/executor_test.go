@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // fakeExecutor captures tmux command arguments for unit testing.
@@ -22,6 +24,10 @@ type fakeExecutor struct {
 	// rejectPaneSessionTargets models tmux's session-environment contract:
 	// show/set-environment targets a session, never a pane ID.
 	rejectPaneSessionTargets bool
+	// agentPane answers agent-pane lookups with fakeAgentPaneRow and accepts the
+	// agent-pane marker writes (recorded, but consuming none of outs/errs), for
+	// tests scripting what surrounds them.
+	agentPane bool
 }
 
 func (f *fakeExecutor) execute(args []string) (string, error) {
@@ -34,6 +40,17 @@ func (f *fakeExecutor) execute(args []string) (string, error) {
 			if arg == "-t" && strings.HasPrefix(args[i+1], "%") {
 				return "", errors.New("pane ID is not a valid session target")
 			}
+		}
+	}
+	if f.agentPane {
+		if row, ok := fakeAgentPaneRow(args); ok {
+			return row, nil
+		}
+		// The agent-pane marker writes (a create, or the re-mark after a
+		// window replacement) are recorded and accepted without consuming a
+		// scripted answer, so positional scripts for what surrounds them hold.
+		if tmuxSubcommand(args) == "set-option" && (slices.Contains(args, agentPaneOption) || slices.Contains(args, agentSessionOption)) {
+			return "", nil
 		}
 	}
 	if f.idx < len(f.outs) || f.idx < len(f.errs) {
@@ -201,6 +218,9 @@ func (p *promptFooterExecutor) execute(args []string) (string, error) {
 	cp := make([]string, len(args))
 	copy(cp, args)
 	p.calls = append(p.calls, cp)
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	if len(args) == 0 {
 		return "", nil
 	}
@@ -415,7 +435,7 @@ func TestLatestActivityTimestamp(t *testing.T) {
 
 func TestIsSessionRunningFalseWhenPaneDead(t *testing.T) {
 	fe := &fakeExecutor{
-		outs: []string{"", "1"},
+		outs: []string{"", "pane\t1"},
 	}
 	tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
 
@@ -428,7 +448,7 @@ func TestIsSessionRunningFalseWhenPaneDead(t *testing.T) {
 	}
 	want := [][]string{
 		{"-u", "-L", "x", "has-session", "-t", "=runner"},
-		{"-u", "-L", "x", "display-message", "-t", "=runner:^.0", "-p", "#{pane_dead}"},
+		{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner:", "-F", agentPaneMarkerFormat + "\t#{pane_dead}"},
 	}
 	for i := range want {
 		if len(fe.calls[i]) != len(want[i]) {
@@ -529,11 +549,11 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 		t.Fatalf("WaitForRuntimeReady() error = %v, want nil", err)
 	}
 
-	if len(fe.calls) == 0 {
-		t.Fatal("expected capture-pane call")
+	if len(fe.calls) < 2 {
+		t.Fatal("expected the agent-pane lookup, then a capture-pane call")
 	}
-	got := fe.calls[0]
-	want := []string{"-u", "capture-pane", "-p", "-t", "=mayor:", "-S", "-120"}
+	got := fe.calls[1]
+	want := []string{"-u", "capture-pane", "-p", "-t", fakeAgentPane("mayor"), "-S", "-120"}
 	if len(got) != len(want) {
 		t.Fatalf("first call = %v, want %v", got, want)
 	}
@@ -553,7 +573,7 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 // `-r` and not `-u`: -u deletes the session entry and lets the server's global
 // value show through again, which is the leak rather than the fix.
 func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
-	exec := &fakeExecutor{outs: []string{"", replacementWindowMetadata("gc-test-token-pin")}}
+	exec := &fakeExecutor{agentPane: true, outs: []string{"", replacementWindowMetadata("gc-test-token-pin")}}
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
@@ -589,7 +609,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	}
 
 	t.Run("hosted beads namespace", func(t *testing.T) {
-		exec := &fakeExecutor{outs: []string{"", "", replacementWindowMetadata("gc-test-beads-pin")}}
+		exec := &fakeExecutor{agentPane: true, outs: []string{"", "", replacementWindowMetadata("gc-test-beads-pin")}}
 		tm := NewTmux()
 		tm.exec = exec
 		ops := &tmuxStartOps{tm: tm}
@@ -625,7 +645,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 // no gain. Scope is a correctness property, not just a cost one — a marker
 // failure is fatal, so every key marked is a key that can fail a launch.
 func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
-	exec := &fakeExecutor{outs: []string{replacementWindowMetadata("gc-test-no-pins")}}
+	exec := &fakeExecutor{agentPane: true, outs: []string{replacementWindowMetadata("gc-test-no-pins")}}
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
@@ -645,6 +665,551 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	}
 	if got := countCallsContaining(exec.calls, "if-shell"); got != 1 {
 		t.Fatalf("pane replacement calls = %d (%v), want 1", got, exec.calls)
+	}
+}
+
+// Relaunch replaces the agent pane's window, never the active pane's. "=name:"
+// resolves to the current window's active pane, so a human who left another
+// window or pane focused would have that pane killed and the old agent left
+// running. The session name is resolved in one list-panes over all its windows
+// to the pane carrying the agent-pane marker, else (a session from before the
+// marker) the first pane listed. The window is then inspected and swapped by
+// that pane, fenced to its session and window; a pane id passes through
+// without the lookup. This fork swaps the window rather than issuing
+// respawn-pane -k (see Tmux.replacePaneWindow), so no respawn-pane is ever sent.
+func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
+	cases := []struct {
+		name       string
+		out        string // the lookup's rows
+		run        func(*Tmux, *tmuxStartOps) error
+		wantTarget string // what the window inspection is addressed to
+	}{
+		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
+			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
+		}, "=gc-test-agent-pane:@4.%7"},
+		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
+			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
+		}, "=gc-test-agent-pane:@3.%7"},
+		{"pane id", "", func(tm *Tmux, _ *tmuxStartOps) error {
+			return tm.RespawnPaneWithWorkDir("%3", "", "claude")
+		}, "%3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &scriptedTargetExecutor{display: "@4\tagent\t1\t/proj\tgc-test-agent-pane\t0"}
+			exec.listPanes = func(string) string { return tc.out }
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm, &tmuxStartOps{tm: tm}); err != nil {
+				t.Fatalf("respawn: %v", err)
+			}
+			var inspected []string
+			ifShells := 0
+			for _, call := range exec.calls {
+				switch {
+				case slices.Contains(call, "respawn-pane"):
+					t.Errorf("sent respawn-pane %q; relaunch must swap the window instead", call)
+				case slices.Contains(call, "if-shell"):
+					ifShells++
+				case slices.Contains(call, "display-message") && strings.Contains(call[len(call)-1], "#{window_panes}"):
+					if target, ok := tmuxTargetArg(call); ok {
+						inspected = append(inspected, target)
+					}
+				}
+			}
+			if !slices.Equal(inspected, []string{tc.wantTarget}) {
+				t.Errorf("window inspected via %q, want exactly %q (the agent pane, not the active one); calls=%q", inspected, tc.wantTarget, exec.calls)
+			}
+			if ifShells != 1 {
+				t.Errorf("window replacements = %d, want 1; calls=%q", ifShells, exec.calls)
+			}
+		})
+	}
+}
+
+// A failed agent-pane lookup fails the respawn closed. Falling back to the
+// session target would respawn the active pane, and an empty id would make
+// tmux respawn some other session's pane (respawn-pane -t "").
+func TestRespawnFailsClosedWhenAgentPaneLookupFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		exec   *fakeExecutor
+		wantIs error
+	}{
+		{"session gone", &fakeExecutor{errs: []error{ErrSessionNotFound}}, ErrSessionNotFound},
+		{"no panes", &fakeExecutor{outs: []string{""}}, nil},
+		// A human killed the agent pane and the session lives on in theirs.
+		{"agent pane gone", &fakeExecutor{outs: []string{"orphan\t@1.%3\norphan\t@1.%4"}}, errAgentPaneGone},
+		{"two agent panes", &fakeExecutor{outs: []string{"agent\t@1.%3\nagent\t@2.%4"}}, errAgentPaneAmbiguous},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = tc.exec
+			err := tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "/proj", "claude")
+			if err == nil {
+				t.Fatal("RespawnPaneWithWorkDir succeeded, want the lookup failure")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("err = %v, want errors.Is %v", err, tc.wantIs)
+			}
+			if len(tc.exec.calls) != 1 || slices.Contains(tc.exec.calls[0], "respawn-pane") {
+				t.Errorf("tmux calls = %q, want only the list-panes lookup", tc.exec.calls)
+			}
+		})
+	}
+}
+
+// agentPaneID reads the id of name's agent pane the way every session-keyed
+// read resolves it.
+func agentPaneID(tm *Tmux, name string) (string, error) {
+	return tm.readAgentPane(tm.run, name, "#{pane_id}")
+}
+
+// fakeAgentPaneRow answers an agent-pane list-panes lookup the way tmux does
+// for a session whose one pane, %1 in window @1, is the marked agent pane
+// running claude as pid 4242. ok is false for any other command, so a fake
+// executor can serve the lookup and script everything else.
+func fakeAgentPaneRow(args []string) (string, bool) {
+	if tmuxSubcommand(args) != "list-panes" {
+		return "", false
+	}
+	fields, ok := strings.CutPrefix(args[len(args)-1], agentPaneMarkerFormat+"\t")
+	if !ok {
+		return "", false
+	}
+	return "agent\t" + strings.NewReplacer(
+		"#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_current_command}", "claude",
+		"#{pane_pid}", "4242", "#{pane_dead}", "0", "#{pane_current_path}", "/w",
+	).Replace(fields), true
+}
+
+// fakeAgentPane is the target fakeAgentPaneRow resolves session to.
+func fakeAgentPane(session string) string { return "=" + session + ":@1.%1" }
+
+// markedAgentPaneExecutor serves a session whose first listed pane is a human's
+// (%1 in @1, running vim as pid 111) and whose second is the marked agent pane
+// (%5 in @2, running claude as pid 222). It answers capture-pane with capture
+// and every other command with "".
+type markedAgentPaneExecutor struct {
+	calls   [][]string
+	capture string
+	lookErr error
+	inMode  string // answers the #{pane_in_mode} copy-mode probe
+}
+
+func (e *markedAgentPaneExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	switch tmuxSubcommand(args) {
+	case "list-panes":
+		if e.lookErr != nil {
+			return "", e.lookErr
+		}
+		fields, ok := strings.CutPrefix(args[len(args)-1], agentPaneMarkerFormat+"\t")
+		if !ok {
+			return "", nil
+		}
+		human := strings.NewReplacer("#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_pid}", "111", "#{pane_current_command}", "vim", "#{pane_dead}", "0").Replace(fields)
+		agent := strings.NewReplacer("#{window_id}", "@2", "#{pane_id}", "%5", "#{pane_pid}", "222", "#{pane_current_command}", "claude", "#{pane_dead}", "0").Replace(fields)
+		return "orphan\t" + human + "\nagent\t" + agent, nil
+	case "capture-pane":
+		return e.capture, nil
+	case "display-message":
+		if slices.Contains(args, "#{pane_in_mode}") {
+			return e.inMode, nil
+		}
+	}
+	return "", nil
+}
+
+func (e *markedAgentPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// targetsOf returns the -t argument of every call to sub.
+func targetsOf(calls [][]string, sub string) []string {
+	var targets []string
+	for _, call := range calls {
+		if tmuxSubcommand(call) != sub {
+			continue
+		}
+		if target, ok := tmuxTargetArg(call); ok {
+			targets = append(targets, target)
+		}
+	}
+	return targets
+}
+
+// Session-keyed reads answer for the marked agent pane, even when a human's
+// pane is listed first.
+func TestAgentPaneReadsPreferMarkedPane(t *testing.T) {
+	tm := NewTmux()
+	tm.exec = &markedAgentPaneExecutor{}
+	if got, err := tm.GetPanePID("w"); err != nil || got != "222" {
+		t.Errorf("GetPanePID = (%q, %v), want the agent's 222", got, err)
+	}
+	if got, err := tm.GetPaneCommand("w"); err != nil || got != "claude" {
+		t.Errorf("GetPaneCommand = (%q, %v), want the agent's claude", got, err)
+	}
+	if got, err := agentPaneID(tm, "w"); err != nil || got != "%5" {
+		t.Errorf("agent pane id = (%q, %v), want the agent's %%5", got, err)
+	}
+}
+
+func TestPickAgentPaneRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, out, want string
+		wantErr         error
+	}{
+		{"marked row wins", "orphan\ta\nagent\tb\norphan\tc", "b", nil},
+		{"unmarked takes first row", "pane\ta\npane\tb", "a", nil},
+		{"trimmed empty fields", "pane", "", nil},
+		{"empty output", "", "", nil},
+		{"a marker-looking field is not a marker", "pane\tagent\npane\tb", "agent", nil},
+		// A human killed the agent pane; the session lives on in theirs.
+		{"marked session without its agent pane", "orphan\ta\norphan\tb", "", errAgentPaneGone},
+		// Two panes claim the session: fail closed rather than guess.
+		{"two agent rows", "agent\ta\nagent\tb", "", errAgentPaneAmbiguous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := pickAgentPaneRow(tc.out)
+			if got != tc.want || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Errorf("pickAgentPaneRow(%q) = (%q, %v), want (%q, %v)", tc.out, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Every create path marks the pane new-session printed as the agent pane,
+// valued with the session's id, and only then flags the session as marked.
+func TestCreatePathsMarkAgentPane(t *testing.T) {
+	mark := []string{"set-option", "-p", "-F", "-t", "%7", agentPaneOption, "#{session_id}"}
+	flag := []string{"set-option", "-t", "=w:", agentSessionOption, "1"}
+	for _, tc := range []struct {
+		name string
+		run  func(*Tmux) error
+	}{
+		{"NewSession", func(tm *Tmux) error { return tm.NewSession("w", "") }},
+		{"NewSessionWithCommand", func(tm *Tmux) error { return tm.NewSessionWithCommand("w", "", "claude") }},
+		{"NewSessionWithCommandAndEnv", func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("w", "", "claude", map[string]string{"GC_CITY": "/c"})
+		}},
+		{"NewSessionWithCommandAndEnv staged", func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("w", "", "claude", map[string]string{"GC_CONTROLLER_TOKEN": "s3cr3t-token-value"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			confineStagedFiles(t)
+			exec := &fakeExecutor{out: "%7"}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			created := slices.IndexFunc(exec.calls, func(c []string) bool {
+				return slices.Contains(c, "new-session") || slices.Contains(c, "source-file")
+			})
+			marked := slices.IndexFunc(exec.calls, func(c []string) bool { return slices.Equal(c[1:], mark) })
+			flagged := slices.IndexFunc(exec.calls, func(c []string) bool { return slices.Equal(c[1:], flag) })
+			if created < 0 || marked <= created || flagged <= marked {
+				t.Fatalf("calls = %q, want the create, then %q, then %q", exec.calls, mark, flag)
+			}
+		})
+	}
+}
+
+// A failed mark is logged, and the session is not flagged: a flagged session
+// without a marked pane would fail closed for its whole life.
+func TestMarkAgentPaneFailureIsLoggedAndUnflagged(t *testing.T) {
+	var warned strings.Builder
+	prev := agentPaneWarningOut
+	agentPaneWarningOut = &warned
+	t.Cleanup(func() { agentPaneWarningOut = prev })
+	exec := &fakeExecutor{outs: []string{"%7"}, errs: []error{nil, errors.New("tmux set-option: boom")}}
+	tm := NewTmux()
+	tm.exec = exec
+	if err := tm.NewSession("w", ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if !strings.Contains(warned.String(), "marking agent pane") || !strings.Contains(warned.String(), "boom") {
+		t.Errorf("warning = %q, want the failed mark logged", warned.String())
+	}
+	for _, c := range exec.calls {
+		if slices.Contains(c, agentSessionOption) {
+			t.Errorf("session flagged after a failed mark: %q", c)
+		}
+	}
+}
+
+// respawnAgent marks a session that has exactly one, unmarked pane (a warm
+// box from before the marker), and leaves any other session alone.
+func TestRespawnAgentAdoptsLoneUnmarkedPane(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rows     string
+		wantMark bool
+	}{
+		{"lone unmarked pane", "pane\t%3", true},
+		{"two unmarked panes", "pane\t%3\npane\t%4", false},
+		{"already marked", "agent\t%3", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &scriptedTargetExecutor{display: "@1\tagent\t1\t/proj\tw\t0"}
+			exec.listPanes = func(format string) string {
+				if format == agentPaneMarkerFormat+"\t#{pane_id}" {
+					return tc.rows
+				}
+				return "agent\t@1.%3"
+			}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := (&tmuxStartOps{tm: tm}).respawnAgent("w", "", "claude", nil); err != nil {
+				t.Fatalf("respawnAgent: %v", err)
+			}
+			marked := slices.ContainsFunc(exec.calls, func(c []string) bool { return slices.Contains(c, agentPaneOption) })
+			if marked != tc.wantMark {
+				t.Errorf("marked = %v, want %v; calls=%q", marked, tc.wantMark, exec.calls)
+			}
+		})
+	}
+}
+
+// Interrupt, SendKeys, ClearHistory and the startup captures and dialog keys
+// go to the agent pane, fenced to its session and window, never the active
+// pane.
+func TestAgentPaneInputOpsTargetMarkedPane(t *testing.T) {
+	const fenced = "=w:@2.%5"
+	cases := []struct {
+		name    string
+		capture string
+		run     func(*Tmux) error
+		sub     string
+		n       int // calls to sub; -1 for any number
+	}{
+		{"Interrupt", "", func(tm *Tmux) error { return (&Provider{tm: tm}).Interrupt("w") }, "send-keys", 1},
+		{"SendKeys", "", func(tm *Tmux) error { return (&Provider{tm: tm}).SendKeys("w", "Down", "Enter") }, "send-keys", 2},
+		{"ClearHistory", "", func(tm *Tmux) error { return tm.ClearHistory("w") }, "clear-history", 1},
+		{"startup capture", "", func(tm *Tmux) error {
+			_, err := newTmuxStartOps(tm, "", 0, runtime.Config{}, true).capturePane("w", 10)
+			return err
+		}, "capture-pane", 1},
+		{"startup readiness", "> ", func(tm *Tmux) error {
+			rc := &RuntimeConfig{Tmux: &RuntimeTmuxConfig{ReadyPromptPrefix: "> "}}
+			return newTmuxStartOps(tm, "", 0, runtime.Config{}, true).waitForReady(context.Background(), "w", rc, time.Second)
+		}, "capture-pane", 1},
+		{"SendKeysDebounced", "", func(tm *Tmux) error { return tm.SendKeysDebounced("w", "hi", 0) }, "send-keys", 2},
+		{"SendKeysReplace", "", func(tm *Tmux) error { return tm.SendKeysReplace("w", "hi", 0) }, "send-keys", 3},
+		{"Pending", "", func(tm *Tmux) error { _, err := tm.Pending("w"); return err }, "capture-pane", 1},
+		{"Peek", "x", func(tm *Tmux) error { _, err := (&Provider{tm: tm}).Peek("w", 10); return err }, "capture-pane", 1},
+		{"Peek all", "x", func(tm *Tmux) error { _, err := (&Provider{tm: tm}).Peek("w", 0); return err }, "capture-pane", 1},
+		{"WaitForIdle", "❯ ", func(tm *Tmux) error { return tm.WaitForIdle(context.Background(), "w", 5*time.Second) }, "capture-pane", -1},
+		{"SnapshotIdle", "❯ ", func(tm *Tmux) error { _, err := tm.SnapshotIdle("w"); return err }, "capture-pane", 1},
+		{"NudgeSession keys", "❯ ", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }, "send-keys", -1},
+		{"NudgeSession captures", "❯ ", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }, "capture-pane", -1},
+		{"startup dialog capture", "", func(tm *Tmux) error {
+			return tm.DismissKnownDialogs(context.Background(), "w", 50*time.Millisecond)
+		}, "capture-pane", -1},
+		{"startup dialog keys", "Do you trust the contents of this directory?", func(tm *Tmux) error {
+			_ = tm.DismissKnownDialogs(context.Background(), "w", 3*time.Second)
+			return nil
+		}, "send-keys", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &markedAgentPaneExecutor{capture: tc.capture}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			targets := targetsOf(exec.calls, tc.sub)
+			if len(targets) == 0 || (tc.n >= 0 && len(targets) != tc.n) {
+				t.Fatalf("%s targets = %q, want %d to %s; calls=%q", tc.sub, targets, tc.n, fenced, exec.calls)
+			}
+			for _, target := range targets {
+				if target != fenced {
+					t.Errorf("%s -t %q, want %q", tc.sub, target, fenced)
+				}
+			}
+		})
+	}
+}
+
+// agentInputTarget, the nudge's resolver, classifies rows exactly as every
+// agent-pane read does. It takes the marked pane even when a human pane listed
+// before it runs the agent's CLI, and fails closed when the marked agent pane
+// is gone or more than one pane claims it: a nudge must never land in a human
+// pane. Only an unmarked (pre-upgrade) session falls back to process
+// detection, then to its first pane.
+func TestAgentInputTargetPrefersMarkerAndFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		outs      []string
+		want      string
+		wantErr   error
+		wantCalls int
+	}{
+		{"marked pane behind a human claude", []string{"orphan\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "=w:@2.%5", nil, 1},
+		{"marked agent pane gone", []string{"orphan\t@1.%1\tclaude\t111\norphan\t@1.%2\tsh\t222"}, "", errAgentPaneGone, 1},
+		{"two marked agent panes", []string{"agent\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "", errAgentPaneAmbiguous, 1},
+		{"unmarked falls back to process names", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tclaude\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%2", nil, 2},
+		{"unmarked single pane", []string{"pane\t@1.%1\tclaude\t111"}, "=w:@1.%1", nil, 1},
+		{"unmarked with no match takes the first pane", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tvim\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%1", nil, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &fakeExecutor{outs: tc.outs}
+			tm := NewTmux()
+			tm.exec = exec
+			got, err := tm.agentInputTarget("w")
+			if got != tc.want || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("agentInputTarget = (%q, %v), want (%q, %v)", got, err, tc.want, tc.wantErr)
+			}
+			if len(exec.calls) != tc.wantCalls {
+				t.Errorf("tmux calls = %q, want %d", exec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// The resolved agent pane is cached for one operation only. Each operation
+// resolves once, however many tmux calls it makes (WaitForIdle polls several
+// times; Respond captures, probes copy-mode, keys and re-captures), and a
+// second operation resolves again, so a pane replaced in between (respawn,
+// relaunch) is never answered from a stale resolution.
+func TestAgentPaneResolvedOncePerOperation(t *testing.T) {
+	prev := respondVerifyInterval
+	respondVerifyInterval = time.Millisecond
+	t.Cleanup(func() { respondVerifyInterval = prev })
+	approval := readApprovalFixture(t, "bash-manual-80x24.txt")
+	cases := []struct {
+		name    string
+		capture string
+		run     func(*Tmux) error
+	}{
+		{"SendKeysDebounced", "", func(tm *Tmux) error { return tm.SendKeysDebounced("w", "hi", 0) }},
+		{"SendKeysReplace", "", func(tm *Tmux) error { return tm.SendKeysReplace("w", "hi", 0) }},
+		{"WaitForIdle", "❯ ", func(tm *Tmux) error { return tm.WaitForIdle(context.Background(), "w", 5*time.Second) }},
+		{"Respond", approval, func(tm *Tmux) error {
+			err := tm.Respond("w", runtime.InteractionResponse{Action: "approve"})
+			if err != nil && strings.Contains(err.Error(), "did not clear") {
+				return nil // the fake never clears the prompt; the calls are what count
+			}
+			return err
+		}},
+		{"Peek", "x", func(tm *Tmux) error { _, err := (&Provider{tm: tm}).Peek("w", 10); return err }},
+		{"NudgeSession", "❯ ", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "Respond" {
+				prevTimeout := respondVerifyTimeout
+				respondVerifyTimeout = 20 * time.Millisecond
+				t.Cleanup(func() { respondVerifyTimeout = prevTimeout })
+			}
+			exec := &markedAgentPaneExecutor{capture: tc.capture}
+			tm := NewTmux()
+			tm.exec = exec
+			for op := 1; op <= 2; op++ {
+				if err := tc.run(tm); err != nil {
+					t.Fatalf("%s #%d: %v", tc.name, op, err)
+				}
+				if got := len(targetsOf(exec.calls, "list-panes")); got != op {
+					t.Fatalf("after %d operations: %d agent-pane lookups, want %d; calls=%q", op, got, op, exec.calls)
+				}
+			}
+		})
+	}
+}
+
+// A pane a human scrolled into copy-mode is probed and released on the agent's
+// pane: probing the active pane would miss a parked agent pane, and a cancel
+// sent there would knock a human's pane out of the mode they chose.
+func TestCopyModeProbeAndCancelTargetResolvedAgentPane(t *testing.T) {
+	const fenced = "=w:@2.%5"
+	approval := readApprovalFixture(t, "bash-manual-80x24.txt")
+	prevTimeout := respondVerifyTimeout
+	respondVerifyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { respondVerifyTimeout = prevTimeout })
+	for _, tc := range []struct {
+		name    string
+		capture string
+		run     func(*Tmux) error
+	}{
+		{"SendKeysDebounced", "", func(tm *Tmux) error { return tm.SendKeysDebounced("w", "hi", 0) }},
+		{"NudgeSession", "❯ ", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }},
+		{"Respond", approval, func(tm *Tmux) error {
+			err := tm.Respond("w", runtime.InteractionResponse{Action: "approve"})
+			if err != nil && strings.Contains(err.Error(), "did not clear") {
+				return nil
+			}
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &markedAgentPaneExecutor{capture: tc.capture, inMode: "1"}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			probe, cancel := "", ""
+			for _, c := range exec.calls {
+				target, _ := tmuxTargetArg(c)
+				switch {
+				case slices.Contains(c, "#{pane_in_mode}") && probe == "":
+					probe = target
+				case slices.Contains(c, "-X") && slices.Contains(c, "cancel") && cancel == "":
+					cancel = target
+				}
+			}
+			if probe != fenced || cancel != fenced {
+				t.Errorf("copy-mode probe -t %q, cancel -t %q, want both %q; calls=%q", probe, cancel, fenced, exec.calls)
+			}
+		})
+	}
+}
+
+// A failed agent-pane lookup sends nothing anywhere: no key reaches the
+// active pane in its place.
+func TestAgentPaneInputOpsFailClosed(t *testing.T) {
+	boom := errors.New("tmux list-panes: boom")
+	for _, tc := range []struct {
+		name string
+		run  func(*Tmux) error
+	}{
+		{"Interrupt", func(tm *Tmux) error { return (&Provider{tm: tm}).Interrupt("w") }},
+		{"SendKeys", func(tm *Tmux) error { return (&Provider{tm: tm}).SendKeys("w", "Enter") }},
+		{"ClearHistory", func(tm *Tmux) error { return tm.ClearHistory("w") }},
+		{"startup dialogs", func(tm *Tmux) error {
+			return tm.DismissKnownDialogs(context.Background(), "w", 50*time.Millisecond)
+		}},
+		{"NudgeSession", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }},
+		// The startup nudge takes no prompt look, so nothing behind the
+		// lookup would stop keys going to the active pane.
+		{"startup nudge", func(tm *Tmux) error { return tm.nudgeStartupSession("w", "hi") }},
+		{"SendKeysDebounced", func(tm *Tmux) error { return tm.SendKeysDebounced("w", "hi", 0) }},
+		{"SendKeysReplace", func(tm *Tmux) error { return tm.SendKeysReplace("w", "hi", 0) }},
+		{"Respond", func(tm *Tmux) error { return tm.Respond("w", runtime.InteractionResponse{Action: "approve"}) }},
+		{"WaitForIdle", func(tm *Tmux) error { return tm.WaitForIdle(context.Background(), "w", time.Second) }},
+		{"ClearInput", func(tm *Tmux) error { return tm.ClearInput(context.Background(), "w", 0) }},
+		{"startup paneBusy", func(tm *Tmux) error {
+			_, err := newTmuxStartOps(tm, "", 0, runtime.Config{}, true).paneBusy("w")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &markedAgentPaneExecutor{lookErr: boom}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm); !errors.Is(err, boom) {
+				t.Errorf("%s = %v, want the lookup error", tc.name, err)
+			}
+			for _, sub := range []string{"send-keys", "paste-buffer", "clear-history", "capture-pane"} {
+				if got := targetsOf(exec.calls, sub); len(got) != 0 {
+					t.Errorf("%s ran %s %q after a failed lookup", tc.name, sub, got)
+				}
+			}
+		})
 	}
 }
 
@@ -778,5 +1343,64 @@ func TestNewTmuxCommandBoundsPipeWait(t *testing.T) {
 	}
 	if !slices.Equal(cmd.Args[1:], []string{"-u", "list-panes", "-a"}) {
 		t.Fatalf("args = %q, want the tmux argv unchanged", cmd.Args)
+	}
+}
+
+// TestSnapshotIdleSeparatesBusyFromIndeterminate pins the readings of the pane
+// scan behind SnapshotIdle. Only a visible busy indicator is (false, nil). A
+// capture showing neither it nor a ready prompt is
+// runtime.ErrIdleIndeterminate: an idle TUI does not repaint a prompt that a
+// broadcast message or an alternate screen displaced, so callers that hold on
+// busy must not read that pane as busy.
+func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
+	errCapture := errors.New("capture-pane failed")
+	for _, tc := range []struct {
+		name              string
+		pane              string
+		captureErr        error
+		wantIdle          bool
+		wantIndeterminate bool
+	}{
+		{name: "ready prompt", pane: "● Done.\n\n❯ \n  ? for shortcuts", wantIdle: true},
+		{name: "busy indicator over a visible prompt", pane: "❯ \n  esc to interrupt"},
+		{name: "busy spinner", pane: "✻ Thinking… (12s · ↓ 1.2k tokens)"},
+		{
+			name:              "prompt displaced by a broadcast",
+			pane:              "Broadcast message from root@host (somewhere) (Wed Oct  8 18:00:01 2026):\n\nDISK ALERT: /data at 91% used",
+			wantIndeterminate: true,
+		},
+		{name: "empty capture", wantIndeterminate: true},
+		{name: "capture failure", captureErr: errCapture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{
+				agentPane: true,
+				// show-environment finds no configured prefix, so the scan
+				// looks for DefaultReadyPromptPrefix.
+				outs: []string{"", tc.pane},
+				errs: []error{errors.New("unknown variable: GC_READY_PROMPT_PREFIX"), tc.captureErr},
+			}
+			tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+
+			idle, err := tm.SnapshotIdle("sess")
+
+			if len(fe.calls) != 3 || !slices.Contains(fe.calls[1], "list-panes") || !slices.Contains(fe.calls[2], "capture-pane") {
+				t.Fatalf("tmux calls = %q, want show-environment, the agent-pane lookup, then one capture-pane", fe.calls)
+			}
+			if idle != tc.wantIdle {
+				t.Errorf("idle = %t, want %t", idle, tc.wantIdle)
+			}
+			if got := errors.Is(err, runtime.ErrIdleIndeterminate); got != tc.wantIndeterminate {
+				t.Errorf("errors.Is(err, ErrIdleIndeterminate) = %t, want %t (err = %v)", got, tc.wantIndeterminate, err)
+			}
+			switch {
+			case tc.captureErr != nil:
+				if !errors.Is(err, tc.captureErr) {
+					t.Errorf("err = %v, want the capture error %v", err, tc.captureErr)
+				}
+			case !tc.wantIndeterminate && err != nil:
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }

@@ -51,7 +51,7 @@ func TestKillPaneProcessesAreNoOpsUntilNamedRespawn(t *testing.T) {
 }
 
 func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tbuild\t1\t/previous\tmanaged\t0"}}
+	fe := &fakeExecutor{agentPane: true, outs: []string{"@1\tbuild\t1\t/previous\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -60,9 +60,13 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"-u", "display-message", "-p", "-t", "=managed:", "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}"},
+		{"-u", "list-panes", "-s", "-t", "=managed:", "-F", agentPaneMarkerFormat + "\t#{window_id}.#{pane_id}"},
+		{"-u", "display-message", "-p", "-t", fakeAgentPane("managed"), "#{window_id}\t#{window_name}\t#{window_panes}\t#{pane_current_path}\t#{session_name}\t#{window_index}"},
 		{"-u", "show-environment", "-t", "=managed", ownedScopeEnv},
 		{"-u", "if-shell", "-F", "-t", "@1", "#{==:#{window_panes},1}", tmuxCommandLine([]string{"new-window", "-d", "-k", "-t", "@1", "-n", "build", "-c", "/work", tm.wrapReplacementCommand("managed", "agent --resume")}), "run-shell 'exit 77'"},
+		// The window swap is followed by a read of the new pane's id, to re-mark it as
+		// the session's agent pane (no id is scripted here, so nothing is marked).
+		{"-u", "display-message", "-p", "-t", "=managed:0", "#{pane_id}"},
 	}
 	if !slices.EqualFunc(fe.calls, want, slices.Equal) {
 		t.Fatalf("tmux calls = %v, want atomic window replacement without respawn-pane %v", fe.calls, want)
@@ -72,7 +76,7 @@ func TestRespawnPaneWithWorkDirReplacesWindowWithoutRespawnPane(t *testing.T) {
 func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	fs := &fakeOwnedScopes{}
-	fe := &fakeExecutor{outs: []string{
+	fe := &fakeExecutor{agentPane: true, outs: []string{
 		"@1\tbuild\t1\t/previous\tmanaged\t0",
 		ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
 		ownedScopeInvocationEnv + "=old-invocation",
@@ -97,7 +101,7 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 	if len(fe.calls) < 6 || !slices.Contains(fe.calls[5], "if-shell") {
 		t.Fatalf("tmux calls = %v, want old scope verification before replacement", fe.calls)
 	}
-	if got := fe.calls[6]; !slices.Contains(got, "=managed:^.0") {
+	if got := fe.calls[6]; !slices.Contains(got, "=managed:0") {
 		t.Fatalf("replacement identity lookup = %v, want stable session identity", got)
 	}
 	for _, call := range fe.calls[7:] {
@@ -114,8 +118,9 @@ func TestRespawnPaneRetiresRecordedScopeBeforeReplacement(t *testing.T) {
 
 func TestRespawnPaneFailsClosedWhenOwnedScopeLookupFails(t *testing.T) {
 	fe := &fakeExecutor{
-		outs: []string{"@1\tbuild\t1\t/previous\tmanaged\t0"},
-		errs: []error{nil, errors.New("tmux connection lost")},
+		agentPane: true,
+		outs:      []string{"@1\tbuild\t1\t/previous\tmanaged\t0"},
+		errs:      []error{nil, errors.New("tmux connection lost")},
 	}
 	tm := NewTmux()
 	tm.exec = fe
@@ -135,6 +140,7 @@ func TestRespawnPaneCleansReplacementScopeWhenPaneIdentityLookupFails(t *testing
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	fs := &fakeOwnedScopes{}
 	fe := &fakeExecutor{
+		agentPane: true,
 		outs: []string{
 			"@1\tbuild\t1\t/previous\tmanaged\t0",
 			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
@@ -169,6 +175,7 @@ func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	fs := &fakeOwnedScopes{}
 	fe := &fakeExecutor{
+		agentPane: true,
 		outs: []string{
 			"@1\tbuild\t1\t/previous\tmanaged\t0",
 			ownedScopeEnv + "=gascity-pane-0123456789abcdef0123456789abcdef.scope",
@@ -199,20 +206,20 @@ func TestRespawnPaneCleansReplacementScopeWhenRecordFails(t *testing.T) {
 }
 
 func TestRespawnPanePreservesCurrentWorkDir(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@2\tmain\t1\t/current\tmanaged\t0"}}
+	fe := &fakeExecutor{agentPane: true, outs: []string{"@2\tmain\t1\t/current\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 
 	if err := tm.RespawnPane("managed", "agent --resume"); err != nil {
 		t.Fatalf("RespawnPane: %v", err)
 	}
-	if got := strings.Join(fe.calls[2], "\\x00"); !strings.Contains(got, "\\x00if-shell\\x00") || !strings.Contains(got, "'-c' '/current'") {
-		t.Fatalf("replacement command = %v, want atomic current-directory replacement", fe.calls[2])
+	if got := strings.Join(fe.calls[3], "\\x00"); !strings.Contains(got, "\\x00if-shell\\x00") || !strings.Contains(got, "'-c' '/current'") {
+		t.Fatalf("replacement command = %v, want atomic current-directory replacement", fe.calls[3])
 	}
 }
 
 func TestRespawnPaneRefusesWindowWithSiblingPanes(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged\t0", "", ""}, errs: []error{nil, nil, errors.New("exit 77")}}
+	fe := &fakeExecutor{agentPane: true, outs: []string{"@1\tmain\t2\t/work\tmanaged\t0", "", ""}, errs: []error{nil, nil, errors.New("exit 77")}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -220,14 +227,14 @@ func TestRespawnPaneRefusesWindowWithSiblingPanes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "window has 2 panes") {
 		t.Fatalf("RespawnPane error = %v, want sibling-loss refusal", err)
 	}
-	if len(fe.calls) != 1 {
-		t.Fatalf("tmux calls = %v, want metadata eligibility check and no replacement", fe.calls)
+	if len(fe.calls) != 2 {
+		t.Fatalf("tmux calls = %v, want the agent-pane lookup and metadata eligibility check and no replacement", fe.calls)
 	}
 }
 
 func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T) {
 	fs := &fakeOwnedScopes{}
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t2\t/work\tmanaged\t0"}}
+	fe := &fakeExecutor{agentPane: true, outs: []string{"@1\tmain\t2\t/work\tmanaged\t0"}}
 	tm := NewTmux()
 	tm.exec = fe
 	tm.ownedScopes = fs
@@ -239,13 +246,13 @@ func TestRespawnPaneRefusesMultiPaneWindowBeforeRetiringOwnedScope(t *testing.T)
 	if fs.stopped != (ownedScope{}) {
 		t.Fatalf("stopped scope = %+v, want original scope preserved", fs.stopped)
 	}
-	if want := 1; len(fe.calls) != want {
-		t.Fatalf("tmux calls = %v, want only metadata eligibility check", fe.calls)
+	if want := 2; len(fe.calls) != want {
+		t.Fatalf("tmux calls = %v, want only the agent-pane lookup and metadata eligibility check", fe.calls)
 	}
 }
 
 func TestRespawnPaneDoesNotRetireOriginalWindowWhenReplacementFails(t *testing.T) {
-	fe := &fakeExecutor{outs: []string{"@1\tmain\t1\t/work\tmanaged\t0", "-" + ownedScopeEnv, ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
+	fe := &fakeExecutor{agentPane: true, outs: []string{"@1\tmain\t1\t/work\tmanaged\t0", "-" + ownedScopeEnv, ""}, errs: []error{nil, nil, errors.New("tmux failed")}}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -253,8 +260,8 @@ func TestRespawnPaneDoesNotRetireOriginalWindowWhenReplacementFails(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "replacing window") {
 		t.Fatalf("RespawnPane error = %v, want replacement failure", err)
 	}
-	if len(fe.calls) != 3 || !slices.Contains(fe.calls[2], "if-shell") {
-		t.Fatalf("tmux calls = %v, want metadata lookup and failed replacement only", fe.calls)
+	if len(fe.calls) != 4 || !slices.Contains(fe.calls[3], "if-shell") {
+		t.Fatalf("tmux calls = %v, want agent-pane lookup, metadata lookup and failed replacement only", fe.calls)
 	}
 }
 

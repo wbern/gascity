@@ -388,15 +388,42 @@ func handoffContinuationObservation(sessStore beads.Store, sessionName string) c
 	return observation
 }
 
-// doHandoffAuto sends handoff mail to self without requesting restart.
+// handoffObservationFromInfo is handoffContinuationObservation for a session
+// that is already resolved: the same fields, read from the record in hand
+// instead of the store.
+func handoffObservationFromInfo(info session.Info, sessionName string) continuationObservation {
+	return continuationObservation{
+		Boundary:          continuationBoundaryReset,
+		Source:            continuationSourceHandoff,
+		SessionName:       firstNonEmptyGCString(info.SessionName, sessionName),
+		SessionID:         info.ID,
+		Template:          info.Template,
+		Generation:        info.Generation,
+		ContinuationEpoch: info.ContinuationEpoch,
+		InstanceToken:     info.InstanceToken,
+		OldWorkID:         info.CurrentlyProcessingBeadID,
+	}
+}
+
+// doHandoffAuto sends handoff mail to self without requesting restart. The
+// calling session is resolved once, from its own bead id (GC_SESSION_ID), and
+// serves both the continuation observation and the mail's sender route; only a
+// hook without that id falls back to resolving sessionAddress by name.
 func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
-	observation := handoffContinuationObservation(sessStore, sessionAddress)
+	var pinned *hookIdentity
+	var observation continuationObservation
+	if identity, ok, err := resolveHookIdentity(sessStore); err == nil && ok {
+		pinned = &identity
+		observation = handoffObservationFromInfo(identity.info, sessionAddress)
+	} else {
+		observation = handoffContinuationObservation(sessStore, sessionAddress)
+	}
 	observation.Boundary = continuationBoundaryProviderHook
 	observation.Source = continuationSourcePreCompact
 	observation.HookEvent = "PreCompact"
 	observation.HookSource = os.Getenv("GC_HOOK_SOURCE")
 	observation.Route = hookFormat
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
+	b, ok := createHandoffMailAs(pinned, msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
 		"priority:1",
@@ -429,6 +456,17 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 // confined inside beadmail.Provider.SendHandoff. The returned mail.Message
 // carries the assigned ID for the caller's confirmation output.
 func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
+	var pinned *hookIdentity
+	if identity, ok, err := resolveHookIdentity(sessStore); err == nil && ok {
+		pinned = &identity
+	}
+	return createHandoffMailAs(pinned, msgStore, sessStore, rec, senderAddress, recipientAddress, args, defaultSubject, extraLabels, stderr)
+}
+
+// createHandoffMailAs is createHandoffMail for a caller that has already
+// resolved the calling session (pinned, nil when it has none), so the sender
+// is not resolved a second time.
+func createHandoffMailAs(pinned *hookIdentity, msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -445,6 +483,13 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// two-store provider (mirroring newCityMailProvider): the message bead is
 	// ClassMessaging, beadmail's addressing reads are ClassSessions.
 	provider := beadmail.NewWithStores(msgStore, sessStore)
+	// Handoff mail is sent from the calling session. When its own bead id
+	// resolves, the provider takes the sender route from that bead instead of
+	// resolving senderAddress again. A failed lookup pins nothing: the sender
+	// resolution below asks the store itself and reports what it finds.
+	if pinned != nil {
+		pinned.pinSender(provider)
+	}
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,
 		To:          recipientAddress,
@@ -524,14 +569,6 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 		errs = append(errs, fmt.Errorf("clearing bead restart flag: %w", err))
 	}
 	return errors.Join(errs...)
-}
-
-// doHandoffRemote sends handoff mail to a remote session and kills its runtime.
-// Non-blocking: returns immediately after killing the session.
-func doHandoffRemote(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
-	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
-) int {
-	return doHandoffRemoteWithForce("", msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
 }
 
 func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,

@@ -23,6 +23,7 @@ go_library(
         "//internal/fsys",
         "//internal/pidutil",
         "@com_github_burntsushi_toml//:toml",
+        "@com_github_steveyegge_beads//backend",
         "@com_github_steveyegge_beads//schema",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@org_golang_x_mod//module",
@@ -33,6 +34,7 @@ go_library(
 go_test(
     name = "contract_test",
     srcs = [
+        "backend_bundle_library_test.go",
         "backend_registry_test.go",
         "connection_bd_external_binding_test.go",
         "connection_bd_owned_direct_binding_test.go",
@@ -42,6 +44,7 @@ go_test(
         "files_atomic_write_test.go",
         "files_bd_nested_config_test.go",
         "files_custom_types_test.go",
+        "files_embedded_config_test.go",
         "files_test.go",
         "id_resolution_test.go",
         "identity_test.go",
@@ -68,6 +71,7 @@ go_test(
         "//internal/fsys",
         "//internal/platform/livefile",
         "//internal/testenv",
+        "@com_github_steveyegge_beads//backend",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"io"
 	"os"
 	"path/filepath"
@@ -596,7 +597,7 @@ func retiredWorkerDirOwner(ctx context.Context, store beads.Store, id string) (b
 }
 
 func retiredWorkerDirOwnerMatches(owner beads.Bead, record workerDirRetirement) bool {
-	if owner.Status != "closed" || owner.ID != record.SessionID || owner.Metadata["gc.user_paused"] == "true" {
+	if owner.Status != "closed" || owner.ID != record.SessionID || owner.Metadata[beadmeta.UserPausedMetadataKey] == "true" {
 		return false
 	}
 	path, err := normalizeReapBorrowPath(contract.WorkerDirFromMetadata(owner.Metadata))

@@ -5342,8 +5342,8 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json --sort oldest --limit=20`,
 		`routed_ready "$GC_CONTROL_TARGET"`,
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"`,
 	} {
@@ -5538,8 +5538,8 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	)
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json --sort oldest --limit=20`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQueryForBeads(bd-1.0.5) missing %q in %q", want, query)
@@ -5601,7 +5601,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -5624,7 +5624,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-pending","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -5644,7 +5644,7 @@ func TestWorkflowServeControlReadyQueryIncludesCanonicalRoutedControlWork(t *tes
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-control-routed","metadata":{"gc.routed_to":"gascity/control-dispatcher","gc.kind":"workflow-finalize"}}]'
     ;;
   *)
@@ -5667,7 +5667,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-instantiating-assigned","metadata":{"%s":"true"}},{"id":"ga-assigned","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-instantiating-routed","metadata":{"%s":"true"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -5676,6 +5676,35 @@ case "$*" in
 esac
 `, beadmeta.InstantiatingMetadataKey, beadmeta.InstantiatingMetadataKey))
 	assertJSONEqual(t, out, `[{"id":"ga-assigned","metadata":{"gc.kind":"retry"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
+}
+
+// TestWorkflowServeControlReadyQueryExcludesHumanLabeledBeads: routed_ready()
+// must hand bd's native human label to --exclude-label, so a bead parked for a
+// person is never served to the control dispatcher as ready work. The fake bd
+// plays the part of bd's own filter: it withholds the flagged row only when
+// the flag is present, and the clean row is returned either way, so a query
+// that stopped reaching the routed tier at all cannot pass this vacuously.
+func TestWorkflowServeControlReadyQueryExcludesHumanLabeledBeads(t *testing.T) {
+	usePathBDAsGCForControlReadyTest(t)
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=gascity/control-dispatcher"*"--exclude-label human"*)
+    printf '[{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
+    ;;
+  *"--metadata-field gc.run_target=gascity/control-dispatcher"*"--unassigned"*)
+    printf '[{"id":"ga-human-flagged","labels":["human"],"metadata":{"gc.kind":"scope-check"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	assertJSONEqual(t, out, `[{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
 }
 
 func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *testing.T) {
@@ -5690,10 +5719,10 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-route-dup","source":"routed-to"}]'
     ;;
   *)
@@ -5942,7 +5971,7 @@ func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T
 		"BD_MATCHED_ARGS": argsPath,
 	}, `#!/bin/sh
 set -eu
-if [ "$#" -eq 19 ] &&
+if [ "$#" -eq 21 ] &&
    [ "$1" = "--readonly" ] &&
    [ "$2" = "--sandbox" ] &&
    [ "$3" = "ready" ] &&
@@ -5958,10 +5987,12 @@ if [ "$#" -eq 19 ] &&
    [ "${13}" = "held" ] &&
    [ "${14}" = "--exclude-label" ] &&
    [ "${15}" = "hold:human" ] &&
-   [ "${16}" = "--json" ] &&
-   [ "${17}" = "--sort" ] &&
-   [ "${18}" = "oldest" ] &&
-   [ "${19}" = "--limit=20" ]; then
+   [ "${16}" = "--exclude-label" ] &&
+   [ "${17}" = "human" ] &&
+   [ "${18}" = "--json" ] &&
+   [ "${19}" = "--sort" ] &&
+   [ "${20}" = "oldest" ] &&
+   [ "${21}" = "--limit=20" ]; then
   printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
   printf '[{"id":"ga-routed"}]'
   exit 0
@@ -5974,7 +6005,7 @@ printf '[]'
 		t.Fatalf("read matched args: %v", err)
 	}
 	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
-	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--exclude-label", "hold:mayor", "--exclude-label", "hold:external", "--exclude-label", "held", "--exclude-label", "hold:human", "--json", "--sort", "oldest", "--limit=20"}
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--exclude-label", "hold:mayor", "--exclude-label", "hold:external", "--exclude-label", "held", "--exclude-label", "hold:human", "--exclude-label", "human", "--json", "--sort", "oldest", "--limit=20"}
 	if !slices.Equal(gotArgs, wantArgs) {
 		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
@@ -5990,7 +6021,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label held --exclude-label hold:human --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)

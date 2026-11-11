@@ -2213,6 +2213,7 @@ func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, erro
 func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
 	mailTTL := nudgeMailSweepDefaultMailTTL
+	unreadMailTTL := nudgeMailSweepDefaultUnreadMailTTL
 	dryRun := false
 	quiet := false
 	cmd := &cobra.Command{
@@ -2221,7 +2222,10 @@ func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale delivered nudge beads and read mail beads.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
-closed. Read mail beads past --mail-ttl are closed. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
+closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
+opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
+mail beads past it are also closed, so mail nobody ever reads ages out instead
+of accumulating forever. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2229,7 +2233,8 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			mailTTLExplicit := cmd.Flags().Changed("mail-ttl")
-			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, mailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
+			unreadMailTTLExplicit := cmd.Flags().Changed("unread-mail-ttl")
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2237,6 +2242,7 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
 	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
+	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
@@ -2248,18 +2254,24 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 // to disable the mail-close phase (see nudgeMailSweepMailTTLForConfig /
 // sweepStaleNudgeMail) -- but a negative value is rejected either way, and an
 // unset flag is left for config resolution rather than validated here.
-func validateNudgeMailSweepFlags(nudgeTTL, mailTTL time.Duration, mailTTLExplicit bool) error {
+// --unread-mail-ttl follows the same rule: an explicit 0 disables the opt-in
+// unread-mail phase, a negative value is rejected, and an unset flag is left
+// for config resolution.
+func validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit bool) error {
 	if nudgeTTL <= 0 {
 		return fmt.Errorf("--nudge-ttl must be positive")
 	}
 	if mailTTLExplicit && mailTTL < 0 {
 		return fmt.Errorf("--mail-ttl must not be negative")
 	}
+	if unreadMailTTLExplicit && unreadMailTTL < 0 {
+		return fmt.Errorf("--unread-mail-ttl must not be negative")
+	}
 	return nil
 }
 
-func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
-	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, mailTTLExplicit); err != nil {
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2357,27 +2369,30 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 			}
 		}
 	}
+	if !unreadMailTTLExplicit {
+		unreadMailTTL = nudgeMailSweepUnreadMailTTLForCity(cityPath, unreadMailTTL, stderr)
+	}
 
 	now := time.Now()
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRunTargets(targets, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 }
 
 //nolint:unparam // compatibility wrapper retains the full nudgeState seam for tests
-func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	return cmdOrderSweepNudgeMailDryRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	return cmdOrderSweepNudgeMailDryRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailDryRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepNudgeMailDryRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
 	var totalCounts nudgeMailSweepResult
 	remainingBudget := nudgeMailSweepCloseBudget
 	for _, target := range targets {
 		if remainingBudget <= 0 {
 			break
 		}
-		counts, err := countStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, remainingBudget)
+		counts, err := countStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, remainingBudget)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -2399,11 +2414,11 @@ func cmdOrderSweepNudgeMailDryRunTargets(targets []nudgeMailSweepTarget, nudgeSt
 }
 
 //nolint:unparam // compatibility wrapper retains the full nudgeState seam for tests
-func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	return cmdOrderSweepNudgeMailRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	return cmdOrderSweepNudgeMailRunTargets([]nudgeMailSweepTarget{{Scope: "city", Nudges: nudges, Mail: mail}}, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepNudgeMailRunTargets(targets []nudgeMailSweepTarget, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
 	var totalResult nudgeMailSweepResult
 	var fatalErr error
 	remainingBudget := nudgeMailSweepCloseBudget
@@ -2412,7 +2427,7 @@ func cmdOrderSweepNudgeMailRunTargets(targets []nudgeMailSweepTarget, nudgeState
 		if remainingBudget <= 0 {
 			break
 		}
-		result, sweepErr := sweepStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, remainingBudget)
+		result, sweepErr := sweepStaleNudgeMail(target.Nudges, target.Mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, remainingBudget)
 		if sweepErr != nil {
 			// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
 			// to stderr and continue; the overall sweep is not fatal. A fatal list error

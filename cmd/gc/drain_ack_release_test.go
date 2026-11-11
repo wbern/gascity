@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
@@ -89,7 +90,7 @@ func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
 	}, "", "")
 	held := mustCreateDrainAckBead(t, store, beads.Bead{
 		Title: "claimed after the session's last executable turn",
-		Type:  "task",
+		Type:  "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
@@ -126,7 +127,7 @@ func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
 	}, "", "")
 	held := mustCreateDrainAckBead(t, store, beads.Bead{
 		Title: "claimed after the session's last executable turn",
-		Type:  "task",
+		Type:  "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
@@ -153,10 +154,10 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	binding := splittest.NewClassStore(t, config.BeadClassGraph)
 
 	rigHeld := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "held in the work store", Type: "task",
+		Title: "held in the work store", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", "worker-1")
 	bindingHeld := mustCreateDrainAckBead(t, binding, beads.Bead{
-		Title: "held in the relocated binding", Type: "task",
+		Title: "held in the relocated binding", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", "worker-1")
 
 	// The binding is a leg of the sweep's own plan now, not an argument: the
@@ -165,7 +166,7 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck(cityPath, nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol(cityPath, nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,11 +193,11 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 func TestDrainAckLeavesForeignClaimsAlone(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	foreign := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "held by a different live session", Type: "task",
+		Title: "held by a different live session", Type: "task", Metadata: routedToWorker(),
 	}, "in_progress", "worker-2")
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,11 +214,11 @@ func TestDrainAckLeavesForeignClaimsAlone(t *testing.T) {
 func TestDrainAckLeavesPreassignedOpenSiblingsAlone(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	sibling := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "continuation sibling, preassigned but not started", Type: "task",
+		Title: "continuation sibling, preassigned but not started", Type: "task", Metadata: routedToWorker(),
 	}, "open", "worker-1")
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -233,14 +234,14 @@ func TestDrainAckLeavesPreassignedOpenSiblingsAlone(t *testing.T) {
 func TestDrainAckLeavesClosedWorkAlone(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	done := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "finished before drain-ack", Type: "task",
+		Title: "finished before drain-ack", Type: "task", Metadata: routedToWorker(),
 	}, "in_progress", "worker-1")
 	if err := work.Close(done.ID); err != nil {
 		t.Fatalf("closing %s: %v", done.ID, err)
 	}
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,11 +261,11 @@ func TestDrainAckLeavesSessionAndMailBeadsAlone(t *testing.T) {
 		Title: "worker-1", Type: session.BeadType, Labels: []string{"gc:session"},
 	}, "in_progress", "worker-1")
 	message := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "mail for worker-1", Type: "message",
+		Title: "mail for worker-1", Type: "message", Metadata: routedToWorker(),
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,12 +288,12 @@ func TestDrainAckLeavesSessionAndMailBeadsAlone(t *testing.T) {
 func TestDrainAckReleaseHonorsItsBudget(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	held := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "held while the budget is already spent", Type: "task",
+		Title: "held while the budget is already spent", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
 	// A budget that cannot admit even the first leg.
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), -time.Second, &stderr); err == nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), -time.Second, &stderr); err == nil {
 		t.Fatal("spent drain budget unexpectedly succeeded")
 	}
 
@@ -311,11 +312,11 @@ func TestDrainAckReleaseHonorsItsBudget(t *testing.T) {
 func TestDrainAckReleaseWithinBudgetStillReleases(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	held := mustCreateDrainAckBead(t, work, beads.Bead{
-		Title: "held with budget to spare", Type: "task",
+		Title: "held with budget to spare", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), time.Minute, &stderr); err != nil {
+	if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, drainAckSessionBead(), time.Minute, &stderr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -370,6 +371,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 // different verb that deliberately KEEPS its claims for the successor session.
 // Only drain-ack means "I hold nothing."
 func TestRequestRestartReleasesNothing(t *testing.T) {
+	testCity := t.TempDir()
 	originalRelease := drainAckReleaseHeldClaims
 	t.Cleanup(func() { drainAckReleaseHeldClaims = originalRelease })
 	released := false
@@ -377,9 +379,15 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,
-		events.Discard, "worker-1", "worker-1", "", &stdout, &stderr)
+		events.Discard, "worker-1", "worker-1", testCity, &stdout, &stderr)
 
 	if released {
 		t.Fatal("gc runtime request-restart released the session's claims; only drain-ack may")
 	}
+}
+
+// routedToWorker routes a drain-ack fixture to the served worker lane, so a
+// bead kept is kept by the filter under test, not the route guard.
+func routedToWorker() map[string]string {
+	return map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
 }

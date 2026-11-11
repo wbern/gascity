@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -376,6 +377,27 @@ type NativeDoltStore struct {
 	// backend; see row_witness.go for what a caller may conclude from it.
 	sawRows atomic.Bool
 
+	// listCounters counts the backend listing requests List issues; see
+	// ListRequestStatsOf.
+	listCounters nativeListCounters
+
+	// listPushableTypes is the issue types a listing of this scope may push,
+	// read from the scope's types.infra setting at open (loadListPushableTypes)
+	// and never written again, not even by a reconnect: a setting changed after
+	// open reaches a long-lived store only when its process restarts. Nil
+	// pushes no type: a store whose setting could not be read, or one built
+	// directly over a storage value.
+	listPushableTypes map[string]bool
+
+	// typePushdownOff latches when the backend refused a pushed issue type:
+	// the scope was provisioned without gc's type vocabulary. Listings then
+	// filter type Go-side only, for the store's lifetime.
+	typePushdownOff atomic.Bool
+
+	// logger receives the list pushdown's diagnostics. Nil is slog.Default(),
+	// read at call time.
+	logger *slog.Logger
+
 	// poolStale marks a handle whose pooled connections point at a proxy
 	// generation that has already been replaced, so the next read must reconnect
 	// BEFORE it is served rather than after it fails.
@@ -643,6 +665,7 @@ func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -659,6 +682,7 @@ func newNativeDoltStoreAtWithoutAmbientEnv(parent context.Context, scopeRoot, cr
 		opt(store)
 	}
 	store.applyConnMaxIdleTime(storage)
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -765,6 +789,7 @@ func NewNativeDoltStoreOverStorageForTest(storage NativeStorage) *NativeDoltStor
 
 func newNativeDoltStoreForTest(storage beadslib.Storage, opts ...NativeDoltStoreOption) *NativeDoltStore {
 	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	store.listPushableTypes = nativeListDefaultPushableTypes
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -1645,7 +1670,7 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 // facade commits the issue and every edge in one transaction, so a partial
 // create can no longer be observed and needs no compensation.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -2533,6 +2558,15 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
+	// ReopenIssue clears the close_reason column but not metadata.close_reason,
+	// which Close forwards as the reason; clear it first, outside the reopen's
+	// single write (see reopenOnce), so a later close without a reason does not
+	// report the old one (staleCloseReasonToClear).
+	if b, err := s.Get(id); err == nil && staleCloseReasonToClear(b) {
+		if err := s.SetMetadata(id, closeReasonMetadataKey, ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	return s.withOpRetry(func(ctx context.Context, storage beadslib.Storage, _ int) error {
 		return s.reopenOnce(ctx, storage, id)
 	})
@@ -2743,14 +2777,7 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
 func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
-	query := ListQuery{AllowScan: true}
-	if len(status) > 0 {
-		query.Status = status[0]
-		if status[0] == "closed" {
-			query.IncludeClosed = true
-		}
-	}
-	return s.List(query)
+	return s.List(ListOpenQuery(status...))
 }
 
 // Children returns all beads whose parent-child dependency points at parentID.
@@ -2762,12 +2789,7 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 // backing answer is a superset and ListQuery.Matches cuts it to the exact set —
 // which is what it did for the raw filter's parent predicate too.
 func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		ParentID:      parentID,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ChildrenQuery(parentID, opts...))
 }
 
 // WaitForParentProjection blocks until native dependency queries reflect a
@@ -2830,29 +2852,17 @@ func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID s
 
 // ListByLabel returns beads with an exact label match.
 func (s *NativeDoltStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Label:         label,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByLabelQuery(label, limit, opts...))
 }
 
 // ListByAssignee returns beads assigned to assignee with the requested status.
 func (s *NativeDoltStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	return s.List(ListQuery{Assignee: assignee, Status: status, Limit: limit, AllowScan: true})
+	return s.List(ListByAssigneeQuery(assignee, status, limit))
 }
 
 // ListByMetadata returns beads whose metadata contains all filters.
 func (s *NativeDoltStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Metadata:      filters,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByMetadataQuery(filters, limit, opts...))
 }
 
 // SetMetadata sets a single metadata key on a bead.
@@ -3075,7 +3085,7 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 
@@ -3087,7 +3097,7 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
-	if len(kvs) > 0 && sessionKeyHook.Load() != nil {
+	if len(kvs) > 0 && sessionHooked() {
 		issue, _ := t.tx.GetIssue(t.ctx, id) // read inside the transaction it writes in
 		noteNativeSessionKeys(issue, kvs)
 	}
@@ -3101,7 +3111,7 @@ func (t *nativeDoltTx) Close(id string) error {
 // noteNativeSessionKeys reports kvs when issue is a session row's, read where
 // the write already holds the row.
 func noteNativeSessionKeys(issue *beadslib.Issue, kvs map[string]string) {
-	if issue == nil || sessionKeyHook.Load() == nil {
+	if issue == nil || !sessionHooked() {
 		return
 	}
 	if b, err := beadFromNativeIssue(issue); err == nil {

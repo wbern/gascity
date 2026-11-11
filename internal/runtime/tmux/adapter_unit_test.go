@@ -62,7 +62,7 @@ func TestBuildLaunchCommandColorWrapsLongPromptCommand(t *testing.T) {
 
 func TestProviderAttachRefusesDeadPane(t *testing.T) {
 	fe := &fakeExecutor{
-		outs: []string{"41", "", "1"},
+		outs: []string{"41", "", "pane\t1"},
 	}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
@@ -491,7 +491,7 @@ func TestProviderAttachNamedSocketUsesNoStartServer(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	p := NewProviderWithConfig(Config{SocketName: "city-socket"})
-	p.tm.exec = &fakeExecutor{outs: []string{"41", "", "0", "41"}}
+	p.tm.exec = &fakeExecutor{outs: []string{"41", "", "pane\t0", "41"}}
 	stable := stableNamedSocketObservation(t)
 	witnessCalls := 0
 	p.tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
@@ -514,7 +514,7 @@ func TestProviderAttachNamedSocketUsesNoStartServer(t *testing.T) {
 	wantPreflight := [][]string{
 		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 		{"-u", "-L", "city-socket", "-N", "has-session", "-t", "=runner"},
-		{"-u", "-L", "city-socket", "-N", "display-message", "-t", "=runner:^.0", "-p", "#{pane_dead}"},
+		{"-u", "-L", "city-socket", "-N", "list-panes", "-s", "-t", "=runner:", "-F", agentPaneMarkerFormat + "\t#{pane_dead}"},
 		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 	}
 	if !reflect.DeepEqual(p.tm.exec.(*fakeExecutor).calls, wantPreflight) {

@@ -96,14 +96,65 @@ func preWakeCommit(
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		return sessFront.ApplyPatch(info.ID, batch)
+	})
+}
+
+// errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
+var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
+
+// preWakeCommitUnder is preWakeCommit as a compare-and-swap (NEW-6): the
+// incarnation lands only on a re-read row whose lifecycle facts are still
+// info's and that still records lease, fenced at that read's revision. A
+// moved row writes nothing and returns errPreWakeSuperseded. Without a
+// conditional writer the check is the re-read alone.
+func preWakeCommitUnder(
+	info sessions.Info,
+	sessFront *sessions.Store,
+	clk clock.Clock,
+	lease *sessions.RuntimeLease,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		applied, err := sessFront.ApplyPatchIfLifecycleUnchangedUnder(info, batch, lease)
+		if err == nil && !applied {
+			err = errPreWakeSuperseded
+		}
+		return err
+	})
+}
+
+func preWakeCommitWith(
+	info sessions.Info,
+	clk clock.Clock,
+	write func(sessions.MetadataPatch) error,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
+	newGen, token, batch, class := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	batch = class.Into(info.ID, batch)
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	if writeErr := write(batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
+
+	return newGen, token, batch, nil
+}
+
+// preWakePatch is the PreWakePatch preWakeCommit writes for info at now with
+// token as the new instance token, the generation it advances to, and the
+// disposition's PreWake cell (class) beside it: the idle stop's and a wait's
+// intent and a soft suspend go; an operator's suspend refuses it, and the
+// controller never starts that row (errStartUserHeld). The v2 start effect
+// decides the same patch in its PreWake CAS (CONTRACT v5 S1). It mints
+// nothing: the writer puts class in its write.
+func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch, class sessions.DispositionPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch
@@ -119,24 +170,18 @@ func preWakeCommit(
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
-	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
-		Now:               clk.Now(),
+		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         freshWake,
+		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := setMetadataBatchBounded(sessFront.Store(), info.ID, batch, startPathWriteTimeout); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
-
-	return newGen, token, batch, nil
+	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
@@ -252,15 +297,10 @@ func validateWorkDir(dir string) error {
 // due to a transient store failure) before any signal reaches the process.
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
 //
+// info is the row the drain decides on: it becomes the drain's basis. A tracked
+// drain stays tied to the facts it was decided on (see drainState.basis).
+//
 // It reads only session_name, generation, and id — all carried verbatim on Info.
-func executionProtocolEnabled(front *sessions.Store, enrolled bool) bool {
-	if enrolled {
-		return true
-	}
-	mode := beads.InspectConditionalWrites(front.Store().Store).Mode
-	return mode == gate.Auto || mode == gate.Require
-}
-
 func beginSessionDrainInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, reason string, clk clock.Clock, timeout time.Duration, fronts ...*sessions.Store) bool {
 	begun, err := beginSessionDrainInfoResult(info, sp, dt, reason, clk, timeout, fronts...)
 	if err != nil {
@@ -310,6 +350,7 @@ func beginSessionDrainInfoResult(
 		deadline:         clk.Now().Add(timeout),
 		reason:           reason,
 		generation:       gen,
+		basis:            sessions.Decide(info, sessions.FactsLegacyStopPending),
 	})
 
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
@@ -317,6 +358,17 @@ func beginSessionDrainInfoResult(
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
 	return true, nil
+}
+
+// executionProtocolEnabled reports whether front's session runs under the
+// execution protocol: it is enrolled (it recorded work_started), or the store's
+// conditional-write mode asks for it.
+func executionProtocolEnabled(front *sessions.Store, enrolled bool) bool {
+	if enrolled {
+		return true
+	}
+	mode := beads.InspectConditionalWrites(front.Store().Store).Mode
+	return mode == gate.Auto || mode == gate.Require
 }
 
 // executionStalledDrainReason drains a pool seat that claimed work and then
@@ -706,6 +758,38 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 	return reason, true
 }
 
+// drainAckOwner is whose decision a runtime's drain ack is, as its source
+// metadata says.
+type drainAckOwner uint8
+
+const (
+	// drainAckOwnerUnknown: the source could not be read. Defer: neither
+	// void the drain nor clear its ack.
+	drainAckOwnerUnknown drainAckOwner = iota
+	// drainAckOwnerAgent: any source but the controller's (the agent's own
+	// `gc runtime drain-ack`, or a bare ack). Decided on the row as it is.
+	drainAckOwnerAgent
+	// drainAckOwnerController: the controller's own ack, which its drain's
+	// basis decides.
+	drainAckOwnerController
+)
+
+// drainAckOwnerOf reads name's drain-ack source. Without a provider there is
+// no controller ack.
+func drainAckOwnerOf(sp runtime.Provider, name string) drainAckOwner {
+	if sp == nil || name == "" {
+		return drainAckOwnerAgent
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	switch {
+	case err != nil:
+		return drainAckOwnerUnknown
+	case source == reconcilerDrainAckSourceValue:
+		return drainAckOwnerController
+	}
+	return drainAckOwnerAgent
+}
+
 // reconcilerDrainAckMatchesSessionInfo is the session.Info sibling of
 // reconcilerDrainAckMatchesSession for the reconciler forward pass. The only
 // session-bead read is the generation (Info.Generation); everything else is
@@ -900,6 +984,13 @@ func cancelRecoveredSessionDrainAttemptInfoResult(info sessions.Info, sp runtime
 	return true, nil
 }
 
+// userHoldDrainReleased reports a user-hold drain whose row no longer carries
+// the operator's suspend (Disposition.KeepsSlot): a resume consumed the hold
+// after the drain began.
+func userHoldDrainReleased(reason string, info sessions.Info) bool {
+	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
+}
+
 func advanceSessionDrainsWithSessionsTraced(
 	cityPath string,
 	dt *drainTracker,
@@ -953,6 +1044,21 @@ func advanceSessionDrainsWithSessionsTraced(
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
 				})
+			}
+			continue
+		}
+
+		// An operator's resume consumed the hold this drain was for: cancel
+		// it, so neither its ack nor its completion acts on the resumed row.
+		if userHoldDrainReleased(ds.reason, info) {
+			dt.clearIdleProbe(id)
+			if ds.ackSet {
+				_ = clearReconcilerDrainAckMetadata(sp, name)
+			}
+			dt.remove(id)
+			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
 			}
 			continue
 		}
@@ -1124,7 +1230,8 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Pending-interaction guards and wake-based cancellation run before this
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
-			// Drain timed out — force stop.
+			// Drain timed out — force stop. An execution-protocol drain must first be accepted
+			// by the protocol; the stop itself is then fenced on the drain's basis.
 			if sessFront != nil {
 				_, _, enrolled, err := sessFront.ExecutionEvidence(info.ID)
 				if err != nil {
@@ -1139,11 +1246,19 @@ func advanceSessionDrainsWithSessionsTraced(
 					}
 				}
 			}
-			if err := verifiedStop(cityPath, info, store, sp, cfg); err != nil {
-				if errors.Is(err, errTokenMismatch) {
-					// Session was re-woken by a different incarnation.
-					// This drain is stale — cancel it.
+			if err := verifiedStop(cityPath, ds.basis, store, sp, cfg); err != nil {
+				if owner := drainAckOwnerOf(sp, name); owner != drainAckOwnerUnknown &&
+					(errors.Is(err, errTokenMismatch) || errors.Is(err, sessions.ErrKillPremiseMoved)) {
+					// Session was re-woken by a different incarnation, or the
+					// row left the basis the drain began on (a resume, a
+					// suspend, a request). This drain is stale — cancel it.
+					// Only the controller's own ack goes with it; an agent's
+					// ack is the agent's decision. An ack whose source cannot
+					// be read keeps the drain for the next tick.
 					dt.clearIdleProbe(id)
+					if ds.ackSet && owner == drainAckOwnerController {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+					}
 					dt.removeIfCurrent(id, ds)
 				}
 				// Other errors (transient stop failure, unverifiable token): keep drain
@@ -1195,19 +1310,22 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_ = sessFront.ApplyPatch(info.ID, batch)
+	_, _ = sessFront.ApplySleep(info.ID, batch)
 }
 
-// verifiedStop stops a session after verifying the instance_token matches.
+// verifiedStop stops the session d decided on after verifying the
+// instance_token matches, while the row still carries d's facts.
 // Prevents stale drain operations from targeting a re-woken session.
-// Returns errTokenMismatch if the running process has a different token, and
-// errTokenUnverifiable if its token cannot be read.
+// Returns errTokenMismatch if the running process has a different token,
+// errTokenUnverifiable if its token cannot be read, and
+// sessions.ErrKillPremiseMoved if the row moved.
 //
 // NOTE: On composite providers (auto/hybrid), GetMeta and Stop may route
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(cityPath string, d sessions.Decided, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	info := d.Info()
 	name := info.SessionNameMetadata
 	expectedToken := info.InstanceToken
 	if expectedToken != "" {
@@ -1218,7 +1336,7 @@ func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp run
 			return &tokenUnverifiableError{sessionID: info.ID, cause: err}
 		}
 	}
-	// Decided again under the lease, on a fresh read (controllerKillSessionRow).
+	// Decided again under the lease, on a fresh read (legacyAct.Stop).
 	observeAutonomousKillLiveSubagents("session drain timeout", workerHandleForSessionWithConfig, cityPath, store, sp, cfg, info.ID, log.Writer())
-	return controllerKillSessionRow(cityPath, store, sp, cfg, info)
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(d)
 }

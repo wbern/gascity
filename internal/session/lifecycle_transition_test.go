@@ -9,7 +9,6 @@ import (
 
 func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
-	later := now.Add(5 * time.Minute)
 	resetNow := time.Date(2026, 4, 15, 6, 0, 0, 0, time.FixedZone("test", -7*60*60))
 
 	tests := []struct {
@@ -33,11 +32,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"state_reason":              "explicit",
 				"pending_create_claim":      "true",
 				"pending_create_started_at": now.UTC().Format(time.RFC3339),
-				"held_until":                "",
-				"quarantined_until":         "",
 				"sleep_reason":              "",
-				"wait_hold":                 "",
-				"sleep_intent":              "",
 				"wake_attempts":             "0",
 				"churn_count":               "0",
 			},
@@ -62,7 +57,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "idle-timeout",
-				"sleep_intent":               "",
 				"generation":                 "3",
 				"wake_request":               "",
 				"wake_requested_at":          "",
@@ -87,7 +81,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
 				"last_woke_at":               now.UTC().Format(time.RFC3339),
 				"sleep_reason":               "",
-				"sleep_intent":               "",
 				"generation":                 "4",
 				"wake_request":               "",
 				"wake_requested_at":          "",
@@ -109,11 +102,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"state_reason":               "continuation-reset",
 				"pending_create_claim":       "true",
 				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
-				"held_until":                 "",
-				"quarantined_until":          "",
 				"sleep_reason":               "",
-				"wait_hold":                  "",
-				"sleep_intent":               "",
 				"wake_attempts":              "0",
 				"churn_count":                "0",
 				"session_key":                "",
@@ -159,9 +148,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":              "",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
-				"sleep_intent":              "",
 				"slept_at":                  now.Format(time.RFC3339),
-				"suspended_at":              "",
 			},
 		},
 		{
@@ -207,9 +194,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
-				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
-				"suspended_at":               "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -368,22 +353,17 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at": "",
 				"retired_named_identity":    "worker",
 				"synced_at":                 now.Format(time.RFC3339),
-				"held_until":                "",
-				"quarantined_until":         "",
-				"wait_hold":                 "",
-				"sleep_intent":              "",
 				"sleep_reason":              "",
 			},
 		},
 		{
 			name:  "quarantine",
-			patch: QuarantinePatch(later, 3),
+			patch: QuarantinePatch(3),
 			want: MetadataPatch{
-				"state":             string(StateQuarantined),
-				"state_reason":      "crash-loop",
-				"quarantined_until": later.Format(time.RFC3339),
-				"quarantine_cycle":  "3",
-				"last_woke_at":      "",
+				"state":            string(StateQuarantined),
+				"state_reason":     "crash-loop",
+				"quarantine_cycle": "3",
+				"last_woke_at":     "",
 			},
 		},
 		{
@@ -395,7 +375,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"continuity_eligible":       "true",
-				"quarantined_until":         "",
 				"crash_count":               "0",
 				"archived_at":               "",
 			},
@@ -409,7 +388,6 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"continuity_eligible":       "false",
-				"quarantined_until":         "",
 				"crash_count":               "0",
 				"archived_at":               "",
 			},
@@ -418,54 +396,47 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "clear expired user hold",
 			patch: ClearExpiredHoldPatch("user-hold"),
 			want: MetadataPatch{
-				"held_until":   "",
 				"sleep_reason": "",
 			},
 		},
 		{
 			name:  "clear expired non-hold timer",
 			patch: ClearExpiredHoldPatch("idle"),
-			want: MetadataPatch{
-				"held_until": "",
-			},
+			want:  MetadataPatch{},
 		},
 		{
 			name:  "clear expired quarantine",
 			patch: ClearExpiredQuarantinePatch("quarantine"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired context churn",
 			patch: ClearExpiredQuarantinePatch("context-churn"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired rate limit",
 			patch: ClearExpiredQuarantinePatch("rate_limit"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"wake_attempts": "0",
+				"churn_count":   "0",
+				"sleep_reason":  "",
 			},
 		},
 		{
 			name:  "clear expired non-quarantine timer",
 			patch: ClearExpiredQuarantinePatch("idle"),
 			want: MetadataPatch{
-				"quarantined_until": "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
+				"wake_attempts": "0",
+				"churn_count":   "0",
 			},
 		},
 	}
@@ -799,10 +770,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "wait-hold",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -814,16 +781,11 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateDrained,
 			sleepReason: "drained",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
-				"suspended_at":          "",
 				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
@@ -832,16 +794,11 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateSuspended,
 			sleepReason: "user-hold",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
 				"state":                 string(StateAsleep),
 				"sleep_reason":          "",
-				"suspended_at":          "",
 				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
@@ -850,10 +807,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "idle",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -864,10 +817,6 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "rate_limit",
 			want: MetadataPatch{
-				"held_until":            "",
-				"quarantined_until":     "",
-				"wait_hold":             "",
-				"sleep_intent":          "",
 				"wake_attempts":         "0",
 				"wake_refused_event_at": "",
 				"churn_count":           "0",
@@ -899,9 +848,13 @@ func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
 		"churn_count":       "2",
 	})
 
-	for _, key := range []string{"held_until", "quarantined_until", "sleep_reason", "wait_hold", "sleep_intent"} {
-		if merged[key] != "" {
-			t.Fatalf("%s = %q, want cleared", key, merged[key])
+	if merged["sleep_reason"] != "" {
+		t.Fatalf("sleep_reason = %q, want cleared", merged["sleep_reason"])
+	}
+	// The holds are the cells' (R7c): the builder leaves them.
+	for _, key := range []string{"held_until", "quarantined_until", "wait_hold", "sleep_intent"} {
+		if merged[key] == "" {
+			t.Fatalf("%s cleared by the builder, want it left to its cell", key)
 		}
 	}
 	for _, key := range []string{"wake_attempts", "churn_count"} {

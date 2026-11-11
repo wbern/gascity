@@ -232,7 +232,7 @@ func archiveSafetyCheck(city string, cfg *config.City, scope reapStoreScope, liv
 	if owner.Status != "closed" || owner.Revision != req.ExpectedBeadRevision {
 		return true, "owner is not closed at the expected revision"
 	}
-	if owner.Metadata["gc.user_paused"] == "true" {
+	if owner.Metadata[beadmeta.UserPausedMetadataKey] == "true" {
 		return true, "owner is user-paused"
 	}
 	bound, err := normalizeReapBorrowPath(owner.Metadata[beadmeta.TaskWorktreeMetadataKey])

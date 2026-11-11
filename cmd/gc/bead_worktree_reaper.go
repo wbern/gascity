@@ -570,7 +570,7 @@ func reapClosedBeadWorktrees(
 					return "live before removal: " + why, nil
 				}
 				owner, err := reapOwnerLive(store, beadID)
-				if err != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata["gc.user_paused"] == "true" {
+				if err != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata[beadmeta.UserPausedMetadataKey] == "true" {
 					return "owner is no longer closed or live owner read failed", nil
 				}
 				current, err = linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)

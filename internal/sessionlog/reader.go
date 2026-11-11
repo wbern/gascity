@@ -43,6 +43,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -157,7 +160,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -239,7 +244,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
