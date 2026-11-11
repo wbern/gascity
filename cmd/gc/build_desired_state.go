@@ -752,6 +752,9 @@ func buildDesiredStateWithSessionBeadsAt(
 			var errs []error
 			collected.DefaultProbed = true
 			collected.DefaultCounts, collected.DefaultDemand, collected.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
+			// A bead whose claims keep failing the same way is not spawn demand
+			// (claim_loop_guard.go).
+			collected.DefaultCounts, collected.DefaultDemand = claimLoopGuardFor(cityPath).withhold(collected.DefaultCounts, collected.DefaultDemand)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(targets.defaultScaleTargets),
 			})
@@ -3038,18 +3041,14 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 // City's "open", so a blocked bead is indistinguishable from ready work and
 // would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
 // a Live read reaches the backing store's server-side --status=open filter
-// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
+// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?;
+// NativeDoltStore pushes the raw status, nativeListPushesRawOpen), which
 // excludes the raw blocked status. This extends the fix gc-4zb/#4395 applied to
 // restoreCarriedWorkRoutes and the workflow projection to the controller-demand
 // List reads. AllowScan opts into the intentional open-status population read;
 // handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
 // latency on the demand path (see readyDemandCache): this pays one live
 // backing-store read rather than over-counting blocked work as demand.
-//
-// Known gap: NativeDoltStore maps Status:"open" to
-// ExcludeStatus=[closed,in_progress] (see nativeIssueFilterFromListQuery), so it
-// still returns raw blocked/deferred rows regardless of Live — this gate is
-// inert on that backend, tracked separately.
 func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
@@ -7457,13 +7456,22 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
-	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
-	// runs immediately after this staging on the SAME workDir (see
+	// Skip the reconciler-owned mergeable hook/settings files hooks.Install
+	// writes: it runs immediately after this staging on the SAME workDir (see
 	// prepareTemplateResolution), so it must be the sole writer of those files
 	// ON THE RECONCILE TICK. Staging them too leaves two writers with
 	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
 	// The runtime task-worktree staging path keeps staging them — it is their
 	// sole writer.
+	//
+	// Only the files hooks.Install actually writes are skipped. A mergeable file
+	// no installer owns — a codex agent's .codex/hooks.json when install_agent_hooks
+	// does not name codex — is staged here like any other overlay file. Skipping
+	// it left session-start staging as its first writer, AFTER this tick's
+	// fingerprint: the next tick's CopyFiles probe then found a hook file GC had
+	// generated itself, and the reconciler drained the freshly started worker
+	// for config drift. Staged here, the file exists before every fingerprint,
+	// and session start re-merges the same overlay into it idempotently.
 	//
 	// "Sole writer" is scoped to the tick on purpose. For a persistent
 	// (non-task) agent the home dir is also the session workDir, and
@@ -7484,13 +7492,15 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// below: it carries the per-pass write-tracking that keeps a path this pass
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
 	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
+	installed := hooks.InstalledWorkDirPaths(installHooks, func(name string) string { return config.BuiltinFamily(name, bp.providers) })
+	installerOwns := func(relPath string) bool { return installed[relPath] }
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(od, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingInstalledMergeable(overlayDir, workDir, overlayProviders, installerOwns, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

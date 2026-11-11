@@ -11,7 +11,7 @@ import (
 
 func executionSessionFixture(t *testing.T, mem *beads.MemStore) beads.Bead {
 	t.Helper()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := mem.Create(beads.Bead{Title: "execution session", Type: BeadType, Metadata: map[string]string{
@@ -37,7 +37,7 @@ func TestRecordStartedClaimPersistsAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	cell, err := DecodeWorkStarted(got.Metadata[WorkStartedKey])
-	if err != nil || !cell.Names("project", "task-1") {
+	if err != nil || !cell.Names("project", "task-1", 0) {
 		t.Fatalf("claim not persisted: cell=%+v err=%v", cell, err)
 	}
 	if len(cell.Claims) != 1 || cell.Claims[0].Gen != 7 {
@@ -201,7 +201,7 @@ func TestExecutionEvidenceUsesOpaqueNonzeroSessionRevisions(t *testing.T) {
 			ID: "gc-1", Type: BeadType, Status: "open", Revision: revision,
 			Metadata: map[string]string{"instance_token": "incarnation-one", "generation": "7"},
 		}}, nil)
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		s := NewStore(beads.SessionStore{Store: mem})
@@ -508,7 +508,7 @@ func TestControllerDrainIntentIsNotAReleaseCensus(t *testing.T) {
 		t.Fatalf("accepted controller stop reopened: %v", err)
 	}
 	_, cell, _, err := front.ExecutionEvidence(row.ID)
-	if err != nil || cell.Drain.Committed || !cell.Drain.Accepted || !cell.Names("", "active-work") {
+	if err != nil || cell.Drain.Committed || !cell.Drain.Accepted || !cell.Names("", "active-work", 0) {
 		t.Fatalf("controller stop changed census or lost active work: %+v %v", cell, err)
 	}
 }
@@ -563,7 +563,7 @@ func TestExecutionFencedHashPatchPreservesConcurrentEvidenceAndRefusesReplacemen
 			}
 			switch scenario {
 			case "claim":
-				if err != nil || saved.Metadata["started_config_hash"] != "accepted" || !cell.Names("project", "concurrent-work") {
+				if err != nil || saved.Metadata["started_config_hash"] != "accepted" || !cell.Names("project", "concurrent-work", 0) {
 					t.Fatalf("patch lost concurrent execution evidence: cell=%+v err=%v", cell, err)
 				}
 			case "new-drain":

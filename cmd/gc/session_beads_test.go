@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
@@ -194,6 +195,15 @@ func (s *failingReopenWriteStore) SetMetadataBatch(id string, kvs map[string]str
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+// UpdateIfMatch fails the fenced status+metadata write as Update fails the
+// unconditional one, for a stamped store.
+func (s *failingReopenWriteStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if s.fail && len(opts.Metadata) > 0 {
+		return errors.New("fenced status+metadata update failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
 // Tx passes s (the wrapper) into the callback so the injected write failures are
 // observed inside the Tx; the embedded MemStore.Tx would bind the raw store.
 func (s *failingReopenWriteStore) Tx(_ string, fn func(beads.Tx) error) error {
@@ -299,6 +309,7 @@ type txSpyStore struct {
 	directSetMetadata      int
 	directClose            int
 	directUpdate           int
+	fencedUpdate           int
 }
 
 func newTxSpyStore() *txSpyStore {
@@ -333,6 +344,12 @@ func (s *txSpyStore) Close(id string) error {
 func (s *txSpyStore) Update(id string, opts beads.UpdateOpts) error {
 	s.directUpdate++
 	return s.MemStore.Update(id, opts)
+}
+
+// UpdateIfMatch counts the fenced writes a stamped spy store takes.
+func (s *txSpyStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	s.fencedUpdate++
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
 }
 
 // allConfiguredDS builds configuredNames from a desiredState map.
@@ -1646,7 +1663,7 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartMarkersWhenRecrea
 
 func TestReopenClosedConfiguredNamedSessionBeadPreservesRequestedSuspendedState(t *testing.T) {
 	cityPath := t.TempDir()
-	store := beads.NewMemStore()
+	store := newTxSpyStore()
 	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -1691,6 +1708,188 @@ func TestReopenClosedConfiguredNamedSessionBeadPreservesRequestedSuspendedState(
 	}
 	if got := reopened.Metadata["sleep_reason"]; got != "" {
 		t.Fatalf("sleep_reason = %q, want empty", got)
+	}
+	if store.directUpdate != 0 {
+		t.Fatalf("directUpdate = %d, want 0 (status flip must happen inside the Tx)", store.directUpdate)
+	}
+	if store.directSetMetadataBatch != 0 {
+		t.Fatalf("directSetMetadataBatch = %d, want 0 (metadata write must happen inside the Tx)", store.directSetMetadataBatch)
+	}
+}
+
+// seedClosedNamedRefinery seeds store with the closed canonical row of an
+// on_demand named session and returns its config, runtime name and row.
+func seedClosedNamedRefinery(t *testing.T, store beads.Store) (*config.City, string, beads.Bead) {
+	t.Helper()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+	return cfg, sessionName, closed
+}
+
+// TestReopenClosedConfiguredNamedSessionBeadFencesStatusAndMetadataInOneWrite
+// is the single-transaction pin on the conditional path, which a store that
+// fences takes under the conditional_writes default (mc-dpo2b): the status
+// flip and the reopen metadata land in exactly one fenced write, with no
+// direct status or metadata write beside it.
+func TestReopenClosedConfiguredNamedSessionBeadFencesStatusAndMetadataInOneWrite(t *testing.T) {
+	store := newTxSpyStore()
+	cfg, sessionName, closed := seedClosedNamedRefinery(t, store)
+	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	store.directUpdate = 0
+
+	var stderr bytes.Buffer
+	reopened, _, ok := reopenClosedConfiguredNamedSessionBead(
+		t.TempDir(), store, cfg, "test-city", "refinery", sessionName, "active", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), nil, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if store.fencedUpdate != 1 || store.directUpdate != 0 || store.directSetMetadataBatch != 0 {
+		t.Fatalf("writes: fenced %d, direct update %d, direct metadata batch %d; want one fenced write and nothing else",
+			store.fencedUpdate, store.directUpdate, store.directSetMetadataBatch)
+	}
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Metadata["state"] != "active" || reopened.ID != closed.ID {
+		t.Fatalf("reopened row status %q state %q, want open/active", got.Status, got.Metadata["state"])
+	}
+}
+
+// TestReopenClosedConfiguredNamedSessionBeadFailsWhenTheFencedWriteFails is
+// the partial-success pin on the conditional path: a failed fenced reopen
+// reports failure and leaves the row closed with its prior metadata.
+func TestReopenClosedConfiguredNamedSessionBeadFailsWhenTheFencedWriteFails(t *testing.T) {
+	store := &failingReopenWriteStore{MemStore: beads.NewMemStore()}
+	cfg, sessionName, closed := seedClosedNamedRefinery(t, store)
+	if err := beads.StampOpenedStore(store.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {
+		t.Fatalf("the conditional arm is not active: writer %T, err %v", w, err)
+	}
+	store.fail = true
+
+	var stderr bytes.Buffer
+	if _, _, ok := reopenClosedConfiguredNamedSessionBead(
+		t.TempDir(), store, cfg, "test-city", "refinery", sessionName, "active", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), nil, &stderr,
+	); ok {
+		t.Fatal("reopenClosedConfiguredNamedSessionBead returned true, want false when the fenced reopen write fails")
+	}
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != "suspended" || got.Metadata["close_reason"] != "suspended" {
+		t.Fatalf("row after a failed fenced reopen: status %q state %q close_reason %q; want it untouched (closed, suspended, suspended)",
+			got.Status, got.Metadata["state"], got.Metadata["close_reason"])
+	}
+}
+
+// TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails pins
+// ga-igcny0.1.1's partial-success fix. The reopen writes the status flip and the
+// terminal metadata as ONE recoverable Update, so when that write fails the
+// function must report failure AND leave the bead untouched -- still closed,
+// still carrying its prior terminal metadata -- never a bead that looks "open"
+// but is missing its reopen metadata. This holds even on a store whose Tx runs
+// callbacks sequentially without rollback, because a single Update is atomic on
+// every backing store.
+func TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails(t *testing.T) {
+	cityPath := t.TempDir()
+	store := &failingReopenWriteStore{MemStore: beads.NewMemStore()}
+	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "refinery",
+			"template":                   "refinery",
+			"state":                      "suspended",
+			"close_reason":               "suspended",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+	store.fail = true
+
+	var stderr bytes.Buffer
+	_, _, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
+	)
+	if ok {
+		t.Fatal("reopenClosedConfiguredNamedSessionBead returned true, want false when the reopen write fails")
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("expected a diagnostic on stderr when the reopen write fails")
+	}
+	// The single status+metadata Update is all-or-nothing on every store, so a
+	// failed reopen must leave the bead exactly as it was: closed, carrying its
+	// prior terminal metadata, with none of the reopen batch applied. A
+	// regression to a separate status flip plus metadata batch would surface
+	// here as an "open" bead (or one whose terminal state was overwritten).
+	got, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("get bead after failed reopen: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed: a failed single-write reopen must not flip the bead open", got.Status)
+	}
+	if got.Metadata["state"] != "suspended" {
+		t.Fatalf("state = %q, want suspended: the reopen sets state=active, so the old terminal state must survive a failed write", got.Metadata["state"])
+	}
+	if got.Metadata["close_reason"] != "suspended" {
+		t.Fatalf("close_reason = %q, want suspended: the reopen clears close_reason, so it must survive a failed write", got.Metadata["close_reason"])
 	}
 }
 
@@ -10076,73 +10275,6 @@ func TestSyncTailReturnsFreshStoreLoadNotLocalSlice(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotIDs, freshIDs) {
 		t.Fatalf("returned snapshot open set %v != fresh store load %v", gotIDs, freshIDs)
-	}
-}
-
-func TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails(t *testing.T) {
-	cityPath := t.TempDir()
-	store := &failingReopenWriteStore{MemStore: beads.NewMemStore()}
-	now := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents: []config.Agent{
-			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
-		},
-		NamedSessions: []config.NamedSession{
-			{Template: "refinery", Mode: "on_demand"},
-		},
-	}
-	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
-	closed, err := store.Create(beads.Bead{
-		Title:  "refinery",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":               sessionName,
-			"alias":                      "refinery",
-			"template":                   "refinery",
-			"state":                      "suspended",
-			"close_reason":               "suspended",
-			namedSessionMetadataKey:      "true",
-			namedSessionIdentityMetadata: "refinery",
-			namedSessionModeMetadata:     "on_demand",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create closed canonical bead: %v", err)
-	}
-	if err := store.Close(closed.ID); err != nil {
-		t.Fatalf("close canonical bead: %v", err)
-	}
-	store.fail = true
-
-	var stderr bytes.Buffer
-	_, _, ok := reopenClosedConfiguredNamedSessionBead(
-		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, nil, &stderr,
-	)
-	if ok {
-		t.Fatal("reopenClosedConfiguredNamedSessionBead returned true, want false when the reopen write fails")
-	}
-	if stderr.Len() == 0 {
-		t.Fatal("expected a diagnostic on stderr when the reopen write fails")
-	}
-	// The single status+metadata Update is all-or-nothing on every store, so a
-	// failed reopen must leave the bead exactly as it was: closed, carrying its
-	// prior terminal metadata, with none of the reopen batch applied. A
-	// regression to a separate status flip plus metadata batch would surface
-	// here as an "open" bead (or one whose terminal state was overwritten).
-	got, err := store.Get(closed.ID)
-	if err != nil {
-		t.Fatalf("get bead after failed reopen: %v", err)
-	}
-	if got.Status != "closed" {
-		t.Fatalf("status = %q, want closed: a failed single-write reopen must not flip the bead open", got.Status)
-	}
-	if got.Metadata["state"] != "suspended" {
-		t.Fatalf("state = %q, want suspended: the reopen sets state=active, so the old terminal state must survive a failed write", got.Metadata["state"])
-	}
-	if got.Metadata["close_reason"] != "suspended" {
-		t.Fatalf("close_reason = %q, want suspended: the reopen clears close_reason, so it must survive a failed write", got.Metadata["close_reason"])
 	}
 }
 

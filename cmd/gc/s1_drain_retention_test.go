@@ -106,7 +106,7 @@ var _ beads.ConditionalWriter = (*s1ReacquireDuringReleaseStore)(nil)
 
 func TestS1DrainAckRefusesSameOwnerReacquisition(t *testing.T) {
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	racing := &s1ReacquireDuringReleaseStore{MemStore: mem}
@@ -139,7 +139,7 @@ func TestS1DrainAckUsesOpaqueNonzeroWorkRevisions(t *testing.T) {
 				Metadata: map[string]string{"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7"},
 			},
 		}, nil)
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		seat, err := mem.Get("gc-2")
@@ -200,7 +200,7 @@ func (s *s1AdoptDuringReleaseStore) UpdateIfMatch(id string, revision int64, opt
 
 func TestS1DrainReservationExcludesConcurrentAdoption(t *testing.T) {
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	racing := &s1AdoptDuringReleaseStore{MemStore: mem}
@@ -244,7 +244,7 @@ func (s *s1UncertainReleaseStore) UpdateIfMatch(id string, revision int64, opts 
 func TestS1UncertainReleaseKeepsAdoptionExcluded(t *testing.T) {
 	for _, writeThenError := range []bool{false, true} {
 		mem := beads.NewMemStore()
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		backend := &s1UncertainReleaseStore{MemStore: mem, writeThenError: writeThenError}
@@ -290,12 +290,12 @@ func TestS1RetainedWorkRecordsExecutionBeforeHandback(t *testing.T) {
 		held := &startedClaimHeldError{Claim: fixture.work}
 		var stdout, stderr bytes.Buffer
 		recorded := false
-		opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true, DrainAck: true}
+		opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true, DrainAck: true}
 		ops := hookClaimOps{
 			DrainAck: func(io.Writer) error { return held },
 			RecordStartedClaim: func(id string, fence session.ExecutionFence, entry session.WorkStartedEntry) error {
 				recorded = true
-				if stdout.Len() != 0 || id != opts.SessionID || fence != *opts.StartedFence || entry.Bead != held.Claim.ID {
+				if stdout.Len() != 0 || id != opts.SessionID || fence != *opts.ExecutionFence || entry.Bead != held.Claim.ID {
 					t.Fatalf("incorrect execution record or work delivered first: id=%s entry=%+v stdout=%s", id, entry, stdout.String())
 				}
 				return recordError
@@ -367,7 +367,7 @@ func newS1FileAdmissionFixture(t *testing.T, status, owner string) s1FileAdmissi
 
 func s1AdmissionResult(t *testing.T, fixture s1FileAdmissionFixture, snapshot beads.Bead, record func(string, session.ExecutionFence, session.WorkStartedEntry) error) (int, string) {
 	t.Helper()
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true}
 	ops := hookClaimOps{
 		RecordStartedClaim: record,
 		StampWorkMeta:      func(context.Context, string, []string, string, string, map[string]string) error { return nil },
@@ -381,7 +381,7 @@ func s1AdmissionResult(t *testing.T, fixture s1FileAdmissionFixture, snapshot be
 	ops.applyDefaults()
 	result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: "hook", Action: "work", Reason: "existing_assignment", BeadID: snapshot.ID, Assignee: "worker-1"}
 	var stdout, stderr bytes.Buffer
-	code := writeHookClaimWorkResultForBead(result, snapshot, opts, ops, fixture.city, false, &stdout, &stderr)
+	code := writeHookClaimWorkResultForBead(result, snapshot, opts, ops, fixture.city, hookAdoptionOwned, time.Time{}, &stdout, &stderr)
 	return code, stdout.String()
 }
 
@@ -566,7 +566,7 @@ func TestS1AdmissionUsesCanonicalClassResidence(t *testing.T) {
 		t.Run(map[bool]string{false: "class-only", true: "work-before-class"}[coResident], func(t *testing.T) {
 			fixture := newS1FileAdmissionFixture(t, "in_progress", "worker-1")
 			class := newClaimRouteClassStore(t)
-			if err := beads.StampOpenedStore(class, "class", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(class, "class", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			id := "gcg-admission"
@@ -599,10 +599,10 @@ func TestS1AdmissionUsesCanonicalClassResidence(t *testing.T) {
 				ResolveWorkBranch:     func(hookClaimWorkTree) string { return "" },
 				ResolveSessionWorkDir: func(string) string { return "" },
 			}, route)
-			opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true}
+			opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true}
 			result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: "hook", Action: "work", Reason: "existing_assignment", BeadID: candidate.ID, Assignee: owner}
 			var stdout, stderr bytes.Buffer
-			code := writeHookClaimWorkResultForBead(result, candidate, opts, ops, fixture.city, false, &stdout, &stderr)
+			code := writeHookClaimWorkResultForBead(result, candidate, opts, ops, fixture.city, hookAdoptionOwned, time.Time{}, &stdout, &stderr)
 			if code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"action":"work"`)) {
 				t.Fatalf("canonical resident refused: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 			}
@@ -1307,7 +1307,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 		t.Fatal(err)
 	}
 	binding := newClaimRouteClassStore(t)
-	if err := beads.StampOpenedStore(binding, "sqlite", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(binding, "sqlite", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	seedSplitRoutes(t, city, binding)
@@ -1342,7 +1342,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 	}
 	var stdout, stderr bytes.Buffer
 	recorded, drainCalls := 0, 0
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: seat.ID, StartedFence: &fence, JSON: true, DrainAck: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: seat.ID, ExecutionFence: &fence, JSON: true, DrainAck: true}
 	ops := hookClaimOps{
 		DrainAck: func(w io.Writer) error {
 			drainCalls++
@@ -1472,7 +1472,7 @@ func TestS1NotDesiredUnreadableAckDefersExpiredDrain(t *testing.T) {
 	env.addDesired("worker", "worker", true)
 	seat := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&seat)
-	if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{"GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": "test-token"} {
@@ -1527,7 +1527,7 @@ func TestS1RetainedWorkDoesNotMaskJoinedCensusFailure(t *testing.T) {
 	censusErr := errors.New("secondary census store unavailable")
 	var stdout, stderr bytes.Buffer
 	recorded := false
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true, DrainAck: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true, DrainAck: true}
 	ops := hookClaimOps{
 		DrainAck:           func(io.Writer) error { return errors.Join(held, censusErr) },
 		RecordStartedClaim: func(string, session.ExecutionFence, session.WorkStartedEntry) error { recorded = true; return nil },

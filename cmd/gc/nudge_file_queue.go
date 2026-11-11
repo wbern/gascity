@@ -492,8 +492,13 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	// every unconfirmable pane into defaultQueuedNudgeMaxAttempts copies of the
 	// same reminder, delivered 15s apart to an agent that already had it.
 	// FORK BEHAVIOR (gcw-os58), re-ported onto the file queue in T5.
-	if errors.Is(cause, tmux.ErrNudgeSubmitUnconfirmed) ||
-		errors.Is(cause, tmux.ErrNudgeSubmitDeliveredUnobserved) {
+	//
+	// ErrNudgeSubmitLost wraps Unconfirmed but is the opposite case: Codex's
+	// rollout proved the turn aborted with no message, so the text definitely
+	// did not land. It takes the attempt-counted retry below (T6 arming-review).
+	if !errors.Is(cause, tmux.ErrNudgeSubmitLost) &&
+		(errors.Is(cause, tmux.ErrNudgeSubmitUnconfirmed) ||
+			errors.Is(cause, tmux.ErrNudgeSubmitDeliveredUnobserved)) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}

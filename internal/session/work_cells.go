@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -48,14 +49,42 @@ func sameClaim(aStore, aBead, bStore, bBead string) bool {
 	return aStore == "" || bStore == "" || aStore == bStore
 }
 
-// With is w with e recorded first, every entry naming the same claim dropped
-// (Names' matching), and the oldest beyond the cap dropped.
+// NamesAt reports whether e names the claim (store, bead) on a row at
+// generation gen: its own store and bead (sameClaim), at any generation, as
+// the cell is claim-sticky; or, for an unmarked entry recorded at gen, its
+// bead under any store, as the older hook may have spelled a binding-resident
+// claim by its leg. The relaxation is as narrow as the evidence it reads: the
+// same row, this incarnation's own record, and never a resident entry, whose
+// store is exact. An unmarked entry from another generation (whose claim may
+// since have moved) or a generation the reader could not read gets none.
+func (e WorkStartedEntry) NamesAt(store, bead string, gen int64) bool {
+	if sameClaim(e.Store, e.Bead, store, bead) {
+		return true
+	}
+	return !e.Resident && gen > 0 && e.Gen == gen && sameClaim("", e.Bead, "", bead)
+}
+
+// Names reports whether w records the claim (store, bead) on a row at
+// generation gen (WorkStartedEntry.NamesAt).
+func (w WorkStarted) Names(store, bead string, gen int64) bool {
+	for _, e := range w.Claims {
+		if e.NamesAt(store, bead, gen) {
+			return true
+		}
+	}
+	return false
+}
+
+// With is w with e recorded first, every entry naming e's claim at e's
+// generation dropped (NamesAt), and the oldest beyond the cap dropped. An
+// unmarked e proves no residence, so it drops no resident entry recorded at
+// its generation: that entry, which does, stays beside it.
 func (w WorkStarted) With(e WorkStartedEntry) WorkStarted {
 	// Releases and Drain belong to the fork's drain-admission and release
 	// reservation fences; a claim write must carry them through untouched.
 	out := WorkStarted{V: workCellVersion, Claims: []WorkStartedEntry{e}, Releases: w.Releases, Drain: w.Drain}
 	for _, c := range w.Claims {
-		if sameClaim(c.Store, c.Bead, e.Store, e.Bead) {
+		if c.NamesAt(e.Store, e.Bead, e.Gen) && (e.Resident || !c.Resident || c.Gen != e.Gen) {
 			continue
 		}
 		if len(out.Claims) == workStartedCap {
@@ -66,15 +95,65 @@ func (w WorkStarted) With(e WorkStartedEntry) WorkStarted {
 	return out
 }
 
-// Without is w with every entry naming (store, bead) dropped.
-func (w WorkStarted) Without(store, bead string) WorkStarted {
+// Without is w with every entry naming (store, bead) at generation gen
+// dropped (NamesAt).
+func (w WorkStarted) Without(store, bead string, gen int64) WorkStarted {
 	out := WorkStarted{V: workCellVersion, Releases: w.Releases, Drain: w.Drain}
 	for _, c := range w.Claims {
-		if !sameClaim(c.Store, c.Bead, store, bead) {
+		if !c.NamesAt(store, bead, gen) {
 			out.Claims = append(out.Claims, c)
 		}
 	}
 	return out
+}
+
+// Respelled is w with every unmarked entry recorded at generation gen that
+// names bead under a store (NamesAt) re-spelled as resident in store, keeping
+// its generation, time, way and place in the cell: the hook's migration of a
+// claim it recorded under its leg before it could prove the residence (an
+// older hook's, or this one's unproven adoption). An entry of another
+// generation, and a storeless one (which already names the bead in every
+// store), are left as they are; an unknown store ("") is never written as a
+// residence. A resident entry already naming the claim at gen makes a
+// re-spelled duplicate redundant, so the leg spelling is dropped instead (one
+// of another generation does not: it is no record of this incarnation, and
+// the #8133 backstop needs one at gen). changed reports whether the cell
+// changed.
+func (w WorkStarted) Respelled(store, bead string, gen int64) (out WorkStarted, changed bool) {
+	out = WorkStarted{V: workCellVersion, Claims: append([]WorkStartedEntry(nil), w.Claims...), Releases: w.Releases, Drain: w.Drain}
+	if strings.TrimSpace(store) == "" {
+		return out, false
+	}
+	resident := slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
+		return c.Resident && c.Gen == gen && sameClaim(c.Store, c.Bead, store, bead)
+	})
+	kept := out.Claims[:0]
+	for _, c := range out.Claims {
+		if !c.Resident && c.Store != "" && c.Gen == gen && c.NamesAt(store, bead, gen) {
+			changed = true
+			if resident {
+				continue
+			}
+			c.Store, c.Resident = store, true
+			resident = true
+		}
+		kept = append(kept, c)
+	}
+	out.Claims = kept
+	return out, changed
+}
+
+// RecordsBead reports whether w holds an entry naming bead under every store
+// on a row at generation gen (NamesAt): a storeless one, or an unmarked one
+// recorded at gen. A resident entry is not one: it names its bead in its own
+// store only, and a reader keying the claim by another store (where another
+// copy of the id may be the claim) reads it unstarted. A hook whose key is not
+// a proven residence asks it before writing an entry that would only duplicate
+// one every reader already matches.
+func (w WorkStarted) RecordsBead(bead string, gen int64) bool {
+	return slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
+		return c.Bead != "" && c.Bead == bead && (c.Store == "" || (!c.Resident && gen > 0 && c.Gen == gen))
+	})
 }
 
 // DecodeWorkLadderRelease reads the one field of a work_ladder cell the hook

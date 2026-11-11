@@ -41,7 +41,7 @@ var allProjectedMetadataKeys = []string{
 	"churn_count", "idle_respawn_attempts", "idle_respawn_bead_id",
 	"claim_holder_recycle_count", "claim_holder_recycle_at", "claim_holder_recycle_claims",
 	"wake_mode", "drain_at", "sleep_intent", "instance_token", "detached_at",
-	CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey, WorkStartedKey, WorkLadderKey, "execution_claim_started", "core_hash_breakdown", "started_provision_hash",
+	CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey, WorkStartedKey, WorkLadderKey, ContentHoldKey, "execution_claim_started", "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
 	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",

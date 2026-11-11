@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type rigResponse struct {
@@ -41,7 +42,10 @@ type gitStatus struct {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) rigResponse {
+// Each agent row is observed on the runtime session it runs under, as
+// sessions resolves it; pools (the request's one listing) short-circuits a
+// session it attests absent.
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -54,11 +58,15 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
-			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			if listedAbsent(pools, sessionName) {
-				continue
-			}
-			obs := observeProviderSession(sp, sessionName, processNames())
+			var obs worker.LiveObservation
+			sessions.resolve(a, ea.qualifiedName, func(sessionName string) bool {
+				obs = worker.LiveObservation{}
+				if listedAbsent(pools, sessionName) {
+					return false
+				}
+				obs = observeProviderSession(sp, sessionName, processNames())
+				return obs.Running
+			})
 			if obs.Running {
 				runningCount++
 			}

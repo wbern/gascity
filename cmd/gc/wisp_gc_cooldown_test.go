@@ -110,7 +110,7 @@ func orphanLogs(t *testing.T) *bytes.Buffer {
 func orphanRuntimeFixture(t *testing.T) (*CityRuntime, *orphanCountingStore, *orphanTestClock) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	withReapOrphansEnforced(t, false)
 	city := t.TempDir()
 	tomlPath := filepath.Join(city, "city.toml")

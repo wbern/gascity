@@ -297,6 +297,9 @@ esac
 					return nil, err
 				}
 				return json.Marshal([]beads.Bead{bead})
+			case len(args) > 0 && args[0] == "dep":
+				// The claim announcer confirms the bead's edges before its events.
+				return []byte("[]"), nil
 			default:
 				t.Fatalf("unexpected trigger command: %v", args)
 				return nil, nil

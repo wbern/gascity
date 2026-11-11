@@ -126,3 +126,35 @@ These apply to all code in this project — frontend and server:
   Take advantage of that feedback to fix those errors!
 - **Use Centralized Semantic Constant Values** using enums and constants instead
   of spreading magic numbers throughout the code.
+
+## Beads Task Integration
+
+This project uses `bd` (beads) for task tracking and development workflow.
+Every development session MUST follow these rules:
+
+1. **Start with context** - Run `bd ready` to find available work
+2. **Claim your work** - Run `bd update <id> --claim` before starting
+3. **Keep beads updated** - Update status as you make progress
+4. **Coordinate schema and Dolt migrations deliberately** - Beads in gascity
+   stores tasks in shared Dolt SQL databases (`beads_*.db`), tracked by git in
+   `.beads/`. The beads client auto-commits metadata on writes.
+
+   Never run `bd dolt pull`, `bd dolt push`, or `bd dolt remote add` here -- they fail and re-introduce
+   a doomed `origin` remote (ga-9wsri). Use `git push` only.
+
+   That same no-remote shape is why bd >= 1.3.0 refuses to auto-apply pending
+   schema migrations to gascity's shared Dolt sql-server: migrating would lock
+   out every co-resident bd still on the old schema. If a bd WRITE fails with a
+   refusal naming pending migrations, the sanctioned fix is `bd migrate schema`
+   run once by a designated migrator after every bd client is upgraded -- NOT
+   `bd dolt pull`, and not an ad-hoc `BD_ALLOW_REMOTE_MIGRATE=1`.
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds

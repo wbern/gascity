@@ -65,12 +65,24 @@ type ExecutionFence struct {
 
 // WorkStartedEntry records work a session has handed to a turn. Gen identifies
 // the session incarnation, not a work claim generation or publication token.
+// Store is the claim's store ref (cmd/gc claimStoreRef's form), "" when the
+// hook could not resolve it; an entry with no store names its bead in every
+// store.
+//
+// Resident marks an entry whose Store is the store the claim RESIDES in, as
+// the hook proved it, spelled as the census spells it, which is how every
+// reader keys the claim. An unmarked entry's Store is the work LEG the hook
+// ran in, which it could not prove the bead resides in: every entry an older
+// hook wrote, and this hook's for an adoption on a city that relocates classes
+// whose residence it could not prove. So an unmarked entry also names its bead
+// under any store, at its own generation only (NamesAt).
 type WorkStartedEntry struct {
-	Store string    `json:"store"`
-	Bead  string    `json:"bead"`
-	Gen   int64     `json:"gen"`
-	At    time.Time `json:"at"`
-	Via   string    `json:"via"`
+	Store    string    `json:"store"`
+	Bead     string    `json:"bead"`
+	Gen      int64     `json:"gen"`
+	At       time.Time `json:"at"`
+	Via      string    `json:"via"`
+	Resident bool      `json:"resident,omitempty"`
 }
 
 // WorkStarted is the durable execution record. Entries survive runtime restarts
@@ -288,17 +300,6 @@ func DecodeWorkStarted(raw string) (WorkStarted, error) {
 	return cell, nil
 }
 
-// Names reports whether this record names a bead in a store. An unknown store
-// matches every store; uncertainty retains work rather than releasing it.
-func (w WorkStarted) Names(store, bead string) bool {
-	for _, entry := range w.Claims {
-		if entry.Bead == bead && (entry.Store == "" || store == "" || entry.Store == store) {
-			return true
-		}
-	}
-	return false
-}
-
 // RecordStartedClaim records execution only while the exact runtime incarnation
 // still owns the session row. It requires a real conditional writer and never
 // falls back to an unfenced metadata write. This records session execution
@@ -376,7 +377,7 @@ func (s *Store) reserveClaimRelease(id string, fence ExecutionFence, proposed Cl
 			return false, ErrDrainAdmissionChanged
 		}
 		held := slices.Contains(labels, beadmeta.HoldMayorLabel) || slices.Contains(labels, beadmeta.HoldExternalLabel)
-		if !held && (cell.Names(proposed.Store, proposed.Bead) || row.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] == proposed.Bead || row.Metadata[CurrentBeadIDKey] == proposed.Bead) {
+		if !held && (cell.Names(proposed.Store, proposed.Bead, 0) || row.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] == proposed.Bead || row.Metadata[CurrentBeadIDKey] == proposed.Bead) {
 			return false, ErrClaimAlreadyStarted
 		}
 		for _, pending := range cell.Releases {

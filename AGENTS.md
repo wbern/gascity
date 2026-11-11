@@ -17,10 +17,6 @@ expressed — as beads composed into formulas — was powerful enough to abstrac
 roles into configuration. Gas City extracts that insight into an SDK where Gas
 Town becomes one configuration among many.
 
-## Fork integration
-
-This fork integrates Gas City, T3 Code and a DoltLite-backed beads store. Keep `upstream/main` easy to merge: prefer new files and small adapters over broad edits to upstream-owned code. Read `engdocs/contributors/fork-integration.md` before changing anything fork-specific.
-
 This file holds only what applies everywhere. Rules for a specific area live
 next to that code; read the matching file before changing it.
 
@@ -33,7 +29,6 @@ next to that code; read the matching file before changing it.
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
-| `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
@@ -46,7 +41,7 @@ next to that code; read the matching file before changing it.
 | Bazel builds | `engdocs/bazel-quickstart.md` |
 | Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
 | What is planned | `ROADMAP.md` |
-| Anything fork-specific (T3 bridge, DoltLite beads, upstream alignment, feature archaeology) or this fork's architecture rules | `engdocs/contributors/fork-integration.md` |
+| This fork (T3 bridge, DoltLite beads, merge discipline) | `engdocs/contributors/fork-integration.md` |
 
 ## How work flows here
 
@@ -252,10 +247,11 @@ becoming more useful as models improve — it becomes LESS useful instead.
 
 ## Build and test
 
-**Bazel is the build and test system; `bazel test` is what CI gates on**
-(`.github/workflows/bazel.yml`). Plain `go test` is a quick inner-loop
-convenience only: it skips nogo lint/vet, formatting, generated-artifact
-and policy targets, and a green `go test` is not evidence a change passes CI.
+**Bazel is the build and test system, and `bazel test` is authoritative:**
+it is what CI gates on (`.github/workflows/bazel.yml`). Agents run tests
+only with `bazel test`, also while iterating on one package. Do not run
+`go test`: it skips nogo lint/vet, formatting, generated-artifact and policy
+targets, and a green `go test` is not evidence a change passes CI.
 
 | Tier | Command (`make` alias) |
 |---|---|
@@ -266,20 +262,65 @@ and policy targets, and a green `go test` is not evidence a change passes CI.
 | `test/integration` (evidence-only in CI) | `bazel test --config=integration //test/integration:integration_test` |
 | Docs sync | `bazel test //test/docsync:docsync_test` (`make check-docs`) |
 
+- **Targets.** A package's default test target is `//<dir>:<leaf>_test`,
+  `<leaf>` being the last element of `<dir>` (`//cmd/gc:gc_test`); a subtree
+  is `//internal/beads/...`. Some packages add targets the default does not
+  cover, such as `//test/integration:integration_unsharded_test` and cmd/gc's
+  `gc_sim_*` corpus: the package's `BUILD.bazel` lists them. Bazel runs only
+  the test files `BUILD.bazel` lists; run `make bazel-sync` after adding one.
+- **Flags.** `go test`'s `-run X` is `--test_filter=X` (one per invocation,
+  for every target named), `-v` is
+  `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` (rules_go's test
+  wrapper then runs the binary with `-test.v`, and the log and `test.xml`
+  list every test that ran), `-count=N` is `--test_arg=-test.count=N`
+  (`--runs_per_test=N` runs N separate actions instead), `VAR=x go test` is
+  `--test_env=VAR=x` and `-tags integration` is `--config=integration`. On a
+  sharded target, `--test_sharding_strategy=disabled` runs a narrow filter
+  as one action.
+- **Evidence.** Results are cached by input: an unchanged target returns its
+  cached result, which is the same evidence, so do not add
+  `--nocache_test_results` to re-prove a pass (timing runs are the
+  exception: TESTING.md "Timing objectives and resource ratchets"). A target
+  also passes when its filter matches nothing, its tests skip, or its
+  `BUILD.bazel` omits a test file: when a filtered run is your evidence, run
+  it with `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` and check the
+  log for `--- PASS: <TestName>`. Re-run with the same flags: `--test_output`
+  and `--test_summary` only change what is printed, but any other change to
+  `--test_arg`, `--test_env` or `--test_filter` is a new cache key, and
+  `--test_arg=-test.v` keys the same verbose run apart from everyone else's.
+- **Regenerating checked files** (`-update`, `-update-golden`,
+  `UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
+  sandbox, so `--test_arg=-update` can pass while changing nothing. Run the
+  generator with `bazel run` from the repository root (its own flag in place
+  of `-update` below, or its environment switch, such as `UPDATE_GOLDEN=1`,
+  in front), check that `git status` lists every new and changed file, then
+  `bazel test` the result:
+
+  ```bash
+  GC_TEST_REPO_ROOT="$PWD" bazel run --test_sharding_strategy=disabled \
+    //<dir>:<leaf>_test -- -test.run='^<TestName>$' -update
+  ```
+
+  A relative write reaches your checkout only through a runfiles link, and
+  those exist only for files already there: `touch` each new golden first,
+  or the generator writes it under `bazel-out` and the run still passes.
+
 - **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
-  plain `bazel test` executes remotely; never run whole-repo `go test`
-  fan-out on shared hosts. Contributors use `--config=fork-cache` (anonymous
-  read-only cache, local execution of misses); maintainers with an rbe-west
-  client certificate use `--config=remote-exec` (ask your human before
-  adding either to `.bazelrc.local`). Details: TESTING.md
-  "Bazel cache tiers" and `engdocs/bazel-quickstart.md`.
+  plain `bazel test` executes remotely. Contributors use
+  `--config=fork-cache` (anonymous read-only cache, local execution of
+  misses); maintainers with an rbe-west client certificate use
+  `--config=remote-exec` (ask your human before adding either to
+  `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
+  `engdocs/bazel-quickstart.md`.
 - **BUILD files.** After changing imports or adding packages or files, run
   `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
   fails otherwise. Never commit machine-specific endpoints; they belong in
   `.bazelrc.local`.
-- **Go-native twins** (`make test-go`, `make check-go`, `make
-  test-acceptance-go`, `make test-integration-go`, `make test-fast-parallel`)
-  exist for offline work and hosts Bazel does not serve (macOS jobs).
+- **Go-native twins** (the `-go` make targets and the sharded runners of
+  TESTING.md "Cross-category runners, timing, and resource isolation") are
+  for humans working offline and for hosts Bazel does not serve: the macOS
+  CI jobs, and Linux hosts that cannot load the pinned ICU runtime
+  (TESTING.md). An agent runs them only on such a host.
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
@@ -312,33 +353,5 @@ Before considering any task complete:
 <!-- BEGIN BEADS INTEGRATION -->
 ## Beads Task Integration (MANDATORY)
 
-This project uses `bd` (beads) for task tracking and development workflow.
-Every development session MUST follow these rules:
-
-1. **Start with context** - Run `bd ready` to find available work
-2. **Claim your work** - Run `bd update <id> --claim` before starting
-3. **Keep beads updated** - Update status as you make progress
-4. **Coordinate schema and Dolt migrations deliberately** - Beads in gascity
-   stores tasks in shared Dolt SQL databases (`beads_*.db`), tracked by git in
-   `.beads/`. The beads client auto-commits metadata on writes.
-
-   Never run `bd dolt pull`, `bd dolt push`, or `bd dolt remote add` here -- they fail and re-introduce
-   a doomed `origin` remote (ga-9wsri). Use `git push` only.
-
-   That same no-remote shape is why bd >= 1.3.0 refuses to auto-apply pending
-   schema migrations to gascity's shared Dolt sql-server: migrating would lock
-   out every co-resident bd still on the old schema. If a bd WRITE fails with a
-   refusal naming pending migrations, the sanctioned fix is `bd migrate schema`
-   run once by a designated migrator after every bd client is upgraded -- NOT
-   `bd dolt pull`, and not an ad-hoc `BD_ALLOW_REMOTE_MIGRATE=1`.
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+Track work with `bd` (`bd ready`, `bd update <id> --claim`); rules in `engdocs/contributors/fork-integration.md`.
 <!-- END BEADS INTEGRATION -->

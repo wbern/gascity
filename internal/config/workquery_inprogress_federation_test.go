@@ -10,12 +10,13 @@ import (
 // city-wide reader and propagates a dead leg, so a session can see its own claim
 // wherever that claim lives.
 //
-// The byte-identity control below is the other half. Together they say: the swap
-// happens on exactly the topologies that need it and nowhere else.
+// The single-store control below is the other half. Together they say: the
+// reader swap happens on exactly the topologies that need it and nowhere else.
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1) || exit $?; `
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1)` +
+			workQueryReadFailure("gc ready --status in_progress") + `; `
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
@@ -26,7 +27,7 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	if strings.Contains(federated, bdListInProgressCommand) {
 		t.Errorf("federated crash-recovery tier still shells %q, so a relocated claim stays invisible: %q", bdListInProgressCommand, federated)
 	}
-	if !strings.Contains(federated, `|| exit $?`) {
+	if !strings.Contains(federated, `exit "$gc_rc"`) {
 		t.Errorf("federated crash-recovery tier does not propagate a dead leg; an empty resume answer on a dead leg is the silent blindness this fixes: %q", federated)
 	}
 	// The federated reader already carries blocked_by, so the shell enrichment
@@ -42,14 +43,15 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 func TestAssignedInProgressTierUsesCompactSingleStoreRead(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
-		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1) || exit $?; `
+		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --brief --exclude-label='hold:mayor' --exclude-label='hold:external' --exclude-label='held' --exclude-label='hold:human' --limit=1)` +
+			workQueryReadFailure("bd list --status in_progress") + `; `
 		if got != want {
 			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant compact work discovery\n  %q", shellVar, got, want)
 		}
 	}
-	// The single-store enrichment must not grow the presence key either: its
-	// reader is `bd list`, whose rows never carry blocked_by, so the branch could
-	// only ever be dead shell on the path every deployment runs.
+	// The single-store enrichment must not grow the presence key: its reader is
+	// `bd list`, whose rows never carry blocked_by, so the branch could only ever
+	// be dead shell on the path every deployment runs.
 	single := inProgressBlockedByEnrichmentScript(false, true)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)

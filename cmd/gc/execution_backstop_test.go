@@ -73,6 +73,9 @@ type executionBackstopFixture struct {
 	// workStore, when set, is the store handle the assigned-work snapshot
 	// carries for each claim (and so the one revalidate reads through).
 	workStore beads.Store
+	// workStoreRef is the store ref the assigned-work snapshot carries for
+	// each claim; "" is the city store.
+	workStoreRef string
 	// sessionStore, when set, is the store the backstop reads and writes the
 	// session row through, in place of store.
 	sessionStore beads.Store
@@ -155,6 +158,7 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	stores := make([]beads.Store, len(work))
 	refs := make([]string, len(work))
 	for i := range work {
+		refs[i] = f.workStoreRef
 		stores[i] = f.store
 		if f.workStore != nil {
 			stores[i] = f.workStore

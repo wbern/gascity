@@ -4,7 +4,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -106,7 +105,7 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	return `{ ` +
 		`bd list --assignee=` + a.QualifiedName() +
@@ -132,7 +131,7 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +
@@ -386,30 +385,20 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
-	// Protect recovery commands: both topologies now propagate their errors,
-	// unlike the older ready tiers normalized below.
-	recovery := map[string]string{}
 	for _, shellVar := range []string{"id", "cand"} {
-		for _, limit := range []int{1, 20} {
-			marker := "__recovery_" + shellVar + "_" + strconv.Itoa(limit) + "__"
-			from := assignedInProgressTierCommandWithLimit(shellVar, QueryTopology{FederatedReady: true}, limit)
-			recovery[marker] = assignedInProgressTierCommandWithLimit(shellVar, QueryTopology{}, limit)
-			federated = replaceFragment(federated, from, marker)
-		}
+		federated = replaceFragment(federated,
+			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+		federated = replaceFragment(federated,
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
 	}
+	// Both topologies fail a read the same way; only the reader the failure
+	// clause names differs.
+	federated = replaceFragment(federated,
+		workQueryReadFailure(gcReadyCommand),
+		workQueryReadFailure(bdReadyCommand))
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
-	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	// Suffix-matched so one pair covers both the routed tier (no explicit
-	// --sort; the reader's canonical priority order decides) and the
-	// migration fallback (which keeps --sort oldest for its retirement window).
-	federated = strings.ReplaceAll(federated, `--limit=20) || exit $?`, `--limit=20 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--limit=20 2>/dev/null) || exit $?`, `--limit=20 2>/dev/null)`)
-	// The named session's legacy graph-step fallback scans the generic routed
-	// read unbounded (namedGraphV2RoutedReadyTierScript).
-	federated = strings.ReplaceAll(federated, `--limit=0) || exit $?`, `--limit=0 2>/dev/null)`)
-	for marker, command := range recovery {
-		federated = replaceFragment(federated, marker, command)
-	}
 	return federated
 }
 

@@ -1214,6 +1214,11 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("bd_guard") {
 		base.BdGuard = fragment.BdGuard
 	}
+	// ops.authoritative is one list, not a gate per kind: a fragment that
+	// defines it replaces the base's list.
+	if fragMeta.IsDefined("ops", "authoritative") {
+		base.Ops.Authoritative = fragment.Ops.Authoritative
+	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
 	}

@@ -1966,7 +1966,7 @@ func TestS1ControllerDrainIssueAndTimeoutUseCapturedAttempt(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			env := newReconcilerTestEnv(t)
 			mem := beads.NewMemStore()
-			if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			interleaved := &s1ControllerStopInterleaveStore{MemStore: mem, beforeAccept: true}
@@ -2073,7 +2073,7 @@ func TestS1DelayedControllerPublicationCannotAdoptReplacementDrain(t *testing.T)
 	env := newReconcilerTestEnv(t)
 	mem := beads.NewMemStore()
 	env.store = mem
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
@@ -2143,7 +2143,7 @@ func TestS1DelayedControllerPublicationCannotAdoptReplacementDrain(t *testing.T)
 		t.Fatal("old publication adopted/deleted replacement intent or timed out resumed runtime")
 	}
 	_, cell, _, err := front.ExecutionEvidence(seat.ID)
-	if err != nil || cell.Drain == nil || cell.Drain.Attempt != replacement.admissionAttempt || cell.Drain.Accepted || cell.Drain.Committed || !cell.Names("", "fresh-work") {
+	if err != nil || cell.Drain == nil || cell.Drain.Attempt != replacement.admissionAttempt || cell.Drain.Accepted || cell.Drain.Committed || !cell.Names("", "fresh-work", 0) {
 		t.Fatalf("replacement or active evidence changed: %+v %v", cell, err)
 	}
 	seat, err = mem.Get(seat.ID)
@@ -2161,7 +2161,7 @@ func TestS1RecoveredCancellationRejectsStalePublishedAttempt(t *testing.T) {
 		for _, stale := range []bool{false, true} {
 			t.Run(fmt.Sprintf("assigned-%v/stale-%v", assigned, stale), func(t *testing.T) {
 				env := newReconcilerTestEnv(t)
-				if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+				if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				seat := env.createSessionBead("worker", "worker")
@@ -2251,7 +2251,7 @@ func TestS1RecoveredCancellationCannotMixReasonAndReplacementAttempt(t *testing.
 	for _, reason := range []string{"config-drift", "no-wake-reason"} {
 		t.Run(reason, func(t *testing.T) {
 			env := newReconcilerTestEnv(t)
-			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			seat := env.createSessionBead("worker", "worker")

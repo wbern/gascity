@@ -15714,7 +15714,7 @@ func TestS1ReconcilerRejectsCancelledOrSupersededAck(t *testing.T) {
 				}
 			}
 
-			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			front := sessionFrontDoor(env.store)
@@ -15826,7 +15826,7 @@ func TestS1StaleAckCleanupAllowsRecovery(t *testing.T) {
 			seat := env.createSessionBead(name, "worker")
 			env.markSessionActive(&seat)
 			env.setSessionMetadata(&seat, map[string]string{namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "worker", namedSessionModeMetadata: "always", "session_key": "prior-provider-conversation"})
-			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			front := sessionFrontDoor(env.store)
@@ -15951,7 +15951,7 @@ func TestS1ControllerAckStopAndCancellationShareAcceptance(t *testing.T) {
 		t.Run(fmt.Sprintf("cancel-before-accept-%v", beforeAccept), func(t *testing.T) {
 			env := newReconcilerTestEnv(t)
 			mem := beads.NewMemStore()
-			if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			interleaved := &s1ControllerStopInterleaveStore{MemStore: mem, beforeAccept: beforeAccept}
@@ -16030,7 +16030,7 @@ func TestS1RecoveredConfigDriftAttachmentCancelsExactAttempt(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
-			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			env.addRunningWorkerDesiredWithNewConfig()

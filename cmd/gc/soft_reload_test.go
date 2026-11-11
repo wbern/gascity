@@ -565,7 +565,7 @@ func TestS1SoftReloadCancelsAdmissionBeforeAcceptingHash(t *testing.T) {
 	for _, scenario := range []string{"cancel", "accepted-stop", "corrupt-evidence", "cas-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := &s1SoftReloadCASFailureStore{MemStore: beads.NewMemStore()}
-			if err := beads.StampOpenedStore(store, "memory", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(store, "memory", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
@@ -648,7 +648,7 @@ func TestS1SoftReloadRecoversExactConfigDriftAttemptWithoutTracker(t *testing.T)
 		for _, nilTracker := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/nil-tracker-%v", scenario, nilTracker), func(t *testing.T) {
 				store := &s1SoftReloadCASFailureStore{MemStore: beads.NewMemStore()}
-				if err := beads.StampOpenedStore(store, "memory", gate.Require, nil, nil); err != nil {
+				if err := beads.StampOpenedStore(store, "memory", gate.Require, false, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
@@ -850,7 +850,7 @@ func TestS1SoftReloadRecoversExactConfigDriftAttemptWithoutTracker(t *testing.T)
 
 func TestS1SoftReloadHashWriteRejectsReplacementDrain(t *testing.T) {
 	store := &s1SoftReloadCASFailureStore{MemStore: beads.NewMemStore()}
-	if err := beads.StampOpenedStore(store, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old-cmd"})
