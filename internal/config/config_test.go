@@ -2019,7 +2019,7 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
 }
@@ -2149,7 +2149,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --exclude-type=message --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2161,7 +2161,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --exclude-type=message --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2173,7 +2173,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2609,7 +2609,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "held" --exclude-label "hold:human" --exclude-label "human" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
-		`bd ready --assignee="$id" --exclude-type=message --json`,
+		`bd ready --assignee="$id" --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantPresent {
@@ -3045,7 +3045,7 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 func TestEffectiveWorkQuerySkipsAssignedMessageBeadsBeforeRoutedDemand(t *testing.T) {
 	agent := Agent{Name: "worker"}
 	query := agent.EffectiveWorkQuery()
-	if !strings.Contains(query, `bd ready --assignee="$id" --exclude-type=message --json --limit=1`) {
+	if !strings.Contains(query, `bd ready --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveWorkQuery() = %q, want assigned-ready tier to exclude message beads before falling through to routed demand", query)
 	}
 }
@@ -3061,7 +3061,7 @@ func TestEffectiveWorkQuerySkipsEphemeralAssignedMessageBeforeRoutedDemand(t *te
 		"GC_SESSION_NAME":   "worker-session",
 	}, `#!/bin/sh
 case "$*" in
-  *"ready --assignee=worker-session --exclude-type=message"*) printf '[]' ;;
+  *"ready --assignee=worker-session"*) printf '[]' ;;
   *"query --json ephemeral=true AND status=open"*) printf '[{"id":"mail-wisp","status":"open","issue_type":"message","assignee":"worker-session"}]' ;;
   *"ready"*"gc.routed_to=worker"*"gc.formula_contract=graph.v2"*) printf '[{"id":"graph-step","status":"open","issue_type":"task","metadata":{"gc.routed_to":"worker","gc.formula_contract":"graph.v2","gc.root_bead_id":"root","gc.step_ref":"workflow.step"}}]' ;;
   *) printf '[]' ;;

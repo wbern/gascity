@@ -221,6 +221,7 @@ const (
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonAdmissionGate         TraceReasonCode = "admission_gate"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
+	TraceReasonStartGateDeferred     TraceReasonCode = "start_gate_deferred"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
 	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"

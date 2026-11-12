@@ -15,6 +15,9 @@ OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
 BDSHIM    := bdshim
+# COMPANION is gc's OSC 7501 capture companion. It is pure Go and is built,
+# installed and removed alongside gc, which looks it up next to itself.
+COMPANION  := gc-osc7501
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -151,17 +154,20 @@ BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
 bazel-tmpdir:
 	@mkdir -p /tmp/bt
 
-## build: compile gc binary with version metadata (CGO_ENABLED=0 by default —
-## server-mode/DoltLite thin client; override CGO_ENABLED=1 for a native build)
+## build: compile gc, its bdshim thin client and its gc-osc7501 companion with version
+## metadata (CGO_ENABLED=0 by default — server-mode/DoltLite thin client; override
+## CGO_ENABLED=1 for a native build)
 build: check-beads-bd-version
 	CGO_ENABLED=$(CGO_ENABLED) go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 	@# bdshim: the tiny (~7MB) pure-Go bd thin client installed beside gc. It is
 	@# always CGO-free (no Dolt/ICU) and stripped; when present beside gc the
 	@# supervisor points the per-city `bd` shim at it, skipping gc's ~200ms boot.
 	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -o $(BUILD_DIR)/$(BDSHIM) ./cmd/bdshim
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(COMPANION) ./cmd/gc-osc7501
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BDSHIM)
+	@GC_SIGN_IDENTIFIER=com.gascity.gc-osc7501 scripts/sign-darwin-local.sh $(BUILD_DIR)/$(COMPANION)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -192,25 +198,31 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
-## install: build and install gc to GOPATH/bin (same location as go install)
+## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
-		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
-		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
-		chmod 0755 "$$tmp"; \
-		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
-		trap - EXIT INT TERM HUP
-	@# Migrate from old install location: replace stale binary with symlink
+		for bin in $(BINARY) $(COMPANION); do \
+			tmp="$(INSTALL_DIR)/.$$bin.tmp.$$$$"; \
+			trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+			cp -f "$(BUILD_DIR)/$$bin" "$$tmp"; \
+			chmod 0755 "$$tmp"; \
+			mv -f "$$tmp" "$(INSTALL_DIR)/$$bin"; \
+			trap - EXIT INT TERM HUP; \
+		done
+	@# Migrate from old install location: replace stale binary with symlink.
+	@# The companion is linked beside gc, because gc looks for it next to the
+	@# path it was started by.
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
+		for bin in $(BINARY) $(COMPANION); do \
+			if [ -f "$(HOME)/.local/bin/$$bin" ] || [ -L "$(HOME)/.local/bin/$$bin" ]; then \
+				rm -f "$(HOME)/.local/bin/$$bin"; \
+			fi; \
+			if [ -d "$(HOME)/.local/bin" ]; then \
+				ln -sf "$(INSTALL_DIR)/$$bin" "$(HOME)/.local/bin/$$bin"; \
+				echo "Symlinked $(HOME)/.local/bin/$$bin -> $(INSTALL_DIR)/$$bin"; \
+			fi; \
+		done; \
 	fi
 	@# Install bdshim beside gc (same dir) so bdshimBesideGC finds it and the
 	@# per-city `bd` shim targets it. Mirror the .local/bin symlink so it is beside
@@ -226,8 +238,7 @@ install: check-self-contained
 		ln -sf "$(INSTALL_DIR)/$(BDSHIM)" "$(HOME)/.local/bin/$(BDSHIM)"; \
 		echo "Symlinked $(HOME)/.local/bin/$(BDSHIM) -> $(INSTALL_DIR)/$(BDSHIM)"; \
 	fi
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
-	@echo "Installed $(BDSHIM) to $(INSTALL_DIR)/$(BDSHIM)"
+	@echo "Installed $(BINARY), $(COMPANION) and $(BDSHIM) to $(INSTALL_DIR)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -240,7 +251,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(BDSHIM)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(BDSHIM) $(BUILD_DIR)/$(COMPANION)
 
 ## complexity: print an advisory cyclomatic complexity report for shipped Go
 complexity:

@@ -41,7 +41,6 @@ next to that code; read the matching file before changing it.
 | Bazel builds | `engdocs/bazel-quickstart.md` |
 | Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
 | What is planned | `ROADMAP.md` |
-| This fork (T3 bridge, DoltLite beads, merge discipline) | `engdocs/contributors/fork-integration.md` |
 
 ## How work flows here
 
@@ -144,6 +143,9 @@ Violating any fails the build. Details live in the linked files.
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
   sessions through `worker.Handle`
   (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Typed store boundary (active migration).** Outside the residency
+  layer, code takes typed class handles, not a raw `beads.Store`, and uses
+  `beads.As` for capabilities (`storeclass` lint, shrink-only baseline).
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).
@@ -351,7 +353,5 @@ Before considering any task complete:
 - Tests cover happy path AND edge cases
 
 <!-- BEGIN BEADS INTEGRATION -->
-## Beads Task Integration (MANDATORY)
-
-Track work with `bd` (`bd ready`, `bd update <id> --claim`); rules in `engdocs/contributors/fork-integration.md`.
+Beads rules: `engdocs/contributors/fork-integration.md`
 <!-- END BEADS INTEGRATION -->

@@ -186,7 +186,14 @@ func getFromStores(id string, stores []beads.Store) (beads.Bead, beads.Store, er
 	var hardErr, notFoundErr error
 	for _, s := range stores {
 		// Live read: attachment admission decisions must not trust a cached row.
-		b, err := beads.HandlesFor(s).Live.Get(id)
+		// A first-owner probe: the attachment lives in the graph store or, for a
+		// v1 poured molecule, in the work store, so a miss passes on.
+		var b beads.Bead
+		err := beads.FederatedRead(func() error {
+			var getErr error
+			b, getErr = beads.HandlesFor(s).Live.Get(id)
+			return getErr
+		})
 		if err == nil {
 			return b, s, nil
 		}

@@ -517,6 +517,10 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	if store == nil {
 		t.Fatalf("openCityStore = nil, code=%d", code)
 	}
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir")
 	if err != nil {
@@ -2101,6 +2105,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 }
 
 func TestSessionListJSONAPIRowsMatchLocalSafeFields(t *testing.T) {
+	t.Skip(skipForkUnifiedSessionListRendering)
 	createdAt := time.Date(2026, 10, 28, 12, 0, 0, 123456789, time.UTC)
 	lastActive := createdAt.Add(time.Minute)
 	lastNudge := createdAt.Add(2 * time.Minute)
@@ -2128,23 +2133,17 @@ func TestSessionListJSONAPIRowsMatchLocalSafeFields(t *testing.T) {
 	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{
 		AgeSeconds: 1.25,
 		Body: []SessionView{{
-			ID:                   info.ID,
-			Template:             info.Template,
-			State:                string(info.State),
-			Title:                info.Title,
-			Alias:                info.Alias,
-			Rig:                  "alpha",
-			AgentName:            info.AgentName,
-			Provider:             info.Provider,
-			Transport:            info.Transport,
-			SessionName:          info.SessionName,
-			WorkDir:              info.WorkDir,
-			WorkerDir:            "/work/tree",
-			CreatedAt:            info.CreatedAt.Format(time.RFC3339Nano),
-			LastActive:           info.LastActive.Format(time.RFC3339Nano),
-			LastNudgeDeliveredAt: info.LastNudgeDeliveredAt.Format(time.RFC3339Nano),
-			Attached:             info.Attached,
-			Running:              true,
+			ID:          info.ID,
+			Template:    info.Template,
+			State:       string(info.State),
+			Title:       info.Title,
+			Alias:       info.Alias,
+			SessionName: info.SessionName,
+			WorkDir:     info.WorkDir,
+			CreatedAt:   info.CreatedAt.Format(time.RFC3339Nano),
+			LastActive:  info.LastActive.Format(time.RFC3339Nano),
+			Attached:    info.Attached,
+			Running:     true,
 		}},
 	}, true, &routed); code != 0 {
 		t.Fatalf("renderSessionListFromAPI = %d, want 0", code)
@@ -3490,9 +3489,8 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 		t.Errorf("sessions len = %d, want 1:\n%s", len(arr), stdout.String())
 	}
 
-	// Fallback path must omit _cache_age_s. The fallback emits the
-	// legacy bare array shape, so json.Unmarshal into map[string]any
-	// fails; that itself proves the envelope is not present.
+	// Fallback path must omit _cache_age_s: it renders the local result
+	// (schema_version, ok, filters, sessions, summary), not the API envelope.
 	stdout.Reset()
 	stderr.Reset()
 	if code := routeSessionList(cityPath, "", "", nil, "controller-down", true, &stdout, &stderr); code != 0 {
@@ -3696,7 +3694,18 @@ func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
 	}
 }
 
+// skipForkUnifiedSessionListRendering names why four fork tests are skipped
+// (T8): the fork rendered the API path of `gc session list --json` with the
+// local rendering's filters, summary and derived closed/name fields, so one
+// shape served both routes. Upstream (T8) documents and schema-validates two
+// renderings instead (local: filters, sessions, summary; API: _cache_age_s and
+// sessions), and T7 already routes a supervisor-hosted city to the local
+// rendering. The upstream design is taken; the fork's unified shape and its
+// sessionListAPIRows projection are dropped. PROVISIONAL (William).
+const skipForkUnifiedSessionListRendering = "fork's unified session-list API rendering replaced by upstream's two schema-validated renderings (T8)"
+
 func TestSessionListAPIRowsDeriveClosedIdentity(t *testing.T) {
+	t.Skip(skipForkUnifiedSessionListRendering)
 	for _, tc := range []struct{ alias, runtime, want string }{
 		{"alias", "runtime", "alias"}, {"", "runtime", "runtime"}, {"", "", "id"},
 	} {
@@ -3708,6 +3717,7 @@ func TestSessionListAPIRowsDeriveClosedIdentity(t *testing.T) {
 }
 
 func TestSessionListAPIPreservesEnvelope(t *testing.T) {
+	t.Skip(skipForkUnifiedSessionListRendering)
 	var out bytes.Buffer
 	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{AgeSeconds: 1.25, Body: []SessionView{{ID: "closed-session", State: "closed"}}}, true, &out); code != 0 {
 		t.Fatal(code)
@@ -3729,6 +3739,7 @@ func TestSessionListAPIPreservesEnvelope(t *testing.T) {
 }
 
 func TestSessionListAPIDoesNotTreatUnknownStateAsClosed(t *testing.T) {
+	t.Skip(skipForkUnifiedSessionListRendering)
 	rows := sessionListAPIRows([]SessionView{{ID: "unclassified"}})
 	if len(rows) != 1 || rows[0].Closed {
 		t.Fatalf("unknown state inferred closed: %+v", rows)

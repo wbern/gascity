@@ -39,13 +39,15 @@ const (
 	staleStagedDirAge = time.Hour
 )
 
-// runNewSession issues a prepared new-session argv, keeping secret environment
-// values out of the process argument vector.
+// runNewSession issues a prepared new-session command list (the new-session
+// argv, then any commands that must run before tmux reads the pane's output),
+// keeping secret environment values out of the process argument vector.
 //
 // An all-inert environment keeps the plain argv path: it needs no writable temp
 // dir, so the common case cannot fail on a read-only filesystem. When a secret
 // IS present and the file cannot be written, this fails closed rather than
 // falling back to argv — a silent fallback is exactly the leak we are closing.
+// A one-command list renders exactly as that command alone.
 //
 // serverPresent carries the new-session preflight's witness that a named server
 // answered. In that case every invocation runs with tmux's -N (see
@@ -54,20 +56,21 @@ const (
 // verified absent/stale-socket path may start the first server.
 //
 // It returns the command's output (new-session -P prints the new pane's id,
-// which source-file passes through).
-func (t *Tmux) runNewSession(args []string, env map[string]string, serverPresent bool) (string, error) {
+// which source-file passes through). When a later command of a list fails,
+// the error is a *tmuxOutputError carrying that output: the session exists.
+func (t *Tmux) runNewSession(cmds [][]string, env map[string]string, serverPresent bool) (string, error) {
 	if !runtime.EnvHasArgvSecrets(env) {
 		if serverPresent {
-			return t.runNoStartOutput(args...)
+			return t.runNoStartOutput(tmuxArgvList(cmds)...)
 		}
-		return t.run(args...)
+		return t.run(tmuxArgvList(cmds)...)
 	}
 	if serverPresent {
-		return t.runCommandFileWith(t.runNoStartOutput, args)
+		return t.runCommandListFileWith(t.runNoStartOutput, cmds)
 	}
 	// source-file needs a server to talk to and, unlike new-session, cannot
 	// create one, so start-server leads.
-	return t.runFromCommandFileOutput(args, "start-server", ";")
+	return t.runCommandListFromFile(cmds, "start-server", ";")
 }
 
 // runFromCommandFile executes one tmux command by writing it to a private
@@ -83,20 +86,26 @@ func (t *Tmux) runFromCommandFile(args []string, lead ...string) error {
 
 // runFromCommandFileOutput is runFromCommandFile returning the output.
 func (t *Tmux) runFromCommandFileOutput(args []string, lead ...string) (string, error) {
-	return t.runCommandFileWith(t.run, args, lead...)
+	return t.runCommandListFromFile([][]string{args}, lead...)
 }
 
-// runCommandFileWith is [Tmux.runFromCommandFileOutput] with the tmux invocation
-// supplied by the caller, so a witnessed-server create can source the file
-// through [Tmux.runNoStartOutput].
-func (t *Tmux) runCommandFileWith(run func(...string) (string, error), args []string, lead ...string) (string, error) {
+// runCommandListFromFile is runFromCommandFileOutput for a command list,
+// written as one line with bare ";" separators.
+func (t *Tmux) runCommandListFromFile(cmds [][]string, lead ...string) (string, error) {
+	return t.runCommandListFileWith(t.run, cmds, lead...)
+}
+
+// runCommandListFileWith is [Tmux.runCommandListFromFile] with the tmux
+// invocation supplied by the caller, so a witnessed-server create can source
+// the file through [Tmux.runNoStartOutput].
+func (t *Tmux) runCommandListFileWith(run func(...string) (string, error), cmds [][]string, lead ...string) (string, error) {
 	// Opportunistic, best-effort: a process killed between MkdirTemp and its
 	// deferred cleanup leaves a secret-bearing file behind with nothing to
 	// remove it. Staging is the only moment we know the staging directory is in
 	// use, so it is where the previous incarnation's litter gets collected.
 	sweepStaleStagedDirs()
 
-	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLine(args))
+	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLines(cmds))
 	if err != nil {
 		return "", fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
 	}
@@ -179,6 +188,18 @@ func tmuxCommandLine(args []string) string {
 		quoted[i] = tmuxQuote(a)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// tmuxCommandLines renders a tmux command list as a single command-file line:
+// each command as tmuxCommandLine renders it, joined by a bare " ; " that tmux
+// reads as the separator (a quoted ';' would be an argument). One command
+// renders exactly as tmuxCommandLine.
+func tmuxCommandLines(cmds [][]string) string {
+	lines := make([]string, len(cmds))
+	for i, c := range cmds {
+		lines[i] = tmuxCommandLine(c)
+	}
+	return strings.Join(lines, " ; ")
 }
 
 // tmuxQuote renders s as one literal argument in tmux's config syntax.

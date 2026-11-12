@@ -334,7 +334,7 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 // --include-ephemeral (a tier CachedReady can't serve).
 //
 // It reads whichever ledger(s) the control dispatcher will actually dispatch
-// against, which controlGraphBinding and controlGraphExtraLeg answer between
+// against, which controlGraphBinding and controlGraphRelicLeg answer between
 // them:
 //
 //   - A CITY scope whose graph class relocated reads the binding INSTEAD of its
@@ -342,32 +342,32 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 //     there are the copies the migration retained, which no longer receive the
 //     workflow's mutations. Enumerating those would hand the drain loop a queue
 //     of ids the dispatch then no-ops on forever.
-//   - A RIG scope on that same city reads its own store AND the binding. Its
-//     queue is split across both — its own workflows minted control beads
-//     locally, and city-scoped molecules minted theirs in the city-keyed binding
-//     and routed them here by name — so a scope-only scan answers `[]` for a
-//     queue that is not empty.
+//   - A RIG scope on that same city reads the binding FIRST, where every tree
+//     minted since S4 lives (city-scoped molecules routed here by name, and the
+//     rig's own new trees), and its own store second while the rig may still
+//     hold pre-S4 trees. Once the rig is proven relic-free it reads the binding
+//     only.
 //
 // Every leg fails LOUD, matching `gc ready`: a work query has nowhere to say
 // "this answer is short", so a leg that errors must not degrade to a partial
 // array that reads as "no work".
 func controlReadyFallbackReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
-		return controlReadyBindingReady(dir, binding, includeEphemeral)
-	}
-	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
-	if err != nil {
-		return nil, err
-	}
-	binding, federated := controlGraphExtraLeg(cityPath, dir)
-	if !federated {
-		return scoped, nil
+	binding, relocated := controlGraphBinding(cityPath, dir)
+	if !relocated {
+		return controlReadyScopeShellReady(dir, env, includeEphemeral)
 	}
 	graphRows, err := controlReadyBindingReady(dir, binding, includeEphemeral)
 	if err != nil {
 		return nil, err
 	}
-	return mergeControlReadyLegs(scoped, graphRows), nil
+	if !controlGraphRelicLeg(cityPath, dir) {
+		return graphRows, nil
+	}
+	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
+	if err != nil {
+		return nil, err
+	}
+	return mergeControlReadyLegs(graphRows, scoped), nil
 }
 
 // mergeControlReadyLegs unions the legs in order, first leg winning on a
@@ -522,16 +522,29 @@ func controlReadyIncompleteSummaryFallback(cause error, dir, cityPath string, en
 	if !errors.As(cause, &integrity) || !controlReadyUsesSummary(env) {
 		return nil, false, nil
 	}
-	rows, err = controlReadyScopedSummaryReady(dir, env, parsed)
-	if err != nil {
-		return nil, true, fmt.Errorf("%w; scoped fallback: %w", cause, err)
-	}
-	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
+	// The same routing rule as controlReadyFallbackReady: a relocated scope reads
+	// the binding, and its own store only while it may still hold pre-S4 trees.
+	// A relocated scope with no relic leg never reads its own store: that holds
+	// only the copies the migration retained, which no longer receive the
+	// workflow's mutations.
+	binding, relocated := controlGraphBinding(cityPath, dir)
+	if relocated && !controlGraphRelicLeg(cityPath, dir) {
 		graphRows, err := controlReadyBindingReady(dir, binding, parsed.includeEphemeral)
 		if err != nil {
 			return nil, true, fmt.Errorf("%w; scoped fallback graph leg: %w", cause, err)
 		}
-		rows = mergeControlReadyLegs(rows, graphRows)
+		return graphRows, true, nil
+	}
+	rows, err = controlReadyScopedSummaryReady(dir, env, parsed)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w; scoped fallback: %w", cause, err)
+	}
+	if relocated {
+		graphRows, err := controlReadyBindingReady(dir, binding, parsed.includeEphemeral)
+		if err != nil {
+			return nil, true, fmt.Errorf("%w; scoped fallback graph leg: %w", cause, err)
+		}
+		rows = mergeControlReadyLegs(graphRows, rows)
 	}
 	return rows, true, nil
 }
@@ -932,7 +945,7 @@ func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.Ca
 // owned is the subset of sources this call constructed and is therefore
 // responsible for closing once the snapshot has been primed into memory. It is
 // deliberately NOT every source. The graph-class binding legs
-// (controlGraphBinding / controlGraphExtraLeg) resolve through the per-city
+// (controlGraphBinding) resolve through the per-city
 // cliStorageRoutes memo, so the binding store is process-shared and closed only
 // by closeCLIStorageRoutes at process exit; CloseStore is a one-way latch, so
 // closing a binding leg here would poison every later graph-class read and write
@@ -947,18 +960,23 @@ func primeControlReadyCaches(dir, cityPath string, cfg *config.City) []*beads.Ca
 // later that can fail after a successful open must close what it opened before
 // returning. The same obligation binds any controlReadyLegSourcesFn seam.
 func controlReadyLegSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
-	// A relocated CITY scope does not open its scope store at all — that would
-	// be a bd process this scan never reads. The binding is process-shared, so
-	// nothing here owns it.
+	// A relocated scope with no relic leg does not open its scope store at all
+	// — that would be a bd process this scan never reads. The binding is
+	// process-shared, so nothing here owns it. A rig scope that may still hold
+	// pre-S4 trees reads its own store second.
 	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
-		return []beads.Store{binding}, nil, nil
+		if !controlGraphRelicLeg(cityPath, dir) {
+			return []beads.Store{binding}, nil, nil
+		}
+		scoped, err := openControlStoreAtForCity(dir, cityPath, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []beads.Store{binding, scoped}, []beads.Store{scoped}, nil
 	}
 	scoped, err := openControlStoreAtForCity(dir, cityPath, cfg)
 	if err != nil {
 		return nil, nil, err
-	}
-	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
-		return []beads.Store{scoped, binding}, []beads.Store{scoped}, nil
 	}
 	return []beads.Store{scoped}, []beads.Store{scoped}, nil
 }

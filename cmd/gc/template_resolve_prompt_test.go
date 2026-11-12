@@ -968,8 +968,10 @@ func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	// Fork 09e43f654 excludes message wisps from the assigned-work probe.
-	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
+	// The assigned-ready read carries no --exclude-type=message: bd's ready path
+	// already excludes message beads natively, and upstream pins that no ready
+	// read renders the flag (T8 dropped the fork's 09e43f654 filter).
+	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
 	}
 }

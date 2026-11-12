@@ -305,7 +305,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 	exec := &fakeExecutor{outs: []string{
 		// list-panes -s: a user's split pane plus the wrapped agent pane.
 		// The bogus PID has no live process, so the first pane cannot match.
-		"pane\t@1.%1\tvim\t999999999\npane\t@1.%2\tsystemd-run\t" + panePID,
+		"pane\t@1.%1\tvim\t999999999\tgc-eol\npane\t@1.%2\tsystemd-run\t" + panePID + "\tgc-eol",
 		// show-environment GT_PROCESS_NAMES
 		"GT_PROCESS_NAMES=sleep",
 	}}
@@ -327,6 +327,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 // requests return a dead PID with no descendants, modeling the startup window
 // where systemd-run exists but the agent has not exec'd yet.
 type wrappedWaitExecutor struct {
+	paneCommand  string // the wrapper the pane reports; "" means systemd-run
 	deadPID      string
 	livePID      string
 	livePIDAfter int
@@ -342,6 +343,9 @@ func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
 			// Agent-pane reads: the session's one, unmarked pane.
 			switch args[len(args)-1] {
 			case agentPaneMarkerFormat + "\t#{pane_current_command}":
+				if e.paneCommand != "" {
+					return "pane\t" + e.paneCommand, nil
+				}
 				return "pane\tsystemd-run", nil
 			case agentPaneMarkerFormat + "\t#{pane_pid}":
 				e.pidRequests++

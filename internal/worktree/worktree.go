@@ -982,9 +982,12 @@ func readProvenance(worktreePath string) (Provenance, error) {
 }
 
 // ReadProvenanceAt reads a worktree's durable ownership record from its
-// private Git directory. An error wrapping fs.ErrNotExist means no managed
-// worktree provenance was published there; other errors indicate that the
-// ownership record could not be trusted.
+// private Git directory, gitDir (what `git rev-parse --absolute-git-dir` names
+// from inside the worktree), i.e. the provenance a completed Ensure published
+// there. It does not verify the record against a spec; Verify does. An error
+// wrapping fs.ErrNotExist means no managed worktree provenance was published
+// there (the directory is not a managed worktree); other errors indicate that
+// the ownership record could not be trusted.
 func ReadProvenanceAt(gitDir string) (Provenance, error) {
 	if strings.TrimSpace(gitDir) == "" {
 		return Provenance{}, errors.New("git directory is empty")

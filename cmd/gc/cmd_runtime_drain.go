@@ -57,6 +57,17 @@ type drainAckAdmission struct {
 // bindDrainAckAdmission captures this operation's census before an asynchronous
 // provider setter can outlive cancellation and a replacement census.
 func bindDrainAckAdmission(dops drainOps, cityPath, sessionName string) (drainOps, error) {
+	// The legacy path wraps its ops in persistedAckDrainOps (read the flag back,
+	// fail a write that found no session). Bind the ops inside the wrapper and
+	// keep the wrapper: matching only the bare *providerDrainOps would leave an
+	// enrolled session's late ack unfenced on that path (T8 arming-review D1).
+	if wrapped, ok := dops.(persistedAckDrainOps); ok {
+		inner, err := bindDrainAckAdmission(wrapped.drainOps, cityPath, sessionName)
+		if err != nil {
+			return nil, err
+		}
+		return persistedAckDrainOps{drainOps: inner}, nil
+	}
 	provider, ok := dops.(*providerDrainOps)
 	if !ok {
 		return dops, nil
@@ -198,11 +209,14 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 		if err := o.sp.SetMeta(sessionName, drainAdmissionAttemptKey, a.attempt); err != nil {
 			return err
 		}
-	} else if err := o.sp.RemoveMeta(sessionName, drainAdmissionAttemptKey); err != nil {
+	} else if err := o.sp.RemoveMeta(sessionName, drainAdmissionAttemptKey); err != nil && !drainAckMissingSessionBeadError(err) {
+		// A session-gone answer is not an error here: it is the flag write's
+		// answer that decides whether the ack landed (errDrainAckFoundNoSession,
+		// #8116), as for the mutations the join below drops it from.
 		return err
 	}
 	if o.admission == nil {
-		if err := o.sp.RemoveMeta(sessionName, drainAckFrameKey); err != nil {
+		if err := o.sp.RemoveMeta(sessionName, drainAckFrameKey); err != nil && !drainAckMissingSessionBeadError(err) {
 			return err
 		}
 	}
@@ -220,16 +234,23 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 	// accident. Stamp-first, the only stamp state a source-keyed reader can
 	// observe is this ack's own: its digest, or empty and therefore unprovable.
 	requesterInstanceToken := drainAckRequesterInstanceToken(sessionName)
-	err := joinDrainAckMutationErrors(
+	writeErrs := []error{
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
-		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
-	)
-	if err != nil {
+	}
+	flagErr := o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1")
+	if err := joinDrainAckMutationErrors(append(writeErrs, flagErr)...); err != nil {
 		return err
 	}
+	// The join dropped the flag's own session-gone answer. A mirror failure is
+	// not that: its value landed, and only the runtime's view of it lags.
+	if flagErr != nil && !runtime.OnlyMetadataNotMirrored(flagErr) {
+		return fmt.Errorf("%w: %w", errDrainAckFoundNoSession, flagErr)
+	}
+	// The strict path's frame: published after the flag, and the admission
+	// re-inspected, exactly as before.
 	if o.admission != nil {
 		a := o.admission
 		info := session.Info{ID: a.id, InstanceToken: a.fence.InstanceToken, Generation: a.fence.Generation, SessionNameMetadata: sessionName}
@@ -352,6 +373,13 @@ func joinDrainAckMutationErrors(errs ...error) error {
 func drainAckMissingSessionBeadError(err error) bool {
 	return runtime.IsSessionGone(err) || errors.Is(err, beads.ErrNotFound)
 }
+
+// errDrainAckFoundNoSession is setDrainAck's error when the GC_DRAIN_ACK write
+// itself was answered session-gone, the answer the write join drops for the
+// other mutations: the flag did not land. A reaped session answers that, and
+// so does a tmux server that does not host the session, or no server at all
+// (#8116). Under v2 the row is the ack either way; the legacy ack is the flag.
+var errDrainAckFoundNoSession = errors.New("the GC_DRAIN_ACK write found no session")
 
 // newDrainOps creates a drainOps from a runtime.Provider.
 func newDrainOps(sp runtime.Provider) drainOps {
@@ -1032,7 +1060,10 @@ carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
 to the incarnation the command read. A missing or stale token, or a store
 that is unreachable or keeps changing, exits 1 with nothing acknowledged.
-Under the legacy reconciler the ack behaves as it always has.`,
+Under the legacy reconciler the runtime flag is the ack, and it is read
+back after the write. A write that finds no session, or a flag that did
+not persist, exits 1 with nothing acknowledged. A read-back that fails
+exits 1 too, but the ack may still take effect; re-running is safe.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, operator, stdout, stderr) != 0 {
@@ -1557,7 +1588,10 @@ func doRuntimeDrainAckResultFor(dops drainOps, cityPath, targetName, sn, session
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort diagnostic
 		return drainAckReleaseCode(err), err
 	}
-	return finishRuntimeDrainAckResult(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	// The legacy path: the runtime flag is the ack, so it is read back and a
+	// write that found no session fails it (#8116). The strict path acks on the
+	// row and reaches finishRuntimeDrainAckResultFrom directly.
+	return finishRuntimeDrainAckResult(persistedAckDrainOps{drainOps: dops}, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
 }
 
 // finishRuntimeDrainAck is the ack after the release: the env flag, the poke
@@ -1643,7 +1677,8 @@ func finishRuntimeDrainAckResultFrom(dops drainOps, rowAcked bool, cityPath, tar
 // The row is the ack there; the env flag only mirrors it into the runtime. A
 // worker site's guard holds no runtime to mirror into, so its
 // ErrControllerOwnedRuntime is "not applicable" (a warning), as drain-check
-// reads it, rather than failing an ack that is already in force.
+// reads it, rather than failing an ack that is already in force. A flag write
+// that found no session has nothing to mirror into either.
 type rowAckedDrainOps struct {
 	drainOps
 	stderr io.Writer
@@ -1655,7 +1690,40 @@ func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
 		fmt.Fprintf(o.stderr, "gc runtime drain-ack: warning: the row ack is in force; no runtime here to mirror it into: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil
 	}
+	if errors.Is(err, errDrainAckFoundNoSession) {
+		return nil
+	}
 	return err
+}
+
+// persistedAckDrainOps is the legacy path's drainOps: the runtime flag is the
+// ack there, so a flag write that found no session fails the ack. That is how
+// a write to the wrong tmux server, or to none, is answered (#8116). A write
+// that reported success is read back: a flag that is unset, or a read that
+// fails, fails the ack too. A read-back that finds the session gone is the
+// benign reap race and passes.
+type persistedAckDrainOps struct {
+	drainOps
+}
+
+func (o persistedAckDrainOps) setDrainAck(sessionName string) error {
+	if err := o.drainOps.setDrainAck(sessionName); err != nil {
+		if errors.Is(err, errDrainAckFoundNoSession) {
+			return fmt.Errorf("drain ack did not land on session %q; held claims released, nothing acknowledged (safe to re-run): %w", sessionName, err)
+		}
+		return err
+	}
+	acked, err := o.isDrainAcked(sessionName)
+	if err != nil {
+		if runtime.IsSessionGone(err) {
+			return nil
+		}
+		return fmt.Errorf("drain ack on session %q could not be verified and may still take effect; held claims released (safe to re-run): %w", sessionName, err)
+	}
+	if !acked {
+		return fmt.Errorf("drain ack did not persist on session %q: GC_DRAIN_ACK is unset after the write; held claims released, nothing acknowledged (safe to re-run)", sessionName)
+	}
+	return nil
 }
 
 // drainAckRefused is runtimeDrainAck's status for a seat's own ack refused

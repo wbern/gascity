@@ -1151,10 +1151,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// comment at the paired wake-count call site in loadDemandSnapshot,
 	// city_runtime.go).
 	poolDecisionTime := time.Now()
+	// The pass's park verdicts, decided once: the pool counts and the
+	// reconciler's hold read the same set.
+	parked := parkSeatsForResult(cfg, openInfos, dsResult, poolDecisionTime.UTC())
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesWithSeedAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, dsResult.PoolNewDemandInterleaveSeed, dsResult.PoolNewDemandLoadVeto, poolDecisionTime)),
+		PoolDesiredCounts(computePoolDesiredStatesWithOptionsParked(
+			cfg, poolWorkBeads, nil, openInfos, dsResult.ScaleCheckCounts, nil, dsResult.PoolNewDemandInterleaveSeed, dsResult.PoolNewDemandLoadVeto, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1173,6 +1176,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withParkedSeats(parked),
 		withAssignedWorkStores(awakeAssignedStores),
 	)
 

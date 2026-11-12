@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 220,
+  "next_id": 222,
   "permanent_ids": [
     {
       "name": "help",
@@ -186,7 +186,7 @@
       "notice_policy": "eligible",
       "classification": "analyze-continuity",
       "owner": "immediate",
-      "id": 216
+      "id": 218
     },
     {
       "path": "gc analyze reliability",
@@ -264,7 +264,7 @@
       "notice_policy": "eligible",
       "classification": "beads-adopt-custody",
       "owner": "immediate",
-      "id": 219
+      "id": 221
     },
     {
       "path": "gc beads city",
@@ -2214,6 +2214,21 @@
       "exclusion": "hidden-private"
     },
     {
+      "path": "gc internal program-status-shadow-report",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": true,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "classification": "excluded",
+      "notice_policy": "ineligible",
+      "recording_policy": "excluded",
+      "owner": "excluded",
+      "mode": "hidden-private",
+      "exclusion": "hidden-private"
+    },
+    {
       "path": "gc internal project-mcp",
       "aliases": [],
       "conditional_modes": [],
@@ -2565,7 +2580,7 @@
       "notice_policy": "eligible",
       "classification": "mcp-validate",
       "owner": "immediate",
-      "id": 213
+      "id": 215
     },
     {
       "path": "gc metrics",
@@ -3502,7 +3517,7 @@
       "notice_policy": "eligible",
       "classification": "run-cancel",
       "owner": "immediate",
-      "id": 215
+      "id": 217
     },
     {
       "path": "gc runtime",
@@ -4209,6 +4224,52 @@
       "id": 201
     },
     {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage",
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage mark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-mark",
+      "owner": "immediate",
+      "id": 213
+    },
+    {
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "path": "gc storage remote-stage unmark",
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-remote-stage-unmark",
+      "owner": "immediate",
+      "id": 214
+    },
+    {
       "path": "gc storage repair-sequence",
       "aliases": [],
       "conditional_modes": [],
@@ -4806,7 +4867,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-archive-reap",
       "owner": "immediate",
-      "id": 217
+      "id": 219
     },
     {
       "path": "gc worktree cleanup",
@@ -4851,7 +4912,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-reap",
       "owner": "immediate",
-      "id": 214
+      "id": 216
     },
     {
       "path": "gc worktree scan",
@@ -4866,7 +4927,7 @@
       "notice_policy": "eligible",
       "classification": "worktree-scan",
       "owner": "immediate",
-      "id": 218
+      "id": 220
     },
     {
       "path": "gc worktree verify",
