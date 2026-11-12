@@ -5555,11 +5555,10 @@ func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
 
 // bdIDListRecorder is a fake bd that honors `list --id=` and records argv.
 type bdIDListRecorder struct {
-	mu        sync.Mutex
-	calls     [][]string
-	rows      map[string]string // id -> status
-	rejectID  bool
-	ephemeral bool
+	mu       sync.Mutex
+	calls    [][]string
+	rows     map[string]string // id -> status
+	rejectID bool
 }
 
 func (r *bdIDListRecorder) run(_, name string, args ...string) ([]byte, error) {
