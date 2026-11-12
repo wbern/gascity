@@ -44,7 +44,7 @@ func inheritStampDeps(cfg *config.City, store beads.Store) (slingDeps, *bytes.Bu
 	// not declare; every sling in this file targets the worker.
 	ensureSlingTestAgent(cfg, config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)})
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.SourceWorkflowStores = func() ([]sling.SourceWorkflowStore, error) {
 		return []sling.SourceWorkflowStore{{Store: store, StoreRef: deps.StoreRef, Strict: true}}, nil
 	}

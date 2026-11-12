@@ -19,7 +19,7 @@ const legacyAttachmentStateKey = beadmeta.LegacyAttachmentStateMetadataKey
 // caller's routing step. Re-deliveries reuse an existing matching family;
 // unassigned does not mean abandoned and never authorizes burning a live root.
 func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formulaName string, vars map[string]string, create func() (*molecule.Result, error), finish func(*molecule.Result) (SlingResult, error), routeTarget ...string) (SlingResult, error) {
-	if deps.GraphStore != nil && strings.TrimSpace(deps.StoreRef) == "" {
+	if deps.graphRelocated() && strings.TrimSpace(deps.StoreRef) == "" {
 		return SlingResult{}, fmt.Errorf("legacy source %s requires a source-store identity before shared-store materialization", sourceID)
 	}
 	// The fence is looked up through the wrapper's declared resolve target
@@ -95,7 +95,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 				}
 				continue
 			}
-			if deps.GraphStore != nil && rootSourceRef == "" {
+			if deps.graphRelocated() && rootSourceRef == "" {
 				return fmt.Errorf("legacy family %s has no source-store identity; reconciliation required", root.ID)
 			}
 			live = append(live, root)
@@ -262,7 +262,7 @@ func isAbandonedPreparingRoot(root beads.Bead, live []beads.Bead, source beads.B
 // molecule helpers take a typed target (upstream T9); a legacy root lives in the
 // store that minted it.
 func legacyRootMolecule(deps SlingDeps, store beads.Store) beads.MoleculeTarget {
-	if deps.GraphStore != nil && !beads.SameStore(deps.GraphStore, deps.Store) && beads.SameStore(store, deps.GraphStore) {
+	if deps.graphRelocated() && beads.SameStore(store, deps.GraphStore) {
 		return beads.GraphMolecule(beads.GraphStore{Store: store})
 	}
 	return beads.WorkMolecule(beads.WorkStore{Store: store})

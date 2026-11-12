@@ -118,7 +118,10 @@ type failingNamedProviderProjectionStore struct {
 }
 
 func (s *failingNamedProviderProjectionStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if kvs["provider_kind"] == "codex" {
+	// The projection patch writes provider = codex (a direct builtin leaves
+	// provider_kind empty, the single rule every writer shares), so the write is
+	// recognised by provider.
+	if kvs["provider"] == "codex" {
 		return errors.New("injected named provider projection write failure")
 	}
 	return s.MemStore.SetMetadataBatch(id, kvs)
@@ -5414,7 +5417,7 @@ func TestRefreshConfiguredNamedStartCandidateRefreshesProviderProjection(t *test
 	}
 	for key, want := range map[string]string{
 		"provider":       "codex",
-		"provider_kind":  "codex",
+		"provider_kind":  "", // a direct builtin: provider carries the name, the stale claude family is cleared
 		"resume_command": prepared.candidate.tp.ResolvedProvider.ResumeCommand,
 	} {
 		if got := after.Metadata[key]; got != want {

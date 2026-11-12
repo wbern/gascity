@@ -41,7 +41,7 @@ description = "test -n \"{{base_branch}}\"; workspace enter --target {{base_bran
 		}},
 	}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	a := config.Agent{Name: "codex-polecat", Dir: "gas-city-infra", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("mol-gcw-polecat-work")}
 
 	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "GCI-1"}, deps, store)
@@ -172,7 +172,7 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttached(t *testi
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	runner := newFakeRunner()
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
 	opts := SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: true}
@@ -243,7 +243,7 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	runner := newFakeRunner()
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-review")}
 	opts := SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: true}

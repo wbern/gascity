@@ -225,6 +225,8 @@
               "storage-vouch-bd",
               "storage-remote-stage-mark",
               "storage-remote-stage-unmark",
+              "storage-snapshot",
+              "storage-snapshot-restore",
               "mcp-validate",
               "worktree-reap",
               "run-cancel",

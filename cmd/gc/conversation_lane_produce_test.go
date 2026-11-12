@@ -706,9 +706,9 @@ func TestDoSlingNudgeUnderLaneProposesTheBeadsNotice(t *testing.T) {
 			runner := newFakeRunner()
 			deps, stdout, stderr := testDeps(c.cfg, c.sp, runner.run)
 			deps.CityPath = c.dir
-			deps.Store = c.store
+			deps = slingDepsWithStore(deps, c.store)
 			if refused {
-				deps.Store = noBatchStore{c.store}
+				deps = slingDepsWithStore(deps, noBatchStore{c.store})
 			}
 			// The fork's workable gate (#191) refuses routed work for a target
 			// that is not a configured agent.
@@ -786,7 +786,9 @@ func TestDoSlingNudgeUnderLaneResolvesARigBeadsSessionInTheCityStore(t *testing.
 			runner := newFakeRunner()
 			deps, stdout, stderr := testDeps(c.cfg, c.sp, runner.run)
 			deps.CityPath = c.dir
-			deps.Store = rig
+			deps = slingDepsWithStore(deps, rig)
+			// The fork's workable gate (#191) refuses routed work for a target
+			// that is not a configured agent.
 			worker := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 			c.cfg.Agents = append(c.cfg.Agents, worker)
 			opts := testOpts(worker, "rg-work-1")

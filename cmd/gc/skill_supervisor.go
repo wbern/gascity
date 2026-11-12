@@ -106,10 +106,11 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) ([
 	}
 
 	var reqs []stage1SkillRequest
+	rt := cityMaterializationRuntime(cfg, cityPath)
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if hasSkillFilter(agent) {
-			if !isStage2EligibleSession(cfg.Session.Provider, agent) {
+			if !isStage2EligibleSession(rt, agent) {
 				return nil, fmt.Errorf("gc: filtered agent %q requires a stage-2-eligible runtime and distinct private work_dir", agent.QualifiedName())
 			}
 			scopeRoot := resolveAgentScopeRoot(agent, cityPath, cfg.Rigs)
@@ -123,7 +124,7 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) ([
 			// A filtered catalog must never reconcile the shared scope-root sink.
 			continue
 		}
-		if !canStage1Materialize(cfg.Session.Provider, agent) {
+		if !canStage1Materialize(rt, agent) {
 			continue
 		}
 		provider := effectiveAgentProviderFamily(agent, cfg.Workspace.Provider, cfg.Providers)

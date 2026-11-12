@@ -5396,10 +5396,14 @@ func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *t
 		t.Errorf("tick 4: nil ResolvedProvider clobbered provider: got %q, want omp-azure", got)
 	}
 
-	// Tick 5: a direct built-in provider is its own launch family. The former
-	// projection helper only wrote provider_kind when BuiltinAncestor differed
-	// from Name, so this switch left the prior omp family in both higher-priority
-	// rungs even though provider itself became codex.
+	// Tick 5: a direct built-in provider is its own launch family, and every
+	// provider_kind writer (creation, this refresh, the start-time projection
+	// patch) records that as an EMPTY provider_kind with provider carrying the
+	// name (resolvedProviderFamilyMetadata, upstream #8539; T10 arming-review).
+	// The point of the switch is that the prior omp family does not survive in
+	// the higher-priority rungs: it is cleared, and the readers fall back to
+	// provider = codex. (The fork previously wrote provider_kind = codex here;
+	// readers are equivalent for a builtin.)
 	codexCmd := "codex --dangerously-bypass-approvals-and-sandbox"
 	ds["mayor"] = TemplateParams{
 		TemplateName: "mayor",
@@ -5415,7 +5419,7 @@ func TestSyncSessionBeads_RefreshesResolvedProviderMetadataOnProviderSwitch(t *t
 	for _, c := range []struct{ key, want string }{
 		{"command", codexCmd},
 		{"provider", "codex"},
-		{"provider_kind", "codex"},
+		{"provider_kind", ""},
 		{"builtin_ancestor", ""},
 		{"resume_flag", "resume"},
 		{"resume_style", "subcommand"},
@@ -5511,6 +5515,71 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 
 	if stderr.Len() > 0 {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+// syncProviderProjection creates a worker session bead, overwrites its
+// provider projection with stored (a missing key stored empty), syncs it
+// under resolved and returns the bead's metadata; a second sync under the
+// same resolution must write nothing.
+func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) map[string]string {
+	t.Helper()
+	cs := &countingStore{Store: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "run-worker"})
+	ds := map[string]TemplateParams{"worker": {TemplateName: "worker", Command: "run-worker"}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, cs)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after the create tick, got %d", len(created))
+	}
+	overlay := make(map[string]string, len(providerProjectionKeys))
+	for _, k := range providerProjectionKeys {
+		overlay[k] = stored[k]
+	}
+	if err := cs.SetMetadataBatch(created[0].ID, overlay); err != nil {
+		t.Fatalf("SetMetadataBatch(stored projection): %v", err)
+	}
+
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: "run-worker", ResolvedProvider: resolved}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	got := allSessionBeads(t, cs)[0].Metadata
+
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("an unchanged sync wrote metadata (%d -> %d writes); the projection must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// TestSyncSessionBeads_ProviderProjectionClearsMissingFields guards #8539:
+// existing-session sync makes a successful provider resolution
+// authoritative for the six family and resume keys, so a key the resolved
+// provider leaves empty clears instead of keeping the previous provider's
+// value; a nil resolution keeps all seven stored keys.
+func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
+	for _, tc := range providerProjectionCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			got := syncProviderProjection(t, tc.stored, tc.resolved)
+			for _, k := range providerProjectionKeys {
+				if got[k] != tc.want[k] {
+					t.Errorf("%s = %q after sync, want %q", k, got[k], tc.want[k])
+				}
+			}
+			if tc.family != "" {
+				if family := session.ProviderFamilyFromMetadata(got, ""); family != tc.family {
+					t.Errorf("provider family = %q after sync, want %q", family, tc.family)
+				}
+			}
+		})
 	}
 }
 

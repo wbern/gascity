@@ -136,17 +136,24 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) SlingDe
 	if cfg != nil && len(cfg.FormulaLayers.City) == 0 {
 		cfg.FormulaLayers.City = []string{sharedTestFormulaDir}
 	}
-	return SlingDeps{
+	return withStore(SlingDeps{
 		CityName: "test-city",
 		CityPath: sharedTestCityDir,
 		Cfg:      cfg,
 		SP:       sp,
 		Runner:   runner,
-		Store:    beads.NewMemStore(),
 		StoreRef: "city:test-city",
 		Resolver: testResolver{},
 		Notify:   testNotifier{},
-	}
+	}, beads.NewMemStore())
+}
+
+// withStore is deps over one store s, as a single-store city wires it at city
+// scope: s is the work store, and the graph and sessions stores collapse onto
+// it.
+func withStore(deps SlingDeps, s beads.Store) SlingDeps {
+	deps.Store, deps.GraphStore, deps.Sessions = beadstest.Work(s), beadstest.Graph(s), beadstest.Sessions(s)
+	return deps
 }
 
 func testOpts(a config.Agent, beadOrFormula string) SlingOpts {
@@ -379,7 +386,7 @@ func TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent(t *testing.T) {
 		t.Fatalf("store.Create(): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false when routed bead has no convoy parent, got %+v", result)
@@ -405,7 +412,7 @@ func TestCheckBeadStateRoutedWithLiveTrackingConvoyIsIdempotent(t *testing.T) {
 		t.Fatalf("store.DepAdd(tracks): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true when routed bead has live tracking convoy, got %+v", result)
@@ -436,7 +443,7 @@ func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsIdempotent(t *testing.
 		t.Fatalf("store.DepAdd(tracks): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true when routed bead has a live tracking convoy, got %+v", result)
@@ -470,7 +477,7 @@ func TestCheckBeadStatePoolInstanceRoutedToCollapsedIdentityIsIdempotent(t *test
 	}
 
 	poolInstance := config.Agent{Name: "polecat-2", Dir: "myrig", PoolName: "myrig/polecat"}
-	result := CheckBeadState(store, bead.ID, poolInstance, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, poolInstance, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true when pool-instance bead is routed to the collapsed pool identity, got %+v", result)
@@ -499,7 +506,7 @@ func TestCheckBeadStateRoutedWithClosedTrackingConvoyIsNotIdempotent(t *testing.
 		t.Fatalf("store.Close(convoy): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false when routed bead has only closed tracking convoy, got %+v", result)
@@ -529,7 +536,7 @@ func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
 		t.Fatalf("store.Close(convoy): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false when convoy parent is closed, got %+v", result)
@@ -567,7 +574,7 @@ func TestCheckBeadStateConvoyLookupErrorFailsClosed(t *testing.T) {
 
 	store := depListErrStore{Store: backing, err: errors.New("boom: store unavailable")}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true (fail closed) on convoy-lookup error, got %+v", result)
@@ -619,7 +626,7 @@ func TestNeedsConvoyRecoveryDistinguishesDeletedParent(t *testing.T) {
 		store := beads.NewMemStore()
 		beadID := newRoutedChild(t, store, "gcg-deleted-parent")
 
-		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 		if result.Idempotent {
 			t.Fatalf("expected Idempotent=false (recovery needed) for a routed child with a deleted parent, got %+v", result)
@@ -631,7 +638,7 @@ func TestNeedsConvoyRecoveryDistinguishesDeletedParent(t *testing.T) {
 		beadID := newRoutedChild(t, backing, "gcg-parent")
 		store := parentGetErrStore{Store: backing, parentID: "gcg-parent", err: errors.New("boom: store unavailable")}
 
-		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+		result := CheckBeadState(store, beadID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 		if !result.Idempotent {
 			t.Fatalf("expected Idempotent=true (fail closed) on a transient parent-read error, got %+v", result)
@@ -691,7 +698,7 @@ func TestCheckBeadStateRoutedWithWorkflowParentIsIdempotent(t *testing.T) {
 				t.Fatalf("store.Create(bead): %v", err)
 			}
 
-			result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+			result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 			if !result.Idempotent {
 				t.Fatalf("expected Idempotent=true for routed bead under workflow parent, got %+v", result)
@@ -717,7 +724,7 @@ func TestCheckBeadStateRoutedWithNormalParentWithoutTrackingConvoyRecovers(t *te
 		t.Fatalf("store.Create(bead): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false for routed bead under normal parent with no tracking convoy, got %+v", result)
@@ -742,7 +749,7 @@ func TestCheckBeadStatePoolLabelWithoutConvoyIsNotIdempotent(t *testing.T) {
 		MaxActiveSessions: intPtr(3),
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false for pool label without convoy parent, got %+v", result)
@@ -801,7 +808,7 @@ func TestCheckBeadStateReportsReadStatusAlongsideVerdict(t *testing.T) {
 				}
 			}
 
-			result := CheckBeadStateWithOptions(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store}, BeadCheckOptions{NoConvoy: true})
+			result := CheckBeadStateWithOptions(store, bead.ID, config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store), BeadCheckOptions{NoConvoy: true})
 
 			if result.Idempotent != tt.wantIdempotent {
 				t.Errorf("Idempotent = %v, want %v (status must not change the routing verdict): %+v", result.Idempotent, tt.wantIdempotent, result)
@@ -819,7 +826,7 @@ func TestCheckBeadStateReportsReadStatusAlongsideVerdict(t *testing.T) {
 func TestCheckBeadStateUnreadableBeadReportsNoStatus(t *testing.T) {
 	store := &getErrStore{Store: beads.NewMemStore(), err: errors.New("boom: store unavailable")}
 
-	result := CheckBeadState(store, "BL-1", config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	result := CheckBeadState(store, "BL-1", config.Agent{Name: "mayor"}, withStore(SlingDeps{}, store))
 
 	if result.Status != "" || result.Idempotent {
 		t.Fatalf("CheckBeadState on an unreadable bead = %+v, want an empty result", result)
@@ -1188,7 +1195,7 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1211,7 +1218,7 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), Suspended: true}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1231,7 +1238,7 @@ func TestDoSlingSuspendedRigWarns(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("my-42")
+	deps = withStore(deps, seededStore("my-42"))
 	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1254,7 +1261,7 @@ func TestDoSlingSuspendedRigForce(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("my-42")
+	deps = withStore(deps, seededStore("my-42"))
 	opts := testOpts(a, "my-42")
 	opts.Force = true
 	result, err := DoSling(opts, deps, nil)
@@ -1276,7 +1283,7 @@ func TestDoSlingLiveRigNoSuspendedRigWarning(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("my-42")
+	deps = withStore(deps, seededStore("my-42"))
 	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1298,7 +1305,7 @@ func TestDoSlingSuspendedRigWarnsEvenOnFailure(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("my-1")
+	deps = withStore(deps, seededStore("my-1"))
 	result, err := DoSling(testOpts(a, "my-1"), deps, nil)
 
 	if err == nil {
@@ -1317,7 +1324,7 @@ func TestDoSlingRunnerError(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 
 	if err == nil {
@@ -1503,7 +1510,7 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	a := config.Agent{Name: "worker", Dir: "other", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
 
 	if err == nil {
@@ -1529,7 +1536,7 @@ func TestDoSlingIdempotent(t *testing.T) {
 	})
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	result, err := DoSling(testOpts(a, b.ID), deps, store)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1569,7 +1576,7 @@ func TestDoSlingWarnsWhenTargetBranchLiveOwned(t *testing.T) {
 	work := beads.Bead{ID: "work-1"}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	result, err := DoSling(testOpts(a, work.ID), deps, store)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1605,7 +1612,7 @@ func TestDoSlingNoBranchWarningWhenNoLiveOwner(t *testing.T) {
 	work := beads.Bead{ID: "work-2"}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	result, err := DoSling(testOpts(a, work.ID), deps, store)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1637,7 +1644,7 @@ func TestOnFormulaNeedsAttachmentAppliesToDefaultSlingFormula(t *testing.T) {
 
 	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review")}
 	opts := SlingOpts{Target: a, BeadOrFormula: bead.ID}
-	deps := SlingDeps{Store: store}
+	deps := withStore(SlingDeps{}, store)
 
 	decision, err := onFormulaNeedsAttachment(opts, store, deps)
 	if err != nil {
@@ -1676,7 +1683,7 @@ func TestDoSlingSkippedForClaimWarningNamesDefaultFormula(t *testing.T) {
 	}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 	result, err := DoSling(testOpts(a, bead.ID), deps, store)
 	if err != nil {
 		t.Fatalf("DoSling error: %v", err)
@@ -1763,7 +1770,7 @@ func TestDoSlingClosedBeadKeepsSingleBeadVerdict(t *testing.T) {
 			}
 
 			deps := testDeps(cfg, runtime.NewFake(), runner.run)
-			deps.Store = store
+			deps = withStore(deps, store)
 			opts := testOpts(a, bead.ID)
 			opts.NoConvoy = tt.noConvoy
 			result, err := DoSling(opts, deps, store)
@@ -1852,13 +1859,13 @@ func TestCheckNoMoleculeChildrenRejectsLiveWorkflowWithoutForce(t *testing.T) {
 	}
 
 	var result SlingResult
-	err = CheckNoMoleculeChildren(store, source.ID, store, &result)
+	err = checkNoMoleculeChildren(store, source.ID, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 	if err == nil {
-		t.Fatal("CheckNoMoleculeChildren error = nil, want workflow conflict")
+		t.Fatal("checkNoMoleculeChildren error = nil, want workflow conflict")
 	}
 	var conflictErr *sourceworkflow.ConflictError
 	if !errors.As(err, &conflictErr) {
-		t.Fatalf("CheckNoMoleculeChildren error = %v, want ConflictError", err)
+		t.Fatalf("checkNoMoleculeChildren error = %v, want ConflictError", err)
 	}
 	if conflictErr.SourceBeadID != source.ID || len(conflictErr.WorkflowIDs) != 1 || conflictErr.WorkflowIDs[0] != root.ID {
 		t.Fatalf("ConflictError = %#v, want source=%s workflow=%s", conflictErr, source.ID, root.ID)
@@ -1904,7 +1911,7 @@ func TestDoSlingValidatesRequiredDeps(t *testing.T) {
 
 	t.Run("nil Store", func(t *testing.T) {
 		deps := testDeps(&config.City{}, nil, nil)
-		deps.Store = nil
+		deps = withStore(deps, nil)
 		_, err := DoSling(opts, deps, nil)
 		if err == nil || !strings.Contains(err.Error(), "Store") {
 			t.Errorf("expected Store validation error, got %v", err)
@@ -1937,7 +1944,7 @@ func TestDoSlingCustomSlingQueryExpandsTemplateContext(t *testing.T) {
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.CityPath = cityPath
 	deps.CityName = ""
-	deps.Store = seededStore("FR-99")
+	deps = withStore(deps, seededStore("FR-99"))
 	opts := testOpts(a, "FR-99")
 	result, err := DoSling(opts, deps, nil)
 	if err != nil {
@@ -1975,7 +1982,7 @@ func TestNewSlingValid(t *testing.T) {
 func TestSlingRouteBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2003,7 +2010,7 @@ func TestSlingRouteBead(t *testing.T) {
 func TestSlingRouteBeadRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2061,7 +2068,7 @@ func TestProbeBeadInStoreTreatsBackendNotFoundAsMissing(t *testing.T) {
 func TestSlingRouteBeadDryRunRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2083,7 +2090,7 @@ func TestSlingRouteBeadDryRunRejectsMissingBead(t *testing.T) {
 func TestDoSlingDryRunInlineTextSkipsMissingBeadValidation(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result, err := DoSling(SlingOpts{
@@ -2109,7 +2116,7 @@ func TestDoSlingDryRunInlineTextSkipsMissingBeadValidation(t *testing.T) {
 func TestDoSlingBatchValidatesContainerInQuerierStore(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	querier := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
 		{ID: "BL-2", Title: "child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
@@ -2159,10 +2166,10 @@ func TestDoSlingBatchFallsBackToSelectedStoreForContainerExpansion(t *testing.T)
 func TestDoSlingBatchUsesCallerQuerierChildrenWhenContainerExistsThere(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+	deps = withStore(deps, beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
 		{ID: "BL-store-only", Title: "store child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
-	}, nil)
+	}, nil))
 	querier := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Title: "convoy", Type: "convoy", Status: "open", Metadata: map[string]string{}},
 		{ID: "BL-query-only", Title: "query child", Type: "task", Status: "open", ParentID: "BL-1", Metadata: map[string]string{}},
@@ -2217,7 +2224,7 @@ func TestDoSlingBatchExpandsTracksConvoy(t *testing.T) {
 func TestDoSlingBatchRoutesNonContainerFoundInQuerierStore(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	querier := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Title: "task", Type: "task", Status: "open", Metadata: map[string]string{}},
 	}, nil)
@@ -2271,7 +2278,7 @@ func TestDoSlingBatchDoesNotFallbackOnQuerierLookupError(t *testing.T) {
 func TestSlingRouteBeadForceAllowsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2300,7 +2307,7 @@ func TestSlingRouteBeadForceAllowsMissingBead(t *testing.T) {
 func TestSlingRouteDefaultFormulaForceStillRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2342,7 +2349,7 @@ func TestValidateExistingBeadInQuerierNilIsLookupError(t *testing.T) {
 func TestSlingRouteBeadSurfacesStoreLookupError(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
-	deps.Store = &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")}
+	deps = withStore(deps, &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")})
 	s, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -2410,7 +2417,7 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Router = router
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 
 	s, err := New(deps)
 	if err != nil {
@@ -2475,7 +2482,7 @@ func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Router = router
-	deps.Store = seededStore("BL-42")
+	deps = withStore(deps, seededStore("BL-42"))
 
 	s, err := New(deps)
 	if err != nil {
@@ -2858,7 +2865,7 @@ func TestSlingAttachFormulaRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 
 	s, err := New(deps)
 	if err != nil {
@@ -2882,7 +2889,7 @@ func TestSlingAttachFormulaForceStillRejectsMissingBead(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = beads.NewMemStore()
+	deps = withStore(deps, beads.NewMemStore())
 
 	s, err := New(deps)
 	if err != nil {
@@ -2990,7 +2997,7 @@ func TestRestampWorkBeadRoutingFailedExecutionRouteWriteLeavesTheClaimRouteUntou
 	store := &restampOrderSpyStore{Store: backing, failKey: beadmeta.ExecutionRoutedToMetadataKey, failErr: writeErr}
 	result := SlingResult{}
 
-	restampWorkBeadRouting(SlingDeps{Store: store}, source.ID, config.Agent{Name: "worker"}, &result)
+	restampWorkBeadRouting(SlingDeps{Store: beads.WorkStore{Store: store}}, source.ID, config.Agent{Name: "worker"}, &result)
 
 	after, err := backing.Get(source.ID)
 	if err != nil {
@@ -3021,7 +3028,7 @@ func TestRestampWorkBeadRoutingWritesTheExecutionRouteBeforeClearingTheClaimRout
 	store := &restampOrderSpyStore{Store: backing}
 	result := SlingResult{}
 
-	restampWorkBeadRouting(SlingDeps{Store: store}, source.ID, config.Agent{Name: "worker"}, &result)
+	restampWorkBeadRouting(SlingDeps{Store: beads.WorkStore{Store: store}}, source.ID, config.Agent{Name: "worker"}, &result)
 
 	after, err := backing.Get(source.ID)
 	if err != nil {
@@ -3054,7 +3061,7 @@ func TestRestampWorkBeadRoutingFailedClearKeepsTheExecutionRoute(t *testing.T) {
 	store := &restampOrderSpyStore{Store: backing, failKey: beadmeta.RoutedToMetadataKey, failErr: clearErr}
 	result := SlingResult{}
 
-	restampWorkBeadRouting(SlingDeps{Store: store}, source.ID, config.Agent{Name: "worker"}, &result)
+	restampWorkBeadRouting(SlingDeps{Store: beads.WorkStore{Store: store}}, source.ID, config.Agent{Name: "worker"}, &result)
 
 	after, err := backing.Get(source.ID)
 	if err != nil {
@@ -3091,7 +3098,7 @@ func TestRestampWorkBeadRoutingCollapsesResolvedPoolInstance(t *testing.T) {
 	}
 	result := SlingResult{}
 
-	restampWorkBeadRouting(SlingDeps{Store: store, Cfg: cfg}, source.ID, a, &result)
+	restampWorkBeadRouting(SlingDeps{Store: beads.WorkStore{Store: store}, Cfg: cfg}, source.ID, a, &result)
 
 	after, err := store.Get(source.ID)
 	if err != nil {
@@ -3138,7 +3145,7 @@ func TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent(t *t
 		t.Fatalf("store.Create: %v", err)
 	}
 
-	deps := SlingDeps{Store: store, Cfg: cfg}
+	deps := withStore(SlingDeps{Cfg: cfg}, store)
 	result := &SlingResult{}
 	restampWorkBeadRouting(deps, bead.ID, a, result)
 
@@ -3198,7 +3205,7 @@ func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 			}
 
 			result := &SlingResult{}
-			restampWorkBeadRouting(SlingDeps{Store: store, Cfg: cfg}, bead.ID, a, result)
+			restampWorkBeadRouting(withStore(SlingDeps{Cfg: cfg}, store), bead.ID, a, result)
 
 			if len(result.MetadataErrors) != 0 {
 				t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
@@ -3263,7 +3270,7 @@ func TestSlingAttachGraphFormulaReportsRestampWriteFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected restamp failure")
-	deps.Store = &failingRestampStore{Store: deps.Store, beadID: source.ID, err: injected}
+	deps = withStore(deps, &failingRestampStore{Store: deps.Store, beadID: source.ID, err: injected})
 
 	s, err := New(deps)
 	if err != nil {
@@ -3381,7 +3388,7 @@ func TestPlainSlingReportsGraphTakeoverClearFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected clear failure")
-	deps.Store = &failingRestampStore{Store: deps.Store, beadID: bead.ID, err: injected}
+	deps = withStore(deps, &failingRestampStore{Store: deps.Store, beadID: bead.ID, err: injected})
 
 	result, err := DoSling(testOpts(config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, bead.ID), deps, deps.Store)
 	if err != nil {
@@ -3466,7 +3473,7 @@ func TestSourceWorkflowLaunchRollbackRestoresSourceRouting(t *testing.T) {
 		t.Fatalf("create root: %v", err)
 	}
 	store := &rootHidingStore{Store: deps.Store, source: source.ID, root: root.ID}
-	deps.Store = store
+	deps = withStore(deps, store)
 	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(5)}
 
 	_, err = withSourceWorkflowLaunchLock(context.Background(), deps, source.ID, false, func() (pendingSourceWorkflowLaunch, error) {
@@ -3537,7 +3544,7 @@ func TestInstantiateGraphFormulaPreservesMaterializationWhenProjectionFails(t *t
 	}
 	var traces []string
 	deps.Tracer = func(format string, args ...any) { traces = append(traces, fmt.Sprintf(format, args...)) }
-	emitCurrentExecutionFacts(deps, &getErrStore{Store: store, err: fmt.Errorf("projection store unavailable")}, result.RootID, "worker", "graph-work")
+	emitCurrentExecutionFacts(deps, beadstest.Graph(&getErrStore{Store: store, err: fmt.Errorf("projection store unavailable")}), result.RootID, "worker", "graph-work")
 	if !slices.ContainsFunc(traces, func(trace string) bool { return strings.Contains(trace, "execution snapshot projection failed") }) {
 		t.Fatalf("traces = %#v, want projection failure", traces)
 	}
@@ -3734,7 +3741,7 @@ func TestRollbackGraphV2ReplacementLaunchRestoresReplacedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = rollbackGraphV2ReplacementLaunch(store, replacement.ID, graphV2ReplacementSnapshot{
+	err = rollbackGraphV2ReplacementLaunch(beadstest.Graph(store), replacement.ID, graphV2ReplacementSnapshot{
 		rootID:    replaced.ID,
 		snapshots: snapshots,
 	})
@@ -4110,15 +4117,15 @@ func TestCheckNoMoleculeChildrenConvoyLookupDoesNotShadowV1Children(t *testing.T
 	}
 
 	var result SlingResult
-	err = CheckNoMoleculeChildren(store, source.ID, store, &result)
+	err = checkNoMoleculeChildren(store, source.ID, withStore(SlingDeps{}, store).attachmentScope(), &result, false)
 	if err == nil {
-		t.Fatal("CheckNoMoleculeChildren error = nil, want blocking molecule child")
+		t.Fatal("checkNoMoleculeChildren error = nil, want blocking molecule child")
 	}
 	if want := fmt.Sprintf("bead %s already has attached molecule %s", source.ID, molBead.ID); err.Error() != want {
-		t.Fatalf("CheckNoMoleculeChildren error = %q, want %q", err.Error(), want)
+		t.Fatalf("checkNoMoleculeChildren error = %q, want %q", err.Error(), want)
 	}
 
-	label, id := FindBlockingMolecule(store, source.ID, store)
+	label, id := withStore(SlingDeps{}, store).FindBlockingMolecule(store, source.ID)
 	if label != "molecule" || id != molBead.ID {
 		t.Fatalf("FindBlockingMolecule = (%q, %q), want (\"molecule\", %q)", label, id, molBead.ID)
 	}
@@ -4191,7 +4198,7 @@ func TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch(t *t
 	}
 	blocking := trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", "open")
 
-	roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.Store, member.ID, "graph-work")
+	roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, member.ID, "graph-work")
 	if err != nil {
 		t.Fatalf("liveConvoyTrackedWorkflowRoots: %v", err)
 	}
@@ -4250,7 +4257,7 @@ func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
 			}
 			trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", tc.status)
 
-			roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.Store, source.ID, "graph-work")
+			roots, err := liveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, source.ID, "graph-work")
 			if err != nil {
 				t.Fatalf("liveConvoyTrackedWorkflowRoots: %v", err)
 			}
@@ -4377,8 +4384,7 @@ func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(
 	}
 
 	var warnings []string
-	deps := SlingDeps{
-		Store:    sourceStore,
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -4390,7 +4396,7 @@ func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(
 		SourceWorkflowStoreScanWarning: func(storeRef string, err error) {
 			warnings = append(warnings, storeRef+": "+err.Error())
 		},
-	}
+	}, sourceStore)
 
 	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
@@ -4408,8 +4414,7 @@ func TestListSourceWorkflowRootsSkipsNonSourceListFailureAndKeepsSingletonGuard(
 func TestListSourceWorkflowRootsKeepsSourceStoreListFailureStrict(t *testing.T) {
 	readErr := errors.New("source store read failed")
 	var warned bool
-	deps := SlingDeps{
-		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr},
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -4418,7 +4423,7 @@ func TestListSourceWorkflowRootsKeepsSourceStoreListFailureStrict(t *testing.T) 
 			}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) { warned = true },
-	}
+	}, sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr})
 
 	_, err := listSourceWorkflowRoots(deps, "mc-source")
 	if !errors.Is(err, readErr) {
@@ -4445,14 +4450,13 @@ func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *
 	if err != nil {
 		t.Fatalf("Create(root): %v", err)
 	}
-	deps := SlingDeps{
-		Store:    sourceStore,
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{Store: beads.NewMemStore(), StoreRef: "rig:healthy"}}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) {},
-	}
+	}, sourceStore)
 
 	err = checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
@@ -4466,8 +4470,7 @@ func TestListSourceWorkflowRootsScansAlreadyOpenSourceStoreWhenListerOmitsIt(t *
 
 func TestListSourceWorkflowRootsKeepsNonSourceFailureStrictWithoutWarningSink(t *testing.T) {
 	readErr := errors.New("unreported stale store")
-	deps := SlingDeps{
-		Store:    beads.NewMemStore(),
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -4475,7 +4478,7 @@ func TestListSourceWorkflowRootsKeepsNonSourceFailureStrictWithoutWarningSink(t 
 				{Store: sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: readErr}, StoreRef: "rig:stale"},
 			}, nil
 		},
-	}
+	}, beads.NewMemStore())
 
 	_, err := listSourceWorkflowRoots(deps, "mc-source")
 	if !errors.Is(err, readErr) {
@@ -4486,8 +4489,7 @@ func TestListSourceWorkflowRootsKeepsNonSourceFailureStrictWithoutWarningSink(t 
 func TestListSourceWorkflowRootsFailsWhenSelectedAndNonSourceScansFail(t *testing.T) {
 	selectedErr := errors.New("selected store failed")
 	var warnings []string
-	deps := SlingDeps{
-		Store:    sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr},
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -4498,7 +4500,7 @@ func TestListSourceWorkflowRootsFailsWhenSelectedAndNonSourceScansFail(t *testin
 		SourceWorkflowStoreScanWarning: func(storeRef string, _ error) {
 			warnings = append(warnings, storeRef)
 		},
-	}
+	}, sourceWorkflowListFailStore{Store: beads.NewMemStore(), err: selectedErr})
 
 	_, err := listSourceWorkflowRoots(deps, "mc-source")
 	if !errors.Is(err, selectedErr) {
@@ -4510,13 +4512,12 @@ func TestListSourceWorkflowRootsFailsWhenSelectedAndNonSourceScansFail(t *testin
 }
 
 func TestListSourceWorkflowRootsFailsWhenListerHasNoUsableStores(t *testing.T) {
-	deps := SlingDeps{
-		Store: beads.NewMemStore(),
+	deps := withStore(SlingDeps{
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{StoreRef: "rig:nil"}}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) {},
-	}
+	}, beads.NewMemStore())
 
 	_, err := listSourceWorkflowRoots(deps, "mc-source")
 	if err == nil || !strings.Contains(err.Error(), "no source workflow stores") {
@@ -4633,7 +4634,7 @@ func TestDoSlingPoolEmptyWarns(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "pool", MaxActiveSessions: intPtr(0)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling: %v", err)
@@ -4757,11 +4758,11 @@ func TestFinalizeAutoConvoyTracksDepAddError(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = &failingDepAddStore{
+	deps = withStore(deps, &failingDepAddStore{
 		Store:    deps.Store,
 		failType: "tracks",
 		err:      errors.New("injected DepAdd failure"),
-	}
+	})
 
 	b, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
 	if err != nil {
@@ -4839,7 +4840,7 @@ func TestFinalizeNoConvoyWhenSuppressed(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", NoConvoy: true,
@@ -4941,7 +4942,7 @@ func TestFindBlockingMolecule(t *testing.T) {
 		{ID: "BL-1", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
 	}, nil)
-	label, id := FindBlockingMolecule(store, "BL-1", store)
+	label, id := withStore(SlingDeps{}, store).FindBlockingMolecule(store, "BL-1")
 	if label != "molecule" {
 		t.Errorf("label = %q, want molecule", label)
 	}
@@ -4954,23 +4955,23 @@ func TestFindBlockingMoleculeNone(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Type: "task", Status: "open"},
 	}, nil)
-	label, id := FindBlockingMolecule(store, "BL-1", store)
+	label, id := withStore(SlingDeps{}, store).FindBlockingMolecule(store, "BL-1")
 	if label != "" || id != "" {
 		t.Errorf("expected no blocking molecule, got %q %q", label, id)
 	}
 }
 
-func TestHasMoleculeChildren(t *testing.T) {
+func TestFindBlockingAttachmentFindsAMoleculeChild(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Type: "task", Status: "open"},
 		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
 	}, nil)
-	has, err := HasMoleculeChildren(store, "BL-1", store)
+	att, err := findBlockingAttachment(store, "BL-1", withStore(SlingDeps{}, store).attachmentScope())
 	if err != nil {
-		t.Fatalf("HasMoleculeChildren: unexpected error %v", err)
+		t.Fatalf("findBlockingAttachment: unexpected error %v", err)
 	}
-	if !has {
-		t.Error("expected true")
+	if att == nil {
+		t.Error("expected a blocking attachment")
 	}
 }
 
@@ -4979,7 +4980,7 @@ func TestDoSlingDryRun(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", DryRun: true,
@@ -5000,7 +5001,7 @@ func TestDoSlingNudgeSignal(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", Nudge: true,
@@ -5035,7 +5036,7 @@ func TestDoSlingIdempotentHonorsNudge(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", Nudge: true, NoConvoy: true,
@@ -5070,7 +5071,7 @@ func TestDoSlingIdempotentDryRunSuppressesNudge(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(0, []beads.Bead{routed}, nil)
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	result, err := DoSling(SlingOpts{
 		Target: a, BeadOrFormula: "BL-1", Nudge: true, NoConvoy: true, DryRun: true,
@@ -5092,7 +5093,7 @@ func TestDoSlingSuspendedAgentWarnsEvenOnFailure(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), Suspended: true}
 
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 
 	if err == nil {
@@ -5115,7 +5116,7 @@ func TestDoSlingNonexistentTargetFails(_ *testing.T) {
 	}
 	nonexistent := config.Agent{Name: "nonexistent", MaxActiveSessions: intPtr(1)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 	// Cross-rig and routing should still work even if agent doesn't exist in config.
 	// The runner will fail, but the domain doesn't validate agent existence.
 	result, err := DoSling(testOpts(nonexistent, "BL-1"), deps, nil)
@@ -5134,7 +5135,7 @@ func TestDoSlingPoolEmptyWarnsOnFailure(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	a := config.Agent{Name: "empty-pool", MaxActiveSessions: intPtr(0)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = seededStore("BL-1")
+	deps = withStore(deps, seededStore("BL-1"))
 
 	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
 	if err == nil {
@@ -5502,12 +5503,11 @@ func TestReopenForReassign_RigStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rig Create: %v", err)
 	}
-	deps := SlingDeps{
-		Store: cityStore,
+	deps := withStore(SlingDeps{
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
-	}
+	}, cityStore)
 	if err := reopenForReassign(bead.ID, deps); err != nil {
 		t.Fatalf("reopenForReassign: %v", err)
 	}
@@ -5533,13 +5533,12 @@ func TestReopenForReassign_PrimaryStoreReadError(t *testing.T) {
 		t.Fatalf("rig Create: %v", err)
 	}
 	sourceSwept := false
-	deps := SlingDeps{
-		Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")},
+	deps := withStore(SlingDeps{
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			sourceSwept = true
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
-	}
+	}, &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")})
 	err = reopenForReassign(bead.ID, deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want primary read failure")
@@ -5568,14 +5567,14 @@ func TestReopenForReassign_PrimaryStoreReadError(t *testing.T) {
 // which would leave the bead human-assigned and pool-invisible (the #3408
 // symptom) under partial store failure.
 func TestReopenForReassign_SourceStoreReadError(t *testing.T) {
-	deps := SlingDeps{
-		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+	deps := withStore(SlingDeps{
+		// bead is absent here, so the sweep runs
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
 				{Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("rig store unreadable")}, StoreRef: "rig:myrig"},
 			}, nil
 		},
-	}
+	}, beads.NewMemStore())
 	err := reopenForReassign("gc-123", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-store read failure")
@@ -5596,12 +5595,12 @@ func TestReopenForReassign_SourceStoreReadError(t *testing.T) {
 // stores cannot even be listed after a primary-store miss, routing must not
 // proceed as though the bead were absent everywhere and leave it human-assigned.
 func TestReopenForReassign_SourceStoreListError(t *testing.T) {
-	deps := SlingDeps{
-		Store: beads.NewMemStore(), // bead is absent here (ErrNotFound), so the sweep runs
+	deps := withStore(SlingDeps{
+		// bead is absent here (ErrNotFound), so the sweep runs
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return nil, fmt.Errorf("stores unavailable")
 		},
-	}
+	}, beads.NewMemStore())
 	err := reopenForReassign("gc-456", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-workflow store listing failure")
@@ -5627,12 +5626,11 @@ func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rig Create: %v", err)
 	}
-	deps := SlingDeps{
-		Store: nil,
+	deps := withStore(SlingDeps{
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
-	}
+	}, nil)
 	if err := reopenForReassign(bead.ID, deps); err != nil {
 		t.Fatalf("reopenForReassign: %v", err)
 	}
@@ -5833,11 +5831,10 @@ func TestSlingFormulaTargetBranch_PrefersBeadMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding bead: %v", err)
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    store,
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, store)
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	got := SlingFormulaTargetBranch(bead.ID, deps, a)
@@ -5853,11 +5850,10 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByBead(t *testing.T) {
 			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat"} // no Dir — bead-prefix lookup must win
 
 	got := SlingFormulaTargetBranch("SC-1", deps, a)
@@ -5873,11 +5869,10 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByHyphenatedBeadPrefix(t *
 			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat"} // no Dir - bead-prefix lookup must handle hyphenated prefixes
 
 	got := SlingFormulaTargetBranch("agent-diagnostics-hnn", deps, a)
@@ -5893,11 +5888,10 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgent(t *testing.T) {
 			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "refinery", Dir: "scamper"}
 
 	// No bead ID — agent.Dir lookup must find the rig.
@@ -5915,11 +5909,10 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgentPath(t *testing.T) 
 			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "refinery", Dir: rigPath}
 
 	got := SlingFormulaTargetBranch("", deps, a)
@@ -5935,11 +5928,10 @@ func TestSlingFormulaTargetBranch_FallsBackToProbeWhenUnset(t *testing.T) {
 			{Name: "scamper", Path: "/scamper", Prefix: "SC"}, // no DefaultBranch
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "trunk"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "refinery", Dir: "scamper"}
 
 	got := SlingFormulaTargetBranch("SC-1", deps, a)
@@ -5966,11 +5958,10 @@ func TestBuildSlingFormulaVarsInjectsBaseBranchFromRigDefault(t *testing.T) {
 			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "develop"},
 		},
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    beads.NewMemStore(),
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	vars := BuildSlingFormulaVars("mol-polecat-work", "SC-1", nil, a, deps)
@@ -5997,11 +5988,10 @@ func TestBuildSlingFormulaVarsBaseBranchPrefersBeadTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding bead: %v", err)
 	}
-	deps := SlingDeps{
+	deps := withStore(SlingDeps{
 		Cfg:      cfg,
-		Store:    store,
 		Branches: fixedBranchResolver{branch: "main"},
-	}
+	}, store)
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	vars := BuildSlingFormulaVars("mol-polecat-work", bead.ID, nil, a, deps)
@@ -6048,7 +6038,7 @@ func TestCheckBeadStateRoutedPoolWorkClaimedByPoolSessionIsIdempotent(t *testing
 		MaxActiveSessions: intPtr(4),
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("expected Idempotent=true when pool work is already claimed by a pool session, got %+v", result)
@@ -6081,7 +6071,7 @@ func TestCheckBeadStateRoutedSingletonForeignAssigneeStillWarns(t *testing.T) {
 		MaxActiveSessions: intPtr(1),
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false for a singleton agent with a foreign assignee, got %+v", result)
@@ -6113,7 +6103,7 @@ func TestCheckBeadStateRoutedPoolForeignAssigneeStillWarns(t *testing.T) {
 		MaxActiveSessions: intPtr(4),
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false when another pool holds the bead, got %+v", result)
@@ -6164,7 +6154,7 @@ func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.
 		t.Fatalf("store.DepAdd(tracks): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if !result.Idempotent {
 		t.Fatalf("known over-match: expected Idempotent=true for a sibling-pool claim under the current anchor, got %+v", result)
@@ -6206,7 +6196,7 @@ func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 		t.Fatalf("store.Create(bead): %v", err)
 	}
 
-	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+	result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 	if result.Idempotent {
 		t.Fatalf("known gap: sanitized rig-qualified pool session is not matched by the target+\"-\" anchor; got %+v", result)
@@ -6284,7 +6274,7 @@ func TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent(t *testing.T
 				t.Fatalf("store.DepAdd(tracks): %v", err)
 			}
 
-			result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+			result := CheckBeadState(store, bead.ID, a, withStore(SlingDeps{}, store))
 
 			if result.Idempotent != tc.wantIdempotent {
 				t.Fatalf("Idempotent = %v, want %v (assignee %q, target %q); result %+v", result.Idempotent, tc.wantIdempotent, sb.ID, target, result)
@@ -6310,7 +6300,7 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, held.ID, a, molErr); warn {
+	if msg, warn := undeliverableHandoffWarning(store, withStore(SlingDeps{}, store), held.ID, a, molErr); warn {
 		t.Fatalf("own pool session claim reported undeliverable: %s", msg)
 	}
 
@@ -6319,7 +6309,7 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, foreign.ID, a, molErr); !warn {
+	if _, warn := undeliverableHandoffWarning(store, withStore(SlingDeps{}, store), foreign.ID, a, molErr); !warn {
 		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }

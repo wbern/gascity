@@ -95,7 +95,7 @@ func TestCheckBeadStateRoutedPoolClaimIdempotency(t *testing.T) {
 			got := CheckBeadState(store, bead.ID, tt.agent, SlingDeps{
 				CityName: tt.cityName,
 				Cfg:      &config.City{Agents: agents},
-				Store:    store,
+				Store:    beads.WorkStore{Store: store},
 			})
 			if got.Idempotent != tt.idempotent {
 				t.Fatalf("Idempotent = %v, want %v; result=%+v", got.Idempotent, tt.idempotent, got)
