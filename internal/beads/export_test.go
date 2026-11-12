@@ -121,3 +121,10 @@ func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
 func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
 	s.txProjectionTimeout = d
 }
+
+// ResetBdListIDFlagSupport clears the per-process `bd list --id` capability
+// latch so tests can exercise both the probe and the fallback.
+func ResetBdListIDFlagSupport() { bdListIDFlagUnsupported.Store(false) }
+
+// BdListIDFlagUnsupported reports the current capability latch.
+func BdListIDFlagUnsupported() bool { return bdListIDFlagUnsupported.Load() }
