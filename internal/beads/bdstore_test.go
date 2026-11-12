@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3268,15 +3269,16 @@ func TestBdStoreListPushesCallerLimitForIssuesTierDefaultSort(t *testing.T) {
 	}
 }
 
-// TestBdStoreListForcesUnboundedForIDs pins that ListQuery.IDs — a Go-side-
-// only residual filter bd list has no flag for — still forces --limit 0 so a
-// bd-side limit can never truncate before the ID match runs.
-func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
+// TestBdStoreListPushesIDsToBdList pins that ListQuery.IDs is sent to bd as
+// --id (so the read is bounded by the ID set) instead of degenerating to an
+// unbounded fetch of every row, and that the Go-side filter is kept.
+func TestBdStoreListPushesIDsToBdList(t *testing.T) {
+	beads.ResetBdListIDFlagSupport()
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		`bd list --json --id=bd-b --label=bounded-caller --include-infra --include-gates --limit 1`: {
 			out: []byte(`[
 				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
@@ -3289,7 +3291,7 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "bd-b" {
-		t.Fatalf("got = %+v, want single bd-b matched Go-side after unbounded fetch", got)
+		t.Fatalf("got = %+v, want single bd-b (Go-side safety filter must drop bd-a)", got)
 	}
 }
 
@@ -5548,5 +5550,245 @@ func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
 	}
 	if reclaimed {
 		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
+	}
+}
+
+// bdIDListRecorder is a fake bd that honors `list --id=` and records argv.
+type bdIDListRecorder struct {
+	mu        sync.Mutex
+	calls     [][]string
+	rows      map[string]string // id -> status
+	rejectID  bool
+	ephemeral bool
+}
+
+func (r *bdIDListRecorder) run(_, name string, args ...string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if name != "bd" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+	}
+	switch args[0] {
+	case "query":
+		return []byte(`[]`), nil
+	case "list":
+		r.calls = append(r.calls, append([]string(nil), args...))
+		var want []string
+		hasID := false
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "--id="); ok {
+				hasID = true
+				want = strings.Split(v, ",")
+			}
+		}
+		if hasID && r.rejectID {
+			return nil, fmt.Errorf("exit status 1: Error: unknown flag: --id")
+		}
+		var rows []string
+		emit := func(id, status string) {
+			rows = append(rows, fmt.Sprintf(`{"id":%q,"title":"t","status":%q,"issue_type":"task","created_at":"2026-05-01T00:00:00Z"}`, id, status))
+		}
+		if hasID {
+			for _, id := range want {
+				if st, ok := r.rows[id]; ok {
+					emit(id, st)
+				}
+			}
+		} else {
+			ids := make([]string, 0, len(r.rows))
+			for id := range r.rows {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			for _, id := range ids {
+				emit(id, r.rows[id])
+			}
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	}
+	return nil, fmt.Errorf("unexpected command: %s %v", name, args)
+}
+
+func (r *bdIDListRecorder) listCalls() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.calls...)
+}
+
+func newBdIDListFixture(closed, open int) (*bdIDListRecorder, []string, []string) {
+	r := &bdIDListRecorder{rows: map[string]string{}}
+	var closedIDs, openIDs []string
+	for i := 0; i < closed; i++ {
+		id := fmt.Sprintf("bd-c%04d", i)
+		r.rows[id] = "closed"
+		closedIDs = append(closedIDs, id)
+	}
+	for i := 0; i < open; i++ {
+		id := fmt.Sprintf("bd-o%04d", i)
+		r.rows[id] = "open"
+		openIDs = append(openIDs, id)
+	}
+	return r, closedIDs, openIDs
+}
+
+func idArg(args []string) string {
+	for _, a := range args {
+		if v, ok := strings.CutPrefix(a, "--id="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+func limitArg(args []string) string {
+	for i, a := range args {
+		if a == "--limit" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func TestBdStoreListByIDsPassesIDFlagAndStaysBounded(t *testing.T) {
+	beads.ResetBdListIDFlagSupport()
+	r, closedIDs, _ := newBdIDListFixture(500, 0)
+	s := beads.NewBdStore("/city", r.run)
+	want := []string{closedIDs[3], closedIDs[7], closedIDs[250]}
+	got, err := s.List(beads.ListQuery{IDs: want, Status: "closed", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := r.listCalls()
+	if len(calls) != 1 {
+		t.Fatalf("bd list calls = %v, want exactly 1", calls)
+	}
+	if idArg(calls[0]) != strings.Join(want, ",") {
+		t.Fatalf("argv %v lacks --id=%s", calls[0], strings.Join(want, ","))
+	}
+	if limitArg(calls[0]) == "0" {
+		t.Fatalf("argv %v is unbounded (--limit 0)", calls[0])
+	}
+	var hasAll bool
+	var hasStatus bool
+	for _, a := range calls[0] {
+		hasAll = hasAll || a == "--all"
+		hasStatus = hasStatus || a == "--status=closed"
+		if a == "--include-ephemeral" {
+			t.Fatalf("argv %v changed ephemeral flags", calls[0])
+		}
+	}
+	if !hasAll || !hasStatus {
+		t.Fatalf("argv %v must keep --all and --status=closed", calls[0])
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d beads, want 3", len(got))
+	}
+}
+
+func TestBdStoreListByIDsChunksAndMerges(t *testing.T) {
+	beads.ResetBdListIDFlagSupport()
+	r, closedIDs, _ := newBdIDListFixture(400, 0)
+	s := beads.NewBdStore("/city", r.run)
+	// 400 ids + a duplicate + a blank + one missing from the store.
+	ids := append([]string{}, closedIDs...)
+	ids = append(ids, closedIDs[0], "", "bd-missing")
+	got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := r.listCalls()
+	if len(calls) < 2 {
+		t.Fatalf("calls = %d, want multiple chunked calls", len(calls))
+	}
+	for _, c := range calls {
+		if n := len(strings.Split(idArg(c), ",")); n > 200 {
+			t.Fatalf("chunk of %d ids exceeds bound", n)
+		}
+		if limitArg(c) == "0" {
+			t.Fatalf("argv %v unbounded", c)
+		}
+	}
+	if len(got) != 400 {
+		t.Fatalf("merged %d beads, want 400 (deduped)", len(got))
+	}
+}
+
+func TestBdStoreListByIDsFallsBackWhenBdLacksIDFlag(t *testing.T) {
+	beads.ResetBdListIDFlagSupport()
+	t.Cleanup(beads.ResetBdListIDFlagSupport)
+	r, closedIDs, _ := newBdIDListFixture(50, 5)
+	r.rejectID = true
+	s := beads.NewBdStore("/city", r.run)
+	want := []string{closedIDs[1], closedIDs[2]}
+	got, err := s.List(beads.ListQuery{IDs: want, Status: "closed", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d beads, want 2 from the legacy path", len(got))
+	}
+	if !beads.BdListIDFlagUnsupported() {
+		t.Fatal("capability latch not set after --id rejection")
+	}
+	calls := r.listCalls()
+	last := calls[len(calls)-1]
+	if idArg(last) != "" || limitArg(last) != "0" {
+		t.Fatalf("fallback argv = %v, want legacy unbounded without --id", last)
+	}
+	// Second call must not re-probe.
+	before := len(r.listCalls())
+	if _, err := s.List(beads.ListQuery{IDs: want, Status: "closed", TierMode: beads.TierBoth}); err != nil {
+		t.Fatal(err)
+	}
+	if after := len(r.listCalls()); after-before != 1 {
+		t.Fatalf("second call issued %d bd list calls, want 1 (no re-probe)", after-before)
+	}
+}
+
+func TestBdStoreListByIDsMatchesLegacyResults(t *testing.T) {
+	ids := func(bs []beads.Bead) []string {
+		out := make([]string, len(bs))
+		for i, b := range bs {
+			out[i] = b.ID
+		}
+		sort.Strings(out)
+		return out
+	}
+	query := func(want []string) beads.ListQuery {
+		return beads.ListQuery{IDs: want, Status: "closed", TierMode: beads.TierBoth}
+	}
+	r1, closedIDs, openIDs := newBdIDListFixture(300, 20)
+	want := append(append([]string{}, closedIDs[:250]...), openIDs[:5]...)
+
+	beads.ResetBdListIDFlagSupport()
+	newPath, err := beads.NewBdStore("/city", r1.run).List(query(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beads.ResetBdListIDFlagSupport()
+	t.Cleanup(beads.ResetBdListIDFlagSupport)
+	r2, _, _ := newBdIDListFixture(300, 20)
+	r2.rejectID = true
+	oldPath, err := beads.NewBdStore("/city", r2.run).List(query(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ids(newPath), ids(oldPath)) || len(newPath) != 250 {
+		t.Fatalf("new path returned %d beads, legacy %d; want identical 250", len(newPath), len(oldPath))
+	}
+}
+
+func TestBdStoreListByIDsNeverReturnsOpenBlockersAsClosed(t *testing.T) {
+	beads.ResetBdListIDFlagSupport()
+	r, closedIDs, openIDs := newBdIDListFixture(3, 3)
+	s := beads.NewBdStore("/city", r.run)
+	// Even a bd that ignores the status filter for --id must not leak open rows.
+	got, err := s.List(beads.ListQuery{IDs: []string{closedIDs[0], openIDs[0]}, Status: "closed", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != closedIDs[0] || got[0].Status != "closed" {
+		t.Fatalf("got %+v, want only the closed blocker", got)
 	}
 }
