@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2885,7 +2886,116 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
 		limit = 0
 	}
+	idChunks := bdListIDChunks(serverQuery.IDs)
+	if len(idChunks) > 0 && !bdListIDFlagUnsupported.Load() {
+		return s.listViaBDListByID(query, serverQuery, limit, idChunks)
+	}
+	return s.listViaBDListOnce(query, serverQuery, limit, nil)
+}
+
+// bdListIDChunkSize bounds how many IDs ride on one `bd list --id=` argument
+// so the command line stays well under platform ARG_MAX limits.
+const bdListIDChunkSize = 150
+
+// bdListIDFlagUnsupported latches (per process) once a bd binary rejects
+// `bd list --id`, so older bd versions pay the failed probe once and then use
+// the unbounded client-side filter path.
+var bdListIDFlagUnsupported atomic.Bool
+
+// bdListIDChunks de-duplicates ids, drops blanks and splits them into groups
+// of at most bdListIDChunkSize. It returns nil when there is nothing to send.
+func bdListIDChunks(ids []string) [][]string {
+	seen := make(map[string]struct{}, len(ids))
+	uniq := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if strings.ContainsRune(id, ',') {
+			// bd would split this into separate IDs; refuse the push-down and
+			// let the unbounded Go-side filter decide.
+			return nil
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	var chunks [][]string
+	for len(uniq) > bdListIDChunkSize {
+		chunks = append(chunks, uniq[:bdListIDChunkSize])
+		uniq = uniq[bdListIDChunkSize:]
+	}
+	if len(uniq) > 0 {
+		chunks = append(chunks, uniq)
+	}
+	return chunks
+}
+
+// isBdListIDUnsupported reports whether err means the installed bd does not
+// know the `list --id` flag.
+func isBdListIDUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unknown flag: --id") ||
+		strings.Contains(text, "unknown flag --id")
+}
+
+// listViaBDListByID pushes the ID filter to bd (`--id=a,b,c`, chunked) so the
+// read is bounded by the ID set instead of fetching every row matching the
+// remaining filters. The Go-side applyListQuery still re-checks IDs and status
+// on the merged rows, so results are identical to the unbounded path. If bd
+// rejects --id the flag is latched unsupported and the unbounded path is used.
+func (s *BdStore) listViaBDListByID(query, serverQuery ListQuery, limit int, chunks [][]string) ([]Bead, error) {
+	var merged []Bead
+	seen := make(map[string]struct{})
+	var partial error
+	for _, chunk := range chunks {
+		// ID-bounded: at most len(chunk) rows can match, so the chunk size is
+		// the bd-side limit; query.Limit is applied Go-side after the merge.
+		got, err := s.listViaBDListOnce(query, serverQuery, len(chunk), chunk)
+		if err != nil {
+			var pe *PartialResultError
+			if errors.As(err, &pe) {
+				if partial == nil {
+					partial = err
+				}
+			} else {
+				if isBdListIDUnsupported(err) {
+					bdListIDFlagUnsupported.Store(true)
+					return s.listViaBDListOnce(query, serverQuery, limit, nil)
+				}
+				return nil, err
+			}
+		}
+		for _, b := range got {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			merged = append(merged, b)
+		}
+	}
+	if len(chunks) > 1 {
+		// Per-chunk results were each ordered/limited; restore the query's
+		// global order and limit.
+		merged = applyListQuery(merged, query)
+	}
+	if partial != nil {
+		return merged, partial
+	}
+	return merged, nil
+}
+
+func (s *BdStore) listViaBDListOnce(query, serverQuery ListQuery, limit int, idChunk []string) ([]Bead, error) {
 	args := []string{"list", "--json"}
+	if len(idChunk) > 0 {
+		args = append(args, "--id="+strings.Join(idChunk, ","))
+	}
 	if serverQuery.Label != "" {
 		args = append(args, "--label="+serverQuery.Label)
 	}
@@ -2977,10 +3087,11 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
-	if len(serverQuery.IDs) > 0 {
+	// IDs is pushed to bd as `--id=` (chunked) when the installed bd supports
+	// it, which bounds the read by the ID set. Only when the flag is known to
+	// be unsupported is IDs a Go-side-only filter, and then a bd-side limit
+	// could truncate before the matching IDs are fetched.
+	if len(serverQuery.IDs) > 0 && bdListIDFlagUnsupported.Load() {
 		return true
 	}
 	return false
