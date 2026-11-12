@@ -169,3 +169,57 @@ func (w *fakeWatcher) Close() error {
 	w.closeOnce.Do(func() { close(w.done) })
 	return nil
 }
+
+// BeginWatch starts a bounded in-memory retained scan. Records are already
+// decoded, so each grant can complete synchronously without I/O or a worker.
+func (f *Fake) BeginWatch(ctx context.Context, afterSeq uint64) (PollWatcher, error) {
+	return &fakePollWatcher{fake: f, ctx: ctx, afterSeq: afterSeq}, nil
+}
+
+type fakePollWatcher struct {
+	mu       sync.Mutex
+	fake     *Fake
+	ctx      context.Context
+	afterSeq uint64
+	index    int
+	closed   bool
+}
+
+func (w *fakePollWatcher) Poll(ctx context.Context, b PollBudget) (PollBatch, error) {
+	if !validPollBudget(b) {
+		return PollBatch{}, fmt.Errorf("event poll: budgets must be positive")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return PollBatch{}, err
+	}
+	if err := w.ctx.Err(); err != nil {
+		return PollBatch{}, err
+	}
+	if w.closed {
+		return PollBatch{}, errWatcherClosed
+	}
+	w.fake.mu.Lock()
+	defer w.fake.mu.Unlock()
+	if w.fake.broken {
+		return PollBatch{}, fmt.Errorf("events provider unavailable")
+	}
+	var out PollBatch
+	for i := 0; i < b.Records && w.index < len(w.fake.Events); i++ {
+		e := w.fake.Events[w.index]
+		w.index++
+		if e.Seq > w.afterSeq {
+			w.afterSeq = e.Seq
+			out.Events = append(out.Events, e)
+		}
+	}
+	return out, nil
+}
+
+func (w *fakePollWatcher) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return nil
+}

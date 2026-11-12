@@ -712,3 +712,34 @@ var Discard Recorder = discardRecorder{}
 type discardRecorder struct{}
 
 func (discardRecorder) Record(Event) {}
+
+// PollBudget bounds one retained-stream grant. All fields must be positive.
+// CompressedBytes bounds archive input, RawBytes bounds framing input, Records
+// bounds decoded rows (including rejected rows), and Segments bounds opens.
+type PollBudget struct {
+	CompressedBytes, RawBytes, Records, Segments int
+}
+
+// PollBatch is the ordered output available without waiting for scanner work.
+// Pending stays true until the outstanding grant is acknowledged and every
+// produced event is returned. False is a batch boundary, never log EOF.
+type PollBatch struct {
+	Events  []Event
+	Pending bool
+}
+
+// PollWatcher provides bounded, nonblocking access to a retained event stream.
+// Poll permits only one outstanding grant. Calls while it is outstanding drain
+// output without adding credits; a completion call never starts the next grant.
+// Close cancels owned waits and joins the worker, including any in-flight decode
+// or OS operation once it returns. It is idempotent.
+type PollWatcher interface {
+	Poll(context.Context, PollBudget) (PollBatch, error)
+	Close() error
+}
+
+// PollProvider starts an owned scanner without synchronously enumerating history,
+// reading its tail, decompressing input, or decoding records.
+type PollProvider interface {
+	BeginWatch(context.Context, uint64) (PollWatcher, error)
+}

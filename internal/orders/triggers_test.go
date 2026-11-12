@@ -1240,3 +1240,166 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
 	}
 }
+
+func TestEventScannerPostfiltersLatchAndCursor(t *testing.T) {
+	f := events.NewFake()
+	f.Record(events.Event{Type: events.BeadCreated, Payload: json.RawMessage(`{"labels":["order-tracking"],"metadata":{"ready":"yes"}}`)})
+	f.Record(events.Event{Type: events.BeadCreated, Payload: json.RawMessage(`{"metadata":{"ready":"no"}}`)})
+	a := Order{Name: "bounded", Trigger: "event", On: events.BeadCreated, Metadata: map[string]string{"ready": "yes"}}
+	s, err := NewEventScanner(context.Background(), a, f, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test cleanup
+	budget := events.PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 1, Segments: 1}
+	for i := 0; i < 2; i++ {
+		if s.Check(context.Background(), 0, budget).Due {
+			t.Fatal("postfilter rejection fired")
+		}
+	}
+	f.Record(events.Event{Type: events.BeadCreated, Payload: json.RawMessage(`{"metadata":{"ready":"yes"}}`)})
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
+	for !s.Check(context.Background(), 0, budget).Due {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("late match lost")
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if !s.Check(context.Background(), 0, budget).Due {
+			t.Fatal("gate/launch retry lost latch")
+		}
+	}
+	if s.Check(context.Background(), 3, budget).Due {
+		t.Fatal("durable cursor did not retire latch")
+	}
+	if !s.Matches(a, f) {
+		t.Fatal("same predicate rejected")
+	}
+	a.Metadata["ready"] = "no"
+	if s.Matches(a, f) {
+		t.Fatal("changed metadata transferred")
+	}
+}
+
+func TestEventScannerPayloadWorkNeverBlocksController(t *testing.T) {
+	f := events.NewFake()
+	f.Record(events.Event{Type: events.BeadCreated, Payload: json.RawMessage(`{"metadata":{"ready":"yes"}}`)})
+	a := Order{Name: "payload", Trigger: "event", On: events.BeadCreated}
+	s, err := NewEventScanner(context.Background(), a, f, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test cleanup
+	entered := make(chan struct{})
+	s.qualify = func(ctx context.Context, _ events.Event) bool {
+		close(entered)
+		<-ctx.Done()
+		return false
+	}
+	budget := events.PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 1, Segments: 1}
+	if s.Check(context.Background(), 0, budget).Due {
+		t.Fatal("unprocessed payload fired")
+	}
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("matcher not entered")
+	}
+	for i := 0; i < 100; i++ {
+		if s.Check(context.Background(), 0, budget).Due {
+			t.Fatal("blocked matcher fired")
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("owned matcher did not join")
+	}
+}
+
+// cancelDuringPollWatcher cancels after Check's caller-context precheck.
+type cancelDuringPollWatcher struct {
+	calls    int
+	cancel   context.CancelFunc
+	terminal bool
+	batch    bool
+}
+
+func (w *cancelDuringPollWatcher) Poll(ctx context.Context, _ events.PollBudget) (events.PollBatch, error) {
+	w.calls++
+	if w.calls == 1 {
+		w.cancel()
+		var batch events.PollBatch
+		if w.batch {
+			batch.Events = []events.Event{{Seq: 1, Type: events.BeadCreated}}
+		}
+		if w.terminal {
+			return batch, fmt.Errorf("retained stream failed")
+		}
+		return batch, ctx.Err()
+	}
+	if w.calls == 2 {
+		return events.PollBatch{Events: []events.Event{{Seq: 2, Type: events.BeadCreated}}}, nil
+	}
+	return events.PollBatch{}, nil
+}
+func (w *cancelDuringPollWatcher) Close() error { return nil }
+
+type cancelDuringPollProvider struct {
+	*events.Fake
+	watcher events.PollWatcher
+}
+
+func (p *cancelDuringPollProvider) BeginWatch(context.Context, uint64) (events.PollWatcher, error) {
+	return p.watcher, nil
+}
+
+func TestEventScannerCancellationDuringPoll(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, batch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("terminal=%v/batch=%v", terminal, batch), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				w := &cancelDuringPollWatcher{cancel: cancel, terminal: terminal, batch: batch}
+				p := &cancelDuringPollProvider{Fake: events.NewFake(), watcher: w}
+				s, err := NewEventScanner(context.Background(), Order{Name: "cancel", On: events.BeadCreated}, p, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close() //nolint:errcheck // test cleanup
+				budget := events.PollBudget{CompressedBytes: 1, RawBytes: 1, Records: 1, Segments: 1}
+				first := s.Check(ctx, 0, budget)
+				if first.Due != batch {
+					t.Fatalf("produced batch lost: %+v", first)
+				}
+				cursor := uint64(0)
+				if batch {
+					cursor = 1
+				}
+				next := s.Check(context.Background(), cursor, budget)
+				if terminal {
+					if next.Due || w.calls != 1 || !strings.Contains(next.Reason, "retained stream failed") {
+						t.Fatalf("terminal failure retried: %+v, calls=%d", next, w.calls)
+					}
+					return
+				}
+				if !next.Due || w.calls != 2 {
+					t.Fatalf("caller cancellation poisoned retained scanner: %+v, calls=%d", next, w.calls)
+				}
+				if s.Check(context.Background(), 2, budget).Due {
+					t.Fatal("consumed event delivered twice")
+				}
+			})
+		}
+	}
+}
