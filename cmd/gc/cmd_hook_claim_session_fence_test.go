@@ -102,7 +102,7 @@ func seedPATHHookClaimSessionFixture(t *testing.T, cityDir, id, name string) {
 	}
 }
 
-// newFenceSessionBead creates a session bead in the city store with the given
+// newFenceSessionBead creates a session bead in the city's session store with the given
 // runtime state and instance token, returning its id.
 func newFenceSessionBead(t *testing.T, cityDir string, state session.State, instanceToken string) string {
 	return newFenceSessionBeadWithMetadata(t, cityDir, state, instanceToken, nil)
@@ -110,10 +110,7 @@ func newFenceSessionBead(t *testing.T, cityDir string, state session.State, inst
 
 func newFenceSessionBeadWithMetadata(t *testing.T, cityDir string, state session.State, instanceToken string, metadata map[string]string) string {
 	t.Helper()
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
+	store := openCitySessionStoreForTest(t, cityDir)
 	beadMetadata := map[string]string{
 		"session_name":   "worker-1",
 		"template":       "worker",

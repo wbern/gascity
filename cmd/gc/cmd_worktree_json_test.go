@@ -58,7 +58,7 @@ func stubWorktreeCityDeps(t *testing.T) {
 		return beads.NewMemStoreFrom(1, nil, nil), nil
 	}
 	worktreeOpenCityStoreAt = func(string) (beads.Store, error) { return beads.NewMemStoreFrom(1, nil, nil), nil }
-	worktreeListAllSessionBeads = func(beads.Store, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
+	worktreeListAllSessionBeads = func(beads.SessionStore, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
 	worktreeScanStrayWorktrees = func([]string, map[string]bool, func(string) gitProbe) ([]strayWorktree, error) {
 		return []strayWorktree{
 			{Path: "/wt/clean", Reclaimable: true},

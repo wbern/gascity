@@ -621,6 +621,9 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
+	// After registration, so the first start's pack setup has run and the
+	// client-side load sees the same config the supervisor does.
+	printRigFederationStartWarnings(cityPath, stderr)
 	if jsonOut {
 		cityName := nameOverride
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
@@ -640,6 +643,21 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// printRigFederationStartWarnings tells the operator running `gc start` that a
+// guarded rig is not protected by this build. The supervisor that runs the
+// city logs the same warning, but only to its own log, so the client loads the
+// config itself. It is best effort: a config that does not load here is
+// reported by the supervisor's own load.
+func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
@@ -801,10 +819,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
-	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
-	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	// The two agree: both read only cfg, which nothing below rewrites,
+	// reconcilerModeLookupEnv's GC_SESSION and GC_BEADS_CONDITIONAL_WRITES,
+	// which no gc code sets, and an exec runtime's admission handshake,
+	// remembered per version of its script (execReadiness); a script
+	// rewritten between the two is caught at boot (C0.8).
+	mode, err := latchReconcilerMode(cfg, cityPath, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -825,6 +845,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Reserved coordination-class prefixes refuse a split city (its binding
 	// mints in that namespace, R10) and stay a non-fatal advisory for a city
 	// that relocates nothing.
@@ -839,6 +863,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// then runs without the permission mode / effort / model the operator
 	// declared. Non-fatal, but invisible otherwise (gcw-bdmt).
 	for _, w := range config.ResumeCommandWarnings(cfg.Providers) {
+		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
@@ -1842,7 +1869,9 @@ var controllerOnlyEnvKeys = func() map[string]bool {
 // "reaches every agent session" instead of requiring two separate,
 // independently-maintained allowlists to agree. controllerOnlyEnvKeys is
 // checked before either path and cannot be bypassed by an opt-in; those keys
-// come back pinned to the empty string rather than absent.
+// come back pinned to the empty string rather than absent. The demand-spawn
+// keys (processenv.DemandSpawnEnvKeys) are skipped the same way: the
+// controller's own copy describes some other session's spawn.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
 	explicitKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
@@ -1852,7 +1881,7 @@ func passthroughEnv() map[string]string {
 	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || controllerOnlyEnvKeys[key] {
+		if !ok || val == "" || controllerOnlyEnvKeys[key] || processenv.IsDemandSpawnEnv(key) {
 			continue
 		}
 		if !strings.HasPrefix(key, "GC_") && !explicit[key] {

@@ -41,6 +41,35 @@ type gitProbe interface {
 // through a package-level var so tests can stub the git invocations.
 var newGitProbe = func(workDir string) gitProbe { return git.NewInspection(workDir) }
 
+// managedWorktreeRefusal reports why the prune must leave the worktree gp
+// probes, or "" when the worktree is the closing session's own. A worktree
+// whose private git directory holds the provenance a completed
+// `gc worktree ensure` published is a managed worktree: the provenance names
+// the one owner that provisioned it, and only that owner removes it, through
+// `gc worktree cleanup` with the attempt id that created it. A closing
+// session is never that owner, even when the controller started it inside the
+// worktree because its work bead names one (verifiedPoolTriggerWorkDir). Only
+// a record that does not exist makes the worktree the session's; a git dir or
+// record that cannot be read keeps the worktree. An empty git directory is
+// unreadable too (fork hardening).
+func managedWorktreeRefusal(gp gitProbe) string {
+	gitDir, err := gp.GitDir()
+	if err != nil || strings.TrimSpace(gitDir) == "" {
+		if err == nil {
+			err = fmt.Errorf("git directory is empty")
+		}
+		return fmt.Sprintf("cannot read its worktree provenance: cannot resolve Git directory: %v", err)
+	}
+	provenance, err := worktree.ReadProvenanceAt(gitDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return fmt.Sprintf("cannot read its worktree provenance: %v", err)
+	}
+	return fmt.Sprintf("managed worktree of bead %s owned by %q; only its owner removes it (gc worktree cleanup)", provenance.BeadID, provenance.Owner)
+}
+
 // resolveWorkerDirForPrune applies the eligibility gates that precede any git
 // safety probe and returns the probe to continue with. When the worker_dir is
 // not eligible it returns a non-empty reason instead, so no skip is silent:
@@ -76,17 +105,8 @@ func resolveWorkerDirForPrune(workerDir, cityPath string) (gp gitProbe, skip str
 	if !gp.IsRepo() {
 		return nil, "worker_dir is not a readable git repo"
 	}
-	gitDir, err := gp.GitDir()
-	if err != nil || strings.TrimSpace(gitDir) == "" {
-		if err == nil {
-			err = fmt.Errorf("git directory is empty")
-		}
-		return nil, fmt.Sprintf("cannot read its worktree provenance: cannot resolve Git directory: %v", err)
-	}
-	if _, err := worktree.ReadProvenanceAt(gitDir); err == nil {
-		return nil, "managed worktree has durable ownership provenance"
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Sprintf("cannot read its worktree provenance: %v", err)
+	if reason := managedWorktreeRefusal(gp); reason != "" {
+		return nil, reason
 	}
 	return gp, ""
 }
@@ -147,16 +167,16 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 }
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
-// worker_dir, after applying the same safety gates as doctor's
-// NestedWorktreePruneCheck. Returns true when the removal actually
-// happened.
+// worker_dir, after applying doctor's NestedWorktreePruneCheck safety gates
+// minus its repo-global stash probe (refs/stash is shared across worktrees
+// and survives `git worktree remove`; ga-pyp2oh). Returns true when the
+// removal actually happened.
 //
 // The decision is mechanical, never role-coupled: any pool-managed agent
 // worktree that lives under the configured worktrees root
-// (workdir.WorktreesRoot), is a git
-// worktree, and probes clean is safe to reclaim. Pool sessions are
-// transient by design — their worktrees were never meant to outlive the
-// session bead.
+// (workdir.WorktreesRoot), is a git worktree no provisioner owns, and
+// probes clean is safe to reclaim. Pool sessions are transient by design —
+// their own worktrees were never meant to outlive the session bead.
 //
 // No-op when:
 //   - cfg.Daemon.AutoPruneWorkerDir is false (the only silent skip: a standing
@@ -165,6 +185,8 @@ func workerDirGitStateSkip(gp gitProbe, workerDir string, stderr io.Writer) (ski
 //   - the worker_dir does not live under the configured worktrees root
 //     (workdir.WorktreesRoot)
 //   - the worker_dir is missing on disk or has no .git pointer
+//   - the worker_dir is a managed worktree, or its provenance cannot be read
+//     (managedWorktreeRefusal)
 //   - the worktree has uncommitted changes, ignored files, or unpushed commits (a repo-wide
 //     stash is only a warning — see workerDirGitStateSkip)
 //   - the rig that owns the session cannot be resolved to a filesystem path

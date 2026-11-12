@@ -515,3 +515,30 @@ func TestScanUnknownFlagsGCWrapperRegressions(t *testing.T) {
 		})
 	}
 }
+
+// bd accepts these aliases without listing them in its help, so help
+// discovery cannot find them: the pinned tables must carry them or gc lint
+// reports a valid invocation as an unknown flag.
+func TestScanUnknownFlagsAcceptsBdHiddenAliases(t *testing.T) {
+	cases := []string{
+		`gc bd create "title" --label area/docs`,
+		`gc bd create "title" --body "text"`,
+		`gc bd create "title" -m "text"`,
+		`gc bd create "title" --message "text"`,
+		`gc bd create "title" --description-file notes.md`,
+		`gc bd update <id> --body "text"`,
+		`gc bd update <id> -m "text"`,
+		`gc bd update <id> --message "text"`,
+		`gc bd update <id> --description-file notes.md`,
+		`gc bd update <id> --acceptance-criteria "done when"`,
+		`gc bd close <id> --resolution "done"`,
+		`gc bd close <id> -m "done"`,
+		`gc bd close <id> --message "done"`,
+		`gc bd close <id> --comment "done"`,
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}

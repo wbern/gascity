@@ -585,7 +585,7 @@ func createHandoffMailWithDedupAs(pinned *hookIdentity, msgStore, sessStore bead
 	// expresses, which aren't part of the generic provider surface. Built as a
 	// two-store provider (mirroring newCityMailProvider): the message bead is
 	// ClassMessaging, beadmail's addressing reads are ClassSessions.
-	provider := beadmail.NewWithStores(msgStore, sessStore)
+	provider := beadmail.NewWithStores(beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore})
 	// Handoff mail is sent from the calling session. When its own bead id
 	// resolves, the provider takes the sender route from that bead instead of
 	// resolving senderAddress again. A failed lookup pins nothing: the sender

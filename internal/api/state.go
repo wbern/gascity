@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -78,8 +79,19 @@ type State interface {
 	// SessionProvider returns the current session provider.
 	SessionProvider() runtime.Provider
 
+	// Stores is the city's class handles for the current store epoch, minted
+	// by the controller's router (storeref.Stores): Work, Graph, Sessions,
+	// Mail, Orders, Nudges, Rig(name), Rigs and GraphFor(scope). Read it once
+	// per request and take every class from that value; a stream re-reads it
+	// per iteration. A held value keeps its epoch: the stores a reload
+	// replaces close within controllerStateStoreCloseDelay, so never cache it
+	// on the Server.
+	Stores() storeref.Stores
+
 	// BeadStore returns the bead store for a rig (by name).
-	// Returns nil if the rig doesn't exist.
+	// Returns nil if the rig doesn't exist. BeadStore, BeadStores,
+	// CityBeadStore, ScopedStoreLike and ClassBindingHasLegacyResidents stay
+	// raw until T7's federated readers: callers are the T7 residue.
 	BeadStore(rig string) beads.Store
 
 	// BeadStores returns all rig names and their stores.
@@ -308,14 +320,35 @@ type RawConfigProvider interface {
 }
 
 // WakeStartRefuser is an optional State capability: the controller names
-// why it will not start a session whose wake was just recorded (an
-// idle-latched row, a suspended rig or agent, no runnable template, a
-// dependency-only row, a startup-health quarantine), or "" when it will.
+// why it will not start a session whose wake was just recorded (a state the
+// controller skips, an idle-latched row, a suspended rig or agent, no
+// runnable template, a dependency-only row, a startup-health quarantine), or
+// "" when it will.
 // certain is false when it does not refuse but cannot tell (a pool seat that
 // starts only for demand). info is the row after the wake was recorded.
 // Optional for the same reason as WebhookDispatchProvider.
 type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
+}
+
+// SessionListWakeReasoner is an optional State capability: the reasons the
+// controller keeps each listed session awake (session, config, attached,
+// pin, ...), as the CLI's local `gc session list` computes them for its
+// REASON column. listed is one page of sessions after the runtime overlay;
+// persisted maps each listed id to the session's persisted Info. A session
+// with no wake reasons has no entry. The classifiers live in cmd/gc, which
+// internal/api cannot import, hence the capability.
+type SessionListWakeReasoner interface {
+	SessionListWakeReasons(listed []session.Info, persisted map[string]session.Info) map[string][]string
+}
+
+// UnknownStateRefuser is an optional State capability: the controller names
+// why it will not act on a wake or a fresh-restart request for a session in a
+// state it skips, or "" when it does not skip the row. info is the stored row
+// before the wake or reset writes anything. Optional for the same reason as
+// WebhookDispatchProvider.
+type UnknownStateRefuser interface {
+	UnknownStateRefusal(info session.Info) string
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live

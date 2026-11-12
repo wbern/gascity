@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // newSliceTestTmux returns a Tmux backed by a fakeExecutor with the agent
@@ -295,7 +297,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 
 	panePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(panePID, []string{"sleep"}) {
+	for !snapshotHasDescendant(panePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -386,7 +388,7 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 
 	livePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(livePID, []string{"sleep"}) {
+	for !snapshotHasDescendant(livePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -418,4 +420,14 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 			t.Fatalf("pane PID requested %d times, want >= 3 (wait must keep polling until the descendant appears)", exec.pidRequests)
 		}
 	})
+}
+
+// snapshotHasDescendant reports whether a process named in names runs below
+// pid in a fresh process-table snapshot, the view the pane probes judge by.
+func snapshotHasDescendant(pid string, names ...string) bool {
+	processes, err := fetchProcessSnapshot(context.Background())
+	if err != nil {
+		return false
+	}
+	return processes.hasDescendantWithNames(pid, proctable.ProcessNameSet(names), 0)
 }

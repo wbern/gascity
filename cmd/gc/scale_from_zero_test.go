@@ -72,9 +72,16 @@ func TestBuildDesiredState_ColdCustomScaleCheckCityPoolRigTriggerStoreRefIsCanon
 		t.Fatalf("desired sessions = %d, want 1", len(result.State))
 	}
 	for _, desired := range result.State {
-		for _, key := range []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
-			if got := desired.Env[key]; got != "rig:rig-A" {
-				t.Fatalf("%s = %q, want canonical rig:rig-A", key, got)
+		// Upstream T9 (#5738, #8468): a seat's env carries only the presence-only
+		// demand marker. The trigger id and its store ref are never exported
+		// (a shell's copy is frozen at exec while the stamp keeps moving), so the
+		// canonical store ref lives on the session row, asserted below.
+		if got := desired.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want the demand marker", got)
+		}
+		for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+			if got := desired.Env[key]; got != "" {
+				t.Fatalf("%s = %q, want it not exported to the seat", key, got)
 			}
 		}
 	}

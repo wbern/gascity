@@ -60,7 +60,8 @@ func (l *requestSessionListing) ListRunning(prefix string) ([]string, error) {
 }
 
 // list reads the full listing once. Attestation is read before the listing
-// and after it; a provider must attest completeness at both observations.
+// and after it, and only both count, as [runtime.ListRunningWithAttestation]
+// documents.
 func (l *requestSessionListing) list() {
 	l.once.Do(func() {
 		before := listingAttested(l.sp)

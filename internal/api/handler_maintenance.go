@@ -37,6 +37,10 @@ func (s *Server) maintenanceUnavailable() error {
 // exists specifically to surface live state, and an empty-history 200
 // would be indistinguishable from a freshly-enabled loop that has not
 // yet fired.
+//
+// It reports no cache age (X-GC-Cache-Age-S is 0): the body comes from config
+// and the maintenance loop, not from the bead cache, so the cache's age says
+// nothing about it.
 func (s *Server) humaHandleMaintenanceStatus(_ context.Context, _ *MaintenanceStatusInput) (*MaintenanceStatusOutput, error) {
 	loop := s.state.MaintenanceLoop()
 	if loop == nil {
@@ -73,7 +77,6 @@ func (s *Server) humaHandleMaintenanceStatus(_ context.Context, _ *MaintenanceSt
 	}
 
 	out := &MaintenanceStatusOutput{
-		CacheAgeHeader: cacheAgeSeconds(s.state.CityBeadStore()),
 		Body: MaintenanceStatusBody{
 			Enabled:       cfg != nil && cfg.Maintenance.Dolt.Enabled,
 			IntervalSec:   intervalSec,

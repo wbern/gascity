@@ -110,6 +110,17 @@ type SessionRequest struct {
 	// (computePoolTriggerBindingPatch), while that dir can host the resume
 	// (parkedWorkDirUsable).
 	ParkedContinuation bool
+	// NameOnly marks a request whose work bead only names a seat that a
+	// custom scale_check count places (scaleCheckDemand.NameOnly). When
+	// realization refuses that work's worktree evidence, the seat starts
+	// unnamed in the pool's own directory (unnamedPoolRequest) rather than
+	// leaving the pool a seat short of its count (nameOnlyFallback).
+	NameOnly bool
+	// NameRefused marks that unnamed request (unnamedPoolRequest). Its work
+	// dir is the pool's own directory (poolTriggerWorkDir), so a reused seat
+	// that is not alive moves there rather than start in the directory its
+	// last binding recorded (poolSeatBindingPatch).
+	NameRefused bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -1246,6 +1257,20 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	if demand.WorktreeErrors != nil {
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
+	request.NameOnly = demand.NameOnly
+	return request
+}
+
+// unnamedPoolRequest is request without the work it names, the fields
+// requestWithScaleDemandProvenance sets, marked NameRefused: the request a
+// warm custom scale_check pool's seat made before its work was named, which
+// starts the seat in the pool's own directory and moves a reused seat that is
+// not alive there.
+func unnamedPoolRequest(request SessionRequest) SessionRequest {
+	request.WorkBeadID, request.WorkBeadTitle, request.WorkPack, request.WorkWorkspace = "", "", "", ""
+	request.WorkStoreRef, request.WorkBindingResident, request.BrainParentSID = "", false, ""
+	request.WorktreeSpec, request.WorktreeError, request.NameOnly = nil, "", false
+	request.NameRefused = true
 	return request
 }
 

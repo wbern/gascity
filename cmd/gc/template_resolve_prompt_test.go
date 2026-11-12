@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -968,11 +969,17 @@ func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	// The assigned-ready read carries no --exclude-type=message: bd's ready path
-	// already excludes message beads natively, and upstream pins that no ready
-	// read renders the flag (T8 dropped the fork's 09e43f654 filter).
-	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
-		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
+	// The assigned-ready read carries the dispatch-hold exclusions (upstream T9,
+	// with the fork's complete DispatchHoldLabels set) and no
+	// --exclude-type=message: bd's ready path already excludes message beads
+	// natively (T8 dropped the fork's 09e43f654 filter).
+	wantQuery := `bd ready --include-ephemeral --assignee="$id"`
+	for _, label := range beadmeta.DispatchHoldLabels {
+		wantQuery += ` --exclude-label "` + label + `"`
+	}
+	wantQuery += ` --json --limit=1`
+	if !strings.Contains(tp.Prompt, wantQuery) {
+		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query %q: %q", wantQuery, tp.Prompt)
 	}
 }
 

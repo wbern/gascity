@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 type primeHookFailWriter struct {
@@ -1003,7 +1002,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			if !ok {
 				t.Fatal("createHandoffMail(auto) failed")
 			}
-			ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "leave this for UserPromptSubmit")
+			ordinary, err := newTestBeadMail(store).Send("human", sessionID, "ordinary", "leave this for UserPromptSubmit")
 			if err != nil {
 				t.Fatalf("Send ordinary mail: %v", err)
 			}
@@ -1060,7 +1059,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			// SessionStart only stages context. A successful first user-turn hook is
 			// the delivery boundary that consumes it, exactly once.
 			var submitOut bytes.Buffer
-			if code := doMailCheck(beadmail.New(store), sessionID, true, &submitOut, &stderr); code != 0 {
+			if code := doMailCheck(newTestBeadMail(store), sessionID, true, &submitOut, &stderr); code != 0 {
 				t.Fatalf("doMailCheck(UserPromptSubmit) = %d; stderr=%q", code, stderr.String())
 			}
 			if got := strings.Count(submitOut.String(), auto.ID); got != 1 {
@@ -1194,7 +1193,7 @@ prompt_template = "prompts/worker.md"
 	if !ok {
 		t.Fatal("createHandoffMail(auto) failed")
 	}
-	ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "review the auth PR")
+	ordinary, err := newTestBeadMail(store).Send("human", sessionID, "ordinary", "review the auth PR")
 	if err != nil {
 		t.Fatalf("Send ordinary mail: %v", err)
 	}

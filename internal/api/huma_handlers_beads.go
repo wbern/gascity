@@ -136,10 +136,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
+			freshness := cacheAgeSeconds(cityStore)
 			return &ListOutput[beads.Bead]{
-				Index:     hit.Index,
-				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -313,7 +315,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
@@ -334,9 +336,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
-		Body:      body,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         body,
 	}, nil
 }
 
@@ -522,7 +525,7 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 // the store implements no Counter or cannot count this query shape exactly
 // (ErrCountUnsupported).
 func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := store.(beads.Counter)
+	counter, ok := beads.As[beads.Counter](store)
 	if !ok {
 		return 0, false
 	}
@@ -613,9 +616,11 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 		all = all[:limit]
 	}
 
+	freshness := cacheAgeSeconds(cityStore)
 	return &ListOutput[beads.Bead]{
-		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(cityStore),
+		Index:        s.latestIndex(),
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[beads.Bead]{
 			Items: all,
 			Total: len(all),
@@ -989,10 +994,12 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
+	freshness := cacheAgeSeconds(cityStore)
 	return &IndexOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      b,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         b,
 	}, nil
 }
 
@@ -1332,7 +1339,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// CachingStore, read bd only after the wait.
 	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
-		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+		if waiter, ok := beads.As[beads.ParentProjectionWaiter](store); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
 				return nil, err
 			}

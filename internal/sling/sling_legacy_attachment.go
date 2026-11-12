@@ -83,7 +83,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			}
 			if root.Status == "closed" {
 				if IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) {
-					family, err := molecule.ListSubtree(rootStoreOf[root.ID], root.ID)
+					family, err := molecule.ListSubtree(legacyRootMolecule(deps, rootStoreOf[root.ID]), root.ID)
 					if err != nil {
 						return fmt.Errorf("inspect closed legacy family %s: %w", root.ID, err)
 					}
@@ -129,7 +129,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 					closeReason = "retired: abandoned preparing attempt (sling died before ready)"
 				}
 				for _, r := range live {
-					if _, err := molecule.CloseSubtreeWithMetadata(rootStoreOf[r.ID], r.ID, map[string]string{
+					if _, err := molecule.CloseSubtreeWithMetadata(legacyRootMolecule(deps, rootStoreOf[r.ID]), r.ID, map[string]string{
 						"close_reason": closeReason,
 					}); err != nil {
 						return fmt.Errorf("retire superseded legacy family %s: %w", r.ID, err)
@@ -253,4 +253,17 @@ func isAbandonedPreparingRoot(root beads.Bead, live []beads.Bead, source beads.B
 		return false
 	}
 	return source.Metadata[beadmeta.MoleculeIDMetadataKey] != root.ID
+}
+
+// legacyRootMolecule is the molecule target for a legacy root held by store: the
+// graph target when store is the graph store of a city that relocates the graph
+// class (a graph store physically distinct from the work store), else the work
+// target: where the classes share one store a legacy root is work class. The
+// molecule helpers take a typed target (upstream T9); a legacy root lives in the
+// store that minted it.
+func legacyRootMolecule(deps SlingDeps, store beads.Store) beads.MoleculeTarget {
+	if deps.GraphStore != nil && !beads.SameStore(deps.GraphStore, deps.Store) && beads.SameStore(store, deps.GraphStore) {
+		return beads.GraphMolecule(beads.GraphStore{Store: store})
+	}
+	return beads.WorkMolecule(beads.WorkStore{Store: store})
 }

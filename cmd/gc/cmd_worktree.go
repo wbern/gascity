@@ -364,7 +364,7 @@ func worktreeLiveWorkerDirs(cityPath string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	list, err := worktreeListAllSessionBeads(store, beads.ListQuery{})
+	list, err := worktreeListAllSessionBeads(beads.SessionStore{Store: store}, beads.ListQuery{})
 	if err != nil {
 		return nil, err
 	}

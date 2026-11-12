@@ -516,7 +516,11 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 // marker cleared), as commitPendingContinuationReset does, when the mint's
 // read still records it. The start was decided on b, so a reset recorded
 // after b was read stays pending for the next start, and one consumed since
-// bumps nothing. What it wrote is folded onto b.
+// bumps nothing. A consumed reset takes the restart handoff's
+// reset_committed_at with it: no start commit follows a Manager start to
+// clear it, and left behind it would read as a restart still in flight once
+// a stale-key recovery records the reset marker again. What it wrote is
+// folded onto b.
 func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKind, b *beads.Bead, consumeReset bool) (Incarnation, error) {
 	expect := infoFromPersistedBead(*b)
 	inc, err := m.PersistedStore().MintIncarnation(ctx, lease, MintRequest{
@@ -524,6 +528,7 @@ func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKi
 		FreshContext: func(fresh Info) bool {
 			return consumeReset && strings.TrimSpace(fresh.ContinuationResetPending) != ""
 		},
+		ConsumeResetCommit: true,
 	})
 	if err != nil {
 		return Incarnation{}, err
@@ -882,7 +887,14 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if State(b.Metadata["state"]) != StateSuspended && running {
 		return m.ensureLive(ctx, by, id, b, sessName, transport, transportVerified)
 	}
-	if b.Metadata["continuation_reset_pending"] == "true" {
+	// A pending reset the restart handoff has not committed yet is the
+	// controller's to start (fork rule, T5): the old runtime is still the
+	// controller's to stop and the replacement must carry its resolved
+	// configuration. Once the handoff has committed the reset
+	// (reset_committed_at) the runtime is stopped and the reset is waiting on
+	// a start, and a Manager start consumes it in the same mint (upstream T9:
+	// a message starts the session before the controller does).
+	if b.Metadata["continuation_reset_pending"] == "true" && strings.TrimSpace(b.Metadata[ResetCommittedAtKey]) == "" {
 		if unroute != nil {
 			unroute()
 		}

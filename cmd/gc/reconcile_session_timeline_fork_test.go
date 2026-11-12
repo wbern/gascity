@@ -67,7 +67,7 @@ var forkTimelineExplain = map[string]map[string]string{
 // start sets and clears, the diagnostic session.continuation_observed events,
 // and the immediate stop of a user-held runtime (decision D7, provisional).
 // Every one is a difference of legacy from upstream's legacy, not of legacy from v2.
-const forkTimelineGoldenRuling = "fork keep (gcw-ti3qt): the fork's legacy differs from upstream's (T3, provisional; digests re-recorded in T5 under fingerprint v9)"
+const forkTimelineGoldenRuling = "fork keep (gcw-ti3qt): the fork's legacy differs from upstream's (T3, provisional; digests re-recorded in T5 under fingerprint v9 and in T9 for the usage close marker, upstream-intake)"
 
 func init() {
 	timelineGoldenRulings = append(timelineGoldenRulings,
@@ -85,13 +85,13 @@ func init() {
 		goldenRuling{"a waiter sleeps", forkTimelineGoldenRuling, "5297093fa7ad"},
 		goldenRuling{"an idle named session holding assigned work defers until its streak is exhausted", forkTimelineGoldenRuling, "200391b7e36d"},
 		goldenRuling{"an idle on-demand named session sleeps", forkTimelineGoldenRuling, "4014ebf25083"},
-		goldenRuling{"an unwanted row inside, then past, the wake grace", forkTimelineGoldenRuling, "3da158e19b9e"},
-		goldenRuling{"an unwanted row of a suspended agent", forkTimelineGoldenRuling, "b806b255f900"},
-		goldenRuling{"an unwanted row woken by a clock ten minutes ahead", forkTimelineGoldenRuling, "eb7762e58461"},
-		goldenRuling{"an unwanted row woken by a clock two minutes ahead", forkTimelineGoldenRuling, "f5e77ec3f5c4"},
+		goldenRuling{"an unwanted row inside, then past, the wake grace", forkTimelineGoldenRuling, "2dd84f3f0596"},
+		goldenRuling{"an unwanted row of a suspended agent", forkTimelineGoldenRuling, "0b6eb3f569ea"},
+		goldenRuling{"an unwanted row woken by a clock ten minutes ahead", forkTimelineGoldenRuling, "cfe595931e8f"},
+		goldenRuling{"an unwanted row woken by a clock two minutes ahead", forkTimelineGoldenRuling, "00d3a3a79560"},
 		goldenRuling{"drift deferrals through time", forkTimelineGoldenRuling, "994f2d3c95cc"},
 		goldenRuling{"idle, then sleep, then the next pass", forkTimelineGoldenRuling, "37f1c7935cc0"},
-		goldenRuling{"kill a seat holding a dep-blocked claim", forkTimelineGoldenRuling, "052357a07a3a"},
+		goldenRuling{"kill a seat holding a dep-blocked claim", forkTimelineGoldenRuling, "af3d0fe26bcb"},
 		goldenRuling{"kill a seat holding a ready claim", forkTimelineGoldenRuling, "7f7d6e923ec9"},
 		goldenRuling{"suspend, then wake", forkTimelineGoldenRuling, "6a850a4ae243"},
 	)

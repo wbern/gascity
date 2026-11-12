@@ -37,7 +37,7 @@ func TestWorktreeScanTextReportUsesManagedRootsAndSkipsLiveSessions(t *testing.T
 		return &config.City{Rigs: []config.Rig{{Name: "demo", Path: filepath.Join("rigs", "demo")}}}, nil
 	}
 	worktreeOpenCityStoreAt = func(string) (beads.Store, error) { return nil, nil }
-	worktreeListAllSessionBeads = func(beads.Store, beads.ListQuery) ([]beads.Bead, error) {
+	worktreeListAllSessionBeads = func(beads.SessionStore, beads.ListQuery) ([]beads.Bead, error) {
 		return []beads.Bead{{ID: "gc-session-1", Metadata: map[string]string{"worker_dir": liveDir}}}, nil
 	}
 	newGitProbe = func(workDir string) gitProbe {
@@ -89,7 +89,7 @@ func TestWorktreeScanJSONOutput(t *testing.T) {
 	worktreeResolveCity = func() (string, error) { return t.TempDir(), nil }
 	worktreeLoadCityConfig = func(string, ...io.Writer) (*config.City, error) { return &config.City{}, nil }
 	worktreeOpenCityStoreAt = func(string) (beads.Store, error) { return nil, nil }
-	worktreeListAllSessionBeads = func(beads.Store, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
+	worktreeListAllSessionBeads = func(beads.SessionStore, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
 	worktreeScanStrayWorktrees = func([]string, map[string]bool, func(string) gitProbe) ([]strayWorktree, error) {
 		return []strayWorktree{{Path: "/tmp/orphan", Reclaimable: true}}, nil
 	}
@@ -127,7 +127,7 @@ func TestWorktreeScanEmptyCase(t *testing.T) {
 	worktreeResolveCity = func() (string, error) { return t.TempDir(), nil }
 	worktreeLoadCityConfig = func(string, ...io.Writer) (*config.City, error) { return &config.City{}, nil }
 	worktreeOpenCityStoreAt = func(string) (beads.Store, error) { return nil, nil }
-	worktreeListAllSessionBeads = func(beads.Store, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
+	worktreeListAllSessionBeads = func(beads.SessionStore, beads.ListQuery) ([]beads.Bead, error) { return nil, nil }
 	worktreeScanStrayWorktrees = func([]string, map[string]bool, func(string) gitProbe) ([]strayWorktree, error) {
 		return nil, nil
 	}

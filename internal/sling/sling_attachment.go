@@ -18,10 +18,15 @@ import (
 )
 
 // BeadFromGetters tries multiple BeadQuerier implementations and returns
-// the first successful result.
+// the first successful result. It skips an absent getter: nil, and a store
+// that is no store (beads.IsNilStore), such as a zero class handle, which is
+// non-nil once boxed into a BeadQuerier and panics on its first Get.
 func BeadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
 	for _, getter := range getters {
 		if getter == nil {
+			continue
+		}
+		if store, ok := getter.(beads.Store); ok && beads.IsNilStore(store) {
 			continue
 		}
 		b, err := getter.Get(id)
@@ -340,7 +345,7 @@ func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, 
 	if convoyStore == nil || rootStore == nil || beadID == "" || formulaName == "" {
 		return nil, nil
 	}
-	convoys, err := convoycore.TrackingConvoysForItem(convoyStore, beadID)
+	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: convoyStore}, beadID)
 	if err != nil {
 		return nil, fmt.Errorf("listing tracking convoys for %s: %w", beadID, err)
 	}
@@ -511,13 +516,15 @@ func hasMoleculeChildrenIn(q BeadQuerier, beadID string, scope attachmentScope) 
 // CloseAttachedSubtree closes an attached workflow or molecule root and any
 // open descendants beneath it.
 func CloseAttachedSubtree(store beads.Store, attached beads.Bead) (int, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	if store == nil {
 		return 0, fmt.Errorf("store unavailable")
 	}
 	if IsWorkflowAttachment(attached) {
-		return sourceworkflow.CloseWorkflowSubtree(store, attached.ID)
+		return sourceworkflow.CloseWorkflowSubtree(storeMolecule, attached.ID)
 	}
-	return molecule.CloseSubtree(store, attached.ID)
+	return molecule.CloseSubtree(storeMolecule, attached.ID)
 }
 
 func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope, _ *SlingResult, allowLiveWorkflow bool) error {
@@ -606,7 +613,8 @@ func attachmentActiveWork(a AttachedBead) (held []string, unreadable error) {
 	if a.Store == nil {
 		return nil, errors.New("its store is unavailable")
 	}
-	subtree, err := molecule.ListSubtree(a.Store, a.Bead.ID)
+	// a.Store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	subtree, err := molecule.ListSubtree(beads.GraphMolecule(beads.GraphStore{Store: a.Store}), a.Bead.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -843,7 +851,7 @@ func liveTrackingConvoys(store beads.Store, itemID string) ([]beads.Bead, error)
 	if store == nil {
 		return nil, nil
 	}
-	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
+	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
@@ -903,7 +911,7 @@ const convoyReapReason = "convoy reap: superseded duplicate root"
 func reapSupersededConvoyRoots(store beads.Store, superseded []beads.Bead, keptID string) []string {
 	var problems []string
 	for _, root := range superseded {
-		if err := convoycore.CloseWithReason(store, root.ID, convoyReapReason); err != nil {
+		if err := convoycore.CloseWithReason(beads.WorkStore{Store: store}, root.ID, convoyReapReason); err != nil {
 			problems = append(problems,
 				fmt.Sprintf("reaping convoy root %s superseded by %s: %v", root.ID, keptID, err))
 		}
@@ -969,11 +977,13 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 		// on older claims; "<agent>-<city>-<suffix>" for bead-derived session
 		// names), not under the bare pool target, so bare equality reads
 		// already-claimed pool work as un-slung and mints a second attempt for
-		// it. The original keeps gc.routed_to once wrapped, so both it and its
-		// do-work step satisfy the pool work_query: one unit of work, two
-		// dispatchable rows, two sessions. Treat a claim by any of this pool's
-		// own sessions as idempotent (claimedByOwnPoolSession); a claim by a
-		// different pool still falls through to the warning below.
+		// it. The wrap clears the original's gc.routed_to (restampWorkBeadRouting),
+		// but the attempt's do-work step is still a dispatchable row while a
+		// session holds the original: one unit of work, two sessions. Treat a
+		// claim by any of this pool's own sessions as idempotent
+		// (claimedByOwnPoolSession, which layers the configured sibling-pool
+		// boundary and the bead-derived name shape on assigneeIsOwnPoolSession); a
+		// claim by a different pool still falls through to the warning below.
 		if b.Assignee == "" || b.Assignee == target ||
 			claimedByOwnPoolSession(deps.Cfg, a, deps.CityName, target, b.Assignee, isMulti, q, deps.Store) {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)

@@ -42,10 +42,15 @@ max_active_sessions = 1
 	}
 }
 
-func TestMcpValidateAllowsImplicitEmptyCatalogAgentOnSharedTarget(t *testing.T) {
-	// Since #181 (77796869e) an implicit provider agent with an empty catalog is
-	// skipped during stage-1 projection, so it no longer conflicts with an
-	// explicit agent that projects servers to the same target.
+func TestMcpValidateReportsImplicitEmptyCatalogAgentConflictOnSharedTarget(t *testing.T) {
+	// T9 (PROVISIONAL): the fork's #181 (77796869e) skipped an implicit provider
+	// agent with an empty catalog during stage-1 projection, so it never
+	// conflicted with an explicit agent projecting servers to the same target.
+	// Upstream's claims model (claimsStage1MCPTarget) counts every agent with a
+	// provider as a claimant of its scope-root target, so the implicit agent
+	// conflicts and the error names the agent-local catalog as the cause
+	// (upstream TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent).
+	// The upstream rule is taken; this test pins it for `gc mcp validate`.
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
@@ -68,11 +73,11 @@ command = "npx"
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc mcp validate failed (code %d): stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc mcp validate succeeded, want an MCP target conflict with the implicit provider agent: stdout=%q", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "MCP target conflict") {
-		t.Fatalf("stderr reports a conflict for an implicit empty-catalog agent:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "MCP target conflict") || !strings.Contains(stderr.String(), "agent-local MCP catalog") {
+		t.Fatalf("stderr = %q, want an MCP target conflict that names the agent-local catalog", stderr.String())
 	}
 }
 

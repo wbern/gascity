@@ -52,6 +52,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
+	"DepRemoveBatch":   nativeStoreMutation,
 
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,
@@ -92,6 +93,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ReadEventsJournalPage":       nativeStoreRead,
 	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
+	"DepMetadataBatch":            nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,

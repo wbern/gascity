@@ -20,7 +20,7 @@ func TestMessagePersistsExplicitBindingBeforeCompletion(t *testing.T) {
 	ledger := usage.NewInvocationLedger(filepath.Join(t.TempDir(), "invocations.jsonl"))
 	headCalls := 0
 	handle, err := NewSessionHandle(SessionHandleConfig{
-		Manager:          sessionpkg.NewManagerWithOptions(store, provider),
+		Manager:          sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: store}, provider),
 		InvocationLedger: ledger,
 		HeadObserver: func(context.Context, string) (usage.Head, error) {
 			headCalls++

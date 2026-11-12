@@ -234,7 +234,7 @@ func TestDetailedMailInjectionDoesNotArchiveSanitizedIDs(t *testing.T) {
 
 func TestOversizedMailInjectionLeavesFailedArchiveMessagesRetrievable(t *testing.T) {
 	store := beads.NewMemStore()
-	provider := &failingMailInjectionArchiver{Provider: beadmail.New(store)}
+	provider := &failingMailInjectionArchiver{Provider: newTestBeadMail(store)}
 	for i := 0; i < mailInjectMaxMessages; i++ {
 		_, err := provider.Send("sender", "recipient", "subject", "body")
 		if err != nil {
@@ -383,7 +383,7 @@ func TestMailInjectionDoesNotPersistWhenHookOutputFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("sender", "recipient", "subject", "detail"); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestMailInjectionStateLoadFailureRecordsFailedDelivery(t *testing.T) {
 		return mailInjectionState{}, nil, false, errors.New("state unavailable")
 	}
 	t.Cleanup(func() { mailInjectionStateLoader = oldLoader })
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("sender", "recipient", "subject", "detail"); err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestMailInjectionPersistFailureRecordsFailedDelivery(t *testing.T) {
 		return mailInjectionState{}, func(mailInjectionState) error { return errors.New("persist failed") }, true, nil
 	}
 	t.Cleanup(func() { mailInjectionStateLoader = oldLoader })
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("sender", "recipient", "subject", "detail"); err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +442,7 @@ func TestMailInjectionClearFailureRecordsFailedEmptyObservation(t *testing.T) {
 	t.Cleanup(func() { mailInjectionStateLoader = oldLoader })
 	var stdout, stderr bytes.Buffer
 	observation := &mailInjectionObservation{outcome: continuationOutcomeEmpty}
-	doMailCheckTargetWithFormat(beadmail.New(beads.NewMemStore()), resolvedMailTarget{display: "recipient", recipients: []string{"recipient"}}, true, "", &stdout, &stderr, observation)
+	doMailCheckTargetWithFormat(newTestBeadMail(beads.NewMemStore()), resolvedMailTarget{display: "recipient", recipients: []string{"recipient"}}, true, "", &stdout, &stderr, observation)
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "clearing mail injection state") || observation.outcome != continuationOutcomeFailed || observation.errorCode != continuationErrorMailState || observation.messageCount != 0 || observation.bodyBytes != 0 {
 		t.Fatalf("stdout=%q stderr=%q observation=%#v", stdout.String(), stderr.String(), observation)
 	}
@@ -456,14 +456,14 @@ func TestMailInjectionEmptyPassRecordsZeroFields(t *testing.T) {
 	t.Cleanup(func() { mailInjectionStateLoader = oldLoader })
 	var stdout, stderr bytes.Buffer
 	observation := &mailInjectionObservation{outcome: continuationOutcomeEmpty}
-	doMailCheckTargetWithFormat(beadmail.New(beads.NewMemStore()), resolvedMailTarget{display: "recipient", recipients: []string{"recipient"}}, true, "", &stdout, &stderr, observation)
+	doMailCheckTargetWithFormat(newTestBeadMail(beads.NewMemStore()), resolvedMailTarget{display: "recipient", recipients: []string{"recipient"}}, true, "", &stdout, &stderr, observation)
 	if stdout.Len() != 0 || stderr.Len() != 0 || observation.outcome != continuationOutcomeEmpty || observation.messageCount != 0 || observation.bodyBytes != 0 || len(observation.mailIDs) != 0 {
 		t.Fatalf("stdout=%q stderr=%q observation=%#v", stdout.String(), stderr.String(), observation)
 	}
 }
 
 func TestMailInjectionUnchangedPassRecordsBoundedPointer(t *testing.T) {
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	sent, err := mp.Send("sender", "recipient", "subject", "secret body")
 	if err != nil {
 		t.Fatal(err)

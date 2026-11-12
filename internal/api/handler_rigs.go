@@ -43,8 +43,9 @@ type gitStatus struct {
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
 // Each agent row is observed on the runtime session it runs under, as
-// sessions resolves it; pools (the request's one listing) short-circuits a
-// session it attests absent.
+// sessions resolves it. pools answers unlimited-pool expansion for the whole
+// request (newRequestSessionListing), and a session its attested listing
+// does not name is stopped without a probe (listedAbsent).
 func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
@@ -60,8 +61,8 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 			agentCount++
 			var obs worker.LiveObservation
 			sessions.resolve(a, ea.qualifiedName, func(sessionName string) bool {
-				obs = worker.LiveObservation{}
 				if listedAbsent(pools, sessionName) {
+					obs = worker.LiveObservation{SessionName: sessionName}
 					return false
 				}
 				obs = observeProviderSession(sp, sessionName, processNames())
@@ -99,7 +100,8 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // runtime entry, or if all its agents are runtime-suspended via session
 // metadata. The deprecated `[[rig]] suspended` field in city.toml is
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
-// target.
+// target. The first agent row that is not suspended decides the answer, so
+// a rig with a stopped agent costs no further probes.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
@@ -124,7 +126,9 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 	return agentCount > 0
 }
 
-// lazyAgentProcessNames resolves the provider chain only for rows that need a probe.
+// lazyAgentProcessNames returns a's process names, resolved on the first call
+// only: resolving them resolves a's provider chain, which dominated the rig
+// list's cost once stopped rows stopped being probed.
 func lazyAgentProcessNames(cfg *config.City, a config.Agent) func() []string {
 	var names []string
 	resolved := false
