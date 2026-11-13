@@ -185,7 +185,15 @@ jobs:
         run: ./scripts/check-generated-docs-drift.sh
       - name: OpenAPI spec + generated client drift check
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
-        run: make spec-ci
+        env:
+          # spec-ci ends in the openapi-breaking gate, whose default base is the
+          # merge-base with origin/main. This job checks out a single commit with
+          # no origin/main, and the fork's PRs target develop: compare against the
+          # PR base commit instead (the checked-out commit itself on dispatch).
+          OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$OPENAPI_BREAKING_BASE"
+          make spec-ci
       - name: make check-schema
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
         run: make check-schema
