@@ -33,7 +33,7 @@ func newRoutedWorkWorkableCheck(cfg *config.City, cityPath string, newStore func
 	var rec events.Recorder
 	if cfg != nil {
 		eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-		p, err := newEventsProviderForNameWithConfig(cfg.Events.Provider, eventsPath, io.Discard, cfg.Events)
+		p, err := newEventsProviderForName(cfg.Events.Provider, eventsPath, io.Discard)
 		if err == nil {
 			rec = p
 		}

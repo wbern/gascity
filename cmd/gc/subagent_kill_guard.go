@@ -31,18 +31,7 @@ func refuseKillForLiveSubagents(command string, resolve sessionTargetHandleResol
 	if err != nil || len(live) == 0 {
 		return false
 	}
-	fmt.Fprintf(out, "%s: refusing to destroy %d live background subagent(s); retry with --force:\n", command, len(live)) //nolint:errcheck
-	for _, subagent := range live {
-		description := strings.TrimSpace(subagent.Description)
-		if description == "" {
-			description = "(no description)"
-		}
-		age := "unknown duration"
-		if !subagent.StartedAt.IsZero() {
-			age = time.Since(subagent.StartedAt).Round(time.Second).String()
-		}
-		fmt.Fprintf(out, "  - %s (%s, running %s)\n", description, subagent.AgentID, age) //nolint:errcheck
-	}
+	printLiveSubagentRefusal(command, live, time.Now(), out)
 	return true
 }
 
@@ -68,5 +57,14 @@ func observeAutonomousKillLiveSubagentsForHandle(source, target string, handle w
 			description = "(no description)"
 		}
 		fmt.Fprintf(out, "gc: autonomous session destruction source=%q target=%q live_subagent=%q description=%q\n", source, target, subagent.AgentID, description) //nolint:errcheck
+	}
+}
+
+// printLiveSubagentRefusal prints command's refusal to destroy the live
+// background subagents, naming each with its age at now.
+func printLiveSubagentRefusal(command string, live []worker.InFlightSubagent, now time.Time, out io.Writer) {
+	fmt.Fprintf(out, "%s: refusing to destroy %d live background subagent(s); retry with --force:\n", command, len(live)) //nolint:errcheck
+	for _, subagent := range live {
+		fmt.Fprintf(out, "  - %s\n", subagent.Summary(now)) //nolint:errcheck
 	}
 }

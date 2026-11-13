@@ -37,7 +37,7 @@ func TestS1DrainAckRetainsCurrentExecution(t *testing.T) {
 
 			var stderr bytes.Buffer
 			var retained *startedClaimHeldError
-			if err := releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, seat, drainAckReleaseBudget, &stderr); !errors.As(err, &retained) || retained.Claim.ID != held.ID {
+			if err := releaseUnexecutedClaimsOnDrainAckProtocol("", nil, work, nil, seat, drainAckReleaseBudget, &stderr); !errors.As(err, &retained) || retained.Claim.ID != held.ID {
 				t.Fatalf("retained execution error = %v, want held %s", err, held.ID)
 			}
 
@@ -53,12 +53,12 @@ func TestS1DrainAckRetainsWorkAndDoesNotPokeOrAcknowledge(t *testing.T) {
 	oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
 	t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = oldRelease, oldPoke })
 	held := &startedClaimHeldError{Claim: beads.Bead{ID: "task-1", Status: "in_progress", Assignee: "worker-1"}}
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) error { return held }
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error { return held }
 	poked := false
 	drainAckPokeController = func(string, reconcilekey.Key) error { poked = true; return nil }
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code, err := doRuntimeDrainAckResult(dops, "", "worker-1", "worker-1", "", false, &stdout, &stderr)
+	code, err := doRuntimeDrainAckResultFor(dops, "", "worker-1", "worker-1", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code == 0 || !errors.Is(err, held) || poked || dops.acked["worker-1"] {
 		t.Fatalf("retained work acknowledged: code=%d err=%v poked=%v ack=%v", code, err, poked, dops.acked)
 	}
@@ -106,7 +106,7 @@ var _ beads.ConditionalWriter = (*s1ReacquireDuringReleaseStore)(nil)
 
 func TestS1DrainAckRefusesSameOwnerReacquisition(t *testing.T) {
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	racing := &s1ReacquireDuringReleaseStore{MemStore: mem}
@@ -120,7 +120,7 @@ func TestS1DrainAckRefusesSameOwnerReacquisition(t *testing.T) {
 	}
 	cfg := &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", cfg, racing, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", cfg, racing, nil, seat, drainAckReleaseBudget, &stderr)
 	status, owner := drainAckBeadStatus(t, racing, work.ID)
 	if status != "in_progress" || owner != "worker-1" {
 		t.Fatalf("replacement acquisition lost: status=%q owner=%q", status, owner)
@@ -139,7 +139,7 @@ func TestS1DrainAckUsesOpaqueNonzeroWorkRevisions(t *testing.T) {
 				Metadata: map[string]string{"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7"},
 			},
 		}, nil)
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		seat, err := mem.Get("gc-2")
@@ -147,7 +147,7 @@ func TestS1DrainAckUsesOpaqueNonzeroWorkRevisions(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stderr bytes.Buffer
-		err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
+		err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
 		status, owner := drainAckBeadStatus(t, mem, "gc-1")
 		if revision == 0 {
 			if err == nil || status != "in_progress" || owner != "worker-1" {
@@ -163,13 +163,19 @@ func TestS1DrainAckNeverDowngradesPersistedExecutionEvidence(t *testing.T) {
 	mem := beads.NewMemStore()
 	work := mustCreateDrainAckBead(t, mem, beads.Bead{Title: "unstarted assignment", Type: "task"}, "in_progress", "worker-1")
 	seat, err := mem.Create(beads.Bead{Title: "worker-1", Type: session.BeadType, Metadata: map[string]string{
-		"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7", session.WorkStartedKey: `{"v":1,"claims":[]}`,
+		"session_name": "worker-1", "instance_token": "incarnation-one", "generation": "7",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// work_started is CASOnly: persist the cell the way its writers do.
+	casSetMeta(t, mem, seat.ID, session.WorkStartedKey, `{"v":1,"claims":[]}`)
+	seat, err = mem.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "off"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "off"}}, mem, nil, seat, drainAckReleaseBudget, &stderr)
 	status, owner := drainAckBeadStatus(t, mem, work.ID)
 	if err == nil || status != "in_progress" || owner != "worker-1" {
 		t.Fatalf("persisted cell downgraded: status=%s owner=%s err=%v", status, owner, err)
@@ -194,7 +200,7 @@ func (s *s1AdoptDuringReleaseStore) UpdateIfMatch(id string, revision int64, opt
 
 func TestS1DrainReservationExcludesConcurrentAdoption(t *testing.T) {
 	mem := beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	racing := &s1AdoptDuringReleaseStore{MemStore: mem}
@@ -205,7 +211,7 @@ func TestS1DrainReservationExcludesConcurrentAdoption(t *testing.T) {
 	}
 	racing.workID, racing.sessionID = work.ID, seat.ID
 	var stderr bytes.Buffer
-	err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, racing, nil, seat, drainAckReleaseBudget, &stderr)
+	err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, racing, nil, seat, drainAckReleaseBudget, &stderr)
 	if err != nil || !racing.attempted || !errors.Is(racing.startErr, session.ErrClaimReleasePending) {
 		t.Fatalf("concurrent adoption crossed reserved release: release=%v attempted=%v start=%v stderr=%s", err, racing.attempted, racing.startErr, stderr.String())
 	}
@@ -238,7 +244,7 @@ func (s *s1UncertainReleaseStore) UpdateIfMatch(id string, revision int64, opts 
 func TestS1UncertainReleaseKeepsAdoptionExcluded(t *testing.T) {
 	for _, writeThenError := range []bool{false, true} {
 		mem := beads.NewMemStore()
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		backend := &s1UncertainReleaseStore{MemStore: mem, writeThenError: writeThenError}
@@ -249,7 +255,7 @@ func TestS1UncertainReleaseKeepsAdoptionExcluded(t *testing.T) {
 		}
 		backend.workID = work.ID
 		var stderr bytes.Buffer
-		err = releaseUnexecutedClaimsOnDrainAck("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, backend, nil, seat, drainAckReleaseBudget, &stderr)
+		err = releaseUnexecutedClaimsOnDrainAckProtocol("", &config.City{Beads: config.BeadsConfig{ConditionalWrites: "require"}}, backend, nil, seat, drainAckReleaseBudget, &stderr)
 		if err == nil || backend.attempts != 1 {
 			t.Fatalf("uncertain release not exercised: writeThenError=%v attempts=%d err=%v", writeThenError, backend.attempts, err)
 		}
@@ -284,12 +290,12 @@ func TestS1RetainedWorkRecordsExecutionBeforeHandback(t *testing.T) {
 		held := &startedClaimHeldError{Claim: fixture.work}
 		var stdout, stderr bytes.Buffer
 		recorded := false
-		opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true, DrainAck: true}
+		opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true, DrainAck: true}
 		ops := hookClaimOps{
 			DrainAck: func(io.Writer) error { return held },
 			RecordStartedClaim: func(id string, fence session.ExecutionFence, entry session.WorkStartedEntry) error {
 				recorded = true
-				if stdout.Len() != 0 || id != opts.SessionID || fence != *opts.StartedFence || entry.Bead != held.Claim.ID {
+				if stdout.Len() != 0 || id != opts.SessionID || fence != *opts.ExecutionFence || entry.Bead != held.Claim.ID {
 					t.Fatalf("incorrect execution record or work delivered first: id=%s entry=%+v stdout=%s", id, entry, stdout.String())
 				}
 				return recordError
@@ -361,7 +367,7 @@ func newS1FileAdmissionFixture(t *testing.T, status, owner string) s1FileAdmissi
 
 func s1AdmissionResult(t *testing.T, fixture s1FileAdmissionFixture, snapshot beads.Bead, record func(string, session.ExecutionFence, session.WorkStartedEntry) error) (int, string) {
 	t.Helper()
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true}
 	ops := hookClaimOps{
 		RecordStartedClaim: record,
 		StampWorkMeta:      func(context.Context, string, []string, string, string, map[string]string) error { return nil },
@@ -375,7 +381,7 @@ func s1AdmissionResult(t *testing.T, fixture s1FileAdmissionFixture, snapshot be
 	ops.applyDefaults()
 	result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: "hook", Action: "work", Reason: "existing_assignment", BeadID: snapshot.ID, Assignee: "worker-1"}
 	var stdout, stderr bytes.Buffer
-	code := writeHookClaimWorkResultForBead(result, snapshot, opts, ops, fixture.city, false, &stdout, &stderr)
+	code := writeHookClaimWorkResultForBead(result, snapshot, opts, ops, fixture.city, hookAdoptionOwned, time.Time{}, &stdout, &stderr)
 	return code, stdout.String()
 }
 
@@ -388,7 +394,7 @@ func TestS1CompletedDrainRejectsStaleAdoption(t *testing.T) {
 				staged = true
 				if nextOwner != "unchanged" {
 					var stderr bytes.Buffer
-					if err := releaseUnexecutedClaimsOnDrainAck(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr); err != nil {
+					if err := releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr); err != nil {
 						t.Fatalf("release stage failed: %v stderr=%s", err, stderr.String())
 					}
 					fresh, err := fixture.store.Get(fixture.work.ID)
@@ -499,9 +505,9 @@ func TestS1CensusToAckExcludesInFlightAdmission(t *testing.T) {
 			oldRelease, oldPoke := drainAckReleaseHeldClaims, drainAckPokeController
 			t.Cleanup(func() { drainAckReleaseHeldClaims = oldRelease; drainAckPokeController = oldPoke })
 			censused := false
-			drainAckReleaseHeldClaims = func(string, string, io.Writer) error {
+			drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error {
 				var stderr bytes.Buffer
-				err := releaseUnexecutedClaimsOnDrainAck(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr)
+				err := releaseUnexecutedClaimsOnDrainAckProtocol(fixture.city, fixture.cfg, fixture.store, nil, fixture.seat, drainAckReleaseBudget, &stderr)
 				censused = err == nil
 				return err
 			}
@@ -536,7 +542,7 @@ func TestS1CensusToAckExcludesInFlightAdmission(t *testing.T) {
 				}
 			}
 			var stdout, stderr bytes.Buffer
-			code, err := doRuntimeDrainAckResult(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, false, &stdout, &stderr)
+			code, err := doRuntimeDrainAckResultFor(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, drainAckCaller{}, false, &stdout, &stderr)
 			if !race {
 				if code != 0 || err != nil || !ops.acked["worker-1"] {
 					t.Fatalf("empty ack control failed: code=%d err=%v stderr=%s", code, err, stderr.String())
@@ -560,7 +566,7 @@ func TestS1AdmissionUsesCanonicalClassResidence(t *testing.T) {
 		t.Run(map[bool]string{false: "class-only", true: "work-before-class"}[coResident], func(t *testing.T) {
 			fixture := newS1FileAdmissionFixture(t, "in_progress", "worker-1")
 			class := newClaimRouteClassStore(t)
-			if err := beads.StampOpenedStore(class, "class", gate.Require, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(class, "class", gate.Require, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			id := "gcg-admission"
@@ -593,10 +599,10 @@ func TestS1AdmissionUsesCanonicalClassResidence(t *testing.T) {
 				ResolveWorkBranch:     func(hookClaimWorkTree) string { return "" },
 				ResolveSessionWorkDir: func(string) string { return "" },
 			}, route)
-			opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true}
+			opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true}
 			result := hookClaimJSONResult{SchemaVersion: "1", OK: true, Command: "hook", Action: "work", Reason: "existing_assignment", BeadID: candidate.ID, Assignee: owner}
 			var stdout, stderr bytes.Buffer
-			code := writeHookClaimWorkResultForBead(result, candidate, opts, ops, fixture.city, false, &stdout, &stderr)
+			code := writeHookClaimWorkResultForBead(result, candidate, opts, ops, fixture.city, hookAdoptionOwned, time.Time{}, &stdout, &stderr)
 			if code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"action":"work"`)) {
 				t.Fatalf("canonical resident refused: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 			}
@@ -628,14 +634,14 @@ func TestS1HookDoesNotReportAckAfterUncertainProviderTimeout(t *testing.T) {
 		drainAckMutationTimeout, drainAckReleaseHeldClaims, drainAckPokeController = oldTimeout, oldRelease, oldPoke
 	})
 	drainAckMutationTimeout = 20 * time.Millisecond
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) error { return nil }
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) error { return nil }
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	base := newFakeDrainOps()
 	release, done := make(chan struct{}), make(chan struct{})
 	ops := s1DelayedAckOps{drainOps: base, release: release, done: done}
 	var stdout, stderr bytes.Buffer
 	ack := func(io.Writer) error {
-		code, err := doRuntimeDrainAckResult(ops, "", "worker-1", "worker-1", "", false, io.Discard, &stderr)
+		code, err := doRuntimeDrainAckResultFor(ops, "", "worker-1", "worker-1", "", drainAckCaller{}, false, io.Discard, &stderr)
 		if err != nil {
 			return err
 		}
@@ -686,7 +692,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 			t.Cleanup(func() { drainAckPokeController = oldPoke })
 			var stdout, stderr bytes.Buffer
-			code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+			code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 			if code != 0 || err != nil {
 				t.Fatalf("production ACK failed: code=%d err=%v stderr=%s", code, err, stderr.String())
 			}
@@ -706,7 +712,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			// that census is a sentinel: sweeping again would release it.
 			late := mustCreateDrainAckBead(t, f.store, beads.Bead{Title: "assigned after committed census", Type: "task"}, "in_progress", "worker-1")
 			committedAttempt := cell.Drain.Attempt
-			if code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr); code != 0 || err != nil {
+			if code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr); code != 0 || err != nil {
 				t.Fatalf("actual ACK retry failed: code=%d err=%v stderr=%s", code, err, stderr.String())
 			}
 			_, retried, _, err := front.ExecutionEvidence(f.seat.ID)
@@ -716,7 +722,7 @@ func TestS1NoArgumentDrainAckPublishesQualifiedTerminalAck(t *testing.T) {
 			if status, owner := drainAckBeadStatus(t, f.store, late.ID); status != "in_progress" || owner != "worker-1" {
 				t.Fatalf("retry swept late assignment: status=%s owner=%s", status, owner)
 			}
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.store = f.store
 			env.sp = sp
 			env.cfg = f.cfg
@@ -786,7 +792,7 @@ func TestS1NoArgumentDelayedAckCannotSurviveCanonicalCancellation(t *testing.T) 
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+		code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 		done <- outcome{code, err}
 	}()
 	t.Cleanup(func() {
@@ -814,14 +820,14 @@ func TestS1NoArgumentDelayedAckCannotSurviveCanonicalCancellation(t *testing.T) 
 		t.Fatalf("census unavailable: %v", err)
 	}
 	oldAttempt := cell.Drain.Attempt
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.store = f.store
 	env.sp = sp
 	env.cfg = f.cfg
 	env.addDesired("worker-1", "worker", false)
 	now := env.clk.Now()
 	env.dt.set(f.seat.ID, &drainState{reason: "wait-hold", generation: 7, admissionAttempt: oldAttempt, startedAt: now.Add(-time.Second), deadline: now.Add(time.Minute)})
-	advanceSessionDrainsWithSessionsTraced(env.dt, sp, f.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", env.dt, sp, f.store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		row, err := f.store.Get(id)
 		if err != nil {
 			return nil
@@ -915,7 +921,7 @@ func TestS1AckFlagBeforeFrameCannotBeCleanedAsStale(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	go func() {
 		defer close(finished)
-		code, err := cmdRuntimeDrainAckResult(nil, true, &stdout, &stderr)
+		code, err := cmdRuntimeDrainAckResult(nil, true, false, &stdout, &stderr)
 		done <- outcome{code, err}
 	}()
 	t.Cleanup(func() {
@@ -961,7 +967,7 @@ func TestS1AckFlagBeforeFrameCannotBeCleanedAsStale(t *testing.T) {
 	if out.code != 0 || out.err != nil {
 		t.Fatalf("publisher failed: %+v stderr=%s", out, stderr.String())
 	}
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.store = f.store
 	env.sp = sp
 	env.cfg = f.cfg
@@ -1053,9 +1059,8 @@ func TestS1ActualUndrainCancelsNativeAttemptBeforeProviderCleanup(t *testing.T) 
 				}
 			}
 			if scenario == "corrupt" {
-				if err := f.store.SetMetadata(f.seat.ID, session.WorkStartedKey, "{ corrupt"); err != nil {
-					t.Fatal(err)
-				}
+				// work_started is CASOnly: corrupt it the way a writer would.
+				casSetMeta(t, f.store, f.seat.ID, session.WorkStartedKey, "{ corrupt")
 			}
 			if scenario == "wrong-runtime" {
 				if err := sp.SetMeta("worker-1", "GC_INSTANCE_TOKEN", "different-runtime"); err != nil {
@@ -1210,9 +1215,9 @@ func TestS1OverwrittenControllerFrameRepublishesCapturedAttempt(t *testing.T) {
 	}
 	dt := newDrainTracker()
 	dt.set(info.ID, ds)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	ds.deadline = env.clk.Now().Add(time.Hour)
-	advanceSessionDrainsWithSessionsTraced(dt, sp, f.store, func(id string) (session.Info, bool) { return info, id == info.ID }, map[string]wakeEvaluation{}, f.cfg, env.clk, nil)
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, f.store, func(id string) (session.Info, bool) { return info, id == info.ID }, map[string]wakeEvaluation{}, f.cfg, env.clk, nil)
 	frame, err := readDrainAckFrame(info, sp, "worker-1")
 	if err != nil || frame.Attempt != b || frame.Reason != ds.reason || !ds.ackSet || ds.admissionAttempt != b {
 		t.Fatalf("captured B not republished: frame=%+v state=%+v err=%v", frame, ds, err)
@@ -1302,7 +1307,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 		t.Fatal(err)
 	}
 	binding := newClaimRouteClassStore(t)
-	if err := beads.StampOpenedStore(binding, "sqlite", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(binding, "sqlite", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	seedSplitRoutes(t, city, binding)
@@ -1337,7 +1342,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 	}
 	var stdout, stderr bytes.Buffer
 	recorded, drainCalls := 0, 0
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: seat.ID, StartedFence: &fence, JSON: true, DrainAck: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: seat.ID, ExecutionFence: &fence, JSON: true, DrainAck: true}
 	ops := hookClaimOps{
 		DrainAck: func(w io.Writer) error {
 			drainCalls++
@@ -1345,7 +1350,7 @@ func testS1RetainedFallbackSecondWorkRoot(t *testing.T, scenario string, inverse
 			if inverse {
 				cityStore, rigStore = secondary, primary
 			}
-			return releaseUnexecutedClaimsOnDrainAck(city, cfg, cityStore, map[string]beads.Store{"later": rigStore}, seat, drainAckReleaseBudget, w)
+			return releaseUnexecutedClaimsOnDrainAckProtocol(city, cfg, cityStore, map[string]beads.Store{"later": rigStore}, seat, drainAckReleaseBudget, w)
 		},
 		RecordStartedClaim: func(id string, got session.ExecutionFence, entry session.WorkStartedEntry) error {
 			recorded++
@@ -1462,12 +1467,12 @@ func reconcileS1StopCompletion(t *testing.T, env *reconcilerTestEnv, rows []bead
 // An unreadable native ACK must hold an expired drain even after its desired
 // agent disappears; the next healthy tick may resume the same stop.
 func TestS1NotDesiredUnreadableAckDefersExpiredDrain(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Beads: config.BeadsConfig{ConditionalWrites: "require"}}
 	env.addDesired("worker", "worker", true)
 	seat := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&seat)
-	if err := beads.StampOpenedStore(env.store, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(env.store, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{"GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": "test-token"} {
@@ -1522,7 +1527,7 @@ func TestS1RetainedWorkDoesNotMaskJoinedCensusFailure(t *testing.T) {
 	censusErr := errors.New("secondary census store unavailable")
 	var stdout, stderr bytes.Buffer
 	recorded := false
-	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, StartedFence: &fixture.fence, JSON: true, DrainAck: true}
+	opts := hookClaimOptions{Assignee: "worker-1", SessionID: fixture.seat.ID, ExecutionFence: &fixture.fence, JSON: true, DrainAck: true}
 	ops := hookClaimOps{
 		DrainAck:           func(io.Writer) error { return errors.Join(held, censusErr) },
 		RecordStartedClaim: func(string, session.ExecutionFence, session.WorkStartedEntry) error { recorded = true; return nil },

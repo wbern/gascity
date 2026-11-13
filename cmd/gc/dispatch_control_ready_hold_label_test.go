@@ -44,6 +44,37 @@ func TestFilterReadyByAssigneeDoesNotExcludeDispatchHoldLabels(t *testing.T) {
 	}
 }
 
+// bd's native human label parks a bead for a person. It is not a dispatch hold
+// (beadmeta.DispatchHoldLabels names only the two canonical holds), but the
+// route-scoped read must withhold it for the same reason: a worker cannot
+// advance a bead that is waiting on a person, and serving it again every tick
+// burns a turn each time. The assignee-scoped tier stays transparent to it.
+func TestFilterReadyByRouteExcludesHumanLabel(t *testing.T) {
+	older := time.Unix(100, 0)
+	routed := map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}
+	ready := []beads.Bead{
+		{ID: "ga-plain", CreatedAt: older, Metadata: routed},
+		{ID: "ga-human", CreatedAt: older, Metadata: routed, Labels: []string{"human"}},
+		{ID: "ga-human-and-held", CreatedAt: older, Metadata: routed, Labels: []string{"human", beadmeta.HoldMayorLabel}},
+	}
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
+	want := []string{"ga-plain"}
+	if !stringSlicesEqual(beadIDs(got), want) {
+		t.Fatalf("filterReadyByRoute ids = %v, want %v (a human-labeled bead must be excluded from the route-scoped tier)", beadIDs(got), want)
+	}
+}
+
+func TestFilterReadyByAssigneeDoesNotExcludeHumanLabel(t *testing.T) {
+	ready := []beads.Bead{
+		{ID: "ga-human-assigned", Assignee: "cand", Labels: []string{"human"}},
+	}
+	got := filterReadyByAssignee(ready, "cand", workflowServeScanLimit)
+	want := []string{"ga-human-assigned"}
+	if !stringSlicesEqual(beadIDs(got), want) {
+		t.Fatalf("filterReadyByAssignee ids = %v, want %v (assignee-scoped tier must stay human-transparent)", beadIDs(got), want)
+	}
+}
+
 func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	parsed, ok := parseControlReadyQuery(query)
@@ -98,12 +129,12 @@ func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromLiveLeg
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
+		t.Fatalf("tryControlReadyScan: handled = false, want true for a control-ready query")
 	}
 
 	var gotIDs []string
@@ -154,9 +185,9 @@ printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true")

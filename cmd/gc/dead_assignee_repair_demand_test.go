@@ -29,7 +29,7 @@ import (
 func TestReconcileSessionBeads_StrandedRepairVsPoolDemand_gci310k(t *testing.T) {
 	runOnce := func(t *testing.T, poolDesired map[string]int) (assignee, status string) {
 		t.Helper()
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 		env.addDesired("worker", "worker", false) // runtime NOT running — dead
 		session := env.createSessionBead("worker", "worker")

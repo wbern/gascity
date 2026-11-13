@@ -8,18 +8,15 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
-	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
 const (
+	// advancingNudgeStoreSetupOps is an enqueue's own store cost: the shadow
+	// save's lookup, which finds the store's open shadow.
 	advancingNudgeStoreSetupOps = 1
-	// advancingNudgeStoreDeadItemOps is the store-op cost of repairing one dead
-	// backlog item during a maintenance sweep: FindIncludingTerminal (List) to
-	// check terminal state, then Terminalize (SetMetadataBatch + Close) to repair
-	// it. Terminalize's own nil return is sufficient confirmation (see
-	// pruneDeadQueuedNudgesWithClock, gastownhall/gascity#5278), so there is no
-	// second FindIncludingTerminal call to account for here.
-	advancingNudgeStoreDeadItemOps = 3
+	// advancingNudgeStoreTerminalizeOps is the cost of paying one shadow debt
+	// with a known bead: SetMetadataBatch, then Close.
+	advancingNudgeStoreTerminalizeOps = 2
 )
 
 type advancingNudgeStore struct {
@@ -28,7 +25,6 @@ type advancingNudgeStore struct {
 	latency   time.Duration
 	failAfter int64
 	ops       int64
-	closed    map[string]bool
 }
 
 func (s *advancingNudgeStore) tick() error {
@@ -75,15 +71,8 @@ func (s *advancingNudgeStore) Get(id string) (beads.Bead, error) {
 	return beads.Bead{ID: id, Type: nudgeBeadType, Status: "open", Metadata: map[string]string{"state": "queued"}}, nil
 }
 
-func (s *advancingNudgeStore) Close(id string) error {
-	if err := s.tick(); err != nil {
-		return err
-	}
-	if s.closed == nil {
-		s.closed = make(map[string]bool)
-	}
-	s.closed[id] = true
-	return nil
+func (s *advancingNudgeStore) Close(string) error {
+	return s.tick()
 }
 
 func (s *advancingNudgeStore) SetMetadata(string, string, string) error {
@@ -98,7 +87,7 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 	t.Helper()
 	now = now.UTC()
 	buckets := make(map[string]string, deadCount+4)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for i := 0; i < 2; i++ {
 			id := fmt.Sprintf("nudge-pending-preserve-%d", i)
 			buckets[id] = "pending"
@@ -154,54 +143,31 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 
 func nudgeQueueBucketsByID(t *testing.T, cityPath string) map[string]string {
 	t.Helper()
-	state, err := nudgequeue.LoadState(cityPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	buckets := make(map[string]string)
-	add := func(id, bucket string) {
-		if previous, exists := buckets[id]; exists {
-			t.Fatalf("duplicate queued ID %s occurs in %s and %s", id, previous, bucket)
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
+		for _, item := range state.Pending {
+			buckets[item.ID] = "pending"
 		}
-		buckets[id] = bucket
-	}
-	for _, item := range state.Pending {
-		add(item.ID, "pending")
-	}
-	for _, item := range state.InFlight {
-		add(item.ID, "in-flight")
-	}
-	for _, item := range state.Dead {
-		add(item.ID, "dead")
+		for _, item := range state.InFlight {
+			buckets[item.ID] = "in-flight"
+		}
+		for _, item := range state.Dead {
+			buckets[item.ID] = "dead"
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reading nudge queue state: %v", err)
 	}
 	return buckets
 }
 
-// payNudgeDebtsWithTestClock uses the production payer and confirmation phase,
-// with virtual store latency so the cooperative I/O budget is observable.
-func payNudgeDebtsWithTestClock(t *testing.T, clk clock.Clock) {
-	t.Helper()
-	previous := settleNudgeShadowDebts
-	settleNudgeShadowDebts = func(cityPath string, store beads.NudgesStore, debts []queuedNudge, budget time.Duration, now time.Time) {
-		payments := payNudgeShadowDebtsWithClock(nudgeFrontDoor(store), debts, clk.Now().Add(budget), clk)
-		if err := confirmNudgeShadowDebts(cityPath, payments, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() { settleNudgeShadowDebts = previous })
-}
-
-type advancingReadClock struct {
-	base *clock.Fake
-	step time.Duration
-}
-
-func (c advancingReadClock) Now() time.Time { now := c.base.Now(); c.base.Advance(c.step); return now }
-
-// Exhaust the pure callback budget partway through dead-letter maintenance.
-// Pausing payment at the durable debt boundary exposes the processed prefix
-// and untouched tail, while the later supersede loop must preserve its inputs.
-func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
+// TestSlingNudgeEnqueueSupersedesOverADeadBacklog pins that a dead backlog no
+// longer starves an enqueue's supersession (ga-fsp5w9): the maintenance pass is
+// pure, so a slow store and 160 older-binary dead letters cost the hold
+// nothing, the enqueue supersedes every pending and in-flight item sharing its
+// reference, and the only store calls are the shadow save before the lock and
+// the four superseded shadows' terminal writes after it.
+func TestSlingNudgeEnqueueSupersedesOverADeadBacklog(t *testing.T) {
 	const (
 		deadBacklog = 160
 		latency     = 40 * time.Millisecond
@@ -210,66 +176,45 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 	cityPath := t.TempDir()
 	fakeClock := &clock.Fake{Time: time.Now().UTC()}
 	seededBuckets := seedNudgeBudgetPreservationBacklog(t, cityPath, fakeClock.Now(), reference, deadBacklog)
-	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
-	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
+	wantOps := int64(advancingNudgeStoreSetupOps + 4*advancingNudgeStoreTerminalizeOps)
+	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: wantOps}
 	item := newQueuedNudgeWithOptions("gascity/deployer", "Work slung. Check your hook.", "sling", fakeClock.Now(), queuedNudgeOptions{
 		ID:        "nudge-new-preservation",
 		Reference: reference,
 	})
 
-	previousPayer := settleNudgeShadowDebts
-	taken := 0
-	settleNudgeShadowDebts = func(_ string, _ beads.NudgesStore, debts []queuedNudge, _ time.Duration, _ time.Time) {
-		taken += len(debts)
+	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, item, fakeClock); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStoreAndClock: %v", err)
 	}
-	t.Cleanup(func() { settleNudgeShadowDebts = previousPayer })
-	exhausted := advancingReadClock{base: fakeClock, step: 100 * time.Millisecond}
-	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, item, exhausted); err != nil {
-		t.Fatal(err)
-	}
-	if ops := store.operations(); ops != advancingNudgeStoreSetupOps {
-		t.Fatalf("exhausted maintenance made %d store calls, want only setup", ops)
-	}
-	state, err := nudgequeue.LoadState(cityPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	byID := make(map[string]queuedNudge, len(state.Dead))
-	for _, dead := range state.Dead {
-		byID[dead.ID] = dead
-	}
-	processed := 0
-	reachedTail := false
-	for i := 0; i < deadBacklog; i++ {
-		id := fmt.Sprintf("nudge-dead-preserve-%03d", i)
-		dead, exists := byID[id]
-		if !exists {
-			t.Fatalf("unpaid dead item %s disappeared", id)
-		}
-		if dead.Shadow == nil {
-			reachedTail = true
-			continue
-		}
-		if reachedTail || !dead.Shadow.Verify || dead.Shadow.Paid {
-			t.Fatalf("invalid processed prefix at %s: %+v", id, dead.Shadow)
-		}
-		processed++
-	}
-	if processed == 0 || processed >= deadBacklog || taken == 0 {
-		t.Fatalf("processed=%d taken=%d, want a nonempty prefix and untouched tail", processed, taken)
+	if ops := store.operations(); ops != wantOps {
+		t.Fatalf("advancing store ops = %d, want %d (the save, then two writes per superseded shadow)", ops, wantOps)
 	}
 
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	if len(buckets) != len(seededBuckets)+1 {
-		t.Fatalf("queue lost or duplicated unprocessed items: %d, want %d", len(buckets), len(seededBuckets)+1)
+	if got, want := len(buckets), deadBacklog+4+1; got != want {
+		t.Fatalf("queued item count = %d, want %d; buckets=%v", got, want, buckets)
 	}
-	for id, want := range seededBuckets {
-		if got := buckets[id]; got != want {
-			t.Fatalf("unprocessed %s moved from %s to %s", id, want, got)
+	for id, bucket := range seededBuckets {
+		if bucket == "dead" && buckets[id] != "dead" {
+			t.Fatalf("dead nudge %q bucket = %q, want dead", id, buckets[id])
 		}
 	}
-	if buckets[item.ID] != "pending" {
-		t.Fatalf("new item not queued: %v", buckets)
+	state := loadNudgeStateForTest(t, cityPath)
+	superseded := 0
+	for _, dead := range state.Dead {
+		if dead.LastError != "superseded" {
+			continue
+		}
+		superseded++
+		if dead.Shadow == nil || !dead.Shadow.Paid || dead.Shadow.State != "superseded" {
+			t.Fatalf("superseded %q debt = %+v, want a paid superseded debt", dead.ID, dead.Shadow)
+		}
+	}
+	if superseded != 4 {
+		t.Fatalf("superseded = %d, want the 2 pending and 2 in-flight items sharing the reference", superseded)
+	}
+	if bucket := buckets[item.ID]; bucket != "pending" {
+		t.Fatalf("new queued nudge bucket = %q, want pending", bucket)
 	}
 }
 

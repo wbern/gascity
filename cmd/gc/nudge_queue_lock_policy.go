@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +10,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-// The nudge queue lock's process-wide policy: bounded waits, slow-hold
-// diagnostics and retries for bookkeeping on a held claim.
+// The nudge queue lock's process-wide policy (DES-NQL §5.6, §5.8, ga-fsp5w9):
+// its telemetry, and the retry of bookkeeping on a held claim.
 
 // nudgeQueueLockSlowHold is the hold past which GC_DEBUG names the holder.
 // Every queue callback is pure, so a hold is a JSON round trip of the queue;
@@ -24,17 +26,22 @@ var nudgeQueueLockDebugWriter io.Writer = os.Stderr
 
 func init() { nudgequeue.SetLockObserver(observeNudgeQueueLock) }
 
-// observeNudgeQueueLock emits a GC_DEBUG line for a slow hold.
+// observeNudgeQueueLock records one acquisition of the queue lock: the wait
+// and hold histograms by verb and outcome, and a GC_DEBUG line for a slow
+// hold.
 func observeNudgeQueueLock(sample nudgequeue.LockSample) {
 	verb := sample.Verb
 	if verb == "" {
 		verb = "unnamed"
 	}
+	telemetry.RecordNudgeQueueLock(context.Background(), verb, sample.Outcome, durationMs(sample.Wait), durationMs(sample.Hold))
 	if sample.Hold > nudgeQueueLockSlowHold && gcDebugEnabled() && nudgeQueueLockDebugWriter != nil {
 		fmt.Fprintf(nudgeQueueLockDebugWriter, "gc nudge: queue lock held %s by %s (waited %s, outcome %s)\n", //nolint:errcheck // best-effort diagnostic
 			sample.Hold.Round(time.Millisecond), verb, sample.Wait.Round(time.Millisecond), sample.Outcome)
 	}
 }
+
+func durationMs(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 // nudgeQueueLockWait is how long a queue verb of this process waits for the
 // queue lock: the queue's budget, or, inside a hook, no longer than the time

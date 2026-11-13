@@ -2,30 +2,27 @@ package api
 
 import "github.com/gastownhall/gascity/internal/api/genclient"
 
-// SessionView is the CLI-facing shape for `gc session list` rows and
-// `gc session peek` output. It mirrors the subset of server-side
+// SessionView is the CLI-facing shape for `gc session peek` output (list rows
+// use SessionListView). It mirrors the subset of server-side
 // sessionResponse fields that the CLI formatter reads so cmd/gc/ never
 // imports genclient directly.
 type SessionView struct {
-	ID                   string `json:"id"`
-	Template             string `json:"template"`
-	State                string `json:"state"`
-	Reason               string `json:"reason"`
-	Title                string `json:"title,omitempty"`
-	Alias                string `json:"alias,omitempty"`
-	Rig                  string `json:"rig,omitempty"`
-	AgentName            string `json:"agent_name,omitempty"`
-	Provider             string `json:"provider,omitempty"`
-	Transport            string `json:"transport,omitempty"`
-	SessionName          string `json:"session_name,omitempty"`
-	WorkDir              string `json:"work_dir,omitempty"`
-	WorkerDir            string `json:"worker_dir,omitempty"`
-	CreatedAt            string `json:"created_at"`
-	LastActive           string `json:"last_active"`
-	LastNudgeDeliveredAt string `json:"last_nudge_delivered_at,omitempty"`
-	Attached             bool   `json:"attached"`
-	Running              bool   `json:"running"`
-	LastOutput           string `json:"last_output"`
+	ID          string `json:"id"`
+	Template    string `json:"template"`
+	State       string `json:"state"`
+	Reason      string `json:"reason"`
+	Title       string `json:"title"`
+	Alias       string `json:"alias"`
+	SessionName string `json:"session_name"`
+	WorkDir     string `json:"work_dir"`
+	CreatedAt   string `json:"created_at"`
+	LastActive  string `json:"last_active"`
+	Attached    bool   `json:"attached"`
+	Running     bool   `json:"running"`
+	LastOutput  string `json:"last_output"`
+	// ProgramStatus is the session program's own status report, as the API
+	// reports it; absent means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
 }
 
 // sessionViewFromGen translates one genclient.SessionResponse into a
@@ -33,7 +30,6 @@ type SessionView struct {
 func sessionViewFromGen(g genclient.SessionResponse) SessionView {
 	out := SessionView{
 		ID:          g.Id,
-		Provider:    g.Provider,
 		Template:    g.Template,
 		State:       g.State,
 		Title:       g.Title,
@@ -41,21 +37,6 @@ func sessionViewFromGen(g genclient.SessionResponse) SessionView {
 		CreatedAt:   g.CreatedAt,
 		Attached:    g.Attached,
 		Running:     g.Running,
-	}
-	if g.Rig != nil {
-		out.Rig = *g.Rig
-	}
-	if g.AgentName != nil {
-		out.AgentName = *g.AgentName
-	}
-	if g.Transport != nil {
-		out.Transport = *g.Transport
-	}
-	if g.WorkerDir != nil {
-		out.WorkerDir = *g.WorkerDir
-	}
-	if g.LastNudgeDeliveredAt != nil {
-		out.LastNudgeDeliveredAt = *g.LastNudgeDeliveredAt
 	}
 	if g.WorkDir != nil {
 		out.WorkDir = *g.WorkDir
@@ -72,21 +53,31 @@ func sessionViewFromGen(g genclient.SessionResponse) SessionView {
 	if g.LastOutput != nil {
 		out.LastOutput = *g.LastOutput
 	}
+	out.ProgramStatus = programStatusFromGen(g.ProgramStatus)
 	return out
 }
 
-// sessionsFromGenList translates the genclient list body into
-// []SessionView. Returns an empty slice (never nil) when the body is
-// missing or holds no items so callers can uniformly format the empty
-// case.
-func sessionsFromGenList(body *genclient.ListBodySessionResponse) []SessionView {
-	if body == nil || body.Items == nil {
-		return []SessionView{}
+// programStatusFromGen translates the generated client's program status into
+// the wire type; nil stays nil (unknown).
+func programStatusFromGen(g *genclient.SessionProgramStatus) *SessionProgramStatus {
+	if g == nil {
+		return nil
 	}
-	items := *body.Items
-	out := make([]SessionView, 0, len(items))
-	for _, item := range items {
-		out = append(out, sessionViewFromGen(item))
+	out := &SessionProgramStatus{
+		State:           string(g.State),
+		Since:           g.Since,
+		QuietSince:      g.QuietSince,
+		WorkingChildren: int(g.WorkingChildren),
+	}
+	if g.Kind != nil {
+		out.Kind = string(*g.Kind)
+	}
+	if g.App != nil {
+		out.App = *g.App
+	}
+	if g.Progress != nil {
+		progress := int(*g.Progress)
+		out.Progress = &progress
 	}
 	return out
 }

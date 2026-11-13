@@ -114,7 +114,9 @@ func TestRunBdInvocationProfileCoversGCRoutingAndChild(t *testing.T) {
 	for _, phase := range []string{
 		"telemetry_init", "command_tree", "command_execute",
 		"rewrite_heartbeat", "resolve_city", "load_city_config", "resolve_scope",
-		"config_builtin_pack_includes", "config_load_with_includes", "config_postprocess",
+		// T5: the passthrough uses upstream's cheap loader
+		// (loadCityConfigForBdPassthrough), which has no config_* sub-phases;
+		// load_city_config above covers it.
 		"provider_preflight", "prepare_subprocess", "bd_subprocess", "total",
 	} {
 		if !report.hasPhase(phase) {

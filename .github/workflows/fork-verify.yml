@@ -15,7 +15,10 @@ on:
   # source branches here would let a newly introduced branch convention skip
   # CI entirely.
   pull_request:
-    branches: [develop]
+    # develop is the fork integration branch; main, hotfix/** and release/**
+    # are listed so the workflow covers every base upstream's branch-filter
+    # policy names, even though the fork does not currently target them.
+    branches: [develop, main, "hotfix/**", "release/**"]
   workflow_dispatch:
 
 permissions:
@@ -34,8 +37,8 @@ jobs:
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1"
+      DOLT_VERSION: "2.6.0"
+      BD_VERSION: "v1.3.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -182,7 +185,15 @@ jobs:
         run: ./scripts/check-generated-docs-drift.sh
       - name: OpenAPI spec + generated client drift check
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
-        run: make spec-ci
+        env:
+          # spec-ci ends in the openapi-breaking gate, whose default base is the
+          # merge-base with origin/main. This job checks out a single commit with
+          # no origin/main, and the fork's PRs target develop: compare against the
+          # PR base commit instead (the checked-out commit itself on dispatch).
+          OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$OPENAPI_BREAKING_BASE"
+          make spec-ci
       - name: make check-schema
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
         run: make check-schema
@@ -306,8 +317,8 @@ jobs:
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1"
+      DOLT_VERSION: "2.6.0"
+      BD_VERSION: "v1.3.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

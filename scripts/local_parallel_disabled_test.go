@@ -33,3 +33,23 @@ func readLocalParallelRunner(t *testing.T) string {
 	}
 	return string(data)
 }
+
+// prePushSuiteHook is the upstream script the pre-push hook delegates to for
+// the push-time test suite.
+const prePushSuiteHook = "push-suite.sh"
+
+// skipIfPrePushSuiteDisabled skips upstream assertions about the push-time
+// test suite when the fork's pre-push hook does not run it. The fork keeps the
+// hook non-blocking for tests (TestPrePushDoesNotRunParallelLocalTests pins
+// that); .githooks/lib/push-suite.sh is retained so a hook that is restored to
+// delegate to it falls through to these assertions again.
+func skipIfPrePushSuiteDisabled(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".githooks", "pre-push"))
+	if err != nil {
+		t.Fatalf("read pre-push hook: %v", err)
+	}
+	if !strings.Contains(string(data), prePushSuiteHook) {
+		t.Skipf(".githooks/pre-push does not delegate to %s; the push-time suite is disabled in this fork", prePushSuiteHook)
+	}
+}

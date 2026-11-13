@@ -49,7 +49,8 @@ func (s legacyUncertainLinkStore) UpdateIfMatch(id string, revision int64, opts 
 func TestLegacyAmbiguousPublicationRetainsPublishedFamily(t *testing.T) {
 	store := legacyUncertainLinkStore{MemStore: seededStore("work")}
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) { return "", nil })
-	deps.Store, deps.CityPath = store, t.TempDir()
+	deps = withStore(deps, store)
+	deps.CityPath = t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	opts := SlingOpts{Target: a, BeadOrFormula: "work", OnFormula: "code-review", NoConvoy: true}
 	if _, err := DoSling(opts, deps, store); err == nil {
@@ -69,7 +70,8 @@ func TestLegacyAmbiguousPublicationRetainsPublishedFamily(t *testing.T) {
 func TestLegacyBatchAndSingleEntryUseSameAdmission(t *testing.T) {
 	store := seededStore("work")
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) { return "", nil })
-	deps.Store, deps.CityPath = store, t.TempDir()
+	deps = withStore(deps, store)
+	deps.CityPath = t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	child, _ := store.Get("work")
 	opts := SlingOpts{Target: a, NoConvoy: true}
@@ -99,7 +101,8 @@ func TestLegacyPublicationCASPreservesConcurrentClaim(t *testing.T) {
 		t.Error("source claimed during publication was routed")
 		return "", nil
 	})
-	deps.Store, deps.CityPath = store, t.TempDir()
+	deps = withStore(deps, store)
+	deps.CityPath = t.TempDir()
 	_, err := DoSling(SlingOpts{Target: config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}, BeadOrFormula: "work", OnFormula: "code-review", NoConvoy: true}, deps, store)
 	if err == nil {
 		t.Fatal("CAS lost a concurrent claim but returned success")
@@ -114,7 +117,7 @@ func TestLegacyClosedRootWithLiveDescendantIsNotForgotten(t *testing.T) {
 	store := seededStore("work")
 	root, _ := store.Create(beads.Bead{Type: "molecule", Status: "closed", Metadata: map[string]string{"gc.var.issue": "work"}})
 	child, _ := store.Create(beads.Bead{Type: "step", Status: "open", ParentID: root.ID, Assignee: "live-reviewer"})
-	deps := SlingDeps{Store: store, CityPath: t.TempDir()}
+	deps := SlingDeps{Store: beads.WorkStore{Store: store}, CityPath: t.TempDir()}
 	_, err := withLegacyAttachment(context.Background(), deps, "work", "review", nil, func() (*molecule.Result, error) {
 		t.Fatal("forgot the open descendant beneath historical closed root")
 		return nil, nil
@@ -138,7 +141,8 @@ func TestLegacyRepeatedRouteKeepsOneFamily(t *testing.T) {
 		t.Error("legacy route invoked unfenced Runner")
 		return "", nil
 	})
-	deps.Store, deps.CityPath = store, t.TempDir()
+	deps = withStore(deps, store)
+	deps.CityPath = t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	opts := SlingOpts{Target: a, BeadOrFormula: "work", OnFormula: "code-review", NoConvoy: true}
 	if _, err := DoSling(opts, deps, store); err != nil {
@@ -158,7 +162,7 @@ func TestLegacyRepeatedRouteKeepsOneFamily(t *testing.T) {
 func TestLegacyClosedSourceAndChangedCustodyNeverRoute(t *testing.T) {
 	for _, closeBefore := range []bool{false, true} {
 		store := seededStore("work")
-		deps := SlingDeps{Store: store, CityPath: t.TempDir()}
+		deps := SlingDeps{Store: beads.WorkStore{Store: store}, CityPath: t.TempDir()}
 		if closeBefore {
 			if err := store.Close("work"); err != nil {
 				t.Fatal(err)
@@ -195,7 +199,7 @@ func TestLegacyDetachedOrIncompleteFamiliesRequireReconciliation(t *testing.T) {
 		root, _ := store.Create(beads.Bead{Type: "molecule", Status: "open", Metadata: map[string]string{
 			"gc.var.issue": "work", beadmeta.FormulaNameMetadataKey: "review", legacyAttachmentStateKey: state,
 		}})
-		deps := SlingDeps{Store: store, CityPath: t.TempDir()}
+		deps := SlingDeps{Store: beads.WorkStore{Store: store}, CityPath: t.TempDir()}
 		_, err := withLegacyAttachment(context.Background(), deps, "work", "review", nil, func() (*molecule.Result, error) {
 			t.Fatal("created another family while a detached/incomplete root exists")
 			return nil, nil
@@ -215,7 +219,7 @@ func TestLegacyDetachedOrIncompleteFamiliesRequireReconciliation(t *testing.T) {
 
 func TestLegacyIndependentReviewSourcesRemainConcurrent(t *testing.T) {
 	store := seededStore("code", "ux")
-	deps := SlingDeps{Store: store, CityPath: t.TempDir()}
+	deps := SlingDeps{Store: beads.WorkStore{Store: store}, CityPath: t.TempDir()}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	entered := make(chan struct{}, 2)
@@ -287,7 +291,8 @@ func TestLegacyAttachmentPublishesParentAndRollsBackLinkFailure(t *testing.T) {
 				}
 				return "", nil
 			})
-			deps.Store, deps.CityPath = store, t.TempDir()
+			deps = withStore(deps, store)
+			deps.CityPath = t.TempDir()
 			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 			result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "work", OnFormula: "code-review", NoConvoy: true}, deps, store)
 			if fail {
@@ -314,7 +319,8 @@ func TestLegacyAttachmentPublishesParentAndRollsBackLinkFailure(t *testing.T) {
 func TestLegacyConcurrentAttachmentConverges(t *testing.T) {
 	store := seededStore("work")
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) { return "", nil })
-	deps.Store, deps.CityPath = store, t.TempDir()
+	deps = withStore(deps, store)
+	deps.CityPath = t.TempDir()
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	start := make(chan struct{})
 	results := make(chan SlingResult, 8)
@@ -366,8 +372,8 @@ func TestLegacyClosedHistoricalRootWithoutStoreRefDoesNotBlockSling(t *testing.T
 	}
 	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, histRoot.ID)
 	deps := SlingDeps{
-		Store:      source,
-		GraphStore: graph,
+		Store:      beads.WorkStore{Store: source},
+		GraphStore: beads.GraphStore{Store: graph},
 		StoreRef:   "rig:crm",
 		CityPath:   t.TempDir(),
 	}
@@ -403,8 +409,8 @@ func TestLegacyMissingStoreRefFallsBackToDepsStoreRef(t *testing.T) {
 	})
 	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, openRoot.ID)
 	deps := SlingDeps{
-		Store:      source,
-		GraphStore: graph,
+		Store:      beads.WorkStore{Store: source},
+		GraphStore: beads.GraphStore{Store: graph},
 		StoreRef:   "rig:crm",
 		CityPath:   t.TempDir(),
 	}
@@ -446,8 +452,8 @@ func TestLegacyReworkRetiresFailedMoleculeAndPoursFresh(t *testing.T) {
 	})
 	_ = source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, failedRoot.ID)
 	deps := SlingDeps{
-		Store:      source,
-		GraphStore: graph,
+		Store:      beads.WorkStore{Store: source},
+		GraphStore: beads.GraphStore{Store: graph},
 		StoreRef:   "rig:crm",
 		CityPath:   t.TempDir(),
 	}
@@ -533,7 +539,7 @@ func TestLegacyAbandonedPreparingRootIsRetiredAndReplaced(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := seededStore("work")
-			deps := SlingDeps{Store: legacyReadyStampFailureStore{MemStore: mem}, StoreRef: "city:test", CityPath: t.TempDir()}
+			deps := SlingDeps{Store: beads.WorkStore{Store: legacyReadyStampFailureStore{MemStore: mem}}, StoreRef: "city:test", CityPath: t.TempDir()}
 			vars := map[string]string{"issue": "work", "pr": "new"}
 			if tc.name == "matching vars" {
 				vars = map[string]string{"issue": "work"}
@@ -550,7 +556,7 @@ func TestLegacyAbandonedPreparingRootIsRetiredAndReplaced(t *testing.T) {
 			abandonedID := stuck[0].ID
 
 			// Retry under the source lock must heal instead of reporting conflicting families.
-			deps.Store = mem
+			deps = withStore(deps, mem)
 			result, err := withLegacyAttachment(context.Background(), deps, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish, "worker")
 			if err != nil {
 				t.Fatalf("retry after abandoned preparing root: %v", err)
@@ -596,7 +602,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, nil)
 		calls := 0
-		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: mem}, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err != nil || calls != 0 || result.WispRootID != root.ID {
 			t.Fatalf("ready root not reused: err=%v calls=%d result=%+v", err, calls, result)
 		}
@@ -605,7 +611,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, map[string]string{"gc.var.issue": "other"})
 		calls := 0
-		_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: mem}, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err == nil || !strings.Contains(err.Error(), "conflicting families") || calls != 0 {
 			t.Fatalf("err=%v calls=%d; want conflicting families", err, calls)
 		}
@@ -617,7 +623,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 		mem := seededStore("work")
 		root := newRoot(mem, map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"})
 		calls := 0
-		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+		result, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: mem}, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 		if err != nil || calls != 1 || result.WispRootID == root.ID {
 			t.Fatalf("failed root not replaced: err=%v calls=%d result=%+v", err, calls, result)
 		}
@@ -639,7 +645,7 @@ func TestLegacyAttachmentStateBranchesUnchanged(t *testing.T) {
 			mem := seededStore("work")
 			root := newRoot(mem, tc.extra)
 			calls := 0
-			_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: mem, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
+			_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: mem}, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", vars, legacyTestCreate(t, mem, vars, &calls), legacyTestFinish)
 			if err == nil || calls != 0 {
 				t.Fatalf("err=%v calls=%d; want refusal without materialization", err, calls)
 			}

@@ -24,7 +24,7 @@ func TestRenudgeStaleHumanGatesStopsAtReminderCap(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"renudge-stale-human-gates.sh", "_bd_trace.sh"} {
+	for _, name := range []string{"renudge-stale-human-gates.sh", "_bd_trace.sh", "order_outcome.sh"} {
 		data, err := fs.ReadFile(PackFS, "assets/scripts/"+name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)

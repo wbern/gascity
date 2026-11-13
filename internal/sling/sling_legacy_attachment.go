@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -18,14 +19,16 @@ const legacyAttachmentStateKey = beadmeta.LegacyAttachmentStateMetadataKey
 // caller's routing step. Re-deliveries reuse an existing matching family;
 // unassigned does not mean abandoned and never authorizes burning a live root.
 func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formulaName string, vars map[string]string, create func() (*molecule.Result, error), finish func(*molecule.Result) (SlingResult, error), routeTarget ...string) (SlingResult, error) {
-	if deps.GraphStore != nil && strings.TrimSpace(deps.StoreRef) == "" {
+	if deps.graphRelocated() && strings.TrimSpace(deps.StoreRef) == "" {
 		return SlingResult{}, fmt.Errorf("legacy source %s requires a source-store identity before shared-store materialization", sourceID)
 	}
-	writer, hasRevisionWriter := beads.ConditionalWriterFor(deps.Store)
+	// The fence is looked up through the wrapper's declared resolve target
+	// (cmd/gc's policy store embeds the Store interface and so hides the
+	// backing store's UpdateIfMatch). Its absence is refused below, after
+	// discovery and before any mutation, so a store that cannot be READ is
+	// reported as the store fault it is rather than as a missing capability.
+	writer, hasRevisionWriter := beads.ConditionalWriterForTarget(deps.Store)
 	patchWriter, hasPatchWriter := beads.MetadataPatchCASWriterFor(deps.Store)
-	if !hasRevisionWriter && !hasPatchWriter {
-		return SlingResult{}, fmt.Errorf("legacy source %s requires conditional publication; refusing unfenced materialization", sourceID)
-	}
 	var result SlingResult
 	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), sourceID, func() error {
 		source, err := beads.HandlesFor(deps.Store).Live.Get(sourceID)
@@ -35,13 +38,35 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 		if source.Status != "open" && source.Status != "in_progress" {
 			return fmt.Errorf("legacy source %s is %s; refusing materialization", sourceID, source.Status)
 		}
-		rootStore := deps.graphStore()
-		roots, err := CollectAttachedBeads(source, rootStore, rootStore)
+		// A legacy root lives in the store that minted it: the work store for a
+		// v1 poured recipe, the graph store for a graph-class one (split-city
+		// storage routing). Discovery reads both; every mutation of a root goes
+		// to the store that holds it.
+		scope := deps.attachmentScope()
+		located, err := CollectAttachments(source, deps.Store, scope.stores()...)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			// A store fault, not a conflict: the guard cannot tell whether a
+			// live family is attached, so the API answers it 5xx.
+			return fmt.Errorf("inspect legacy source %s: %w", sourceID, attachmentProbeFailure(sourceID, err, scope))
+		}
 		if err != nil {
 			return fmt.Errorf("inspect legacy source %s: %w", sourceID, err)
 		}
+		// requireFence refuses an unfenced store before the first mutation
+		// (a retire, a create, or the publication). Refusals that change
+		// nothing - a live conflict, a reconciliation fault - are reported
+		// as themselves, ahead of a missing capability.
+		requireFence := func() error {
+			if !hasRevisionWriter && !hasPatchWriter {
+				return fmt.Errorf("legacy source %s requires conditional publication; refusing unfenced materialization", sourceID)
+			}
+			return nil
+		}
+		rootStoreOf := map[string]beads.Store{}
 		var live []beads.Bead
-		for _, root := range roots {
+		for _, loc := range located {
+			root := loc.Bead
+			rootStoreOf[root.ID] = loc.Store
 			rootSourceRef := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey])
 			// If root has no source-store identity recorded, and we are in a shared graph store,
 			// fallback to deps.StoreRef for roots residing in the same store.
@@ -58,7 +83,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 			}
 			if root.Status == "closed" {
 				if IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) {
-					family, err := molecule.ListSubtree(rootStore, root.ID)
+					family, err := molecule.ListSubtree(legacyRootMolecule(deps, rootStoreOf[root.ID]), root.ID)
 					if err != nil {
 						return fmt.Errorf("inspect closed legacy family %s: %w", root.ID, err)
 					}
@@ -70,7 +95,7 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 				}
 				continue
 			}
-			if deps.GraphStore != nil && rootSourceRef == "" {
+			if deps.graphRelocated() && rootSourceRef == "" {
 				return fmt.Errorf("legacy family %s has no source-store identity; reconciliation required", root.ID)
 			}
 			live = append(live, root)
@@ -91,45 +116,51 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 
 			switch {
 			case matches && !isFailed && isReady && !deps.Force:
+				if err := requireFence(); err != nil {
+					return err
+				}
 				materialized = &molecule.Result{RootID: root.ID}
 			case isFailed || deps.Force || abandoned:
+				if err := requireFence(); err != nil {
+					return err
+				}
 				closeReason := "retired: superseded by rework"
 				if abandoned && !isFailed && !deps.Force {
 					closeReason = "retired: abandoned preparing attempt (sling died before ready)"
 				}
 				for _, r := range live {
-					if _, err := molecule.CloseSubtreeWithMetadata(rootStore, r.ID, map[string]string{
+					if _, err := molecule.CloseSubtreeWithMetadata(legacyRootMolecule(deps, rootStoreOf[r.ID]), r.ID, map[string]string{
 						"close_reason": closeReason,
 					}); err != nil {
 						return fmt.Errorf("retire superseded legacy family %s: %w", r.ID, err)
 					}
 				}
-				materialized, err = create()
+				materialized, err = createAndStampReady(deps, scope, create)
 				if err != nil {
 					return err
-				}
-				if err = rootStore.SetMetadata(materialized.RootID, legacyAttachmentStateKey, "ready"); err != nil {
-					return fmt.Errorf("finish legacy family %s: %w; family retained for reconciliation", materialized.RootID, err)
-				}
-				if deps.StoreRef != "" {
-					_ = rootStore.SetMetadata(materialized.RootID, beadmeta.SourceStoreRefMetadataKey, deps.StoreRef)
 				}
 			default:
 				if len(live) == 1 && root.Metadata[beadmeta.SourceBeadIDMetadataKey] == "" && root.Metadata["gc.var.issue"] == "" {
 					return &MoleculeAttachedError{BeadID: sourceID, Label: "molecule", AttachmentID: root.ID}
 				}
+				// An explicit --on naming a different formula than the live
+				// family was poured from is a refusal the caller can read (a
+				// MoleculeAttachedError), not an opaque reconciliation fault; the
+				// family is still never retired here.
+				if len(live) == 1 && IsMoleculeAttachment(root) && !IsWorkflowAttachment(root) && root.Metadata[beadmeta.SourceBeadIDMetadataKey] == sourceID {
+					if attached := strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]); attached != "" && attached != formulaName {
+						return &MoleculeAttachedError{BeadID: sourceID, Label: AttachmentLabel(root), AttachmentID: root.ID}
+					}
+				}
 				return fmt.Errorf("legacy source %s has conflicting families (%s); reconciliation required", sourceID, root.ID)
 			}
 		} else {
-			materialized, err = create()
-			if err != nil {
+			if err := requireFence(); err != nil {
 				return err
 			}
-			if err = rootStore.SetMetadata(materialized.RootID, legacyAttachmentStateKey, "ready"); err != nil {
-				return fmt.Errorf("finish legacy family %s: %w; family retained for reconciliation", materialized.RootID, err)
-			}
-			if deps.StoreRef != "" {
-				_ = rootStore.SetMetadata(materialized.RootID, beadmeta.SourceStoreRefMetadataKey, deps.StoreRef)
+			materialized, err = createAndStampReady(deps, scope, create)
+			if err != nil {
+				return err
 			}
 		}
 		// Re-read after materialization: external claim/close operations do not
@@ -167,6 +198,28 @@ func withLegacyAttachment(ctx context.Context, deps SlingDeps, sourceID, formula
 	return result, err
 }
 
+// createAndStampReady materializes the family through create and stamps it
+// ready (and with the source-store identity) in the store that holds the new
+// root: create mints a v1 poured recipe in the work store and a graph-class one
+// in the graph store, so the root is located rather than assumed.
+func createAndStampReady(deps SlingDeps, scope attachmentScope, create func() (*molecule.Result, error)) (*molecule.Result, error) {
+	materialized, err := create()
+	if err != nil {
+		return nil, err
+	}
+	_, rootStore, err := getFromStores(materialized.RootID, scope.stores())
+	if err == nil {
+		err = rootStore.SetMetadata(materialized.RootID, legacyAttachmentStateKey, "ready")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finish legacy family %s: %w; family retained for reconciliation", materialized.RootID, err)
+	}
+	if deps.StoreRef != "" {
+		_ = rootStore.SetMetadata(materialized.RootID, beadmeta.SourceStoreRefMetadataKey, deps.StoreRef)
+	}
+	return materialized, nil
+}
+
 // isAbandonedPreparingRoot reports whether the single live root is a legacy
 // family left in gc.legacy_attachment_state=preparing by a sling that died
 // between create() and the ready stamp (gci-142rk9).
@@ -200,4 +253,17 @@ func isAbandonedPreparingRoot(root beads.Bead, live []beads.Bead, source beads.B
 		return false
 	}
 	return source.Metadata[beadmeta.MoleculeIDMetadataKey] != root.ID
+}
+
+// legacyRootMolecule is the molecule target for a legacy root held by store: the
+// graph target when store is the graph store of a city that relocates the graph
+// class (a graph store physically distinct from the work store), else the work
+// target: where the classes share one store a legacy root is work class. The
+// molecule helpers take a typed target (upstream T9); a legacy root lives in the
+// store that minted it.
+func legacyRootMolecule(deps SlingDeps, store beads.StoreReader) beads.MoleculeTarget {
+	if deps.graphRelocated() && beads.SameStore(store, deps.GraphStore) {
+		return beads.GraphMolecule(deps.GraphStore)
+	}
+	return beads.WorkMolecule(deps.Store)
 }

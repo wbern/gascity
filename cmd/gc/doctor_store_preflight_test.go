@@ -22,14 +22,23 @@ var doctorCityStoreDependentNames = []string{
 	"census-owner-liveness",
 	"run-target-routed-to-backfill",
 	"route-recovery-quarantine",
+	"cross-store-gates",
+	"storage-rigs",
+	"storage-split",
+	"dangling-blocking-edges",
 	"hold-label-routed-to",
 	"pool-idle-routed-work",
+	"v2-demand-migrations",
+	"v2-session-migration",
+	"exec-runtime-identity",
 	"work-option-metadata-migration",
 	"backlog-depth",
 	"order-tracking-retention",
 	"session-model",
 	"routed-work-workable",
 	"startup-health-episodes",
+	"ownerless-runtimes",
+	"program-status-capture",
 	"gate-sandbox-reads",
 	"custom-types:city",
 	"hold-label-conventions:city",
@@ -111,10 +120,11 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	if !strings.Contains(res.Message, "doltlite") {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
-	// Seventeen city checks (upstream's sixteen plus the fork's
+	// The city checks (doctorCityStoreCheckCount: upstream's twenty-four, T9
+	// added exec-runtime-identity, T10 order-dispatch-floor, plus the fork's
 	// routed-work-workable) plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 23 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 23", res.Message)
+	if !strings.Contains(res.Message, "skipped 32 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 32", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)

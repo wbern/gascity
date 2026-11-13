@@ -36,7 +36,7 @@ title = "Do work"
 	store := beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
 	}, nil)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "")
 

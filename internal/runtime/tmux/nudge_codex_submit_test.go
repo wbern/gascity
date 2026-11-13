@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -169,7 +170,7 @@ func TestCodexNudgeQueuesOwnDraftWithoutEscape(t *testing.T) {
 				tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 				message := "<system-reminder>\nwork the exact bead\n</system-reminder>"
 				pastes := 0
-				err := tm.nudgeSession("sess", message, func(_ string, text string, _ time.Duration) error {
+				err := tm.nudgeSession(context.Background(), "sess", message, func(_ context.Context, _ string, text string, _ time.Duration) error {
 					pastes++
 					if text != message {
 						t.Fatal("payload changed")
@@ -180,7 +181,7 @@ func TestCodexNudgeQueuesOwnDraftWithoutEscape(t *testing.T) {
 						fe.pane = "• Working (esc to interrupt)\n› " + strings.ReplaceAll(message, "\n", "\n  ") + "\n\ntab to queue message"
 					}
 					return nil
-				}, func(string) bool { return true }, func(string) []string { return []string{"Escape", "Enter"} })
+				}, func(string) bool { return true }, func(string) []string { return []string{"Escape", "Enter"} }, func(string) error { return nil }, false)
 				if err != nil || pastes != 1 {
 					t.Fatalf("err=%v pastes=%d", err, pastes)
 				}
@@ -201,7 +202,7 @@ func TestCodexNudgePreservesAttachedHumanDraft(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: "› human draft\n\nGPT-6 low"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 	pasted := false
-	err := tm.nudgeSession("sess", "injected reminder", func(string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} })
+	err := tm.nudgeSession(context.Background(), "sess", "injected reminder", func(context.Context, string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} }, func(string) error { return nil }, false)
 	if !preInjectionRefusal(err) || pasted {
 		t.Fatalf("err=%v pasted=%v", err, pasted)
 	}
@@ -245,10 +246,10 @@ func TestCodexComposerRejectsFooterLikeHumanDraft(t *testing.T) {
 		fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex", attached: "1", pane: strings.Join(body, "\n")}
 		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 		pasted := false
-		err := tm.nudgeSession("sess", message, func(string, string, time.Duration) error {
+		err := tm.nudgeSession(context.Background(), "sess", message, func(context.Context, string, string, time.Duration) error {
 			pasted = true
 			return nil
-		}, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} })
+		}, func(string) bool { return false }, func(string) []string { return []string{"Escape", "Enter"} }, func(string) error { return nil }, false)
 		if !preInjectionRefusal(err) || pasted || countCallsWithTokens(fe.calls, "send-keys") != 0 {
 			t.Errorf("foreign draft received input: err=%v pasted=%v calls=%v", err, pasted, fe.calls)
 		}
@@ -292,11 +293,11 @@ func TestCodexNudgeHandlesOnlyFreshlyPastedRenderedWraps(t *testing.T) {
 				}
 				tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 				pastes := 0
-				err := tm.nudgeSession("sess", tc.message, func(string, string, time.Duration) error {
+				err := tm.nudgeSession(context.Background(), "sess", tc.message, func(context.Context, string, string, time.Duration) error {
 					pastes++
 					fe.pane = wrapped
 					return nil
-				}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+				}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, func(string) error { return nil }, false)
 				if existing {
 					if !preInjectionRefusal(err) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys") != 0 {
 						t.Fatalf("existing ambiguous input received keys: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
@@ -314,11 +315,11 @@ func TestCodexBusyWithoutQueueActionDoesNotStageReminder(t *testing.T) {
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 	message := "<system-reminder>\nYou have a deferred reminder that was queued until a safe boundary:\n\n- [session] narrow reminder\n\nHandle them after this turn.\n</system-reminder>\n"
 	pastes := 0
-	err := tm.nudgeSession("sess", message, func(_ string, text string, _ time.Duration) error {
+	err := tm.nudgeSession(context.Background(), "sess", message, func(_ context.Context, _ string, text string, _ time.Duration) error {
 		pastes++
 		fe.pane = "Working (18s • esc to interrupt)\n\n› " + strings.ReplaceAll(text, "\n", "\n  ") + "\n\nGPT-6.1-Sol … Goal achieved (2m)    ⚠ 1 warning · f2 to view"
 		return nil
-	}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+	}, func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, func(string) error { return nil }, false)
 	if !errors.Is(err, ErrNudgeInputNotReady) || pastes != 0 || countCallsWithTokens(fe.calls, "send-keys", "Enter") != 0 || countCallsWithTokens(fe.calls, "send-keys", "Tab") != 0 {
 		t.Fatalf("busy unsafe boundary mutated input: err=%v pastes=%d calls=%v", err, pastes, fe.calls)
 	}
@@ -400,7 +401,7 @@ func TestCodexNudgeUnreadableComposerIsNotReady(t *testing.T) {
 			}
 			tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 			pasted := false
-			err := tm.nudgeSession("sess", "injected reminder", func(string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+			err := tm.nudgeSession(context.Background(), "sess", "injected reminder", func(context.Context, string, string, time.Duration) error { pasted = true; return nil }, func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, func(string) error { return nil }, false)
 			if !preInjectionRefusal(err) || pasted || countCallsWithTokens(fe.calls, "send-keys") != 0 {
 				t.Fatalf("unreadable composer mutated input: err=%v pasted=%v calls=%v", err, pasted, fe.calls)
 			}

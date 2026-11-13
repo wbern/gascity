@@ -15,6 +15,7 @@ description: Key packages, ownership boundaries, and the fastest routes through 
 | Orders | `internal/orders/` | Order parsing and scanner logic |
 | Convergence | `internal/convergence/` | Iterative refinement loops, gates, and convergence metadata |
 | API | `internal/api/` | HTTP resources used by dashboards and external clients |
+| Fork-specific rules | `engdocs/contributors/fork-integration.md` | T3 bridge, DoltLite beads, merge discipline and the beads integration rules this fork adds; the root AGENTS.md stays at upstream's text to hold its byte budget |
 
 ## Common Change Paths
 

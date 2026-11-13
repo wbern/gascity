@@ -52,7 +52,7 @@ func TestReview172SingleAndBatchRouteFence(t *testing.T) {
 					return "", nil
 				}
 				deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner)
-				deps.Store = store
+				deps = withStore(deps, store)
 				deps.CityPath = t.TempDir()
 				router := &fakeBeadRouter{}
 				deps.Router = router
@@ -60,7 +60,7 @@ func TestReview172SingleAndBatchRouteFence(t *testing.T) {
 				var err error
 				if batch {
 					opts.BeadOrFormula = "group"
-					_, err = DoSlingBatch(opts, deps, store)
+					_, err = DoSlingBatch(opts, deps, deps.Store)
 				} else {
 					_, err = DoSling(opts, deps, store)
 				}
@@ -105,7 +105,7 @@ func (s *patchOnlyPublicationStore) CompareAndSetMetadataPatch(id string, expect
 func TestLegacyAttachmentPublishesThroughAtomicMetadataPatch(t *testing.T) {
 	mem := seededStore("work")
 	store := &patchOnlyPublicationStore{Store: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: store, CityPath: t.TempDir()}, "work", "review", nil,
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: store}, CityPath: t.TempDir()}, "work", "review", nil,
 		func() (*molecule.Result, error) {
 			root, createErr := mem.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
 			return &molecule.Result{RootID: root.ID}, createErr
@@ -140,7 +140,7 @@ func TestReview172RollbackCannotCloseCachedClaimedMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := &review172PublicationFailure{MemStore: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: cache, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: source}, GraphStore: beads.GraphStore{Store: cache}, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
 		func() (*molecule.Result, error) { return &molecule.Result{RootID: root.ID}, nil },
 		func(*molecule.Result) (SlingResult, error) {
 			t.Fatal("failed publication finished")
@@ -180,7 +180,7 @@ func TestReview172RollbackCannotRaceClaim(t *testing.T) {
 	child, _ := mem.Create(beads.Bead{Type: "step", Status: "open", ParentID: root.ID})
 	s := &review172ClaimDuringClose{Store: mem, root: root.ID, child: child.ID}
 	source := &review172PublicationFailure{MemStore: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, GraphStore: s, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: source}, GraphStore: beads.GraphStore{Store: s}, StoreRef: "rig:here", CityPath: t.TempDir()}, "work", "review", nil,
 		func() (*molecule.Result, error) { return &molecule.Result{RootID: root.ID}, nil },
 		func(*molecule.Result) (SlingResult, error) {
 			t.Fatal("failed publication finished")
@@ -202,7 +202,7 @@ func TestReview172SameIDInIndependentStoresDoesNotReuseForeignFamily(t *testing.
 		beadmeta.SourceBeadIDMetadataKey: "work", beadmeta.SourceStoreRefMetadataKey: "rig:other",
 		beadmeta.FormulaNameMetadataKey: "review", legacyAttachmentStateKey: "ready", "gc.var.issue": "work",
 	}})
-	deps := SlingDeps{Store: source, GraphStore: roots, StoreRef: "rig:here", CityPath: t.TempDir()}
+	deps := SlingDeps{Store: beads.WorkStore{Store: source}, GraphStore: beads.GraphStore{Store: roots}, StoreRef: "rig:here", CityPath: t.TempDir()}
 	result, err := withLegacyAttachment(context.Background(), deps, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) {
 		own, e := roots.Create(beads.Bead{Type: "molecule", Status: "open", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: "work", beadmeta.SourceStoreRefMetadataKey: "rig:here"}})
 		return &molecule.Result{RootID: own.ID}, e
@@ -226,7 +226,7 @@ func (s review172UnconditionalRace) SetMetadata(id, key, value string) error {
 func TestReview172NonCASCannotOverwriteInterveningPointer(t *testing.T) {
 	mem := seededStore("work")
 	s := review172UnconditionalRace{Store: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: s, CityPath: t.TempDir()}, "work", "review", nil, func() (*molecule.Result, error) {
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: s}, CityPath: t.TempDir()}, "work", "review", nil, func() (*molecule.Result, error) {
 		root, e := mem.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
 		return &molecule.Result{RootID: root.ID}, e
 	}, func(r *molecule.Result) (SlingResult, error) { return SlingResult{WispRootID: r.RootID}, nil })
@@ -255,7 +255,7 @@ func (s review172CloseAfterRead) Get(id string) (beads.Bead, error) {
 func TestReview172ClosedSourceCannotBeRoutedAfterPublication(t *testing.T) {
 	mem := seededStore("work")
 	s := review172CloseAfterRead{Store: mem}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: s, CityPath: t.TempDir()}, "work", "review", nil, func() (*molecule.Result, error) {
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: s}, CityPath: t.TempDir()}, "work", "review", nil, func() (*molecule.Result, error) {
 		root, e := mem.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
 		return &molecule.Result{RootID: root.ID}, e
 	}, func(r *molecule.Result) (SlingResult, error) {

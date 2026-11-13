@@ -385,6 +385,32 @@ func TestRetiredWorkerDirIdentityRejectsRedirectedWorktree(t *testing.T) {
 	}
 }
 
+// The retirement boundary is the configured worktrees root, the same one the
+// prune and the reaper discover under: with GC_WORKTREES_DIR set, a worktree
+// there is retirable, and one in the default <city>/.gc/worktrees tree is
+// outside the rig workspace. A hard-coded default boundary would refuse every
+// deferred retry under an override and never retire it.
+func TestRetiredWorkerDirIdentityUsesConfiguredWorktreesRoot(t *testing.T) {
+	city, rig := initReapRig(t)
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+
+	configuredWT := filepath.Join(configuredRoot, reapTestRigName, "polecats", "retired-conf")
+	if err := os.MkdirAll(filepath.Dir(configuredWT), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, rig, "worktree", "add", "-b", "wt-retired-conf", configuredWT)
+	if _, err := workerDirRetirementIdentity(city, reapTestRigName, rig, configuredWT, "session-retired"); err != nil {
+		t.Fatalf("worktree under the configured root refused: %v", err)
+	}
+
+	defaultWT := addClosedWorktree(t, rig, city, "polecats", "retired-dflt")
+	_, err := workerDirRetirementIdentity(city, reapTestRigName, rig, defaultWT, "session-retired")
+	if err == nil || !strings.Contains(err.Error(), "outside its rig workspace") {
+		t.Fatalf("worktree under the default tree while GC_WORKTREES_DIR is set: err = %v, want 'outside its rig workspace'", err)
+	}
+}
+
 func TestRetiredWorkerDirRetryRecoversCompletedPublicationAfterCrash(t *testing.T) {
 	for _, scenario := range []string{"published_pending", "partial_cleanup", "external_only", "mixed_external", "unknown_alias", "symlink_alias", "corrupt"} {
 		t.Run(scenario, func(t *testing.T) {

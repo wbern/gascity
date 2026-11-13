@@ -28,10 +28,12 @@ type restartRequestTestEnv struct {
 	stdout       bytes.Buffer
 	stderr       bytes.Buffer
 	startOptions []startExecutionOption
+	city         string             // the reconcile helpers' city path; only a test of the no-city refusal sets ""
+	stops        *asyncStartTracker // the drain-ack's async stops the reconcile helpers queue
 }
 
-func newRestartRequestTestEnv() *restartRequestTestEnv {
-	return &restartRequestTestEnv{
+func newRestartRequestTestEnv(t testing.TB) *restartRequestTestEnv {
+	env := &restartRequestTestEnv{
 		store:        beads.NewMemStore(),
 		sp:           runtime.NewFake(),
 		dt:           newDrainTracker(),
@@ -43,7 +45,13 @@ func newRestartRequestTestEnv() *restartRequestTestEnv {
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 		},
+		city:  t.TempDir(),
+		stops: &asyncStartTracker{},
 	}
+	// The drain-ack's async stops finish before the city is removed.
+	env.startOptions = append(env.startOptions, withAsyncDrainAckStopTracker(env.stops))
+	t.Cleanup(func() { env.stops.wait(5 * time.Second) })
+	return env
 }
 
 func (e *restartRequestTestEnv) createSessionBead(name string) beads.Bead {
@@ -83,10 +91,23 @@ func (e *restartRequestTestEnv) reconcile(sessions []beads.Bead) {
 	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, nil)
 }
 
+// reconcileWithDrainOps is reconcile with the controller's drain ops dops,
+// through which the reconciler reads the runtime restart hint.
+func (e *restartRequestTestEnv) reconcileWithDrainOps(sessions []beads.Bead, dops drainOps) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, dops)
+}
+
 func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	_ = reconcileSessionBeads(
+	_ = reconcileSessionBeadsAtPath(
 		context.Background(),
+		e.city,
 		sessions,
 		e.desiredState,
 		cfgNames,
@@ -94,6 +115,7 @@ func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []b
 		e.sp,
 		e.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		e.dt,
@@ -124,7 +146,7 @@ func (d *clearRestartErrorDrainOps) clearRestartRequested(string) error {
 func newLiveRestartRequestScenario(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
 
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -163,7 +185,7 @@ func newLiveRestartRequestScenario(t *testing.T) (*restartRequestTestEnv, beads.
 }
 
 func TestReconcileSessionBeads_RestartRequestRotatesKeyForSessionIDProviders(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -245,7 +267,7 @@ func TestReconcileSessionBeads_RestartRequestRecordsStopAndResetCommit(t *testin
 }
 
 func TestReconcileSessionBeads_RestartRequestClearsKeyForResumeOnlyProviders(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -287,7 +309,7 @@ func TestReconcileSessionBeads_RestartRequestClearsKeyForResumeOnlyProviders(t *
 }
 
 func TestReconcileSessionBeads_RestartRequestPreservesLiveHashesDuringHandoff(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -379,7 +401,7 @@ func TestReconcileSessionBeads_RestartRequestSuppressesGoneClearRestartRequested
 }
 
 func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	rec := &continuationObservationRecorder{}
 	env.rec = rec
 	env.cfg = &config.City{
@@ -452,7 +474,7 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 }
 
 func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Daemon: config.DaemonConfig{
@@ -482,8 +504,7 @@ func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *
 	if !cb.IsOpen(identity, base.Add(time.Minute)) {
 		t.Fatalf("precondition: breaker should be OPEN for %q", identity)
 	}
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{
@@ -590,7 +611,7 @@ func TestReconcileSessionBeads_RestartRequestPreemptsChurnGate(t *testing.T) {
 
 func newRestartRequestedZombieSession(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -659,7 +680,7 @@ func assertRestartRequestStoppedBeforeAutonomousGate(t *testing.T, env *restartR
 // with watchdog-driven `gc session reset` calls during the gap, sometimes
 // multiple patrol cycles).
 func TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -721,7 +742,7 @@ func TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick(t *testing
 func restartRequestTestIntPtr(n int) *int { return &n }
 
 func TestReconcileSessionBeads_RestartRequestSkipsCollateralKillForPinnedNamedSession(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -782,7 +803,7 @@ func TestReconcileSessionBeads_RestartRequestSkipsCollateralKillForPinnedNamedSe
 }
 
 func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSession(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -839,15 +860,15 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 
 // TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession
 // covers Fix 1 end-to-end: doHandoffWithOutcome on a pinned always-mode
-// session with a working persistRestart must land continuation_reset_pending
-// on the session bead, and that persisted state must be exactly what lets the
+// session records the fenced row request (SG-3), which lands
+// continuation_reset_pending on the session bead, and that persisted state must be exactly what lets the
 // reconciler's explicit-reset escape hatch actually stop the pinned session
 // on its next pass (mirrors
 // TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSession,
 // but drives the persisted state through the CLI instead of setting it
 // directly).
 func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "mayor", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -879,26 +900,20 @@ func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *
 	}
 
 	dops := newDrainOps(env.sp)
-	persistCalled := false
-	persistRestart := func() error {
-		persistCalled = true
-		// Stands in for Manager.RequestFreshRestart (out of scope here):
-		// what doHandoffWithOutcome actually depends on is that a working
-		// persistRestart lands continuation_reset_pending on the bead.
-		return env.store.SetMetadata(session.ID, "continuation_reset_pending", "true")
-	}
+	const token = "tok-pinned-live"
+	env.setSessionMetadata(&session, map[string]string{"instance_token": token})
+	restart := testRowFirstRestart("gc handoff", sessionName, dops, nil)
+	restart.token = token
+	restart.record = sessionRestartRecorder(t.TempDir(), env.store, env.sp, env.cfg, sessionName)
 
 	var stdout, stderr bytes.Buffer
-	outcome := doHandoffWithOutcome(env.store, env.store, env.rec, dops, persistRestart,
+	outcome := doHandoffWithOutcome(env.store, env.store, env.rec, dops, restart,
 		sessionName, sessionName, []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
 	if !outcome.restartRequested {
-		t.Fatal("restartRequested = false, want true for pinned always-mode session with working persistRestart")
-	}
-	if !persistCalled {
-		t.Fatal("persistRestart was not called for pinned always-mode session")
+		t.Fatal("restartRequested = false, want true for pinned always-mode session with a recorded restart")
 	}
 	if !strings.Contains(stdout.String(), "requesting restart") {
 		t.Errorf("stdout = %q, want restart-requested confirmation", stdout.String())
@@ -931,7 +946,7 @@ func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *
 // byte-for-byte unchanged: this fix must never write "asleep" on that branch.
 func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled(t *testing.T) {
 	t.Run("live runtime killed", func(t *testing.T) {
-		env := newRestartRequestTestEnv()
+		env := newRestartRequestTestEnv(t)
 		env.cfg = &config.City{
 			Workspace:     config.Workspace{Name: "test-city"},
 			Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -1001,7 +1016,7 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 	})
 
 	t.Run("already dead: fall-through unaffected", func(t *testing.T) {
-		env := newRestartRequestTestEnv()
+		env := newRestartRequestTestEnv(t)
 		env.cfg = &config.City{
 			Workspace:     config.Workspace{Name: "test-city"},
 			Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},

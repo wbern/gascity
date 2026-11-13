@@ -9,9 +9,21 @@ import (
 	"time"
 )
 
-// Managed hooks discard a child's output after their timeout. A nudge drain
-// must leave enough time to acknowledge its injected output and exit. When
-// that reserve is exhausted it releases its claims for the next drain.
+// The managed-hook deadline.
+//
+// `gc hook run` runs a hook command in a child and discards the child's output
+// when the child overruns the timeout. A child that injects auto-handoff mail
+// and then archives it can be reported as timed out AFTER it archived: the
+// agent never sees the handoff, and it is already marked read and closed. So
+// gc hook run hands the child its deadline, and a child skips a destructive
+// post-injection step when too little time is left to finish it and exit. The
+// skipped mail stays unread and the next hook delivers it again. An injecting
+// nudge drain is gated the same way: its ack of the nudges it wrote is the
+// destructive step, so with too little time left it releases its claims
+// instead, and the next drain delivers them again. The margin is a heuristic:
+// it makes a lost delivery unlikely, not impossible — a destructive step that
+// starts with the margin left and then runs past the deadline still loses the
+// output it was retiring.
 
 // hookDeadlineEnv names the absolute time (RFC 3339, UTC) by which a child of
 // gc hook run must have exited for its output to be kept.
@@ -70,6 +82,21 @@ func hookArchiveMargin(deadline, start time.Time) time.Duration {
 	return min(hookDeadlineArchiveMarginMax, deadline.Sub(start)/3)
 }
 
+// hookWorkEnd is when work this process does inside a hook must be done: the
+// deadline gc hook run handed it, less the archive margin, so the process
+// still exits with its output kept. ok is false outside a hook. A deadline
+// that does not parse leaves no time: the end is now.
+func hookWorkEnd() (end time.Time, ok bool) {
+	deadline, has, err := inheritedHookDeadline()
+	if err != nil {
+		return time.Now(), true
+	}
+	if !has {
+		return time.Time{}, false
+	}
+	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart)), true
+}
+
 // hookDeadlineLeavesArchiveTime reports whether, at now, the archive margin
 // remains before the deadline gc hook run handed this process, which started
 // at start. Without a deadline there is no limit. A deadline that does not
@@ -86,21 +113,6 @@ func hookDeadlineLeavesArchiveTime(now, start time.Time) (bool, error) {
 	return deadline.Sub(now) >= hookArchiveMargin(deadline, start), nil
 }
 
-// hookWorkEnd is when work this process does inside a hook must be done: the
-// deadline gc hook run handed it, less the archive margin, so the process
-// still exits with its output kept. ok is false outside a hook. A deadline
-// that does not parse leaves no time: the end is now.
-func hookWorkEnd() (end time.Time, ok bool) {
-	deadline, has, err := inheritedHookDeadline()
-	if err != nil {
-		return time.Now(), true
-	}
-	if !has {
-		return time.Time{}, false
-	}
-	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart)), true
-}
-
 // hookDeadlineStillLeavesTime reports, now, whether the archive margin still
 // remains before the deadline gc hook run handed this process. It gates the
 // optional writes that follow a destructive step already taken — the archive's
@@ -109,6 +121,24 @@ func hookWorkEnd() (end time.Time, ok bool) {
 func hookDeadlineStillLeavesTime() bool {
 	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
 	return err == nil && ok
+}
+
+// hookDeadlineAllowsArchive reports whether an injecting hook has time to
+// archive the injected auto-handoff mail it is about to archive, described by
+// what. When it does not, it says so on stderr under cmdName, so a skipped
+// archive is visible rather than silent. Callers ask only when there is
+// auto-handoff mail to archive, so the warning names a real skip.
+func hookDeadlineAllowsArchive(cmdName, what string, stderr io.Writer) bool {
+	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v; leaving %s unarchived\n", cmdName, err, what) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	if !ok {
+		fmt.Fprintf(stderr, "%s: hook deadline too close to archive %s; it stays unread and the next hook delivers it again\n", cmdName, what) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
 }
 
 // hookDeadlineAllowsNudgeAck reports whether an injecting nudge drain has time

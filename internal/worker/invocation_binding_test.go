@@ -20,7 +20,7 @@ func TestMessagePersistsExplicitBindingBeforeCompletion(t *testing.T) {
 	ledger := usage.NewInvocationLedger(filepath.Join(t.TempDir(), "invocations.jsonl"))
 	headCalls := 0
 	handle, err := NewSessionHandle(SessionHandleConfig{
-		Manager:          sessionpkg.NewManagerWithOptions(store, provider),
+		Manager:          sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: store}, provider),
 		InvocationLedger: ledger,
 		HeadObserver: func(context.Context, string) (usage.Head, error) {
 			headCalls++
@@ -37,11 +37,11 @@ func TestMessagePersistsExplicitBindingBeforeCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(ctx); err != nil {
+	if err := handle.Start(ctx, handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	_, err = handle.Message(ctx, MessageRequest{
+	_, err = handle.Message(ctx, handleActor(t, handle, sessionpkg.ActorOperator), MessageRequest{
 		Text: "do the bounded work",
 		Binding: &InvocationBinding{
 			City:         "gc2",

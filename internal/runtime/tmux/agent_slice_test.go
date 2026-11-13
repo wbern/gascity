@@ -10,13 +10,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // newSliceTestTmux returns a Tmux backed by a fakeExecutor with the agent
 // slice probe stubbed to succeed, plus the executor for argv inspection.
 func newSliceTestTmux(t *testing.T) (*Tmux, *fakeExecutor) {
 	t.Helper()
-	exec := &fakeExecutor{}
+	exec := &fakeExecutor{agentPane: true}
 	tm := NewTmux()
 	tm.exec = exec
 	tm.ownedScopes = &fakeOwnedScopes{}
@@ -90,7 +92,7 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
-	args = exec.calls[10]
+	args = exec.calls[12] // after the first respawn's two agent-marker writes
 	if got := args[6]; !strings.Contains(got, "--slice=gascity-agents.slice") || !strings.Contains(got, "claude --resume") {
 		t.Fatalf("respawn-with-workdir command = %q, want embedded agent slice", got)
 	} else if secondScope := scopeUnitInText(t, got); secondScope == firstScope {
@@ -273,12 +275,13 @@ func TestAgentSliceQuotesEmbeddedSingleQuotes(t *testing.T) {
 	}
 }
 
-// TestFindAgentPane_WrappedPane pins the detection contract for panes whose
-// root command is a wrapper such as systemd-run (GC_AGENT_SLICE): none of the
-// direct-name, shell-descendant, or version-as-argv[0] checks match the
-// wrapper process, so FindAgentPane must identify the agent through the
-// unconditional descendant walk, mirroring IsRuntimeRunning.
-func TestFindAgentPane_WrappedPane(t *testing.T) {
+// TestAgentInputTarget_WrappedPane pins the detection contract, for unmarked
+// sessions, for panes whose root command is a wrapper such as systemd-run
+// (GC_AGENT_SLICE): none of the direct-name, shell-descendant, or
+// version-as-argv[0] checks match the wrapper process, so agentInputTarget
+// must identify the agent through the unconditional descendant walk,
+// mirroring IsRuntimeRunning.
+func TestAgentInputTarget_WrappedPane(t *testing.T) {
 	// Real process tree: the test binary spawns "sleep 60", standing in for
 	// systemd-run spawning the agent. The fake executor reports the pane
 	// command as "systemd-run" with the test binary's PID, so only the
@@ -294,7 +297,7 @@ func TestFindAgentPane_WrappedPane(t *testing.T) {
 
 	panePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(panePID, []string{"sleep"}) {
+	for !snapshotHasDescendant(panePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -304,19 +307,19 @@ func TestFindAgentPane_WrappedPane(t *testing.T) {
 	exec := &fakeExecutor{outs: []string{
 		// list-panes -s: a user's split pane plus the wrapped agent pane.
 		// The bogus PID has no live process, so the first pane cannot match.
-		"%1\tvim\t999999999\n%2\tsystemd-run\t" + panePID,
+		"pane\t@1.%1\tvim\t999999999\tgc-eol\npane\t@1.%2\tsystemd-run\t" + panePID + "\tgc-eol",
 		// show-environment GT_PROCESS_NAMES
 		"GT_PROCESS_NAMES=sleep",
 	}}
 	tm := NewTmux()
 	tm.exec = exec
 
-	paneID, err := tm.FindAgentPane("gc-test-wrapped")
+	target, err := tm.agentInputTarget("gc-test-wrapped")
 	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+		t.Fatalf("agentInputTarget: %v", err)
 	}
-	if paneID != "%2" {
-		t.Fatalf("FindAgentPane = %q, want %q (wrapped agent pane via descendant fallback)", paneID, "%2")
+	if want := "=gc-test-wrapped:@1.%2"; target != want {
+		t.Fatalf("agentInputTarget = %q, want %q (wrapped agent pane via descendant fallback)", target, want)
 	}
 }
 
@@ -326,6 +329,7 @@ func TestFindAgentPane_WrappedPane(t *testing.T) {
 // requests return a dead PID with no descendants, modeling the startup window
 // where systemd-run exists but the agent has not exec'd yet.
 type wrappedWaitExecutor struct {
+	paneCommand  string // the wrapper the pane reports; "" means systemd-run
 	deadPID      string
 	livePID      string
 	livePIDAfter int
@@ -337,16 +341,20 @@ func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
 	// subcommand token.
 	for _, a := range args {
 		switch a {
-		case "display-message":
+		case "list-panes":
+			// Agent-pane reads: the session's one, unmarked pane.
 			switch args[len(args)-1] {
-			case "#{pane_current_command}":
-				return "systemd-run", nil
-			case "#{pane_pid}":
+			case agentPaneMarkerFormat + "\t#{pane_current_command}":
+				if e.paneCommand != "" {
+					return "pane\t" + e.paneCommand, nil
+				}
+				return "pane\tsystemd-run", nil
+			case agentPaneMarkerFormat + "\t#{pane_pid}":
 				e.pidRequests++
 				if e.pidRequests <= e.livePIDAfter {
-					return e.deadPID, nil
+					return "pane\t" + e.deadPID, nil
 				}
-				return e.livePID, nil
+				return "pane\t" + e.livePID, nil
 			}
 			return "", nil
 		case "show-environment":
@@ -368,7 +376,7 @@ func (e *wrappedWaitExecutor) executeCtx(_ context.Context, args []string) (stri
 // when no agent ever appears.
 func TestWaitForCommand_WrappedPane(t *testing.T) {
 	// Real process tree: the test binary spawns "sleep 60" standing in for
-	// the agent, as in TestFindAgentPane_WrappedPane.
+	// the agent, as in TestAgentInputTarget_WrappedPane.
 	agent := osexec.Command("sleep", "60")
 	if err := agent.Start(); err != nil {
 		t.Fatalf("starting agent stand-in: %v", err)
@@ -380,7 +388,7 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 
 	livePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(livePID, []string{"sleep"}) {
+	for !snapshotHasDescendant(livePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -412,4 +420,14 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 			t.Fatalf("pane PID requested %d times, want >= 3 (wait must keep polling until the descendant appears)", exec.pidRequests)
 		}
 	})
+}
+
+// snapshotHasDescendant reports whether a process named in names runs below
+// pid in a fresh process-table snapshot, the view the pane probes judge by.
+func snapshotHasDescendant(pid string, names ...string) bool {
+	processes, err := fetchProcessSnapshot(context.Background())
+	if err != nil {
+		return false
+	}
+	return processes.hasDescendantWithNames(pid, proctable.ProcessNameSet(names), 0)
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -73,11 +74,17 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 
-			catalog, projection, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved))
+			// The stage-2 pre-start writes the provider-native file a tmux
+			// session reads; ACP sessions take their servers in-band.
+			mcp, err := resolveAgentMCPProjection(cityPath, cfg, &agent, identity, absWorkdir, resolvedProviderLaunchFamily(resolved), false)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			if len(mcp.Skipped) > 0 {
+				fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPServerSkips([]string{strconv.Quote(identity)}, mcp.Skipped)) //nolint:errcheck // best-effort stderr
+			}
+			catalog, projection := mcp.Catalog, mcp.Projection
 			if projection.Provider == "" {
 				return nil
 			}
@@ -85,13 +92,16 @@ func newInternalProjectMCPCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			err = projection.ApplyWithStderr(fsys.OSFS{}, stderr)
-			var refused *materialize.MCPAdoptionRefusedError
-			if errors.As(err, &refused) {
-				warnMCPAdoptionRefusedWithPrefix(cityPath, []string{identity}, projection, refused, fsys.OSFS{}, stderr, "gc internal project-mcp: warning:")
-				return nil
-			}
-			if err != nil {
+			if err := projection.ApplyWithStderr(fsys.OSFS{}, stderr); err != nil {
+				var refused *materialize.MCPAdoptionRefusedError
+				if errors.As(err, &refused) {
+					// The work dir's own MCP config (often committed to the
+					// repository) stays as it is; the session starts without
+					// gc's servers. A pre-start's output is discarded when it
+					// succeeds, so resolveTemplate reports this too.
+					fmt.Fprintf(stderr, "gc internal project-mcp: warning: %s\n", describeMCPAdoptionRefused([]string{identity}, projection, refused)) //nolint:errcheck // best-effort stderr
+					return nil
+				}
 				fmt.Fprintf(stderr, "gc internal project-mcp: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}

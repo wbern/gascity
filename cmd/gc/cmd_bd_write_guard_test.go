@@ -129,18 +129,23 @@ func TestGcBdWriteGuardDoesNotOpenTheScopeStore(t *testing.T) {
 // read, because the close gate and the claim-identity close consume the bead
 // itself; so does a write naming an unprefixed id, which bd rewrites
 // (TestGcBdWriteGuardReadsAnUnprefixedIDWhereBdResolvesIDsExactly).
+//
+// The guard's reads are the ones before the write. A close also reads its bead
+// back after the write, to announce bead.closed with the committed row
+// (bd_close_events.go); that read-back is counted on its own.
 func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 	cases := []struct {
-		name      string
-		args      []string
-		wantReads int
+		name          string
+		args          []string
+		wantReads     int
+		wantReadBacks int
 	}{
-		{"update", []string{"update", "demo-abc", "--status", "in_progress"}, 0},
-		{"update metadata", []string{"update", "demo-abc", "--set-metadata", "k=v"}, 0},
-		{"reopen", []string{"reopen", "demo-abc"}, 0},
-		{"heartbeat", []string{"heartbeat", "demo-abc"}, 0},
-		{"close reads for the gate and claim identity", []string{"close", "demo-abc"}, 1},
-		{"update to closed reads for the gate", []string{"update", "demo-abc", "--status", "closed"}, 1},
+		{"update", []string{"update", "demo-abc", "--status", "in_progress"}, 0, 0},
+		{"update metadata", []string{"update", "demo-abc", "--set-metadata", "k=v"}, 0, 0},
+		{"reopen", []string{"reopen", "demo-abc"}, 0, 0},
+		{"heartbeat", []string{"heartbeat", "demo-abc"}, 0, 0},
+		{"close reads for the gate and claim identity", []string{"close", "demo-abc"}, 1, 1},
+		{"update to closed reads for the gate", []string{"update", "demo-abc", "--status", "closed"}, 1, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,11 +161,15 @@ func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tc.args, code, stderr.String())
 			}
 			log := readBdCallLog(t, calls)
-			if got := strings.Count(log, "show --json demo-abc"); got != tc.wantReads {
+			write := strings.Index(log, strings.Join(tc.args, " "))
+			if write < 0 {
+				t.Fatalf("the write was not forwarded to bd:\n%s", log)
+			}
+			if got := strings.Count(log[:write], "show --json demo-abc"); got != tc.wantReads {
 				t.Fatalf("guard reads = %d, want %d:\n%s", got, tc.wantReads, log)
 			}
-			if !strings.Contains(log, strings.Join(tc.args, " ")) {
-				t.Fatalf("the write was not forwarded to bd:\n%s", log)
+			if got := strings.Count(log[write:], "show --json demo-abc"); got != tc.wantReadBacks {
+				t.Fatalf("read-backs after the write = %d, want %d:\n%s", got, tc.wantReadBacks, log)
 			}
 		})
 	}
@@ -219,6 +228,42 @@ func TestGcBdWriteGuardKeepsTheReadWhereBdResolvesFuzzily(t *testing.T) {
 			}
 			if got := strings.Count(readBdCallLog(t, calls), "show --json demo-abc"); got != 1 {
 				t.Fatalf("guard reads = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestGcBdWriteGuardCloseKeepsTheClaimIdentityOnExactIDBackends pins why
+// close-shaped writes keep the read where bd resolves ids exactly: a session
+// closing work it claimed closes it under the identity the claim recorded,
+// and that identity comes from the bead the guard read.
+func TestGcBdWriteGuardCloseKeepsTheClaimIdentityOnExactIDBackends(t *testing.T) {
+	for _, args := range [][]string{
+		{"close", "demo-abc"},
+		{"update", "demo-abc", "--status", "closed"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, cityDir := bdSQLRefusalCityDir(t, "")
+			setCwd(t, cityDir)
+			writeBoundBackendMetadata(t, cityDir, "http")
+			binDir := t.TempDir()
+			logPath := filepath.Join(t.TempDir(), "bd-calls.log")
+			script := "#!/bin/sh\nprintf '%s actor=%s\\n' \"$*\" \"${BEADS_ACTOR:-}\" >> " + logPath + "\n" +
+				"if [ \"$1\" = show ]; then printf '[{\"id\":\"demo-abc\",\"status\":\"in_progress\",\"assignee\":\"sess-1\"}]\\n'; fi\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_SESSION_ID", "sess-1")
+			t.Setenv("BEADS_ACTOR", "someone-else")
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", args, code, stderr.String())
+			}
+			want := strings.Join(args, " ") + " actor=sess-1"
+			if log := readBdCallLog(t, logPath); !strings.Contains(log, want) {
+				t.Fatalf("bd calls = %q, want the close to run as the claim's identity (%q)", log, want)
 			}
 		})
 	}

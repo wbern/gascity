@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -219,6 +220,38 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Errorf("status = %d, want Error", r.Status)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs:      []config.Rig{{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Federation: config.RigFederationRig}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigSharingADirectory(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: shared, Prefix: "al"},
+			{Name: "beta", Path: shared, Prefix: "be", Federation: config.RigFederationRig},
+		},
+	}
+	c := NewConfigValidCheck(cfg)
+	// A nil context must not panic.
+	r := c.Run(nil)
+	if r.Status != StatusError || !strings.Contains(r.Message, "needs its own store directory") {
+		t.Errorf("status = %d, msg = %q; want the shared-directory error", r.Status, r.Message)
 	}
 }
 
@@ -914,6 +947,46 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// A zombie whose tmux server dies between Fix's observation and its Stop is
+// gone, which is all Fix is for; a stop that failed to remove the session is
+// still reported, even when a missing-server answer is joined beside it.
+func TestZombieSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate zombie: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session zombie: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "zombie", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies["zombie"] = true
+			sp.StopErrors["zombie"] = tc.stopErr
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "zombie", ProcessNames: []string{"claude"}}},
+			}
+			err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for a zombie already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "zombie"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "zombie", n)
+			}
+		})
+	}
+}
+
 // TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider with neither fence engdocs/design/session-store-fences.md
@@ -1093,6 +1166,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp, trackedSessions()).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
 	}
 }
 
@@ -2946,6 +3056,24 @@ func TestWorktreeCheckAllValid(t *testing.T) {
 	}
 }
 
+func TestWorktreeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	wtDir := filepath.Join(configuredRoot, "myrig", "agent1")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /nonexistent/configured-target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := (&WorktreeCheck{}).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
+	}
+}
+
 func TestWorktreeCheckBroken(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 
@@ -4259,24 +4387,24 @@ func TestCompareDoltVersion(t *testing.T) {
 
 func TestDoltVersionCheck_OK(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.1\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.1") {
+	if !strings.Contains(r.Message, "2.6.1") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.0\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.0") {
+	if !strings.Contains(r.Message, "2.6.0") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -4294,23 +4422,29 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 }
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
-	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.6\n", nil }
-	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-	if !strings.Contains(r.Message, "below minimum") {
-		t.Errorf("message = %q, want below-minimum text", r.Message)
+	// 2.5.1 is the last release below the 2.6.0 floor, and 2.1.0 the
+	// previous floor: both final releases a managed city may still run.
+	for _, version := range []string{"2.5.1", "2.1.0", "2.0.6"} {
+		t.Run(version, func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return "dolt version " + version + "\n", nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "below minimum 2.6.0") || !strings.Contains(r.Message, version) {
+				t.Errorf("message = %q, want below-minimum text naming %s and 2.6.0", r.Message, version)
+			}
+		})
 	}
 }
 
 func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 	cases := []string{
-		"dolt version 2.1.0-rc1\n",
-		"dolt version 2.1.0-rc1+build.5\n",
-		"dolt version 2.1.0-dev.0\n",
-		"dolt version 2.1.1-rc1\n",
+		"dolt version 2.6.0-rc1\n",
+		"dolt version 2.6.0-rc1+build.5\n",
+		"dolt version 2.6.0-dev.0\n",
+		"dolt version 2.6.1-rc1\n",
 	}
 	for _, version := range cases {
 		t.Run(strings.TrimSpace(version), func(t *testing.T) {
@@ -4320,7 +4454,7 @@ func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 			if r.Status != StatusError {
 				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 			}
-			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.1.0") {
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.6.0") {
 				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
 			}
 		})

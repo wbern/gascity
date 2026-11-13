@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -61,7 +62,8 @@ type reapReport struct {
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any whose associated bead is closed
+// <worktrees root>/<rig>/, the configured worktrees root
+// (workdir.WorktreesRoot), and removes any whose associated bead is closed
 // and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //
@@ -198,7 +200,7 @@ func reapClosedBeadWorktrees(
 	removedThisPass := 0
 
 	referencingBeads, incomplete := collectReapBorrowScope(cityPath, cfg, scope, stderr)
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	discovered, discoveryIncomplete := discoverReapNamespaces(cfg, scope, wtRoot, live, liveSessionDirs, stderr)
 	incomplete = append(incomplete, discoveryIncomplete...)
 	report.IncompleteScopes = incomplete
@@ -570,7 +572,7 @@ func reapClosedBeadWorktrees(
 					return "live before removal: " + why, nil
 				}
 				owner, err := reapOwnerLive(store, beadID)
-				if err != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata["gc.user_paused"] == "true" {
+				if err != nil || owner.Status != "closed" || owner.Revision != c.revision || owner.Metadata[beadmeta.UserPausedMetadataKey] == "true" {
 					return "owner is no longer closed or live owner read failed", nil
 				}
 				current, err = linkedWorktreeRetirementIdentity(cityPath, rigName, rigRoot, worktreePath)

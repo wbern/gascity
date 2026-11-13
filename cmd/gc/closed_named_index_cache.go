@@ -50,7 +50,7 @@ func (c *closedNamedIndexStoreCache) get(store beads.Store) (session.ClosedNamed
 	if store == nil || !reflect.TypeOf(store).Comparable() {
 		// A non-comparable store cannot key the map; build uncached rather
 		// than panic.
-		return closedNamedIndexBuild(store)
+		return closedNamedIndexBuild(beads.SessionStore{Store: store})
 	}
 	now := closedNamedIndexNow()
 	c.mu.Lock()
@@ -60,7 +60,7 @@ func (c *closedNamedIndexStoreCache) get(store beads.Store) (session.ClosedNamed
 		return entry.index, nil
 	}
 
-	index, err := closedNamedIndexBuild(store)
+	index, err := closedNamedIndexBuild(beads.SessionStore{Store: store})
 	if err != nil {
 		return index, err
 	}

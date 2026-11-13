@@ -276,9 +276,9 @@ func TestConfigFingerprintEmptyConfig(t *testing.T) {
 
 func TestConfigFingerprintExtraChangesHash(t *testing.T) {
 	a := Config{Command: "claude"}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "5"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("FingerprintExtra should change the hash")
+		t.Error("a Restart-policy FingerprintExtra key should change the hash")
 	}
 }
 
@@ -295,39 +295,43 @@ func TestConfigFingerprintExtraDeterministic(t *testing.T) {
 }
 
 func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
-	a := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "3"}}
-	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "10"}}
+	a := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "db"}}
+	b := Config{Command: "claude", FingerprintExtra: map[string]string{"depends_on": "cache"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("different FingerprintExtra values should produce different hashes")
+		t.Error("different Restart-policy FingerprintExtra values should produce different hashes")
 	}
 }
 
 func TestCoreFingerprintExcludesSkillsKeyspace(t *testing.T) {
+	// The fork's skills: exclusion is now the FingerprintExtra change policy
+	// (skills: is ChangeNextStart, upstream #8079); this pins that the
+	// set-membership of skills still never moves the core hash, while a
+	// Restart-policy key still does.
 	withoutSkill := Config{
 		Command:          "claude",
-		FingerprintExtra: map[string]string{"pool.max": "5"},
+		FingerprintExtra: map[string]string{"depends_on": "db"},
 	}
 	withSkill := Config{
 		Command: "claude",
 		FingerprintExtra: map[string]string{
-			"pool.max":          "5",
+			"depends_on":        "db",
 			"skills:basics.foo": "present",
 		},
 	}
 	if CoreFingerprint(withoutSkill) != CoreFingerprint(withSkill) {
 		t.Error("skills:* keys in FingerprintExtra must not affect CoreFingerprint (set-membership changes must not force a restart)")
 	}
-	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(withoutSkill), withSkill); len(got) != 0 {
-		t.Errorf("skills:* addition should not be reported as a drift field, got %v", got)
-	}
 
-	// A genuine non-skills FPExtra change must still drift.
-	withDifferentPool := Config{
+	// A genuine Restart-policy FPExtra change must still drift.
+	withDifferentDependency := Config{
 		Command:          "claude",
-		FingerprintExtra: map[string]string{"pool.max": "10"},
+		FingerprintExtra: map[string]string{"depends_on": "cache"},
 	}
-	if CoreFingerprint(withoutSkill) == CoreFingerprint(withDifferentPool) {
-		t.Error("non-skills FingerprintExtra changes must still change CoreFingerprint")
+	if CoreFingerprint(withoutSkill) == CoreFingerprint(withDifferentDependency) {
+		t.Error("Restart-policy FingerprintExtra changes must still change CoreFingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(withoutSkill), withDifferentDependency); len(got) != 1 || got[0] != "FPExtra" {
+		t.Errorf("Restart-policy change drift fields = %v, want [FPExtra]", got)
 	}
 }
 
@@ -967,8 +971,8 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v7 prefix (prior mismatched version)", "v7:" + bareHex, true},
-		{"v9 prefix (future mismatched version)", "v9:" + bareHex, true},
+		{"v8 prefix (prior mismatched version)", "v8:" + bareHex, true},
+		{"v10 prefix (future mismatched version)", "v10:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

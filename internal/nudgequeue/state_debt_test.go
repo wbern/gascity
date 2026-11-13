@@ -1,12 +1,12 @@
+//go:build unix
+
 package nudgequeue
 
 import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -30,30 +30,6 @@ func seedState(t *testing.T, cityPath string, items ...Item) {
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-}
-
-func holdQueueLockForTest(t *testing.T, cityPath string) func() {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(LockPath(cityPath)), 0o755); err != nil {
-		t.Fatalf("create queue directory: %v", err)
-	}
-	f, err := os.OpenFile(LockPath(cityPath), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatalf("open queue lock: %v", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		t.Fatalf("hold queue lock: %v", err)
-	}
-	var once sync.Once
-	release := func() {
-		once.Do(func() {
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-			_ = f.Close()
-		})
-	}
-	t.Cleanup(release)
-	return release
 }
 
 // A file with no debts and no retired items is byte-identical to the format
@@ -207,7 +183,7 @@ func TestLockObserverReportsVerbOutcomeAndTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	release := holdQueueLockForTest(t, cityPath)
-	_ = WithStateWithin(cityPath, "blocked", 30*time.Millisecond, func(*State) error { return nil })
+	_ = withStateBounded(cityPath, "blocked", 30*time.Millisecond, func(*State) error { return nil })
 	release()
 	if len(samples) != 2 {
 		t.Fatalf("samples = %+v, want two", samples)

@@ -962,7 +962,7 @@ func (c *Client) CloseBead(id string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
 	}
-	resp, err := c.cw.PostV0CityByCityNameBeadByIdCloseWithResponse(context.Background(), c.cityName, id, nil)
+	resp, err := c.cw.PostV0CityByCityNameBeadByIdCloseWithResponse(context.Background(), c.cityName, id, nil, genclient.PostV0CityByCityNameBeadByIdCloseJSONRequestBody{})
 	return checkMutation(resp, err)
 }
 

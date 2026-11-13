@@ -42,10 +42,15 @@ max_active_sessions = 1
 	}
 }
 
-func TestMcpValidateAllowsImplicitEmptyCatalogAgentOnSharedTarget(t *testing.T) {
-	// Since #181 (77796869e) an implicit provider agent with an empty catalog is
-	// skipped during stage-1 projection, so it no longer conflicts with an
-	// explicit agent that projects servers to the same target.
+func TestMcpValidateReportsImplicitEmptyCatalogAgentConflictOnSharedTarget(t *testing.T) {
+	// T9 (PROVISIONAL): the fork's #181 (77796869e) skipped an implicit provider
+	// agent with an empty catalog during stage-1 projection, so it never
+	// conflicted with an explicit agent projecting servers to the same target.
+	// Upstream's claims model (claimsStage1MCPTarget) counts every agent with a
+	// provider as a claimant of its scope-root target, so the implicit agent
+	// conflicts and the error names the agent-local catalog as the cause
+	// (upstream TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent).
+	// The upstream rule is taken; this test pins it for `gc mcp validate`.
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
@@ -68,11 +73,11 @@ command = "npx"
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("gc mcp validate failed (code %d): stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code := run([]string{"mcp", "validate"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc mcp validate succeeded, want an MCP target conflict with the implicit provider agent: stdout=%q", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "MCP target conflict") {
-		t.Fatalf("stderr reports a conflict for an implicit empty-catalog agent:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "MCP target conflict") || !strings.Contains(stderr.String(), "agent-local MCP catalog") {
+		t.Fatalf("stderr = %q, want an MCP target conflict that names the agent-local catalog", stderr.String())
 	}
 }
 
@@ -262,6 +267,65 @@ API_TOKEN = "super-secret"
 	}
 	if strings.Contains(stdout.String(), "super-secret") {
 		t.Fatalf("mcp list JSON leaked env value:\n%s", stdout.String())
+	}
+}
+
+// An ACP session receives its servers in session/new; gc writes no file for
+// it, so gc mcp list shows the in-band delivery instead of a file target.
+func TestMcpListShowsInBandDeliveryForACPAgents(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.relay]
+base = "builtin:claude"
+command = "echo"
+prompt_mode = "none"
+supports_acp = true
+acp_command = "echo"
+`, `
+provider = "relay"
+scope = "city"
+session = "acp"
+`)
+	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"mcp", "list", "--agent", "mayor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp list --agent exited %d: %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Target: (none: an ACP session receives these servers in-band, in session/new)",
+		"Delivery: acp",
+		"notes",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("mcp list output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), ".mcp.json") {
+		t.Fatalf("mcp list shows a file target for an ACP agent:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	if code := run([]string{"mcp", "list", "--agent", "mayor", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mcp list --agent --json exited %d: %s", code, stderr.String())
+	}
+	contentOpValidate(t, "schemas/mcp/list/result.schema.json", stdout.String())
+	var got projectedMCPJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Projection.Delivery != "acp" || got.Projection.Target != "" || len(got.Servers) != 1 {
+		t.Fatalf("projection = %+v, servers %d; want acp delivery, no target, one server", got.Projection, len(got.Servers))
 	}
 }
 

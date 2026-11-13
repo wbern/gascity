@@ -30,21 +30,22 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 	return graphroute.Deps{
 		CityPath:              cityPath,
 		Resolver:              cliAgentResolver{},
-		DirectSessionResolver: cliDirectSessionResolver,
+		DirectSessionResolver: cliDirectSessionResolver(nil),
 	}
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
 // dependencies.
 func applyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string, vars map[string]string, scopeKind, scopeRef, storeRef string, store beads.Store, cityName, cityPath string, cfg *config.City) error {
-	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	return graphroute.ApplyGraphRouting(recipe, a, routedTo, vars, "", scopeKind, scopeRef, storeRef, beads.SessionStore{Store: store}, cityName, cfg, cliGraphrouteDeps(cityPath))
 }
 
 var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
-		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
+		ep, code := openCityEventsReader(stderr, "gc convoy control --serve")
 		if ep == nil {
 			return nil, fmt.Errorf("opening events provider (exit %d)", code)
 		}
@@ -323,6 +324,13 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, cfg, stderr)
@@ -518,6 +526,23 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	stores := workflowServeStores(cityPath, agentCfg, storePath, workEnv, cfg)
+	// Execution emits are deferred per scope store: a root's projection runs
+	// against the store its controls were read from, so a federated serve keeps
+	// one deferral per store it drains.
+	emitsByStore := map[string]*executionEmitDeferral{}
+	emitsFor := func(dir string) *executionEmitDeferral {
+		if emits, ok := emitsByStore[dir]; ok {
+			return emits
+		}
+		emits := newExecutionEmitDeferral(cityPath, dir, stderr)
+		emitsByStore[dir] = emits
+		return emits
+	}
+	defer func() {
+		for _, emits := range emitsByStore {
+			emits.flush()
+		}
+	}()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		var queue []workflowServeStoreCandidate
@@ -532,38 +557,35 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 				return result, fmt.Errorf("querying control work for %s (store %s): %w", agentCfg.QualifiedName(), store.dir, err)
 			}
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emitsFor(store.dir).flushSettled(beadsForStore)
 			for _, b := range beadsForStore {
 				queue = append(queue, workflowServeStoreCandidate{bead: b, storePath: store.dir})
 			}
 		}
-		if len(queue) == 0 {
-			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
-				idlePolls++
-				workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
-				time.Sleep(workflowServeIdlePollInterval)
-				continue
-			}
-			workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
-			return result, nil
-		}
-		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
+		skippedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.bead.ID
 			candidateStorePath := candidate.storePath
 			kind := strings.TrimSpace(candidate.bead.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, candidateStorePath)
-			// controlDispatcherServe currently returns nil both when it
-			// successfully advanced a control bead AND when ProcessControl
-			// chose to no-op (e.g., status != "open"). The caller cannot
-			// tell those apart without cross-referencing the store, so the
-			// trace line just below was previously identical in both
-			// cases. That masked a 20-minute stall on ga-ttn5z's retry
-			// control ga-fw2fm. The silent no-op now emits a separate
-			// `process-control ... skip reason=bead_not_open` line inside
-			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, candidateStorePath, beadID, io.Discard, stderr); err != nil {
+			// controlDispatcherServe returns nil only when the control bead
+			// advanced. A dispatch ProcessControl made no change to (status
+			// not open, a spawned fanout waiting on its finalize) arrives as
+			// errControlNotProcessed: a skip, which is neither progress nor
+			// pending, so it writes no wake file and does not hold the
+			// --follow backoff at its floor.
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
+			if err := controlDispatcherServe(cityPath, candidateStorePath, beadID, io.Discard, stderr, emitsFor(candidateStorePath)); err != nil {
+				if errors.Is(err, errControlNotProcessed) {
+					skippedCount++
+					calls := snapshotControlBdCalls().since(callsBefore)
+					workflowTracef("serve skipped bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
+					continue
+				}
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -603,11 +625,16 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Only progress restarts the idle re-polls: a stale row that keeps
+			// the queue non-empty must not, or a skip-only pass after real
+			// progress would re-poll forever.
+			idlePolls = 0
 			// Signal workers to skip their poll sleep: new step beads may be ready.
 			writeDispatchWakeFile(cityPath)
 			continue
@@ -616,6 +643,19 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
+		// Nothing advanced and nothing is pending: the queue was empty or
+		// held only skips. Either way this is the idle path.
+		if skippedCount > 0 {
+			workflowTracef("serve skip-queue agent=%s count=%d", agentCfg.QualifiedName(), skippedCount)
+		}
+		if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
+			idlePolls++
+			workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
+			time.Sleep(workflowServeIdlePollInterval)
+			continue
+		}
+		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		return result, nil
 	}
 }
 
@@ -925,6 +965,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	}
 	gcBD := shellquote.Quote(gcExe) + ` bd`
 	query := queryPrefix + ` sh -c '` +
+		ambientDoltConnectionQueryGuard() +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
@@ -951,38 +992,60 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 
 // ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
 // (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
-// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
-// names bd recognizes.
+// Dolt connection coordinates under the private GC_AMBIENT_DOLT_* names.
 //
-// Without this, the ready-query subprocess env is built by stripping the
-// parent's inherited Dolt vars and re-projecting them from a freshly resolved
-// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
-// runs its own managed-runtime-availability probe and can transiently come
-// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
-// from the subprocess env and causing `bd --sandbox` to resolve port 0
-// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
-// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
-// own environment already carries the connection coordinates it was spawned
-// with, so pass them through explicitly as a shell-prefix assignment (which
-// takes effect for the inner `sh -c` and its `bd` children regardless of what
-// the outer subprocess's cmd.Env resolved to) rather than depending on that
-// re-resolution succeeding on every poll.
+// The ready-query subprocess env is built by stripping the parent's inherited
+// Dolt vars and re-projecting them from a freshly resolved scope lookup
+// (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution runs its own
+// managed-runtime-availability probe and can transiently come back without a
+// port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT from the
+// subprocess env and causing `bd --sandbox` to resolve port 0 ("Dolt server
+// unreachable at 127.0.0.1:0") — the recurring fleet-wide graph.v2 wedge
+// (gascity gc-74rxa). The running control-dispatcher process's own
+// environment already carries the connection coordinates it was spawned with,
+// so they travel through under private names and
+// ambientDoltConnectionQueryGuard re-asserts them under the GC_DOLT_* and
+// BEADS_DOLT_SERVER_* names bd recognizes — but only when the per-poll env
+// resolved no target itself, so a freshly resolved per-poll port (including
+// one a managed Dolt restart moved to) always wins over the spawn-time pair.
 func ambientDoltConnectionQueryPrefix() string {
 	host, port := ambientDoltHostPort()
 	var pairs []string
 	if host != "" {
-		quotedHost := shellquote.Quote(host)
-		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_HOST=`+shellquote.Quote(host))
 	}
 	if port != "" {
-		quotedPort := shellquote.Quote(port)
-		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_PORT=`+shellquote.Quote(port))
 	}
 	if len(pairs) == 0 {
 		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
 		return ""
 	}
 	return " " + strings.Join(pairs, " ")
+}
+
+// ambientDoltConnectionQueryGuard returns the POSIX sh fragment that promotes
+// the private GC_AMBIENT_DOLT_* pair into the public GC_DOLT_* and
+// BEADS_DOLT_SERVER_* names bd reads, but only when the per-poll env carries
+// no Dolt target of its own (no port under either name and no socket). It is
+// placed at the head of the ready query's `sh -c` script, ahead of its
+// `set -e`, and returns "" when the dispatcher process has no ambient pair,
+// leaving the passthrough disabled.
+func ambientDoltConnectionQueryGuard() string {
+	host, port := ambientDoltHostPort()
+	if host == "" && port == "" {
+		return ""
+	}
+	var guard strings.Builder
+	guard.WriteString(`if [ -z "${GC_DOLT_PORT:-}${BEADS_DOLT_SERVER_PORT:-}${BEADS_DOLT_SERVER_SOCKET:-}" ]; then `)
+	if host != "" {
+		guard.WriteString(`if [ -n "${GC_AMBIENT_DOLT_HOST:-}" ]; then export GC_DOLT_HOST="$GC_AMBIENT_DOLT_HOST" BEADS_DOLT_SERVER_HOST="$GC_AMBIENT_DOLT_HOST"; fi; `)
+	}
+	if port != "" {
+		guard.WriteString(`if [ -n "${GC_AMBIENT_DOLT_PORT:-}" ]; then export GC_DOLT_PORT="$GC_AMBIENT_DOLT_PORT" BEADS_DOLT_SERVER_PORT="$GC_AMBIENT_DOLT_PORT"; fi; `)
+	}
+	guard.WriteString(`fi; `)
+	return guard.String()
 }
 
 // ambientDoltHostPort resolves the ambient Dolt host and port as a matched
@@ -1043,7 +1106,7 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
-	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+	if queue, handled, err := tryControlReadyScan(workQuery, dir, env); handled {
 		if err != nil {
 			log.Printf("control-ready query failed for %s: %v; continuing serve loop", dir, err)
 			return nil, nil

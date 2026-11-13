@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -140,7 +142,10 @@ func newStartupDialogConfig(opts []StartupDialogOption) startupDialogConfig {
 //  0. Claude first-run theme picker ("Choose the text style…") — requires Enter
 //  1. Claude resume selector — requires Down+Enter to resume the full session
 //  2. Codex update dialog ("Update available") — requires Down+Enter to skip
-//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?", pi "Trust project folder?")
+//  3. Workspace trust dialog (Claude "Quick safety check", older Codex
+//     "Do you trust the contents of this directory?", Codex 0.156
+//     "Trust this folder?", Gemini "Do you trust the files in this folder?",
+//     pi "Trust project folder?")
 //  4. External CLAUDE.md imports dialog (Claude "Allow external CLAUDE.md file imports?") — requires Enter to allow (option 1 pre-selected)
 //  5. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
 //  6. Codex hook review dialog — requires Down+Enter to trust hooks
@@ -324,6 +329,15 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		observed = true
 	}
 	return observed, nil
+}
+
+// CodexStartupPending reports whether content shows a Codex pane that has
+// drawn its composer but not yet finished starting: Codex 0.156+ draws the
+// composer before it configures the session, and draws its status line
+// ("<model> · <dir>") under the composer only once startup is done. Text typed
+// into such a pane can be swallowed by a startup dialog drawn after it.
+func CodexStartupPending(content string) bool {
+	return codexStartupPending(content)
 }
 
 func codexStartupPending(content string) bool {
@@ -767,15 +781,16 @@ var ErrWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust op
 var errStartupDialogStreamInconclusive = errors.New("startup dialog needs a selection move; stream cannot re-read the screen")
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
-// agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". The safe option isn't reliably pre-selected — a
-// stale Claude Code build can default the cursor to "No, exit" — so the
-// handler locates the cursor and the trust option in the rendered content
-// and moves the selection before confirming; it never blind-sends a fixed
-// key sequence. When it can't locate both rows it sends no keys, and the
-// snapshot falls through to the existing readiness check, which hands the
-// phase off. Holding the phase open instead is tracked separately.
+// agents. Claude shows "Quick safety check"; older Codex shows
+// "Do you trust the contents of this directory?"; Codex 0.156 shows
+// "Trust this folder?"; Gemini shows "Do you trust the files in this folder?";
+// pi (>= 0.79) shows "Trust project folder?". The safe option isn't reliably
+// pre-selected — a stale Claude Code build can default the cursor to
+// "No, exit" — so the handler locates the cursor and the trust option in the
+// rendered content and moves the selection before confirming; it never
+// blind-sends a fixed key sequence. When it can't locate both rows it sends no
+// keys, and the snapshot falls through to the existing readiness check, which
+// hands the phase off. Holding the phase open instead is tracked separately.
 //
 // Selection and confirmation are a closed loop: movement keys are sent
 // alone, the pane is re-read, and Enter is sent only from a frame whose
@@ -916,6 +931,13 @@ var claudeTrustDialogLayout = trustDialogLayout{
 	},
 }
 
+var codexTrustDialogLayout = trustDialogLayout{
+	markers: []string{"›"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(strings.ToLower(label), "trust and continue")
+	},
+}
+
 var geminiTrustDialogLayout = trustDialogLayout{
 	markers: []string{"●"},
 	isTrustRow: func(label string) bool {
@@ -932,13 +954,17 @@ var piTrustDialogLayout = trustDialogLayout{
 
 // workspaceTrustConfirmKeys locates the cursor row and the safe trust
 // option in a rendered workspace-trust dialog and returns the keys that
-// move the selection onto that option and confirm it. Claude, Gemini, and
-// pi each render the confirmation as a cursor-navigable option list, but
+// move the selection onto that option and confirm it. Claude, Codex 0.156,
+// Gemini, and pi each render the confirmation as a cursor-navigable list, but
 // with their own marker glyph and label wording (Claude: "❯"/"trust this
-// folder"; Gemini: "●"/"trust folder"; pi: "→"/"Trust"), so which layout to
-// scan with is chosen by which question text matched. Codex's trust prompt
-// has no rendered option list at all, so it's answered unconditionally —
-// there is no wrong selection to guard against.
+// folder"; Codex 0.156: "›"/"Trust and continue"; Gemini:
+// "●"/"trust folder"; pi: "→"/"Trust"), so which layout to scan with is
+// chosen by which question text matched. Codex 0.156's question is chosen
+// only when it is the last trust question in the capture
+// (codexTrustQuestionIsLast), so a stale copy in scrollback cannot pre-empt
+// another agent's live dialog. Older Codex's trust prompt has no rendered
+// option list at all, so it is answered unconditionally — there is no wrong
+// selection to guard against.
 //
 // For the list-style layouts, it reports ok=false when the cursor or the
 // trust row can't be located — a layout still mid-render, or one none of
@@ -947,8 +973,17 @@ var piTrustDialogLayout = trustDialogLayout{
 // be pre-selected, including a "don't trust" option (the original bug, for
 // Claude).
 func workspaceTrustConfirmKeys(content string) ([]string, bool) {
+	if codexTrustQuestionIsLast(content) {
+		if keys, ok := deriveTrustDialogKeys(content, "Trust this folder?", codexTrustDialogLayout); ok {
+			return keys, true
+		}
+		// Not Codex's rows: the capitalized question also heads Claude's dialog
+		// (the fork matches it case-insensitively), which the generic case below
+		// answers from its own rows.
+	}
 	switch {
-	case strings.Contains(strings.ToLower(content), "trust this folder") || strings.Contains(content, "Quick safety check"):
+	case (strings.Contains(strings.ToLower(content), "trust this folder") && !otherTrustQuestionAfterClaudeQuestion(content)) ||
+		strings.Contains(content, "Quick safety check"):
 		// "Quick safety check" is the dialog's header line, so it anchors the
 		// scan above every option row. "trust this folder" is itself an option
 		// label, so it only anchors when the header isn't rendered; prefer the
@@ -971,6 +1006,52 @@ func workspaceTrustConfirmKeys(content string) ([]string, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// otherTrustQuestionAfterClaudeQuestion reports whether another agent's trust
+// question occurs after the last case-insensitive "trust this folder" in
+// content. The capture includes scrollback above the live dialog, and the live
+// dialog is the bottom-most: a Codex "Trust this folder?" left in history above
+// a live Gemini, pi, or older-Codex dialog must not be answered as Claude's.
+func otherTrustQuestionAfterClaudeQuestion(content string) bool {
+	at := strings.LastIndex(strings.ToLower(content), "trust this folder")
+	if at < 0 {
+		return false
+	}
+	for _, question := range []string{
+		"Do you trust the files in this folder?",
+		"Trust project folder?",
+		"Do you trust the contents of this directory?",
+	} {
+		if strings.LastIndex(content, question) > at {
+			return true
+		}
+	}
+	return false
+}
+
+// codexTrustQuestionIsLast reports whether Codex 0.156's "Trust this folder?"
+// occurs in content after every other agent's trust question. The capture
+// includes scrollback above the live dialog (see trustDialogWindow), and the
+// live dialog is the bottom-most, so a "Trust this folder?" left in history
+// above another agent's live dialog must not select the Codex layout.
+func codexTrustQuestionIsLast(content string) bool {
+	codexAt := strings.LastIndex(content, "Trust this folder?")
+	if codexAt < 0 {
+		return false
+	}
+	for _, question := range []string{
+		"trust this folder",
+		"Quick safety check",
+		"Do you trust the files in this folder?",
+		"Trust project folder?",
+		"Do you trust the contents of this directory?",
+	} {
+		if strings.LastIndex(content, question) > codexAt {
+			return false
+		}
+	}
+	return true
 }
 
 // deriveTrustDialogKeys locates the cursor row and the trust row in a
@@ -1962,9 +2043,118 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceStop(lower):
+		return "quota_exceeded"
 	default:
 		return ""
 	}
+}
+
+// ProviderResumeRefusalReason classifies content, a startup death's error
+// (which carries its last pane output) or a dead pane's screen, as the
+// provider's own refusal to resume sessionKey, the conversation it was
+// handed, "" when it is not: claude's "No conversation found with session
+// ID: <key>", the phrase and that key on one line. A refused resume cannot
+// succeed from that launch, so its caller starts the conversation fresh
+// instead of retrying the same resume (mc-bm1af).
+//
+// The key anchors it: a resumed claude draws its history before it can die,
+// so the phrase about another conversation (or the resume picker's "No
+// conversations found") in that history is no refusal.
+func ProviderResumeRefusalReason(content, sessionKey string) string {
+	key := strings.ToLower(strings.TrimSpace(sessionKey))
+	if key == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ToLower(content), "\n") {
+		if strings.Contains(line, "no conversation found with session id") && strings.Contains(line, key) {
+			return "conversation_not_found"
+		}
+	}
+	return ""
+}
+
+// Claude Code's exhausted-credit stop phrases: the TUI's displayed stop and
+// the headless message.
+const (
+	creditBalanceStopPhrase         = "credit balance too low"
+	creditBalanceStopHeadlessPhrase = "credit balance is too low"
+)
+
+// The raw Anthropic API error for an exhausted credit balance, as Claude Code
+// renders it: an "API Error: 4xx" line whose JSON body carries the sentence
+// "Your credit balance is too low to access the Anthropic API". The sentence
+// starts about 90 columns in, so a narrow pane wraps it onto indented
+// continuation lines; it is matched with all whitespace removed so word and
+// mid-word wraps both join back up.
+const (
+	apiClientErrorPrefix      = "api error: 4"
+	apiCreditBalanceSentence  = "creditbalanceistoolowtoaccess"
+	apiErrorContinuationLines = 5
+)
+
+// containsCreditBalanceStop reports whether lowercased content shows Claude
+// Code's exhausted-credit stop as an error line of its own.
+//
+// The match is anchored rather than a bare substring because a terminal park
+// has no self-heal (it needs an explicit wake or an operator), so a false hit
+// on a session that merely quoted the phrase and then crashed is worse than a
+// miss, which degrades to ordinary crash counting.
+func containsCreditBalanceStop(lower string) bool {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
+		body := creditErrorBody(line)
+		if isCreditBalanceStopLine(body, creditBalanceStopPhrase) ||
+			isCreditBalanceStopLine(body, creditBalanceStopHeadlessPhrase) {
+			return true
+		}
+		if strings.HasPrefix(body, apiClientErrorPrefix) &&
+			strings.Contains(apiErrorBlock(lines[i:]), apiCreditBalanceSentence) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCreditBalanceStopLine reports whether an error body is the stop phrase on
+// its own or followed only by Claude Code's " · " remedy separator (whatever
+// the remedy text, billing host, or clipping after it). Prose that wraps the
+// phrase to the start of a line continues with words and does not match.
+func isCreditBalanceStopLine(body, phrase string) bool {
+	rest, ok := strings.CutPrefix(body, phrase)
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "·")
+}
+
+// apiErrorBlock joins an API error line (lines[0]) with its wrapped
+// continuation: up to apiErrorContinuationLines following lines that are
+// non-blank and indented, stopping at the first that is not. All whitespace is
+// dropped so a wrap at any column, even mid-word, rejoins the sentence, while
+// the bound keeps a later, unrelated line from completing the match.
+func apiErrorBlock(lines []string) string {
+	block := []string{lines[0]}
+	for _, line := range lines[1:] {
+		if len(block) > apiErrorContinuationLines || strings.TrimSpace(line) == "" {
+			break
+		}
+		if r, _ := utf8.DecodeRuneInString(line); !unicode.IsSpace(r) {
+			break
+		}
+		block = append(block, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(block, "\n")), "")
+}
+
+// creditErrorBody returns line with its indentation and Claude Code's leading
+// "⎿" error marker trimmed. strings.TrimSpace trims Unicode space, so the
+// marker's no-break-space padding needs no special case.
+func creditErrorBody(line string) string {
+	body := strings.TrimSpace(line)
+	body = strings.TrimPrefix(body, "⎿")
+	return strings.TrimSpace(body)
 }
 
 // lineContainsAll reports whether any single line of content contains every

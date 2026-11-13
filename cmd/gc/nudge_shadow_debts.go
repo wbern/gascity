@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -26,9 +26,10 @@ const (
 	// nudgeShadowPayBatch bounds how many leftover debts one controller pass
 	// takes.
 	nudgeShadowPayBatch = 16
-	// nudgeControllerPayBudget bounds how much payment work one controller pass
-	// starts. It is checked between store calls; a store call already in progress
-	// may run beyond it, and the next pass can pay debts this pass did not reach.
+	// nudgeControllerPayBudget bounds the payments of one controller pass. The
+	// pass runs on the supervisor's dispatch loop or the orders lane, so a
+	// hung store must not hold it; the next pass takes what this one did not
+	// reach.
 	nudgeControllerPayBudget = 5 * time.Second
 	// nudgeShadowRetryBase and nudgeShadowRetryMax bound the backoff after a
 	// failed payment: base * 2^(attempts-1), capped.
@@ -40,11 +41,12 @@ const (
 // known shadow bead in.
 var errNoNudgesStoreForDebt = errors.New("no nudges store is open")
 
-// queuedNudgeHasShadow reports whether item names a gc:nudge shadow bead.
-// Deferred submits use Source "session" in this fork and may have no shadow;
-// BeadID is the reliable discriminator.
+// queuedNudgeHasShadow reports whether item can have a gc:nudge shadow, and so
+// owes it a terminal write when it leaves the queue: it names one, or it was
+// enqueued while no store opened (paid through Terminalize's find-by-id
+// fallback). A deferred submit never had a shadow.
 func queuedNudgeHasShadow(item queuedNudge) bool {
-	return item.BeadID != ""
+	return item.BeadID != "" || item.Source != nudgequeue.SourceSubmit
 }
 
 // nudgeShadowLedger collects, during one queue callback run, the debts the run
@@ -101,6 +103,13 @@ func nudgeDebtPayable(item queuedNudge, now time.Time) bool {
 	return item.Shadow != nil && !item.Shadow.Paid && !item.Shadow.NotBefore.After(now)
 }
 
+// nudgeDebtLeased reports whether a payer holds item's debt at now: it took
+// the debt, holds a copy, and may be writing the shadow until its lease runs
+// out. A debt backing off after a failed payment is not held.
+func nudgeDebtLeased(item queuedNudge, now time.Time) bool {
+	return item.Shadow != nil && item.Shadow.Leased && !item.Shadow.Paid && item.Shadow.NotBefore.After(now)
+}
+
 // takeDueNudgeShadowDebts leases up to limit debts whose lease or backoff has
 // run out, oldest bucket first: the dead letters, then the retired items.
 func takeDueNudgeShadowDebts(state *nudgeQueueState, ledger *nudgeShadowLedger, limit int) {
@@ -128,13 +137,9 @@ type nudgeDebtPayment struct {
 // if it is not terminal; the others Terminalize, which is idempotent and
 // tolerates a missing bead.
 func payNudgeShadowDebts(front *nudgequeue.Store, taken []queuedNudge, deadline time.Time) []nudgeDebtPayment {
-	return payNudgeShadowDebtsWithClock(front, taken, deadline, clock.Real{})
-}
-
-func payNudgeShadowDebtsWithClock(front *nudgequeue.Store, taken []queuedNudge, deadline time.Time, clk clock.Clock) []nudgeDebtPayment {
 	payments := make([]nudgeDebtPayment, 0, len(taken))
 	for _, item := range taken {
-		if clk.Now().After(deadline) {
+		if time.Now().After(deadline) {
 			payments = append(payments, nudgeDebtPayment{item: item})
 			continue
 		}
@@ -154,7 +159,7 @@ func payNudgeShadowDebt(front *nudgequeue.Store, item queuedNudge) error {
 		return errNoNudgesStoreForDebt
 	}
 	if debt.Verify {
-		shadow, ok, err := front.FindItemShadow(item)
+		shadow, ok, err := front.FindIncludingTerminal(item.ID)
 		if err != nil {
 			return err
 		}
@@ -194,10 +199,7 @@ func confirmNudgeShadowDebts(cityPath string, payments []nudgeDebtPayment, now t
 	if len(payments) == 0 {
 		return nil
 	}
-	// Confirmation is optional bookkeeping after the authoritative queue commit.
-	// A busy lock leaves the debt leased for a later pass; it must not delay
-	// hook output or the controller with held-claim bookkeeping retries.
-	return nudgequeue.WithStateWithin(cityPath, "confirm_debts", 0, func(state *nudgeQueueState) error {
+	return withNudgeQueueState(cityPath, "confirm_debts", func(state *nudgeQueueState) error {
 		applyNudgeDebtPayments(state, payments, now)
 		return nil
 	})
@@ -248,17 +250,9 @@ func applyNudgeDebtPayments(state *nudgeQueueState, payments []nudgeDebtPayment,
 		item.Shadow = &debt
 		return debt.Paid
 	}
-	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
-	dead := state.Dead[:0]
 	for i := range state.Dead {
-		item := state.Dead[i]
-		settle(&item)
-		if item.Shadow != nil && item.Shadow.Paid && !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-			continue
-		}
-		dead = append(dead, item)
+		settle(&state.Dead[i])
 	}
-	state.Dead = dead
 	retired := state.Retired[:0]
 	for _, item := range state.Retired {
 		if settle(&item) {
@@ -372,4 +366,27 @@ func warnNudgeShadowDebt(item queuedNudge, err error) {
 		return
 	}
 	fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking nudge %q %s: %v\n", item.ID, item.Shadow.State, err) //nolint:errcheck
+}
+
+// verifyDebtForLegacyDeadLetter gives a dead letter an older binary wrote, one
+// that names a shadow but carries no debt, a one-time Verify debt, left for the
+// controller to pay.
+func verifyDebtForLegacyDeadLetter(item *queuedNudge, now time.Time) {
+	if item.Shadow != nil || item.BeadID == "" {
+		return
+	}
+	reason := strings.TrimSpace(item.LastError)
+	if reason == "" {
+		reason = "failed"
+	}
+	at := now
+	if !item.DeadAt.IsZero() {
+		at = item.DeadAt
+	}
+	item.Shadow = &nudgequeue.ShadowDebt{
+		State:  terminalStateForDeadQueuedNudge(*item),
+		Reason: reason,
+		At:     at.UTC(),
+		Verify: true,
+	}
 }

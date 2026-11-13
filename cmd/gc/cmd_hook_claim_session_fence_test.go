@@ -102,7 +102,7 @@ func seedPATHHookClaimSessionFixture(t *testing.T, cityDir, id, name string) {
 	}
 }
 
-// newFenceSessionBead creates a session bead in the city store with the given
+// newFenceSessionBead creates a session bead in the city's session store with the given
 // runtime state and instance token, returning its id.
 func newFenceSessionBead(t *testing.T, cityDir string, state session.State, instanceToken string) string {
 	return newFenceSessionBeadWithMetadata(t, cityDir, state, instanceToken, nil)
@@ -110,17 +110,21 @@ func newFenceSessionBead(t *testing.T, cityDir string, state session.State, inst
 
 func newFenceSessionBeadWithMetadata(t *testing.T, cityDir string, state session.State, instanceToken string, metadata map[string]string) string {
 	t.Helper()
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
+	store := openCitySessionStoreForTest(t, cityDir)
 	beadMetadata := map[string]string{
 		"session_name":   "worker-1",
 		"template":       "worker",
 		"state":          string(state),
 		"instance_token": instanceToken,
 	}
+	// work_started is CASOnly: seed it by a CAS on the row after the create,
+	// the way its writers do, never in the create's metadata.
+	var seedWorkStarted string
 	for key, value := range metadata {
+		if key == session.WorkStartedKey {
+			seedWorkStarted = value
+			continue
+		}
 		beadMetadata[key] = value
 	}
 	bead, err := store.Create(beads.Bead{
@@ -131,6 +135,9 @@ func newFenceSessionBeadWithMetadata(t *testing.T, cityDir string, state session
 	})
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
+	}
+	if seedWorkStarted != "" {
+		seedFenceWorkStarted(t, store, bead.ID, seedWorkStarted)
 	}
 	return bead.ID
 }
@@ -287,6 +294,9 @@ esac
 					return nil, err
 				}
 				return json.Marshal([]beads.Bead{bead})
+			case len(args) > 0 && args[0] == "dep":
+				// The claim announcer confirms the bead's edges before its events.
+				return []byte("[]"), nil
 			default:
 				t.Fatalf("unexpected trigger command: %v", args)
 				return nil, nil
@@ -1535,4 +1545,29 @@ func withLegacySessionBeadRead(script string) string {
 fi
 `
 	return strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\n"+sessionRead, 1)
+}
+
+// seedFenceWorkStarted writes a work_started cell onto a session row by a CAS,
+// through the policy wrapper to the store's own conditional writer: the cell is
+// CASOnly, and a scenario that persists it with conditional writes configured
+// off still has to put it there.
+func seedFenceWorkStarted(t *testing.T, store beads.Store, id, value string) {
+	t.Helper()
+	for {
+		if w, ok := beads.ConditionalWriterFor(store); ok {
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{session.WorkStartedKey: value}}); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		policy, ok := store.(*beadPolicyStore)
+		if !ok {
+			t.Fatalf("store %T has no conditional writer to seed work_started", store)
+		}
+		store = policy.Store
+	}
 }

@@ -72,6 +72,8 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 
 	return &SessionHandle{
 		manager:          cfg.Manager,
+		resolveBead:      cfg.ResolveBead,
+		formulaMemo:      cfg.FormulaMemo,
 		adapter:          adapter,
 		recorder:         recorder,
 		usageSink:        usageSink,

@@ -11,7 +11,7 @@ import (
 
 func executionSessionFixture(t *testing.T, mem *beads.MemStore) beads.Bead {
 	t.Helper()
-	if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := mem.Create(beads.Bead{Title: "execution session", Type: BeadType, Metadata: map[string]string{
@@ -37,7 +37,7 @@ func TestRecordStartedClaimPersistsAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	cell, err := DecodeWorkStarted(got.Metadata[WorkStartedKey])
-	if err != nil || !cell.Names("project", "task-1") {
+	if err != nil || !cell.Names("project", "task-1", 0) {
 		t.Fatalf("claim not persisted: cell=%+v err=%v", cell, err)
 	}
 	if len(cell.Claims) != 1 || cell.Claims[0].Gen != 7 {
@@ -122,7 +122,7 @@ func TestRecordStartedClaimRefusesRestartDuringCAS(t *testing.T) {
 func TestRecordStartedClaimPreservesUnreadableEvidence(t *testing.T) {
 	mem := beads.NewMemStore()
 	b := executionSessionFixture(t, mem)
-	if err := mem.SetMetadata(b.ID, WorkStartedKey, "{"); err != nil {
+	if err := seedWorkStarted(mem, b.ID, "{"); err != nil {
 		t.Fatal(err)
 	}
 	s := NewStore(beads.SessionStore{Store: mem})
@@ -201,7 +201,7 @@ func TestExecutionEvidenceUsesOpaqueNonzeroSessionRevisions(t *testing.T) {
 			ID: "gc-1", Type: BeadType, Status: "open", Revision: revision,
 			Metadata: map[string]string{"instance_token": "incarnation-one", "generation": "7"},
 		}}, nil)
-		if err := beads.StampOpenedStore(mem, "memory", gate.Require, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(mem, "memory", gate.Require, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		s := NewStore(beads.SessionStore{Store: mem})
@@ -333,7 +333,7 @@ func TestDrainAdmissionRetryDoesNotTrustStaleCachedCommit(t *testing.T) {
 	}
 	// Model another process canceling through the authoritative backing while
 	// this controller's session cache still carries its committed census.
-	if err := mem.SetMetadata(row.ID, WorkStartedKey, `{"v":1,"claims":[]}`); err != nil {
+	if err := seedWorkStarted(mem, row.ID, `{"v":1,"claims":[]}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishDrainAdmission(row.ID, fence, attempt, true); err == nil {
@@ -508,7 +508,7 @@ func TestControllerDrainIntentIsNotAReleaseCensus(t *testing.T) {
 		t.Fatalf("accepted controller stop reopened: %v", err)
 	}
 	_, cell, _, err := front.ExecutionEvidence(row.ID)
-	if err != nil || cell.Drain.Committed || !cell.Drain.Accepted || !cell.Names("", "active-work") {
+	if err != nil || cell.Drain.Committed || !cell.Drain.Accepted || !cell.Names("", "active-work", 0) {
 		t.Fatalf("controller stop changed census or lost active work: %+v %v", cell, err)
 	}
 }
@@ -563,7 +563,7 @@ func TestExecutionFencedHashPatchPreservesConcurrentEvidenceAndRefusesReplacemen
 			}
 			switch scenario {
 			case "claim":
-				if err != nil || saved.Metadata["started_config_hash"] != "accepted" || !cell.Names("project", "concurrent-work") {
+				if err != nil || saved.Metadata["started_config_hash"] != "accepted" || !cell.Names("project", "concurrent-work", 0) {
 					t.Fatalf("patch lost concurrent execution evidence: cell=%+v err=%v", cell, err)
 				}
 			case "new-drain":
@@ -577,4 +577,14 @@ func TestExecutionFencedHashPatchPreservesConcurrentEvidenceAndRefusesReplacemen
 			}
 		})
 	}
+}
+
+// seedWorkStarted writes the work_started cell the way its owners do: by a CAS
+// on the row, never blind (the cell is CASOnly, see TestGuardSessionKeysRefusesBlindCASOnlyWrites).
+func seedWorkStarted(mem *beads.MemStore, id, raw string) error {
+	row, err := mem.Get(id)
+	if err != nil {
+		return err
+	}
+	return mem.UpdateIfMatch(id, row.Revision, beads.UpdateOpts{Metadata: map[string]string{WorkStartedKey: raw}})
 }

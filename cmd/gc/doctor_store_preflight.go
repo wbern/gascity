@@ -14,7 +14,7 @@ const doctorBeadStorePreflightTimeout = 5 * time.Second
 
 // City + per-rig store checks skipped on outage-shaped preflight; keep in sync with buildDoctorChecks.
 const (
-	doctorCityStoreCheckCount   = 17
+	doctorCityStoreCheckCount   = 26 // upstream 25 (T9 exec-runtime-identity, T10 order-dispatch-floor) + the fork's routed-work-workable
 	doctorPerRigStoreCheckCount = 3
 )
 

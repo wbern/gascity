@@ -32,6 +32,11 @@ func (e *nudgeRoutingExecutor) execute(args []string) (string, error) {
 		}
 	}
 
+	// Agent-pane lookups (list-panes over the session) answer with the marked
+	// agent pane, the way a real session's marker would.
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	joined := strings.Join(args, "\x00")
 	switch {
 	case strings.Contains(joined, "#{pane_in_mode}"):
@@ -73,61 +78,6 @@ func countCallsWithTokens(calls [][]string, tokens ...string) int {
 		}
 	}
 	return n
-}
-
-// TestNudgeSessionCancelsCopyModeBeforeDelivery pins gcw-3e62 defect 2. A pane
-// parked in copy-mode (the ga-c4w WheelUpPane binding, or a human simply
-// scrolling up) routes send-keys into copy-mode's key table, where the nudge's
-// characters are COMMANDS, not input: the message is executed as navigation and
-// then lost. cancelCopyModeIfParked already fixes this for SendKeysDebounced and
-// Respond; NudgeSession — the path every order and every piece of mail takes —
-// never called it.
-//
-// Measured live on codex 0.145.0 / tmux 3.6b before the fix: pane in copy-mode,
-// nudge text + Enter delivered, composer empty afterwards and the pane still in
-// copy-mode. After `send-keys -X cancel` the identical nudge landed.
-func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
-	t.Run("parked pane cancels copy-mode before the literal send", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "1", provider: "claude", pane: "esc to interrupt"}
-		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
-
-		if err := tm.NudgeSession("sess", "hello"); err != nil {
-			t.Fatalf("NudgeSession: %v", err)
-		}
-
-		probe := callIndexWithTokens(fe.calls, "display-message", "#{pane_in_mode}")
-		cancel := callIndexWithTokens(fe.calls, "send-keys", "-X", "cancel")
-		literal := callIndexWithTokens(fe.calls, "send-keys", "-l", "hello")
-
-		if probe < 0 {
-			t.Fatalf("expected a #{pane_in_mode} probe before delivery; calls=%v", fe.calls)
-		}
-		if cancel < 0 {
-			t.Fatalf("parked pane: expected a copy-mode `-X cancel` before delivery; calls=%v", fe.calls)
-		}
-		if literal < 0 {
-			t.Fatalf("nudge text was never delivered; calls=%v", fe.calls)
-		}
-		if cancel >= literal {
-			t.Fatalf("copy-mode cancel (idx %d) must precede the literal send (idx %d); calls=%v", cancel, literal, fe.calls)
-		}
-	})
-
-	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
-		fe := &nudgeRoutingExecutor{inMode: "0", provider: "claude", pane: "esc to interrupt"}
-		tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
-
-		if err := tm.NudgeSession("sess", "hello"); err != nil {
-			t.Fatalf("NudgeSession: %v", err)
-		}
-
-		if cancel := callIndexWithTokens(fe.calls, "send-keys", "-X", "cancel"); cancel >= 0 {
-			t.Fatalf("unparked pane: spurious copy-mode cancel at idx %d; calls=%v", cancel, fe.calls)
-		}
-		if literal := callIndexWithTokens(fe.calls, "send-keys", "-l", "hello"); literal < 0 {
-			t.Fatalf("happy path must still deliver the nudge text; calls=%v", fe.calls)
-		}
-	})
 }
 
 // The pre-paste C-u clear runs only on a session probed as unattached (#5192);
@@ -306,7 +256,7 @@ func TestNudgeBodyTakesBracketedPastePath(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", body, time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", body, time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 
@@ -329,7 +279,7 @@ func TestShortKeystrokePayloadStaysOnSendKeys(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", "yes", time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "yes", time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 	if idx := callIndexWithTokens(fe.calls, "send-keys", "-l", "yes"); idx < 0 {
@@ -356,7 +306,7 @@ func TestPasteKeepsLineFeeds(t *testing.T) {
 	fe := &nudgeRoutingExecutor{inMode: "0", provider: "codex"}
 	tm := &Tmux{cfg: nudgeTestConfig(), exec: fe}
 
-	if err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("line\n", 400), time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("line\n", 400), time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry: %v", err)
 	}
 

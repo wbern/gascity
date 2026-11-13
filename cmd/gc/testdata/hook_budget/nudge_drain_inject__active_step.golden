@@ -1,0 +1,6 @@
+Current time: <now>
+<system-reminder>
+Active assignment: inspect (tc-3)
+Status: in_progress
+Retrieve full assignment: gc bd show tc-3
+</system-reminder>

@@ -14,8 +14,8 @@ import (
 func TestReview172MissingSharedSourceRefCannotPublishUnretryableFamily(t *testing.T) {
 	source := seededStore("work")
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), func(string, string, map[string]string) (string, error) { t.Fatal("runner called"); return "", nil })
-	deps.Store = source
-	deps.GraphStore = beads.NewMemStore()
+	deps = withStore(deps, source)
+	deps.GraphStore = beads.GraphStore{Store: beads.NewMemStore()}
 	deps.StoreRef = ""
 	deps.StoreRef = ""
 	deps.CityPath = t.TempDir()
@@ -37,7 +37,7 @@ func TestReview172MissingSharedSourceRefCannotPublishUnretryableFamily(t *testin
 
 func TestReview172InterveningSourceRouteMustNotBeOverwritten(t *testing.T) {
 	source := seededStore("work")
-	deps := SlingDeps{Store: source, CityPath: t.TempDir()}
+	deps := SlingDeps{Store: beads.WorkStore{Store: source}, CityPath: t.TempDir()}
 	_, err := withLegacyAttachment(context.Background(), deps, "work", "review", nil, func() (*molecule.Result, error) {
 		root, e := source.Create(beads.Bead{Type: "molecule", Status: "open", ParentID: "work"})
 		if e != nil {
@@ -63,7 +63,7 @@ func TestReview172PointerCannotAdoptAnotherSourceIdentity(t *testing.T) {
 	if err := source.SetMetadata("work", beadmeta.MoleculeIDMetadataKey, foreign.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: source, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) { t.Fatal("must refuse corrupt pointer"); return nil, nil }, func(r *molecule.Result) (SlingResult, error) { return SlingResult{WispRootID: r.RootID}, nil }, "worker")
+	_, err := withLegacyAttachment(context.Background(), SlingDeps{Store: beads.WorkStore{Store: source}, StoreRef: "city:test", CityPath: t.TempDir()}, "work", "review", map[string]string{"issue": "work"}, func() (*molecule.Result, error) { t.Fatal("must refuse corrupt pointer"); return nil, nil }, func(r *molecule.Result) (SlingResult, error) { return SlingResult{WispRootID: r.RootID}, nil }, "worker")
 	if err == nil {
 		t.Fatal("pointer adopted root whose canonical source ID belongs to different source")
 	}

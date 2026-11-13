@@ -103,8 +103,16 @@ func (p MCPProjection) Hash() string {
 // untouched. A successful first adoption snapshots the original bytes under
 // .gc/mcp-adopted/<provider>/ before writing the catalog projection.
 //
-// Claude owns the whole file; Gemini, Codex, Cursor, Antigravity, OpenCode,
-// and MiMo Code preserve unrelated config while replacing the MCP subtree.
+// Apply does not adopt a file that holds content gc does not manage: MCP
+// servers the projection does not carry, the file's own definition of a
+// server the projection defines differently, or, for Claude's whole-file
+// target, any other top-level key; nor a file it cannot parse, nor a
+// symlinked one. It returns *MCPAdoptionRefusedError and writes no target,
+// marker, or snapshot. Once gc manages a target, it owns its MCP servers,
+// and out-of-band edits to them are drift it reverts.
+//
+// Claude owns the whole file; Gemini, Codex, Cursor, Antigravity, OpenCode, and
+// MiMo Code preserve unrelated config while replacing the MCP subtree.
 //
 // Apply is safe against concurrent writers for the same target: when the
 // backing FS is the real OS filesystem, the read-validate-write sequence
@@ -112,8 +120,9 @@ func (p MCPProjection) Hash() string {
 // ticks and stage-2 pre-start commands therefore serialize instead of
 // overwriting each other's work.
 //
-// Symlinked, unreadable, unparseable, non-regular, and oversized unmanaged
-// targets are refused. Managed symlink targets remain errors.
+// A target gc manages must be a regular file in a regular directory: a
+// symlinked one is an error. An empty catalog on a target gc does not
+// manage is a no-op, whatever the target is.
 func (p MCPProjection) Apply(fs fsys.FS) error {
 	return p.applyWithStderr(fs, adoptionStderr)
 }
@@ -126,9 +135,9 @@ func (p MCPProjection) ApplyWithStderr(fs fsys.FS, stderr io.Writer) error {
 	return p.applyWithStderr(fs, stderr)
 }
 
-// beforeMCPTargetLock runs after the unlocked adoption check and before Apply
-// acquires the target lock. Tests use it to exercise a target change in that
-// interval.
+// beforeMCPTargetLock, when set, runs after Apply's unlocked adoption check
+// and before it takes the target lock. Tests use it to change the target in
+// between.
 var beforeMCPTargetLock func()
 
 func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
@@ -136,14 +145,27 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 		return err
 	}
 	// Short-circuit: nothing to do for an empty catalog on an unmanaged
-	// target. Skipping early avoids taking an adoption snapshot of a
-	// file we are not about to overwrite (the prior-review fix moved
-	// snapshotting into Apply, but emitting a snapshot + warning with
-	// no corresponding write violates the "snapshot only before first
-	// overwrite" contract and lets .gc/mcp-adopted/ grow unbounded on
-	// repeated stage-2 pre-starts that resolve to empty catalogs).
+	// target, which is someone else's file, whatever it is. Skipping early
+	// avoids taking an adoption snapshot of a file we are not about to
+	// overwrite (the prior-review fix moved snapshotting into Apply, but
+	// emitting a snapshot + warning with no corresponding write violates
+	// the "snapshot only before first overwrite" contract and lets
+	// .gc/mcp-adopted/ grow unbounded on repeated stage-2 pre-starts that
+	// resolve to empty catalogs).
 	if len(p.Servers) == 0 && !p.isManaged(fs) {
 		return nil
+	}
+	// A refused adoption writes nothing, not even the lock file, so check
+	// before taking the lock. The check repeats under the lock, on the
+	// content the snapshot saves.
+	if refused, err := p.adoptionConflict(fs); err != nil || refused != nil {
+		return refusalOrErr(refused, err)
+	}
+	if err := ensureNotSymlink(fs, p); err != nil {
+		return err
+	}
+	if beforeMCPTargetLock != nil {
+		beforeMCPTargetLock()
 	}
 	if refused, err := p.adoptionConflict(fs); err != nil || refused != nil {
 		return refusalOrErr(refused, err)
@@ -159,66 +181,202 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 		lockRoot = lockRootForProjection(p)
 	}
 	return withTargetLock(lockRoot, p.Provider, p.Target, func() error {
+		// The target may have changed since the checks above; check again
+		// under the lock, on the content this pass reads, snapshots, and
+		// rewrites.
 		managed := p.isManaged(fs)
-		if len(p.Servers) == 0 && !managed {
+		if !managed && len(p.Servers) == 0 {
 			return nil
 		}
+		adopting := !managed
 		link, err := symlinkedPath(fs, p)
 		if err != nil {
 			return err
 		}
 		if link != "" {
-			if !managed && len(p.Servers) > 0 {
+			if adopting {
 				return &MCPAdoptionRefusedError{Provider: p.Provider, Target: p.Target, Symlink: link}
 			}
 			return symlinkError(link)
 		}
-		var existing []byte
-		// Claude's writer replaces the whole file, so managed Claude targets
-		// need no read. An unmanaged Claude file still must be re-read under
-		// the lock to recheck adoption and snapshot the exact bytes replaced.
-		if p.Provider != MCPProviderClaude || (!managed && len(p.Servers) > 0) {
-			existing, err = readRegularFile(fs, p.Target)
-			if err != nil && !errorsIsNotExist(err) {
-				if !managed && len(p.Servers) > 0 {
+		var current mcpTargetContent
+		// Claude's file is gc's whole, so a target gc manages is rewritten
+		// without being read.
+		if adopting || p.Provider != MCPProviderClaude {
+			current, err = readMCPTarget(fs, p.Target)
+			if err != nil {
+				if adopting {
 					return &MCPAdoptionRefusedError{Provider: p.Provider, Target: p.Target, ReadErr: err}
 				}
 				return fmt.Errorf("reading %s: %w", p.Target, err)
 			}
-			if errorsIsNotExist(err) {
-				existing = nil
-			}
 		}
-		if !managed && len(p.Servers) > 0 && existing != nil {
-			refused, err := p.adoptionConflictIn(existing)
+		if current.exists && adopting {
+			refused, err := p.adoptionConflictIn(current.data)
 			if err != nil || refused != nil {
 				return refusalOrErr(refused, err)
 			}
-			if err := snapshotAdoption(fs, p, existing, stderr); err != nil {
+			// Snapshot inside the lock so the backup holds the exact
+			// content about to be replaced — no TOCTOU against another
+			// writer.
+			if err := snapshotAdoption(fs, p, current.data, stderr); err != nil {
 				return err
 			}
 		}
-		switch p.Provider {
-		case MCPProviderClaude:
-			return p.applyClaude(fs)
-		case MCPProviderCodex:
-			return p.applyCodex(fs, existing)
-		case MCPProviderGemini:
-			return p.applyGemini(fs, existing)
-		case MCPProviderOpenCode:
-			return p.applyOpenCode(fs, existing)
-		case MCPProviderMimoCode:
-			// MiMo Code is an OpenCode fork sharing the same `mcp` document
-			// schema; only the target file name differs (set at build time).
-			return p.applyOpenCode(fs, existing)
-		case MCPProviderCursor:
-			return p.applyMCPServersJSON(fs, existing, p.cursorServersDoc())
-		case MCPProviderAntigravity:
-			return p.applyMCPServersJSON(fs, existing, p.antigravityServersDoc())
-		default:
-			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
+		change, err := p.targetChangeFrom(fs, current)
+		if err != nil {
+			return err
 		}
+		return p.writeChange(fs, change)
 	})
+}
+
+// mcpTargetContent is a target file as read: its bytes, or that it does not
+// exist.
+type mcpTargetContent struct {
+	data   []byte
+	exists bool
+}
+
+// readMCPTarget reads a target that is a regular file of at most
+// MaxMCPFileSize bytes (readRegularFile).
+func readMCPTarget(fs fsys.FS, path string) (mcpTargetContent, error) {
+	data, err := readRegularFile(fs, path)
+	if err != nil {
+		if errorsIsNotExist(err) {
+			return mcpTargetContent{}, nil
+		}
+		return mcpTargetContent{}, err
+	}
+	return mcpTargetContent{data: data, exists: true}, nil
+}
+
+func refusalOrErr(refused *MCPAdoptionRefusedError, err error) error {
+	if err != nil {
+		return err
+	}
+	return refused
+}
+
+// mcpTargetChange is what reconciling a projection does to its target file
+// and to the managed marker beside it.
+type mcpTargetChange struct {
+	// noop is set when there is nothing to do: an empty catalog on a target
+	// gc does not manage.
+	noop bool
+	// remove deletes the target; otherwise content replaces it.
+	remove  bool
+	content []byte
+	// managed is whether the managed marker exists afterwards.
+	managed bool
+}
+
+// targetChange computes what reconciling p does to its target, reading the
+// current file and writing nothing.
+//
+// Claude owns the whole file. Gemini, Codex, Cursor, OpenCode, and MiMo Code
+// keep unrelated config and replace only the MCP subtree; with an empty
+// catalog the subtree is removed, and the file with it once nothing else is
+// left.
+func (p MCPProjection) targetChange(fs fsys.FS) (mcpTargetChange, error) {
+	if len(p.Servers) == 0 && !p.isManaged(fs) {
+		return mcpTargetChange{noop: true}, nil
+	}
+	if p.Provider == MCPProviderClaude {
+		// Claude's file is gc's whole: its current content does not matter.
+		return p.targetChangeFrom(fs, mcpTargetContent{})
+	}
+	current, err := readMCPTarget(fs, p.Target)
+	if err != nil {
+		return mcpTargetChange{}, fmt.Errorf("reading %s: %w", p.Target, err)
+	}
+	return p.targetChangeFrom(fs, current)
+}
+
+// targetChangeFrom is targetChange for the target's current content, as read.
+func (p MCPProjection) targetChangeFrom(fs fsys.FS, current mcpTargetContent) (mcpTargetChange, error) {
+	if len(p.Servers) == 0 && !p.isManaged(fs) {
+		return mcpTargetChange{noop: true}, nil
+	}
+	key, servers, err := p.serversDoc()
+	if err != nil {
+		return mcpTargetChange{}, err
+	}
+	if p.Provider == MCPProviderClaude {
+		if len(p.Servers) == 0 {
+			return mcpTargetChange{remove: true}, nil
+		}
+		data, err := marshalJSONDoc(map[string]any{key: servers})
+		if err != nil {
+			return mcpTargetChange{}, err
+		}
+		return mcpTargetChange{content: data, managed: true}, nil
+	}
+
+	parse, marshal := parseJSONDocument, marshalJSONDoc
+	if p.Provider == MCPProviderCodex {
+		parse, marshal = parseTOMLDocument, marshalTOMLDoc
+	}
+	doc, err := parse(current.data)
+	if err != nil {
+		return mcpTargetChange{}, fmt.Errorf("parsing %s: %w", p.Target, err)
+	}
+	if len(p.Servers) == 0 {
+		delete(doc, key)
+		if len(doc) == 0 {
+			return mcpTargetChange{remove: true}, nil
+		}
+	} else {
+		doc[key] = servers
+	}
+	data, err := marshal(doc)
+	if err != nil {
+		return mcpTargetChange{}, err
+	}
+	return mcpTargetChange{content: data, managed: len(p.Servers) > 0}, nil
+}
+
+// serversDoc returns the document key p's provider keeps MCP servers under,
+// and the server entries gc writes there.
+func (p MCPProjection) serversDoc() (string, map[string]any, error) {
+	key := mcpServersKey(p.Provider)
+	switch p.Provider {
+	case MCPProviderClaude:
+		return key, p.claudeServersDoc(), nil
+	case MCPProviderCodex:
+		return key, p.codexServersDoc(), nil
+	case MCPProviderGemini:
+		return key, p.geminiServersDoc(), nil
+	case MCPProviderOpenCode, MCPProviderMimoCode:
+		// MiMo Code is an OpenCode fork sharing the same `mcp` document
+		// schema; only the target file name differs (set at build time).
+		return key, p.opencodeServersDoc(), nil
+	case MCPProviderCursor:
+		return key, p.cursorServersDoc(), nil
+	case MCPProviderAntigravity:
+		return key, p.antigravityServersDoc(), nil
+	default:
+		return "", nil, fmt.Errorf("unsupported MCP provider %q", p.Provider)
+	}
+}
+
+// writeChange applies a computed change: the target first, then the managed
+// marker.
+func (p MCPProjection) writeChange(fs fsys.FS, change mcpTargetChange) error {
+	if change.noop {
+		return nil
+	}
+	if change.remove {
+		if err := removeManagedMCPFile(fs, p.Target); err != nil {
+			return err
+		}
+	} else if err := writeManagedMCPFile(fs, p.Target, change.content); err != nil {
+		return err
+	}
+	if change.managed {
+		return p.writeManagedMarker(fs)
+	}
+	return removeManagedMCPFile(fs, p.markerPath())
 }
 
 func (p MCPProjection) normalizedBytes() []byte {
@@ -237,198 +395,46 @@ func (p MCPProjection) normalizedBytes() []byte {
 	return data
 }
 
-func (p MCPProjection) applyClaude(fs fsys.FS) error {
-	if len(p.Servers) == 0 {
-		if !p.isManaged(fs) {
-			return nil
-		}
-		if err := removeManagedMCPFile(fs, p.Target); err != nil {
-			return err
-		}
-		return removeManagedMCPFile(fs, p.markerPath())
+// MCPProjectionSupportsTransport reports whether providerKind's native MCP
+// config can carry a server of the given transport. Every projection carries
+// stdio servers. Cursor's is stdio-only: its HTTP/SSE mcpServers wire
+// contract is not verified. No projection renders SSE. An unknown provider
+// supports nothing.
+//
+// Callers that build an agent's projection consult this first and leave out
+// what the provider cannot receive; Apply rejects anything that slips
+// through instead of writing a config block the provider would ignore.
+func MCPProjectionSupportsTransport(providerKind string, transport MCPTransport) bool {
+	switch providerKind {
+	case MCPProviderClaude, MCPProviderCodex, MCPProviderGemini, MCPProviderOpenCode, MCPProviderMimoCode, MCPProviderAntigravity:
+		return transport == MCPTransportStdio || transport == MCPTransportHTTP
+	case MCPProviderCursor:
+		return transport == MCPTransportStdio
+	default:
+		return false
 	}
-	doc := map[string]any{
-		"mcpServers": p.claudeServersDoc(),
-	}
-	data, err := marshalJSONDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-	return p.writeManagedMarker(fs)
-}
-
-func (p MCPProjection) applyGemini(fs fsys.FS, existing []byte) error {
-	managed := p.isManaged(fs)
-	if len(p.Servers) == 0 && !managed {
-		return nil
-	}
-	doc, err := parseJSONDocument(existing)
-	if err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		delete(doc, "mcpServers")
-		if len(doc) == 0 {
-			if err := removeManagedMCPFile(fs, p.Target); err != nil {
-				return err
-			}
-			return removeManagedMCPFile(fs, p.markerPath())
-		}
-	} else {
-		doc["mcpServers"] = p.geminiServersDoc()
-	}
-	data, err := marshalJSONDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		return removeManagedMCPFile(fs, p.markerPath())
-	}
-	return p.writeManagedMarker(fs)
-}
-
-func (p MCPProjection) applyCodex(fs fsys.FS, existing []byte) error {
-	managed := p.isManaged(fs)
-	if len(p.Servers) == 0 && !managed {
-		return nil
-	}
-	doc, err := parseTOMLDocument(existing)
-	if err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		delete(doc, "mcp_servers")
-		if len(doc) == 0 {
-			if err := removeManagedMCPFile(fs, p.Target); err != nil {
-				return err
-			}
-			return removeManagedMCPFile(fs, p.markerPath())
-		}
-	} else {
-		doc["mcp_servers"] = p.codexServersDoc()
-	}
-	data, err := marshalTOMLDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		return removeManagedMCPFile(fs, p.markerPath())
-	}
-	return p.writeManagedMarker(fs)
-}
-
-func (p MCPProjection) applyOpenCode(fs fsys.FS, existing []byte) error {
-	managed := p.isManaged(fs)
-	if len(p.Servers) == 0 && !managed {
-		return nil
-	}
-	doc, err := parseJSONDocument(existing)
-	if err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		delete(doc, "mcp")
-		if len(doc) == 0 {
-			if err := removeManagedMCPFile(fs, p.Target); err != nil {
-				return err
-			}
-			return removeManagedMCPFile(fs, p.markerPath())
-		}
-	} else {
-		doc["mcp"] = p.opencodeServersDoc()
-	}
-	data, err := marshalJSONDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		return removeManagedMCPFile(fs, p.markerPath())
-	}
-	return p.writeManagedMarker(fs)
-}
-
-// applyMCPServersJSON reconciles a JSON target whose MCP catalog lives under
-// a top-level "mcpServers" object, preserving every other key.
-func (p MCPProjection) applyMCPServersJSON(fs fsys.FS, existing []byte, servers map[string]any) error {
-	managed := p.isManaged(fs)
-	if len(p.Servers) == 0 && !managed {
-		return nil
-	}
-	doc, err := parseJSONDocument(existing)
-	if err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		delete(doc, "mcpServers")
-		if len(doc) == 0 {
-			if err := removeManagedMCPFile(fs, p.Target); err != nil {
-				return err
-			}
-			return removeManagedMCPFile(fs, p.markerPath())
-		}
-	} else {
-		doc["mcpServers"] = servers
-	}
-	data, err := marshalJSONDoc(doc)
-	if err != nil {
-		return err
-	}
-	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
-		return err
-	}
-	if len(p.Servers) == 0 {
-		return removeManagedMCPFile(fs, p.markerPath())
-	}
-	return p.writeManagedMarker(fs)
 }
 
 func (p MCPProjection) validateProviderContract() error {
-	switch p.Provider {
-	case MCPProviderCursor:
-		return p.validateCursorContract()
-	case MCPProviderAntigravity:
-		return p.validateAntigravityContract()
-	}
-	return nil
-}
-
-// validateAntigravityContract rejects legacy HTTP+SSE servers: agy speaks
-// stdio and Streamable HTTP only.
-func (p MCPProjection) validateAntigravityContract() error {
 	for _, server := range p.Servers {
-		if server.Transport == MCPTransportSSE {
-			return fmt.Errorf(
-				"antigravity MCP projection does not support sse server %q: Antigravity supports only stdio and Streamable HTTP; point the server at its Streamable HTTP endpoint or bridge it over stdio",
-				server.Name,
-			)
+		if MCPProjectionSupportsTransport(p.Provider, server.Transport) {
+			continue
 		}
-	}
-	return nil
-}
-
-func (p MCPProjection) validateCursorContract() error {
-	for _, server := range p.Servers {
-		switch server.Transport {
-		case MCPTransportStdio:
-		case MCPTransportHTTP, MCPTransportSSE:
+		if p.Provider == MCPProviderCursor {
 			return fmt.Errorf(
 				"cursor MCP projection does not support %s server %q: Cursor's HTTP/SSE mcpServers wire contract is not verified",
 				server.Transport,
 				server.Name,
 			)
 		}
+		if p.Provider == MCPProviderAntigravity {
+			return fmt.Errorf(
+				"antigravity MCP projection does not support %s server %q: Antigravity supports only stdio and Streamable HTTP; point the server at its Streamable HTTP endpoint or bridge it over stdio",
+				server.Transport,
+				server.Name,
+			)
+		}
+		return fmt.Errorf("%s MCP projection does not support %s server %q", p.Provider, server.Transport, server.Name)
 	}
 	return nil
 }
@@ -577,29 +583,6 @@ func (p MCPProjection) opencodeServersDoc() map[string]any {
 		out[server.Name] = entry
 	}
 	return out
-}
-
-// serversDoc returns the document key and server entries written by this
-// provider. Keeping it centralized lets adoption compare project-owned entries
-// with the exact wire values Apply would write.
-func (p MCPProjection) serversDoc() (string, map[string]any, error) {
-	key := mcpServersKey(p.Provider)
-	switch p.Provider {
-	case MCPProviderClaude:
-		return key, p.claudeServersDoc(), nil
-	case MCPProviderCodex:
-		return key, p.codexServersDoc(), nil
-	case MCPProviderGemini:
-		return key, p.geminiServersDoc(), nil
-	case MCPProviderAntigravity:
-		return key, p.antigravityServersDoc(), nil
-	case MCPProviderOpenCode, MCPProviderMimoCode:
-		return key, p.opencodeServersDoc(), nil
-	case MCPProviderCursor:
-		return key, p.cursorServersDoc(), nil
-	default:
-		return "", nil, fmt.Errorf("unsupported MCP provider %q", p.Provider)
-	}
 }
 
 func marshalJSONDoc(doc map[string]any) ([]byte, error) {

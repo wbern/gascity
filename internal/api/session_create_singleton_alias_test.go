@@ -18,6 +18,9 @@ func TestHandleSessionCreate_CanonicalSingletonWithoutAliasUsesQualifiedNameAlia
 		Name:              "marketer",
 		Provider:          "test-agent",
 		MaxActiveSessions: intPtr(1),
+		// A demand-only singleton (min 0, no named session) refuses a manual create
+		// (#6858); a min of one keeps the session running, so the create is allowed.
+		MinActiveSessions: intPtr(1),
 	})
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)

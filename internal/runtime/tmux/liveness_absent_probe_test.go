@@ -1,9 +1,7 @@
 package tmux
 
 import (
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -17,12 +15,10 @@ import (
 // process names still reads GT_PROCESS_NAMES.
 // Kills: the GT_PROCESS_NAMES read moved back ahead of the running check.
 func TestObserveLivenessNotRunningForksNothing(t *testing.T) {
-	fe := &fakeExecutor{out: strings.Join([]string{
-		"corpse\t1\tbash\t201\t0\t1000",
-		"live\t0\tclaude\t101\t1\t2000",
-	}, "\n")}
-	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
-	p := &Provider{tm: tm, cache: NewStateCache(&tmuxFetcher{tm: tm}, time.Hour)}
+	p, fe := newListPanesProvider(
+		"corpse\t1\tbash\t201\t0\t1000\t$7\t900",
+		"live\t0\tclaude\t101\t1\t2000\t$3\t800",
+	)
 	if got := p.ObserveLiveness("live", []string{"claude"}); got != (runtime.Liveness{Running: true, Alive: true}) {
 		t.Fatalf("ObserveLiveness(live) = %+v, want running and alive", got)
 	}

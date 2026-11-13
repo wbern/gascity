@@ -29,7 +29,7 @@ func TestOrphanInvocationCompletionLog(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })
 	gc := newWispGC(15*time.Minute, time.Hour, 0).(*memoryWispGC)
-	_, err := gc.runGCContext(context.Background(), beads.GraphStore{Store: beads.NewMemStore()}, beads.SessionStore{}, beads.MailStore{}, time.Now())
+	_, err := gc.runGCContext(context.Background(), nil, beads.GraphStore{Store: beads.NewMemStore()}, beads.SessionStore{}, beads.MailStore{}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func orphanLogs(t *testing.T) *bytes.Buffer {
 func orphanRuntimeFixture(t *testing.T) (*CityRuntime, *orphanCountingStore, *orphanTestClock) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	withReapOrphansEnforced(t, false)
 	city := t.TempDir()
 	tomlPath := filepath.Join(city, "city.toml")
@@ -218,10 +218,16 @@ func TestOrphanCooldownLongArmReloadAndBoundary(t *testing.T) {
 	proofs, other, mails := s.proofs.Load(), s.otherLists.Load(), s.mailLists.Load()
 	for _, advance := range []time.Duration{0, 5 * time.Minute, 10*time.Minute - time.Nanosecond} {
 		clock.advance(advance)
-		reloadOrphanRuntime(t, cr) // real reload resets sweep cadence, not cooldown
-		if m := cr.wg.(*memoryWispGC); !m.lastRun.IsZero() || m.sessionPurgeCursor != nil {
-			t.Fatal("reload carried general cadence/cursor")
+		prev := cr.wg.(*memoryWispGC)
+		wantRun, wantCursor := prev.lastRun, prev.sessionPurgeCursor
+		reloadOrphanRuntime(t, cr) // a real reload keeps the sweep cadence and cursor (upstream #8667) and never touches the cooldown
+		m := cr.wg.(*memoryWispGC)
+		if !m.lastRun.Equal(wantRun) || m.sessionPurgeCursor != wantCursor {
+			t.Fatalf("reload dropped the carried cadence/cursor: lastRun %v->%v cursor %v->%v", wantRun, m.lastRun, wantCursor, m.sessionPurgeCursor)
 		}
+		// The interval has elapsed: the general sweep is due while the orphan
+		// cooldown is still running, which is what this loop pins.
+		m.lastRun = time.Time{}
 		if got := runOrphanSweep(t, cr, clock.now()); got.err != nil || got.purged != 0 {
 			t.Fatalf("skipped sweep: %+v", got)
 		}
@@ -242,6 +248,7 @@ func TestOrphanCooldownLongArmReloadAndBoundary(t *testing.T) {
 	}
 	clock.advance(time.Nanosecond)
 	reloadOrphanRuntime(t, cr)
+	cr.wg.(*memoryWispGC).lastRun = time.Time{} // the reload kept the cadence (upstream #8667); the interval has elapsed
 	runOrphanSweep(t, cr, clock.now())
 	if s.orphanLists.Load() != 2 {
 		t.Fatalf("exact completion+15m boundary did not admit: %d", s.orphanLists.Load())
@@ -285,7 +292,7 @@ func TestOrphanCooldownFailureCancelFallbackAndEnforcement(t *testing.T) {
 			m.orphanCooldown = &cr.orphanCooldown
 			m.orphanIdentity = key
 			m.orphanNow = clock.now
-			_, err := m.runGCContext(ctx, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
+			_, err := m.runGCContext(ctx, nil, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
 			if scenario == "failure" && !errors.Is(err, sentinel) {
 				t.Fatalf("original error lost: %v", err)
 			}
@@ -297,7 +304,7 @@ func TestOrphanCooldownFailureCancelFallbackAndEnforcement(t *testing.T) {
 			}
 			before := s.orphanLists.Load()
 			clock.advance(time.Minute)
-			_, _ = m.runGCContext(context.Background(), graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
+			_, _ = m.runGCContext(context.Background(), nil, graph, beads.SessionStore{}, beads.MailStore{}, clock.now())
 			skipped := scenario == "failure" || scenario == "fast"
 			want := before + 1
 			if skipped {
@@ -448,6 +455,7 @@ func TestOrphanCooldownCapturedRouteAndIndependentCities(t *testing.T) {
 }
 
 func TestOrphanCooldownSuccessfulOpenAndReopenIdentity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
 	logs := orphanLogs(t)
 	cr, _, clock := orphanRuntimeFixture(t)
 	// Exercise the actual controller constructor and update publication seam.
@@ -525,6 +533,10 @@ func TestOrphanCooldownStandaloneFailedReopenRetainsPair(t *testing.T) {
 	if after.Store != before.Store || got != key {
 		t.Fatalf("failed standalone reopen replaced captured pair: %+v", got)
 	}
+	// A reload keeps the general sweep cadence (upstream #8667), so the next
+	// sweep is not due until the interval elapses; make it due while the
+	// orphan cooldown is still running.
+	cr.wg.(*memoryWispGC).lastRun = time.Time{}
 	clock.advance(time.Minute)
 	runOrphanSweep(t, cr, clock.now())
 	if !strings.Contains(logs.String(), "completion cooldown remaining=14m0s") {

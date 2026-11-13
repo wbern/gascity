@@ -85,7 +85,16 @@ func shellCommandWithStderr(command, dir string, timeout time.Duration, env map[
 // the command before it starts — it is how a caller opts into a cancellation
 // policy stronger than CommandContext's default.
 func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
-	stdout, _, err := runShellCommandWithStderr(command, dir, timeout, env, prepare)
+	stdout, stderr, err := runShellCommandWithStderr(command, dir, timeout, env, prepare)
+	if err != nil {
+		// The error renders only "exit status N"; keep the failed command's
+		// stderr in the text so the reason survives a caller that drops it
+		// (upstream T10). Callers that want stderr apart use
+		// runShellCommandWithStderr.
+		if reason := strings.TrimSpace(stderr); reason != "" {
+			err = fmt.Errorf("%w: %s", err, reason)
+		}
+	}
 	return stdout, err
 }
 

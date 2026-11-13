@@ -19,7 +19,7 @@ func deadBacklogID(i int) string {
 func seedDeadBacklog(t *testing.T, cityPath string, now time.Time, n int) map[string]string {
 	t.Helper()
 	buckets := make(map[string]string, n)
-	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+	if err := withNudgeQueueState(cityPath, "test", func(state *nudgeQueueState) error {
 		for i := 0; i < n; i++ {
 			id := deadBacklogID(i)
 			buckets[id] = "dead"
@@ -42,14 +42,17 @@ type enqueueTiming struct {
 	operations     int64
 }
 
+// timeEnqueue enqueues one nudge over a dead backlog of older-binary dead
+// letters (shadow-backed, no debt) on a store whose every call advances a fake
+// clock by latency. The hold is pure (ga-fsp5w9): the backlog costs no store
+// call, each dead letter gets a one-time Verify debt left for the controller,
+// and the enqueue costs only its shadow save.
 func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming {
 	t.Helper()
 	cityPath := t.TempDir()
 	fakeClock := &clock.Fake{Time: time.Now().UTC()}
 	seededBuckets := seedDeadBacklog(t, cityPath, fakeClock.Now(), backlog)
-	payNudgeDebtsWithTestClock(t, fakeClock)
-	maxOps := int64(nudgeEnqueueMaintenanceBudget/latency) + advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps
-	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: maxOps}
+	store := &advancingNudgeStore{fakeClock: fakeClock, latency: latency, failAfter: advancingNudgeStoreSetupOps}
 	item := queuedNudge{ID: "nudge-new", Agent: "gascity/deployer", Source: "sling", Message: "Work slung. Check your hook."}
 	start := fakeClock.Now()
 	if err := enqueueQueuedNudgeWithStoreAndClock(cityPath, beads.NudgesStore{Store: store}, item, fakeClock); err != nil {
@@ -59,36 +62,24 @@ func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming
 		virtualElapsed: fakeClock.Now().Sub(start),
 		operations:     store.operations(),
 	}
-	if timing.operations <= advancingNudgeStoreSetupOps {
-		t.Fatal("enqueue did not exercise any backlog payments")
-	}
-	if maxElapsed := nudgeEnqueueMaintenanceBudget + (advancingNudgeStoreSetupOps+advancingNudgeStoreDeadItemOps)*latency; timing.virtualElapsed > maxElapsed {
-		t.Fatalf("virtual enqueue elapsed (backlog=%d) = %v, want at most %v", backlog, timing.virtualElapsed, maxElapsed)
-	}
-	if timing.operations > maxOps {
-		t.Fatalf("advancing store ops (backlog=%d) = %d, want at most %d", backlog, timing.operations, maxOps)
+	if want := advancingNudgeStoreSetupOps * latency; timing.virtualElapsed != want {
+		t.Fatalf("virtual enqueue elapsed (backlog=%d) = %v, want %v (the shadow save alone)", backlog, timing.virtualElapsed, want)
 	}
 
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	processed := 0
-	for i := 0; i < backlog; i++ {
-		id := deadBacklogID(i)
-		bucket, present := buckets[id]
-		closed := store.closed["bead-"+id]
-		if closed {
-			processed++
-			if present {
-				t.Fatalf("paid aged item %s remains in %s", id, bucket)
-			}
-		} else if bucket != seededBuckets[id] {
-			t.Fatalf("unpaid item %s lost or moved: %q", id, bucket)
+	if got, want := len(buckets), backlog+1; got != want {
+		t.Fatalf("queued item count (backlog=%d) = %d, want %d; buckets=%v", backlog, got, want, buckets)
+	}
+	for id, bucket := range seededBuckets {
+		if buckets[id] != bucket {
+			t.Fatalf("dead nudge %q bucket = %q, want %q", id, buckets[id], bucket)
 		}
 	}
-	if processed == 0 || processed >= backlog {
-		t.Fatalf("processed %d of %d, want a nonempty bounded subset", processed, backlog)
-	}
-	if got, want := len(buckets), backlog-processed+1; got != want {
-		t.Fatalf("queue has %d items, want %d; unpaid data was lost or duplicated", got, want)
+	state := loadNudgeStateForTest(t, cityPath)
+	for _, dead := range state.Dead {
+		if dead.Shadow == nil || !dead.Shadow.Verify || !dead.Shadow.NotBefore.IsZero() {
+			t.Fatalf("dead nudge %q debt = %+v, want an untaken Verify debt for the controller", dead.ID, dead.Shadow)
+		}
 	}
 	if bucket := buckets[item.ID]; bucket != "pending" {
 		t.Fatalf("new queued nudge bucket = %q, want pending; buckets=%v", bucket, buckets)
@@ -97,19 +88,14 @@ func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming
 }
 
 // The foreground `--nudge` enqueue must be bounded regardless of nudge-queue
-// backlog. The advancing store makes the aggregate deadline observable without
-// spending the maintenance budget in real time.
+// backlog: its hold does no store I/O, so a dead backlog adds nothing.
 func TestSlingNudgeEnqueueBoundedByBacklog(t *testing.T) {
-	for _, latency := range []time.Duration{20 * time.Millisecond, 100 * time.Millisecond} {
-		t.Run(latency.String(), func(t *testing.T) {
-			small := timeEnqueue(t, 40, latency)
-			big := timeEnqueue(t, 160, latency)
-			if small != big {
-				t.Fatalf("shadow I/O grew with backlog at latency %s: 40=%+v 160=%+v", latency, small, big)
-			}
-			if fullBacklogOps := int64(advancingNudgeStoreSetupOps + advancingNudgeStoreDeadItemOps*40); small.operations >= fullBacklogOps {
-				t.Fatalf("processed the whole backlog: %d ops", small.operations)
-			}
-		})
+	const latency = 20 * time.Millisecond
+	small := timeEnqueue(t, 40, latency)
+	big := timeEnqueue(t, 160, latency)
+	t.Logf("enqueue backlog=40 -> virtual=%v ops=%d ; backlog=160 -> virtual=%v ops=%d",
+		small.virtualElapsed, small.operations, big.virtualElapsed, big.operations)
+	if small != big {
+		t.Fatalf("foreground enqueue grew with backlog: backlog=40 got %+v, backlog=160 got %+v", small, big)
 	}
 }

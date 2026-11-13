@@ -18,9 +18,10 @@ import (
 // (state.go, WithState over []Item). The nudge bead exists only for
 // observability / event emission. So this wrapper is a thin veneer over the
 // existing leaf helpers (cmd/gc/nudge_beads.go: ensure/markTerminal/find), NOT
-// a new storage authority. Its methods must remain outside the queue flock:
-// enqueue saves the shadow before the queue commit, and committed exits record
-// ShadowDebt for a later write after the lock is released.
+// a new storage authority. Its methods are never called inside the queue's
+// flock (WithState's callbacks are pure): Save runs before an enqueue commits,
+// and a committed exit records a ShadowDebt that Terminalize pays after the
+// lock is released. The shadow lags the queue and never leads it.
 //
 // PHASE 0 STATUS: the wrapper type + Save/Terminalize/Find/FindIncludingTerminal
 // SIGNATURES are the contract; their bodies are routed in Phase 2. The one
@@ -152,13 +153,13 @@ const EnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 // returning the bead id and whether a new bead was created. It is the write
 // half of the codec: the Item->Bead serialization (metadata map, labels, title,
 // type) is confined here. The flock'd state.json remains the queue authority;
-// this bead is the observability shadow, saved before the queue transaction.
+// this bead is the observability shadow, saved before the enqueue commits.
 //
 // Save emits byte-identical bead writes to the prior raw ensureQueuedNudgeBead
 // helper: an existence check by the durable nudge label, then a single Create
 // when absent.
 func (s *Store) Save(item Item) (beadID string, created bool, err error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return "", false, nil
 	}
 	existing, ok, err := s.find(item.ID, false)
@@ -177,7 +178,7 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 // label, deduplicates attempts. A losing attempt may roll back only this new
 // identity, which no other new enqueue adopts.
 func (s *Store) CreateShadow(item Item) (beadID string, created bool, err error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return "", false, nil
 	}
 	meta := map[string]string{
@@ -221,7 +222,7 @@ func (s *Store) CreateShadow(item Item) (beadID string, created bool, err error)
 // Only legacy items without a BeadID resolve by logical ID. Missing records
 // are no-ops; writes remain SetMetadataBatch followed by Close.
 func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now time.Time) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil
 	}
 	update := map[string]string{
@@ -284,7 +285,7 @@ func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now
 // enqueueQueuedNudgeWithStore. Errors are joined and returned by the caller so a
 // leaked open bead is diagnosable.
 func (s *Store) RollbackEnqueue(beadID string) error {
-	if s == nil || s.store.Store == nil || beadID == "" {
+	if s == nil || s.store == (beads.NudgesStore{}) || beadID == "" {
 		return nil
 	}
 	var errs error
@@ -314,7 +315,7 @@ func (s *Store) RollbackEnqueue(beadID string) error {
 // joined-error assertions keep passing. Unlike Terminalize it adds no missing-bead
 // tolerance, matching the inline sweep it replaces.
 func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil
 	}
 	update := map[string]string{
@@ -346,10 +347,9 @@ func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
 // candidate set the sweep and dry-run see is unchanged. limit caps the number of
 // candidate beads FETCHED (0 or negative == unbounded); the caller keeps its own
 // cross-phase close budget on top, so the live exclusion moving inside here does
-// not alter which beads the budget-limited loop closes. It is nil-receiver safe
-// and called after the queue flock is released.
+// not alter which beads the budget-limited loop closes. It is nil-receiver safe.
 func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs map[string]bool) ([]NudgeShadow, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil, nil
 	}
 	if limit < 0 {
@@ -380,7 +380,7 @@ func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs m
 // or terminal clock is at or after since, oldest first. It preserves terminal
 // history needed by wait finalization across a storage cutover.
 func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil, nil
 	}
 	candidates, err := s.store.List(beads.ListQuery{
@@ -420,7 +420,7 @@ func (s *Store) FindItemShadow(item Item) (NudgeShadow, bool, error) {
 	if item.BeadID == "" {
 		return s.FindIncludingTerminal(item.ID)
 	}
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return NudgeShadow{}, false, nil
 	}
 	b, err := s.store.Get(item.BeadID)
@@ -450,7 +450,7 @@ func (s *Store) FindIncludingTerminal(nudgeID string) (NudgeShadow, bool, error)
 // durable "nudge:<id>" label, applying the lookup cap and the open-vs-terminal
 // selection rules. It is backend-invariant: it reads only bead fields.
 func (s *Store) find(nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
-	if s == nil || s.store.Store == nil || nudgeID == "" {
+	if s == nil || s.store == (beads.NudgesStore{}) || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
 	items, err := s.store.List(beads.ListQuery{
@@ -511,13 +511,62 @@ func IsShadowBead(b beads.Bead) bool {
 // the cmd/gc adapter test that guards the >=20 char validator floor.
 func CanonicalCloseReason(stateCode string) string { return canonicalCloseReason(stateCode) }
 
-func isTerminalNudgeState(state string) bool {
-	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed", "superseded":
-		return true
+// TerminalOutcome is what a nudge lifecycle state code means for the work the
+// nudge carried. ClassifyTerminalState is the single list of terminal codes;
+// IsTerminalState is derived from it.
+type TerminalOutcome int
+
+const (
+	// OutcomeNotTerminal is a live nudge (queued, in flight), a closed shadow
+	// that carries no delivery outcome (an enqueue closed by RollbackEnqueue,
+	// or one closed gc-swept by SweepStale), or an unknown code. Wait dispatch
+	// re-queues a wait reminder whose shadows are all in this class.
+	OutcomeNotTerminal TerminalOutcome = iota
+	// OutcomeDelivered means delivery to the provider is proven; the nudge must
+	// not be retried.
+	OutcomeDelivered
+	// OutcomeFailed means the nudge will never be delivered.
+	OutcomeFailed
+	// OutcomeSuperseded means a newer queued entry replaced the nudge and
+	// carries its delivery outcome.
+	OutcomeSuperseded
+)
+
+// String returns the outcome name for diagnostics.
+func (o TerminalOutcome) String() string {
+	switch o {
+	case OutcomeNotTerminal:
+		return "not-terminal"
+	case OutcomeDelivered:
+		return "delivered"
+	case OutcomeFailed:
+		return "failed"
+	case OutcomeSuperseded:
+		return "superseded"
 	default:
-		return false
+		return "TerminalOutcome(" + strconv.Itoa(int(o)) + ")"
 	}
+}
+
+// ClassifyTerminalState maps a nudge lifecycle state code to its terminal
+// outcome. It is the package-canonical list of terminal codes: a new terminal
+// state is added here, and every consumer that switches on the outcome picks it
+// up.
+func ClassifyTerminalState(state string) TerminalOutcome {
+	switch state {
+	case "accepted_for_injection", "injected", "injected_unobserved":
+		return OutcomeDelivered
+	case "expired", "failed":
+		return OutcomeFailed
+	case "superseded":
+		return OutcomeSuperseded
+	default:
+		return OutcomeNotTerminal
+	}
+}
+
+func isTerminalNudgeState(state string) bool {
+	return ClassifyTerminalState(state) != OutcomeNotTerminal
 }
 
 // canonicalCloseReason maps a nudge terminalization state code to a
@@ -525,7 +574,7 @@ func isTerminalNudgeState(state string) bool {
 // `bd close --reason` under validation.on-close=error. Terminalize stamps the
 // result in metadata.close_reason before Close; BdStore.Close forwards it as the
 // --reason argument. Without the canonical reason, validators reject the close
-// and the item's durable shadow debt remains unpaid for a later retry.
+// and the item's shadow debt is never paid.
 func canonicalCloseReason(stateCode string) string {
 	switch stateCode {
 	case "failed":

@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -114,7 +115,7 @@ func NewConfigValidCheck(cfg *config.City) *ConfigValidCheck {
 func (c *ConfigValidCheck) Name() string { return "config-valid" }
 
 // Run validates agents and rigs in the config.
-func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
+func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if err := config.ValidateAgents(c.cfg.Agents); err != nil {
 		r.Status = StatusError
@@ -122,6 +123,15 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig validation: %v", err)
+		return r
+	}
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
@@ -139,6 +149,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 	if err := workspacesvc.ValidateRuntimeSupport(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
+		return r
+	}
+	if warnings := config.RigFederationWarnings(c.cfg.Rigs); len(warnings) > 0 {
+		r.Status = StatusWarning
+		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r
 	}
 	r.Status = StatusOK
@@ -548,7 +563,10 @@ func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all zombie sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles zombie
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. A zombie that is
+// already gone when Fix stops it — its tmux server died after the observation —
+// is fixed, so Fix stops through runtime.StopForCleanup and reports only a
+// stop that failed to remove a session.
 func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -559,7 +577,7 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
 		if c.sp.IsRunning(sn) && !c.sp.ProcessAlive(sn, a.ProcessNames) {
-			if err := c.sp.Stop(sn); err != nil {
+			if err := runtime.StopForCleanup(c.sp, sn); err != nil {
 				return fmt.Errorf("killing zombie session %q: %w", sn, err)
 			}
 		}
@@ -730,6 +748,8 @@ func (c *OrphanSessionsCheck) CanFix() bool { return c.attributed != nil }
 // otherwise widen the kill set rather than narrow it. It also refuses while a
 // controller is running (GH#5742): the controller's own health patrol already
 // reconciles orphan sessions, and an uncoordinated Stop here would race it.
+// Like ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
+// orphan whose tmux server died after the listing counts as removed.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -750,7 +770,7 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 		if tracked[s] {
 			continue
 		}
-		if err := c.sp.Stop(s); err != nil {
+		if err := runtime.StopForCleanup(c.sp, s); err != nil {
 			return fmt.Errorf("killing orphan session %q: %w", s, err)
 		}
 	}
@@ -1877,14 +1897,15 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// Run walks the configured worktrees root (workdir.WorktreesRoot) and
+// verifies each .git pointer. Per-bead
 // worktrees at <rig>/worktrees/ are a separate population and are
 // covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1892,8 +1913,8 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 			// Name the directory. The bare "no worktrees directory"
 			// read as a claim about every worktree on the box, and was
 			// reported green against a rig whose own worktrees/ held
-			// tens of gigabytes. Sibling checks already say ".gc/".
-			r.Message = "no .gc/worktrees directory"
+			// tens of gigabytes.
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
@@ -1925,7 +1946,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no agent worktrees under .gc/worktrees"
+			r.Message = fmt.Sprintf("no agent worktrees under %s", wtRoot)
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}

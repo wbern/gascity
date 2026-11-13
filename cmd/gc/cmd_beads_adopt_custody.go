@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"io"
 	"os"
 	"os/exec"
@@ -479,7 +480,7 @@ func checkCustodyBead(b beads.Bead, o custodyOperation) error {
 	if b.ID != o.Source || b.Status != o.Status || o.Assignee == nil || b.Assignee != *o.Assignee || b.Revision != o.Revision {
 		return fmt.Errorf("exact source revision/status/assignee differs")
 	}
-	for k, v := range map[string]string{"gc.session_id": o.PriorSession, "gc.workspace_owner": o.PriorOwner, "gc.claimed_at": o.ClaimedAt, "branch": o.Branch, "gc.work_branch": o.Branch, "gc.base_sha": o.Base, "gc.task_worktree": o.Workspace, "gc.workspace_mode": "task"} {
+	for k, v := range map[string]string{beadmeta.SessionIDMetadataKey: o.PriorSession, beadmeta.WorkspaceOwnerMetadataKey: o.PriorOwner, beadmeta.ClaimedAtMetadataKey: o.ClaimedAt, "branch": o.Branch, beadmeta.WorkBranchMetadataKey: o.Branch, beadmeta.BaseSHAMetadataKey: o.Base, beadmeta.TaskWorktreeMetadataKey: o.Workspace, beadmeta.WorkspaceModeMetadataKey: "task"} {
 		if b.Metadata[k] != v {
 			return fmt.Errorf("native custody binding differs: %s", k)
 		}
@@ -534,7 +535,7 @@ func applyCustodyOperation(store beads.Store, o custodyOperation, hash string, c
 	}
 	status := "in_progress"
 	claim := o.Successor.Claim
-	patch := map[string]string{"gc.session_id": o.Successor.ID, "gc.session_name": o.Successor.Name, "gc.workspace_owner": o.Successor.Agent, "gc.workspace_owner_prior": o.PriorOwner, "gc.custody_manifest_sha256": hash, "gc.custody_transferred_at": transitionTime.UTC().Format(time.RFC3339Nano)}
+	patch := map[string]string{beadmeta.SessionIDMetadataKey: o.Successor.ID, beadmeta.SessionNameMetadataKey: o.Successor.Name, beadmeta.WorkspaceOwnerMetadataKey: o.Successor.Agent, beadmeta.WorkspaceOwnerPriorMetadataKey: o.PriorOwner, beadmeta.CustodyManifestSHA256MetadataKey: hash, beadmeta.CustodyTransferredAtMetadataKey: transitionTime.UTC().Format(time.RFC3339Nano)}
 	if e := writer.UpdateIfMatch(o.Source, o.Revision, beads.UpdateOpts{Status: &status, Assignee: &claim, Metadata: patch}); e != nil {
 		// A transport error can lose the acknowledgement after persistence.
 		// Only typed stale/unsupported responses establish definite no-write.

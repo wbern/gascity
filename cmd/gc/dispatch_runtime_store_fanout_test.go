@@ -42,7 +42,7 @@ func TestDrainWorkflowServeWorkSelectsRigStoreControlBead(t *testing.T) {
 	}
 
 	var processed []struct{ beadID, storePath string }
-	controlDispatcherServe = func(_, storePath, beadID string, _, _ io.Writer) error {
+	controlDispatcherServe = func(_, storePath, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, struct{ beadID, storePath string }{beadID, storePath})
 		return nil
 	}
@@ -112,7 +112,7 @@ func TestDrainWorkflowServeWorkRigStoreEnvPointsBEADSDIRAtRigStore(t *testing.T)
 	)
 
 	var processed []struct{ beadID, storePath string }
-	controlDispatcherServe = func(_, storePath, beadID string, _, _ io.Writer) error {
+	controlDispatcherServe = func(_, storePath, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, struct{ beadID, storePath string }{beadID, storePath})
 		if err := os.WriteFile(donePath, nil, 0o644); err != nil {
 			t.Fatalf("marking bead done: %v", err)
@@ -160,7 +160,7 @@ func TestDrainWorkflowServeWorkNonSingletonAgentStaysSingleStore(t *testing.T) {
 		queriedStores = append(queriedStores, storePath)
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _, beadID string, _, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatalf("controlDispatcherServe unexpectedly called for bead %s", beadID)
 		return nil
 	}

@@ -69,7 +69,7 @@ func TestDeliverSessionNudgeWaitIdleQueuesWhenAtInteractivePrompt(t *testing.T) 
 	target, sessionName := nudgeInteractivePromptTarget(t, dir, store.Store, fake, pane)
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store.Store, fake, "OVERRIDE: claim a-003", nudgeDeliveryWaitIdle, false, &stdout, &stderr)
+	code := deliverSessionNudgeKeyed(target, store.Store, fake, "OVERRIDE: claim a-003", nudgeDeliveryWaitIdle, "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, stderr=%q, want 0", code, stderr.String())
 	}

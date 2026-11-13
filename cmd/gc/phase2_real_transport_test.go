@@ -28,7 +28,7 @@ func TestReconcilerColdTmuxMetadataAllowsFirstStart(t *testing.T) {
 	tmuxCfg := runtimetmux.DefaultConfig()
 	tmuxCfg.SocketName = guard.SocketName()
 	sp := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	const name = "cold-fixture"
 	env.cfg = &config.City{Agents: []config.Agent{{Name: name}}}
 	env.addDesired(name, name, false)

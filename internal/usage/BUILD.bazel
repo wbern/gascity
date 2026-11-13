@@ -3,9 +3,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "usage",
     srcs = [
+        "attribution.go",
         "exec_sink.go",
+        "invocation_ledger.go",
         "local_sink.go",
         "recent_reader.go",
+        "terminal_outbox.go",
         "totals.go",
         "usage.go",
     ],
@@ -16,9 +19,12 @@ go_library(
 go_test(
     name = "usage_test",
     srcs = [
+        "attribution_test.go",
         "exec_sink_test.go",
+        "invocation_ledger_test.go",
         "local_sink_test.go",
         "recent_reader_test.go",
+        "terminal_outbox_test.go",
         "testenv_import_test.go",
         "totals_test.go",
         "usage_test.go",
@@ -35,6 +41,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

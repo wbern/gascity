@@ -205,6 +205,7 @@ func TestFactorySessionForResolvedRuntimeStartsResolvedSession(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
 		Provider: sp,
+		CityPath: t.TempDir(), // a started create takes the runtime lease in its city
 	})
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
@@ -263,6 +264,7 @@ func TestFactorySessionForResolvedRuntimeCreatesDeferredSession(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
 		Provider: sp,
+		CityPath: t.TempDir(), // a started create takes the runtime lease in its city
 	})
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)

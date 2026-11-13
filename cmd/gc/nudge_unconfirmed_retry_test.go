@@ -104,3 +104,23 @@ func TestFailedQueuedNudge_StillRetriesOrdinaryFailures(t *testing.T) {
 		t.Fatalf("Attempts = %d, want 1", updated.Attempts)
 	}
 }
+
+// A Lost submit (the provider's own record proves the turn ended without the
+// message) wraps ErrNudgeSubmitUnconfirmed but is the opposite case: nothing
+// landed, so the queued nudge is retried under the attempt budget, not dropped.
+func TestFailedQueuedNudge_LostSubmitIsRetried(t *testing.T) {
+	item := newQueuedNudgeWithOptions("worker", "reminder", "queue", time.Now(), queuedNudgeOptions{
+		ID:        "n-lost",
+		SessionID: "gc-1",
+	})
+	lost := fmt.Errorf("%w: session %q", sessiontmux.ErrNudgeSubmitLost, "gc-1")
+
+	updated, dead := failedQueuedNudge(item, lost, time.Now())
+
+	if dead {
+		t.Fatal("dead = true for a Lost submit: the message never landed, so the nudge must be retried")
+	}
+	if updated.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 (counted against the retry budget)", updated.Attempts)
+	}
+}

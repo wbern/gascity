@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -29,6 +28,13 @@ type Reference struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
 }
+
+// SourceSubmit is the Source of a user's submitted message that the session
+// layer queued instead of delivering (a held or dead session, a running turn
+// its submit keys would interrupt, a follow-up). It is still the user's
+// prompt: it is delivered alone and verbatim, never folded into a deferred
+// reminder or injected as hook context.
+const SourceSubmit = "submit"
 
 // Item is a persisted deferred nudge.
 type Item struct {
@@ -44,11 +50,18 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
-	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	// DeliveryBatch is the delivery key of the batch this item was claimed
+	// in, pinned at claim time. Until the batch is acked, dead-lettered or
+	// definitively rejected, its items are claimed and delivered together
+	// under this key, so a redelivery after an unknown outcome is the same
+	// delivery to a runtime that deduplicates by key. A rejection clears it,
+	// and the next claim pins a new batch.
+	DeliveryBatch string    `json:"delivery_batch,omitempty"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	ClaimedAt     time.Time `json:"claimed_at,omitempty"`
+	LeaseUntil    time.Time `json:"lease_until,omitempty"`
+	DeadAt        time.Time `json:"dead_at,omitempty"`
 	// Shadow is the terminal record this item's gc:nudge shadow bead owes,
 	// set when the queue commits the item's exit (a dead letter, an ack). The
 	// shadow write happens after the queue lock is released.
@@ -224,7 +237,7 @@ func WithStateFor(cityPath, verb string, fn func(*State) error) error {
 // caller that must finish by a deadline of its own (a hook's) waits no
 // longer than that leaves. A wait of zero or less tries the lock once.
 func WithStateWithin(cityPath, verb string, wait time.Duration, fn func(*State) error) error {
-	return withStateBoundedVerb(cityPath, verb, wait, fn)
+	return withStateBounded(cityPath, verb, wait, fn)
 }
 
 // LockWait is the wait budget WithState and UpdateIfChanged give the lock:
@@ -287,13 +300,9 @@ const nudgeQueueLockPollInterval = 10 * time.Millisecond
 // the in-memory State and returns, with no bead-store call, store open,
 // config load, census, socket or subprocess (ga-fsp5w9). A hold whose fn
 // leaves the state's bytes unchanged writes nothing.
-func withStateBoundedVerb(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) (err error) {
-	return withStateBoundedVerbClock(cityPath, verb, waitTimeout, clock.Real{}, fn)
-}
-
-func withStateBoundedVerbClock(cityPath, verb string, waitTimeout time.Duration, clk clock.Clock, fn func(*State) error) (err error) {
+func withStateBounded(cityPath, verb string, waitTimeout time.Duration, fn func(*State) error) (err error) {
 	start := time.Now()
-	unlock, err := lockStateWithClock(cityPath, waitTimeout, clk)
+	unlock, err := lockState(cityPath, waitTimeout)
 	if err != nil {
 		outcome := LockOutcomeError
 		if errors.Is(err, ErrQueueBusy) {
@@ -332,12 +341,6 @@ func withStateBoundedVerbClock(cityPath, verb string, waitTimeout time.Duration,
 	return nil
 }
 
-// withStateBounded preserves the original clock-injected test seam. Production
-// callers use the named, instrumented variants above.
-func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Clock, fn func(*State) error) error {
-	return withStateBoundedVerbClock(cityPath, "", waitTimeout, clk, fn)
-}
-
 // UpdateIfChanged is WithState for a verb that is often a no-op. It first runs
 // fn on a lock-free snapshot (the atomic rename makes a read a whole committed
 // state); when that dry run leaves the state unchanged, it returns without
@@ -363,7 +366,7 @@ func UpdateIfChangedWithin(cityPath, verb string, waitTimeout time.Duration, fn 
 	if changed, err := DryRun(cityPath, fn); err == nil && !changed {
 		return nil
 	}
-	return withStateBoundedVerb(cityPath, verb, waitTimeout, fn)
+	return withStateBounded(cityPath, verb, waitTimeout, fn)
 }
 
 // DryRun runs fn on a lock-free snapshot of the queue (a whole committed
@@ -388,7 +391,9 @@ func DryRun(cityPath string, fn func(*State) error) (bool, error) {
 	return !bytes.Equal(before, after), nil
 }
 
-func lockStateWithClock(cityPath string, waitTimeout time.Duration, clk clock.Clock) (func(), error) {
+// lockState takes the queue's exclusive flock within waitTimeout and returns
+// its release.
+func lockState(cityPath string, waitTimeout time.Duration) (func(), error) {
 	dir := filepath.Dir(StatePath(cityPath))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating nudge queue dir: %w", err)
@@ -399,7 +404,7 @@ func lockStateWithClock(cityPath string, waitTimeout time.Duration, clk clock.Cl
 		return nil, fmt.Errorf("opening nudge queue lock: %w", err)
 	}
 
-	deadline := clk.Now().Add(waitTimeout)
+	deadline := time.Now().Add(waitTimeout)
 	for {
 		lockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if lockErr == nil {
@@ -409,7 +414,7 @@ func lockStateWithClock(cityPath string, waitTimeout time.Duration, clk clock.Cl
 			lockFile.Close() //nolint:errcheck
 			return nil, fmt.Errorf("locking nudge queue: %w", lockErr)
 		}
-		if !clk.Now().Before(deadline) {
+		if !time.Now().Before(deadline) {
 			lockFile.Close() //nolint:errcheck
 			return nil, lockTimeoutError{wait: waitTimeout}
 		}

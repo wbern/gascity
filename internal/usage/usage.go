@@ -52,6 +52,7 @@ type Fact struct {
 	// write either an explicit bound or unbound value rather than inferring a
 	// work bead from mutable session metadata during collection.
 	AttributionV2 *InvocationAttribution `json:"attribution_v2,omitempty"`
+	FormulaName   string                 `json:"formula_name,omitempty"` // formula the acting bead's run root was compiled from; empty = unattributed
 
 	Kind Kind `json:"kind"`
 

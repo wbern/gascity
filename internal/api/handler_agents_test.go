@@ -1,21 +1,27 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type partialAgentSessionLister struct {
@@ -258,6 +264,106 @@ func TestAgentListUnlimitedImportedPoolDiscovery(t *testing.T) {
 	}
 }
 
+// gc init writes an agent with no max_active_sessions plus a [[named_session]]
+// for it. That template is pool-shaped, and instance discovery only matches
+// "<name>-" sessions, so the named session has to reach the roster from
+// config, running or not. A routed-work instance of the template is live
+// here, so the roster is not empty and the configured-pool fallback cannot
+// stand in for the named session.
+func TestAgentListIncludesOwnNamedSessionOfUnlimitedTemplate(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		t.Run(fmt.Sprintf("running=%v", running), func(t *testing.T) {
+			state := newFakeState(t)
+			initCfg := config.DefaultCity(state.cityName)
+			state.cfg.Agents = initCfg.Agents
+			state.cfg.NamedSessions = initCfg.NamedSessions
+			identity := initCfg.NamedSessions[0].QualifiedName()
+			instance := identity + "-1"
+			live := []string{instance}
+			if running {
+				live = append(live, identity)
+			}
+			for _, qn := range live {
+				if err := state.sp.Start(context.Background(), agentSessionName(state.cityName, qn, ""), runtime.Config{}); err != nil {
+					t.Fatalf("start session for %s: %v", qn, err)
+				}
+			}
+			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
+
+			req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			var resp struct {
+				Items []agentResponse `json:"items"`
+				Total int             `json:"total"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Total != 2 {
+				t.Fatalf("Total = %d, want 2: named session %s and instance %s (items=%+v)", resp.Total, identity, instance, resp.Items)
+			}
+			byName := make(map[string]agentResponse, len(resp.Items))
+			for _, item := range resp.Items {
+				byName[item.Name] = item
+			}
+			item, ok := byName[identity]
+			if !ok {
+				t.Fatalf("no row for named session %s (items=%+v)", identity, resp.Items)
+			}
+			if item.Running != running {
+				t.Errorf("%s Running = %v, want %v", identity, item.Running, running)
+			}
+			if item.Pool != identity {
+				t.Errorf("%s Pool = %q, want %q, matching GET /agent/%s", identity, item.Pool, identity, identity)
+			}
+			if inst, ok := byName[instance]; !ok || !inst.Running {
+				t.Errorf("instance %s = %+v (listed=%v), want a running row", instance, inst, ok)
+			}
+		})
+	}
+}
+
+// A failed session listing leaves the template's instances unknown, but its
+// own named session comes from config: the roster keeps that row and names
+// the failure in partial_errors rather than dropping the agent.
+func TestAgentListKeepsOwnNamedSessionWhenListingFails(t *testing.T) {
+	state := newFakeState(t)
+	state.sp = runtime.NewFailFake()
+	initCfg := config.DefaultCity(state.cityName)
+	state.cfg.Agents = initCfg.Agents
+	state.cfg.NamedSessions = initCfg.NamedSessions
+	identity := initCfg.NamedSessions[0].QualifiedName()
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		Items         []agentResponse `json:"items"`
+		PartialErrors []string        `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.ContainsFunc(resp.PartialErrors, func(e string) bool { return strings.HasPrefix(e, "agent "+identity+": ") }) {
+		t.Fatalf("partial_errors = %v, want an entry naming agent %s", resp.PartialErrors, identity)
+	}
+	if !slices.ContainsFunc(resp.Items, func(item agentResponse) bool { return item.Name == identity }) {
+		t.Fatalf("no row for named session %s beside the listing error (items=%+v)", identity, resp.Items)
+	}
+}
+
 func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -296,7 +402,7 @@ func TestFindAgentCanonicalSingletonPoolRejectsSuffix(t *testing.T) {
 	if _, ok := findAgent(cfg, "myrig/worker-1"); ok {
 		t.Fatal("findAgent(myrig/worker-1) = true, want false for canonical singleton pool")
 	}
-	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil, nil)
 	if len(expanded) != 1 {
 		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
 	}
@@ -314,7 +420,7 @@ func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
 	if isMultiSessionAgent(cfg.Agents[0]) {
 		t.Fatal("isMultiSessionAgent(max=0) = true, want false")
 	}
-	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil, nil)
 	if len(expanded) != 1 {
 		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
 	}
@@ -323,6 +429,58 @@ func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
 	}
 	if expanded[0].pool != "" {
 		t.Fatalf("expandAgent()[0].pool = %q, want empty", expanded[0].pool)
+	}
+}
+
+func TestExpandAgentListsOwnNamedSessionOfPool(t *testing.T) {
+	coordinator := config.Agent{Name: "coordinator"}
+	ownNamed := []config.NamedSession{{Template: "coordinator", Mode: "always"}}
+	tests := []struct {
+		name    string
+		agent   config.Agent
+		named   []config.NamedSession
+		running []string
+		noSP    bool
+		want    []string
+	}{
+		{name: "unlimited with nothing running", agent: coordinator, named: ownNamed, want: []string{"coordinator"}},
+		{
+			name: "unlimited keeps discovered instances", agent: coordinator, named: ownNamed,
+			running: []string{"coordinator", "coordinator-gc-7"},
+			want:    []string{"coordinator", "coordinator-gc-7"},
+		},
+		{
+			name: "explicit pool settings are left alone", agent: config.Agent{Name: "coordinator", MaxActiveSessions: intPtr(-1)}, named: ownNamed,
+			running: []string{"coordinator-gc-7"},
+			want:    []string{"coordinator-gc-7"},
+		},
+		{name: "no session provider lists it once", agent: coordinator, named: ownNamed, noSP: true, want: []string{"coordinator"}},
+		{
+			name:  "imported rig agent",
+			agent: config.Agent{Name: "refinery", Dir: "myrig", BindingName: "gs"},
+			named: []config.NamedSession{{Template: "refinery", Dir: "myrig", BindingName: "gs"}},
+			want:  []string{"myrig/gs.refinery"},
+		},
+		{name: "named session under another identity", agent: coordinator, named: []config.NamedSession{{Name: "lead", Template: "coordinator"}}},
+		{name: "no named session", agent: coordinator, running: []string{"coordinator-gc-7"}, want: []string{"coordinator-gc-7"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sp sessionLister
+			if !tt.noSP {
+				sp = partialAgentSessionLister{running: tt.running}
+			}
+			var names []string
+			for _, ea := range expandAgent(tt.agent, "city", "", sp, tt.named) {
+				names = append(names, ea.qualifiedName)
+				if ea.pool != tt.agent.QualifiedName() {
+					t.Errorf("%s: pool = %q, want %q", ea.qualifiedName, ea.pool, tt.agent.QualifiedName())
+				}
+			}
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("expandAgent() = %v, want %v", names, tt.want)
+			}
+		})
 	}
 }
 
@@ -1263,7 +1421,7 @@ func TestComputeAgentState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeAgentState(tt.suspended, tt.quarantined, tt.running, tt.activeBead, tt.lastAct)
+			got := computeAgentState(tt.suspended, tt.quarantined, tt.running, tt.activeBead, tt.lastAct, runtime.ProgramStatus{})
 			if got != tt.want {
 				t.Errorf("computeAgentState() = %q, want %q", got, tt.want)
 			}
@@ -1792,5 +1950,334 @@ func TestLiveActiveBeadStoreErrors(t *testing.T) {
 				t.Fatalf("active bead = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// listCountingStore counts every List call, so a test can prove a store was
+// never read.
+type listCountingStore struct {
+	beads.Store
+	listCalls int
+}
+
+func (s *listCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.List(query)
+}
+
+// suspendedRigLookup is a city with rigs alpha and beta, each holding
+// in_progress work assigned to "session-id". alpha sorts first, so a lookup
+// that reads it returns alpha's bead.
+type suspendedRigLookup struct {
+	state     *fakeState
+	alpha     *listCountingStore
+	beta      *listCountingStore
+	alphaWork string
+	betaWork  string
+}
+
+func newSuspendedRigLookup(t *testing.T) suspendedRigLookup {
+	t.Helper()
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "alpha", Path: "/tmp/alpha"},
+		{Name: "beta", Path: "/tmp/beta"},
+	}
+	alpha := &listCountingStore{Store: &beads.MemStore{IDPrefix: "alpha"}}
+	beta := &listCountingStore{Store: &beads.MemStore{IDPrefix: "beta"}}
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	l := suspendedRigLookup{state: state, alpha: alpha, beta: beta}
+	l.alphaWork = addActiveWork(t, alpha.Store, "session-id")
+	l.betaWork = addActiveWork(t, beta.Store, "session-id")
+	return l
+}
+
+// suspendAlphaAtRuntime suspends rig alpha in runtime state the way
+// `gc rig suspend alpha` records it.
+func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
+	t.Helper()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, state.cityPath, "alpha", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended(alpha): %v", err)
+	}
+}
+
+// lookupActiveBead runs the cached or live active-bead lookup.
+func lookupActiveBead(srv *Server, live bool, rig string, assignees ...string) string {
+	if live {
+		return srv.findLiveActiveBeadForAssignees(rig, assignees...)
+	}
+	return srv.findActiveBeadForAssignees(rig, assignees...)
+}
+
+// TestActiveBeadLookupSkipsSuspendedRig: a rig suspended by effective state
+// has no cache, so any read of its store goes to bd and restarts its retired
+// proxy and Dolt (#8162). The unscoped lookup searches the other rigs only.
+func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{{"live", true}, {"cached", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+
+			got := lookupActiveBead(New(l.state), tc.live, "", "session-id")
+
+			if l.alpha.listCalls != 0 {
+				t.Errorf("suspended rig alpha List calls = %d, want 0", l.alpha.listCalls)
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want beta's %q", got, l.betaWork)
+			}
+		})
+	}
+}
+
+// TestActiveBeadLookupForSuspendedRigReadsNoStore: a rig-scoped lookup for a
+// suspended rig whose store no unsuspended rig shares answers nothing instead
+// of falling back to every rig. That holds for a store of its own and for one
+// it shares only with another suspended rig.
+func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		shareWithSuspendedRig bool
+	}{{"own store", false}, {"store shared with a suspended rig", true}} {
+		for _, live := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/live=%v", tc.name, live), func(t *testing.T) {
+				l := newSuspendedRigLookup(t)
+				suspendAlphaAtRuntime(t, l.state)
+				if tc.shareWithSuspendedRig {
+					l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "gamma", Path: "/tmp/gamma", SuspendedOnStart: true})
+					l.state.stores["gamma"] = l.alpha
+				}
+
+				got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
+
+				if got != "" {
+					t.Errorf("active bead = %q, want none", got)
+				}
+				if l.alpha.listCalls != 0 || l.beta.listCalls != 0 {
+					t.Errorf("List calls alpha=%d beta=%d, want no store read", l.alpha.listCalls, l.beta.listCalls)
+				}
+			})
+		}
+	}
+}
+
+// TestActiveBeadLookupUsesEffectiveRigSuspension: the skipped set is the one
+// statusWorkCounts skips. A runtime override wins; without one, the config's
+// suspended_on_start (or legacy suspended) decides.
+func TestActiveBeadLookupUsesEffectiveRigSuspension(t *testing.T) {
+	tests := []struct {
+		name      string
+		rig       config.Rig
+		runtime   *bool
+		wantAlpha bool
+	}{
+		{
+			name: "suspended_on_start without runtime override",
+			rig:  config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+		},
+		{
+			name:      "suspended_on_start with runtime resume",
+			rig:       config.Rig{Name: "alpha", Path: "/tmp/alpha", SuspendedOnStart: true},
+			runtime:   boolPtr(false),
+			wantAlpha: true,
+		},
+		{
+			name: "legacy suspended",
+			rig:  config.Rig{Name: "alpha", Path: "/tmp/alpha", Suspended: true},
+		},
+		{
+			name:    "runtime suspend over suspended_on_start false",
+			rig:     config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+			runtime: boolPtr(true),
+		},
+	}
+	for _, tt := range tests {
+		for _, live := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/live=%v", tt.name, live), func(t *testing.T) {
+				l := newSuspendedRigLookup(t)
+				l.state.cfg.Rigs[0] = tt.rig
+				if tt.runtime != nil {
+					if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, l.state.cityPath, "alpha", tt.runtime); err != nil {
+						t.Fatalf("SetRigSuspended(alpha, %v): %v", *tt.runtime, err)
+					}
+				}
+
+				got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+				want := l.betaWork
+				if tt.wantAlpha {
+					want = l.alphaWork
+				}
+				if read := l.alpha.listCalls > 0; read != tt.wantAlpha {
+					t.Errorf("alpha read = %v (List calls %d), want %v", read, l.alpha.listCalls, tt.wantAlpha)
+				}
+				if got != want {
+					t.Errorf("active bead = %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestActiveBeadLookupReadsRigInferredSuspended: a rig that status infers
+// suspended because all of its agents are keeps a refreshing cache and is
+// still read.
+func TestActiveBeadLookupReadsRigInferredSuspended(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			l.state.cfg.Rigs = l.state.cfg.Rigs[1:]
+			delete(l.state.stores, "alpha")
+			l.state.cfg.Agents = []config.Agent{
+				{Name: "worker", Dir: "beta", Provider: "test-agent", Suspended: true},
+			}
+			l.state.cfg.NamedSessions = nil
+
+			got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+			if l.beta.listCalls == 0 {
+				t.Error("beta was not read")
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want beta's %q", got, l.betaWork)
+			}
+		})
+	}
+}
+
+// TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias: in legacy
+// shared-file mode every rig aliases one store, which the controller keeps
+// warm even for a suspended rig. A suspended alpha must not hide the store
+// that beta still reaches, whether the lookup is unscoped or scoped to alpha.
+func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("unscoped/live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+			l.state.stores["alpha"] = l.beta
+
+			got := lookupActiveBead(New(l.state), live, "", "session-id")
+
+			if l.beta.listCalls == 0 {
+				t.Error("shared store was not read through beta")
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want %q", got, l.betaWork)
+			}
+		})
+		// The scoped lookup reads the shared store and nothing else: able
+		// has a store of its own and sorts first, so a lookup that fell
+		// back to every store would answer able's bead.
+		t.Run(fmt.Sprintf("scoped to alpha/live=%v", live), func(t *testing.T) {
+			l := newSuspendedRigLookup(t)
+			suspendAlphaAtRuntime(t, l.state)
+			l.state.stores["alpha"] = l.beta
+			able := &listCountingStore{Store: &beads.MemStore{IDPrefix: "able"}}
+			addActiveWork(t, able.Store, "session-id")
+			l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "able", Path: "/tmp/able"})
+			l.state.stores["able"] = able
+
+			got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
+
+			if able.listCalls != 0 {
+				t.Errorf("rig able List calls = %d, want 0", able.listCalls)
+			}
+			if got != l.betaWork {
+				t.Errorf("active bead = %q, want the shared store's %q", got, l.betaWork)
+			}
+		})
+	}
+}
+
+// TestActiveBeadLookupSuspensionStateEdges: an unreadable state file or an
+// unknown city path still applies the config defaults, neither skipping nor
+// reading every rig wholesale.
+func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
+	t.Run("corrupt state file", func(t *testing.T) {
+		l := newSuspendedRigLookup(t)
+		l.state.cfg.Rigs[0].SuspendedOnStart = true
+		path := citylayout.SuspensionStateFile(l.state.cityPath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := New(l.state).findActiveBeadForAssignees("", "session-id")
+
+		if l.alpha.listCalls != 0 {
+			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
+		}
+		if l.beta.listCalls == 0 || got != l.betaWork {
+			t.Errorf("active bead = %q (beta List calls %d), want beta's %q", got, l.beta.listCalls, l.betaWork)
+		}
+	})
+	t.Run("empty city path", func(t *testing.T) {
+		l := newSuspendedRigLookup(t)
+		l.state.cfg.Rigs[0].SuspendedOnStart = true
+		l.state.cityPath = ""
+		cwd := t.TempDir()
+		t.Chdir(cwd)
+		relative := citylayout.SuspensionStateFile("")
+		if err := os.MkdirAll(filepath.Dir(relative), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(relative, []byte(`{"rigs":{"beta":{"suspended":true}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got := New(l.state).findLiveActiveBeadForAssignees("", "session-id")
+
+		if l.alpha.listCalls != 0 {
+			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
+		}
+		if got != l.betaWork {
+			t.Errorf("active bead = %q, want beta's %q (a relative state file must not be read)", got, l.betaWork)
+		}
+	})
+}
+
+// TestActiveBeadLookupLogsUnreadableSuspensionStateOnce: every lookup reads
+// the state file, once per row of a list, so an unreadable file is logged
+// once, naming the file, until it reads again. A fault after that is logged
+// again.
+func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
+	l := newSuspendedRigLookup(t)
+	path := citylayout.SuspensionStateFile(l.state.cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeState := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := New(l.state)
+	lookupRows := func() {
+		for range 3 {
+			srv.findActiveBeadForAssignees("", "session-id")
+		}
+	}
+	var logs bytes.Buffer
+	t.Cleanup(captureLog(t, &logs))
+
+	writeState("{not json")
+	lookupRows()
+	if n := strings.Count(logs.String(), path); n != 1 {
+		t.Fatalf("corrupt state file logged %d times naming %s, want 1; log:\n%s", n, path, logs.String())
+	}
+
+	writeState(`{}`)
+	lookupRows()
+	writeState("{not json")
+	lookupRows()
+	if n := strings.Count(logs.String(), path); n != 2 {
+		t.Fatalf("state file corrupt again after it read logged %d times in all, want 2; log:\n%s", n, logs.String())
 	}
 }

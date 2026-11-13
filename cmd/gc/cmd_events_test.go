@@ -19,6 +19,7 @@ import (
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestDoEventsCityDefaultUsesJSONLItems(t *testing.T) {
@@ -446,7 +447,7 @@ func TestDoEventsFallsBackToLocalCityEventsForExplicitLocalSupervisorAPITranspor
 		Message: "stopped",
 	})
 
-	server := httptest.NewServer(http.NotFoundHandler())
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.NotFoundHandler()))
 	apiURL := server.URL
 	server.Close()
 
@@ -614,7 +615,7 @@ func TestDoEventsSeqFallsBackToLocalCityEventHeadForExplicitLocalSupervisorAPITr
 	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	rec.Record(events.Event{Type: events.SessionStopped, Actor: "gc"})
 
-	server := httptest.NewServer(http.NotFoundHandler())
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.NotFoundHandler()))
 	apiURL := server.URL
 	server.Close()
 
@@ -1351,7 +1352,7 @@ func TestDoEventsRotateRequiresRunningSupervisor(t *testing.T) {
 }
 
 func TestDoEventsRotateCityNotFoundErrorIsPinned(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/missing-city/events/rotate" {
 			t.Fatalf("path = %s, want missing-city rotate path", r.URL.Path)
 		}
@@ -1360,7 +1361,7 @@ func TestDoEventsRotateCityNotFoundErrorIsPinned(t *testing.T) {
 			"status": http.StatusNotFound,
 			"detail": gcapi.CityNotFoundOrNotRunningDetail("missing-city"),
 		})
-	}))
+	})))
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
@@ -1426,7 +1427,7 @@ type testEventRoutes struct {
 
 func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/city/mc-city/events":
 			if routes.cityEvents == nil {
@@ -1456,7 +1457,7 @@ func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server 
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-	}))
+	})))
 }
 
 func eventRotateTestResponse(status string) cliEventsRotateResponse {
@@ -2090,5 +2091,30 @@ func TestDoEventsWatchReplayDrainsAfterSeq(t *testing.T) {
 		if e.Seq != int64(i+101) {
 			t.Fatalf("event[%d].Seq = %d, want %d (ascending, contiguous from 101)", i, e.Seq, i+101)
 		}
+	}
+}
+
+// TestEventsTestServerIgnoresAForeignLoopbackProbe is the ga-ylpbsy.94.5
+// regression. A host daemon that sweeps listening loopback ports can reach a
+// test's httptest server. On the shared CI/dev host `moshi-hook serve` sends
+// `GET /` with `Connection: close` to each new loopback listener; its scan
+// runs about once a minute. That request is not the client under test, so the
+// server must answer it 404 instead of failing the test as a misroute.
+func TestEventsTestServerIgnoresAForeignLoopbackProbe(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{})
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("building the probe: %v", err)
+	}
+	req.Close = true
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("probe status = %d, want 404", resp.StatusCode)
 	}
 }

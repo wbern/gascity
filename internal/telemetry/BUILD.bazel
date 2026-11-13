@@ -15,8 +15,6 @@ go_library(
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//semconv/v1.26.0:v1_26_0",
-        "@io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp//:otlploghttp",
-        "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp//:otlpmetrichttp",
         "@io_opentelemetry_go_otel_log//:log",
         "@io_opentelemetry_go_otel_log//global",
         "@io_opentelemetry_go_otel_metric//:metric",
@@ -29,6 +27,7 @@ go_library(
 go_test(
     name = "telemetry_test",
     srcs = [
+        "exporter_register_test.go",
         "recorder_invocation_test.go",
         "recorder_test.go",
         "subprocess_test.go",
@@ -42,6 +41,8 @@ go_test(
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel//semconv/v1.26.0:v1_26_0",
+        "@io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp//:otlploghttp",
+        "@io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp//:otlpmetrichttp",
         "@io_opentelemetry_go_otel_log//:log",
         "@io_opentelemetry_go_otel_log//global",
         "@io_opentelemetry_go_otel_sdk//resource",
@@ -59,6 +60,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

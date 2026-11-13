@@ -20,7 +20,7 @@ import (
 func TestCreateAliasedNamed_DerivesSessionNameFromAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Alias:    "kenneth",
@@ -51,7 +51,7 @@ func TestCreateAliasedNamed_DerivesSessionNameFromAlias(t *testing.T) {
 func TestCreateAliasedNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Alias:    "gas-city-infra/devops",
@@ -76,7 +76,7 @@ func TestCreateAliasedNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 func TestCreateAliasedNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "helper",
@@ -96,7 +96,7 @@ func TestCreateAliasedNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 func TestCreateAliasedNamed_ExplicitNameTakesPrecedenceOverAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Alias:        "kenneth",
@@ -118,7 +118,7 @@ func TestCreateAliasedNamed_ExplicitNameTakesPrecedenceOverAlias(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_DerivesSessionNameFromAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		BeadOnly: true,
@@ -147,7 +147,7 @@ func TestCreateAliasedBeadOnlyNamed_DerivesSessionNameFromAlias(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		BeadOnly: true,
@@ -177,7 +177,7 @@ func TestCreateAliasedBeadOnlyNamed_QualifiedAliasGetsDoubleDash(t *testing.T) {
 func TestCreateAliasedBeadOnlyNamed_EmptyAliasFallsBackToBeadID(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		BeadOnly: true,

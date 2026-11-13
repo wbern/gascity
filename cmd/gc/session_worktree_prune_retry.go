@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -84,7 +86,10 @@ func linkedWorktreeRetirementIdentity(city, rigName, rigRoot, path string) (work
 	if rigName == "" || rigRoot == "" {
 		return r, errors.New("retirement identity is incomplete")
 	}
-	root, err := normalizeReapBorrowPath(city)
+	// The boundary is the configured worktrees root (workdir.WorktreesRoot:
+	// GC_WORKTREES_DIR, T3CODE_WORKTREES_DIR, T3CODE_HOME), the same root the
+	// prune and the reaper discover under, not a hard-coded <city>/.gc/worktrees.
+	root, err := normalizeReapBorrowPath(workdir.WorktreesRoot(city))
 	if err != nil {
 		return r, err
 	}
@@ -92,7 +97,7 @@ func linkedWorktreeRetirementIdentity(city, rigName, rigRoot, path string) (work
 	if err != nil {
 		return r, err
 	}
-	boundary := filepath.Join(root, ".gc", "worktrees", rigName)
+	boundary := filepath.Join(root, rigName)
 	if r.Path == boundary || !pathAtOrUnder(boundary, r.Path) {
 		return r, errors.New("retirement path is outside its rig workspace")
 	}
@@ -596,7 +601,7 @@ func retiredWorkerDirOwner(ctx context.Context, store beads.Store, id string) (b
 }
 
 func retiredWorkerDirOwnerMatches(owner beads.Bead, record workerDirRetirement) bool {
-	if owner.Status != "closed" || owner.ID != record.SessionID || owner.Metadata["gc.user_paused"] == "true" {
+	if owner.Status != "closed" || owner.ID != record.SessionID || owner.Metadata[beadmeta.UserPausedMetadataKey] == "true" {
 		return false
 	}
 	path, err := normalizeReapBorrowPath(contract.WorkerDirFromMetadata(owner.Metadata))

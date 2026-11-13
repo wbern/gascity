@@ -28,16 +28,16 @@ var wispGCSweepsByCity sync.Map
 // wispGCContextRunner is implemented by wisp GC trackers whose sweep stops
 // before its next arm once ctx is done.
 type wispGCContextRunner interface {
-	runGCContext(ctx context.Context, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
+	runGCContext(ctx context.Context, legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // runWispGCWithContext runs one sweep, honoring ctx when the tracker supports
 // it.
-func runWispGCWithContext(ctx context.Context, wg wispGC, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
+func runWispGCWithContext(ctx context.Context, wg wispGC, legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	if cr, ok := wg.(wispGCContextRunner); ok {
-		return cr.runGCContext(ctx, graphStore, sessionLedger, mailStore, now)
+		return cr.runGCContext(ctx, legs, graphStore, sessionLedger, mailStore, now)
 	}
-	return wg.runGC(graphStore, sessionLedger, mailStore, now)
+	return wg.runGC(legs, graphStore, sessionLedger, mailStore, now)
 }
 
 // wispGCRunner runs wisp GC sweeps off the controller tick goroutine, at most
@@ -200,6 +200,16 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	if !cr.wg.shouldRun(now) {
 		return
 	}
+	// On a city that relocates the graph class, the attachment holders and the
+	// v1 poured molecule roots live on the work legs, not the binding the GC
+	// sweeps (wispGCLegs). A single-store city hands none: its graph-class
+	// store is its work store. The work arm runs on its own lane; the tick only
+	// wakes it.
+	var legs wispGCLegs
+	if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
+		legs = cr.workLegs()
+		cr.workGCLaneOf().wake()
+	}
 	// A runtime replaced in-process (supervisor city restart) may leave its
 	// sweep running past the bounded shutdown drain; never overlap it.
 	cityKey := cr.cityPath
@@ -217,7 +227,7 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 
 	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
-		purged, err := runWispGCWithContext(ctx, wg, graphStore, sessionLedger, mailStore, now)
+		purged, err := runWispGCWithContext(ctx, wg, legs, graphStore, sessionLedger, mailStore, now)
 		return purged, errors.Join(err, sweepLeakedRigSteps(ctx, rigStores))
 	}) {
 		wispGCSweepsByCity.Delete(cityKey)
@@ -244,11 +254,17 @@ func (cr *CityRuntime) reportWispGC(trace *sessionReconcilerTraceCycle) {
 	if !ok {
 		return
 	}
-	trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete, "wisp_gc", res.duration, map[string]any{
+	payload := map[string]any{
 		"purged":     res.purged,
 		"background": true,
 		"started_at": res.started.UTC().Format(time.RFC3339),
-	})
+	}
+	if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated
+		if age, ran := cr.workGCLaneOf().lastPassAge(time.Now()); ran {
+			payload["work_arm_last_pass_age_ms"] = age.Milliseconds()
+		}
+	}
+	trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete, "wisp_gc", res.duration, payload)
 	if res.err != nil {
 		for _, line := range strings.Split(res.err.Error(), "\n") {
 			if line == "" {

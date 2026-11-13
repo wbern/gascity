@@ -34,6 +34,7 @@ go_test(
     name = "materialize_test",
     srcs = [
         "mcp_project_adopt_test.go",
+        "mcp_project_plan_test.go",
         "mcp_project_test.go",
         "mcp_read_test.go",
         "mcp_test.go",
@@ -60,6 +61,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

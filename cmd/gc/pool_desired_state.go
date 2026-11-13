@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -39,6 +39,7 @@ type poolNewDemandLoadVeto struct {
 	Vetoed  bool
 	Load    float64
 	Ceiling float64
+	NumCPU  int
 }
 
 // resolvePoolNewDemandLoadVeto probes the host load once and decides whether
@@ -48,13 +49,46 @@ type poolNewDemandLoadVeto struct {
 // DesiredStateResult, mirroring PoolNewDemandInterleaveSeed) rather than
 // letting computePoolDesiredStates probe internally.
 func resolvePoolNewDemandLoadVeto(cfg *config.City, scaleCheckCounts map[string]int) poolNewDemandLoadVeto {
-	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
-		if load, err := poolNewDemandLoadAverageFn(); err == nil {
-			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
-			if load > ceiling {
-				return poolNewDemandLoadVeto{Vetoed: true, Load: load, Ceiling: ceiling}
-			}
-		}
+	if len(scaleCheckCounts) == 0 {
+		return poolNewDemandLoadVeto{}
+	}
+	return poolNewDemandLoadVetoFor(cfg, scaleCheckCounts, readPoolNewDemandLoad(cfg))
+}
+
+// poolLoadReading is one probe of the host: its 1-minute load average and the
+// CPU count the veto ceiling scales with. OK is false when the guard is off or
+// the load was unreadable, which proceeds (fail-open).
+type poolLoadReading struct {
+	Load   float64
+	NumCPU int
+	OK     bool
+}
+
+// readPoolNewDemandLoad probes the host load once, when the guard is enabled.
+// The reconciler's gather phase takes the reading so the allocator's decision
+// stays a pure function of its inputs; resolvePoolNewDemandLoadVeto takes it
+// for the callers that decide outside that pass.
+func readPoolNewDemandLoad(cfg *config.City) poolLoadReading {
+	if cfg.Daemon.PoolNewDemandMaxLoadPercent() <= 0 {
+		return poolLoadReading{}
+	}
+	load, err := poolNewDemandLoadAverageFn()
+	if err != nil {
+		return poolLoadReading{}
+	}
+	return poolLoadReading{Load: load, NumCPU: runtime.NumCPU(), OK: true}
+}
+
+// poolNewDemandLoadVetoFor is the veto verdict for reading: a function of its
+// arguments alone.
+func poolNewDemandLoadVetoFor(cfg *config.City, scaleCheckCounts map[string]int, reading poolLoadReading) poolNewDemandLoadVeto {
+	pct := cfg.Daemon.PoolNewDemandMaxLoadPercent()
+	if pct <= 0 || len(scaleCheckCounts) == 0 || !reading.OK {
+		return poolNewDemandLoadVeto{}
+	}
+	ceiling := float64(reading.NumCPU) * float64(pct) / 100
+	if reading.Load > ceiling {
+		return poolNewDemandLoadVeto{Vetoed: true, Load: reading.Load, Ceiling: ceiling, NumCPU: reading.NumCPU}
 	}
 	return poolNewDemandLoadVeto{}
 }
@@ -75,6 +109,10 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	// WorkBindingResident reports that WorkBeadID was read from a relocated
+	// class binding: WorkStoreRef is then the city key the binding is grouped
+	// under, and the row's owner is its gc.root_store_ref.
+	WorkBindingResident bool
 	// WorktreeSpec is the single-owner evidence published by the provisioner.
 	// When present, the pool path verifies it before publishing work_dir on a
 	// session bead; a mismatch fails the whole atomic metadata update.
@@ -94,6 +132,29 @@ type SessionRequest struct {
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
 	// demand (follow-up to #2893).
 	FloorGuarantee bool
+	// Parked marks a resume request for a seat parked on pre-assigned
+	// blocked work (parkedSeats): it keeps the seat selected, so it sleeps
+	// rather than draining as an orphan, but takes no cap headroom and is
+	// not pool demand (PoolDesiredCounts) until its pin is ready.
+	Parked bool
+	// ParkedContinuation marks a resume request of a parked seat, or of one
+	// waking from its park, for its pre-assigned work (parkVerdict.Continues):
+	// the wake resumes the seat's conversation, so its binding keeps the
+	// seat's recorded work dir, as a live continuation's does
+	// (computePoolTriggerBindingPatch), while that dir can host the resume
+	// (parkedWorkDirUsable).
+	ParkedContinuation bool
+	// NameOnly marks a request whose work bead only names a seat that a
+	// custom scale_check count places (scaleCheckDemand.NameOnly). When
+	// realization refuses that work's worktree evidence, the seat starts
+	// unnamed in the pool's own directory (unnamedPoolRequest) rather than
+	// leaving the pool a seat short of its count (nameOnlyFallback).
+	NameOnly bool
+	// NameRefused marks that unnamed request (unnamedPoolRequest). Its work
+	// dir is the pool's own directory (poolTriggerWorkDir), so a reused seat
+	// that is not alive moves there rather than start in the directory its
+	// last binding recorded (poolSeatBindingPatch).
+	NameRefused bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -250,7 +311,15 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 	}
 	counts := make(map[string]int, len(states))
 	for _, state := range states {
-		counts[state.Template] = len(state.Requests)
+		n := 0
+		for _, request := range state.Requests {
+			if !request.Parked {
+				n++
+			}
+		}
+		if n > 0 {
+			counts[state.Template] = n
+		}
 	}
 	return counts
 }
@@ -533,6 +602,81 @@ func computePoolDesiredStatesWithOptions(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, newDemandInterleaveSeed, loadVeto, admissionVerdicts, decisionTime, nil, trace)
+}
+
+// computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
+// pass's parked seats (parkSeats): a parked seat's resume request is marked
+// Parked, accepted outside the nested caps (it takes no headroom from
+// anything, floors included) and left out of the pool's demand count. A seat
+// is parked here only when every request it makes is an open pin. It draws a
+// fresh rotation seed and load veto for this one call; the paired buildDesiredState
+// pass uses computePoolDesiredStatesWithOptionsParked with its own.
+func computePoolDesiredStatesParkedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	decisionTime time.Time,
+	parked parkedSeats,
+) []PoolDesiredState {
+	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, parked, nil)
+}
+
+// computePoolDesiredStatesWithOptionsParked is computePoolDesiredStatesWithOptions
+// with the pass's parked seats (see computePoolDesiredStatesParkedAt).
+func computePoolDesiredStatesWithOptionsParked(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	newDemandInterleaveSeed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
+	parked parkedSeats,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	// The zero decision time reads the wall clock here, at the edge: the
+	// allocator's pure decide always supplies its pass's clock and calls
+	// computePoolDesiredStatesDecided directly.
+	if decisionTime.IsZero() {
+		decisionTime = time.Now()
+	}
+	// The veto's trace belongs to the edge as well: it records at the controller's
+	// clock under a lock, and the allocator's decide (which passes no trace) must
+	// not reach it.
+	if loadVeto.Vetoed && trace != nil {
+		trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
+			"load":              loadVeto.Load,
+			"max_load_percent":  cfg.Daemon.PoolNewDemandMaxLoadPercent(),
+			"num_cpu":           loadVeto.NumCPU,
+			"ceiling":           loadVeto.Ceiling,
+			"templates_at_risk": len(scaleCheckCounts),
+		})
+	}
+	return computePoolDesiredStatesDecided(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, newDemandInterleaveSeed, loadVeto, admissionVerdicts, decisionTime, parked, trace)
+}
+
+// computePoolDesiredStatesDecided is computePoolDesiredStatesWithOptionsParked
+// at a decision time that is set: the body is a function of its arguments (the
+// trace, when given, only observes it).
+func computePoolDesiredStatesDecided(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	newDemandInterleaveSeed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
+	parked parkedSeats,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
 	if len(assignedWorkStoreRefs) > 0 && len(assignedWorkStoreRefs) != len(assignedWorkBeads) {
 		// Store refs are provenance, not optional positional hints. A malformed
 		// non-empty slice could bind a session to another rig, so drop this
@@ -588,12 +732,46 @@ func computePoolDesiredStatesWithOptions(
 	// session for it would only drain-and-re-wake every tick (gcw-ehvg P1a).
 	// It shares the caller's decision time when one was supplied.
 	now := decisionTime
-	if now.IsZero() {
-		now = time.Now()
-	}
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
+
+	// Resume tier: actionable assigned work beads whose assignee resolves
+	// to a non-closed session bead. These sessions must stay alive. A bead's
+	// routing does not depend on the agent, so it is resolved once and the
+	// beads bucketed by the template they route to, in order (A3).
+	routedWork := make(map[string][]int)
+	// unparkable are the seats holding work that is not an open pin: never
+	// parked, whatever the verdict says.
+	unparkable := make(map[string]bool)
+	for i, wb := range assignedWorkBeads {
+		routedTo := routedToOrLegacyWorkflowTarget(wb)
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		sessionBeadID := assigneeToSessionBeadID[assignee]
+		if routedTo == "" && sessionBeadID != "" {
+			routedTo = sessionBeadTemplate[sessionBeadID]
+			if routedTo == "" && len(cfg.Agents) == 1 {
+				routedTo = cfg.Agents[0].QualifiedName()
+			}
+		}
+		routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
+		if sessionBeadID != "" {
+			sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+			if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
+				continue
+			}
+		}
+		routedWork[routedTo] = append(routedWork[routedTo], i)
+		if wb.Status != "open" && sessionBeadID != "" {
+			unparkable[sessionBeadID] = true
+		}
+	}
 
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -607,7 +785,8 @@ func computePoolDesiredStatesWithOptions(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for workIndex, wb := range assignedWorkBeads {
+		for _, workIndex := range routedWork[template] {
+			wb := assignedWorkBeads[workIndex]
 			workStoreRef := ""
 			if len(assignedWorkStoreRefs) == len(assignedWorkBeads) && len(assignedWorkStoreRefs) > 0 {
 				canonical, valid := canonicalContinuationClaimStoreRef(cfg.Workspace.Name, assignedWorkStoreRefs[workIndex])
@@ -626,10 +805,6 @@ func computePoolDesiredStatesWithOptions(
 				// keeps the legacy no-store-ref fallback rather than dropping
 				// the work.
 			}
-			routedTo := routedToOrLegacyWorkflowTarget(wb)
-			if wb.Status != "in_progress" && wb.Status != "open" {
-				continue
-			}
 			// An OPEN bead deferred into the future is not claimable; waking a
 			// session for it just drains and re-wakes each tick (gcw-ehvg P1a).
 			// In-progress work resumes regardless (defer hides from claim, not
@@ -638,26 +813,7 @@ func computePoolDesiredStatesWithOptions(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == "" {
-				continue
-			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
-			if routedTo == "" && sessionBeadID != "" {
-				routedTo = sessionBeadTemplate[sessionBeadID]
-				if routedTo == "" && len(cfg.Agents) == 1 {
-					routedTo = cfg.Agents[0].QualifiedName()
-				}
-			}
-			routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
-			if sessionBeadID != "" {
-				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
-				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
-					continue
-				}
-			}
-			if routedTo != template {
-				continue
-			}
 			if sessionBeadID != "" {
 				// Named-session beads are materialized by the named-session
 				// loop in buildDesiredState, not by the pool path. Skipping
@@ -707,17 +863,19 @@ func computePoolDesiredStatesWithOptions(
 					continue
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
-					Template:       template,
-					BeadPriority:   beadPriorityRank(beadPriority(wb)),
-					Tier:           "resume",
-					ExistingActive: activeSessionBeadIDs[sessionBeadID],
-					SessionBeadID:  sessionBeadID,
-					WorkBeadID:     wb.ID,
-					WorkBeadTitle:  strings.TrimSpace(wb.Title),
-					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
-					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
-					WorkStoreRef:   workStoreRef,
-					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Template:           template,
+					BeadPriority:       beadPriorityRank(beadPriority(wb)),
+					Tier:               "resume",
+					ExistingActive:     activeSessionBeadIDs[sessionBeadID],
+					SessionBeadID:      sessionBeadID,
+					WorkBeadID:         wb.ID,
+					WorkBeadTitle:      strings.TrimSpace(wb.Title),
+					WorkPack:           strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+					WorkWorkspace:      strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+					WorkStoreRef:       workStoreRef,
+					BrainParentSID:     strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Parked:             parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
+					ParkedContinuation: parked.continues(sessionBeadID) && !unparkable[sessionBeadID],
 				})
 				continue
 			}
@@ -770,6 +928,9 @@ func computePoolDesiredStatesWithOptions(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
+	// A parked seat's requests stand outside the caps: they are accepted
+	// after them, and count toward no limit or floor.
+	resumeRequests, parkedRequests := splitParkedRequests(resumeRequests)
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
@@ -823,15 +984,6 @@ func computePoolDesiredStatesWithOptions(
 	// let the two calls independently reach opposite verdicts on the same
 	// tick (PR #131 review cycle 2).
 	newDemandVetoed := loadVeto.Vetoed
-	if newDemandVetoed && trace != nil {
-		trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
-			"load":              loadVeto.Load,
-			"max_load_percent":  cfg.Daemon.PoolNewDemandMaxLoadPercent(),
-			"num_cpu":           runtime.NumCPU(),
-			"ceiling":           loadVeto.Ceiling,
-			"templates_at_risk": len(scaleCheckCounts),
-		})
-	}
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
@@ -1016,7 +1168,44 @@ func computePoolDesiredStatesWithOptions(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace), parkedRequests)
+}
+
+// splitParkedRequests separates a parked seat's requests from the counted
+// ones, keeping each side's order.
+func splitParkedRequests(requests []SessionRequest) (counted, parked []SessionRequest) {
+	for _, req := range requests {
+		if req.Parked {
+			parked = append(parked, req)
+		} else {
+			counted = append(counted, req)
+		}
+	}
+	return counted, parked
+}
+
+// withParkedRequests adds each parked seat's first request to its template's
+// accepted state, one per seat, after the caps: it selects the seat (the
+// realize binds it like a resume) without being counted by them.
+func withParkedRequests(states []PoolDesiredState, parked []SessionRequest) []PoolDesiredState {
+	if len(parked) == 0 {
+		return states
+	}
+	seen := make(map[string]bool, len(parked))
+	for _, req := range parked {
+		if seen[req.SessionBeadID] {
+			continue
+		}
+		seen[req.SessionBeadID] = true
+		i := slices.IndexFunc(states, func(s PoolDesiredState) bool { return s.Template == req.Template })
+		if i < 0 {
+			states = append(states, PoolDesiredState{Template: req.Template})
+			i = len(states) - 1
+		}
+		states[i].Requests = append(states[i].Requests, req)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].Template < states[j].Template })
+	return states
 }
 
 // poolNewDemandInterleaveCounter backs nextPoolNewDemandInterleaveSeed, used
@@ -1113,6 +1302,7 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
 	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
 	request.WorkStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
+	request.WorkBindingResident = demand.BindingResident[workBeadID]
 	request.BrainParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
 	// Worktree evidence is per-bead like every field above it. Carrying the
 	// previous bead's spec into a rebound request would hand the session a
@@ -1125,6 +1315,20 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	if demand.WorktreeErrors != nil {
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
+	request.NameOnly = demand.NameOnly
+	return request
+}
+
+// unnamedPoolRequest is request without the work it names, the fields
+// requestWithScaleDemandProvenance sets, marked NameRefused: the request a
+// warm custom scale_check pool's seat made before its work was named, which
+// starts the seat in the pool's own directory and moves a reused seat that is
+// not alive there.
+func unnamedPoolRequest(request SessionRequest) SessionRequest {
+	request.WorkBeadID, request.WorkBeadTitle, request.WorkPack, request.WorkWorkspace = "", "", "", ""
+	request.WorkStoreRef, request.WorkBindingResident, request.BrainParentSID = "", false, ""
+	request.WorktreeSpec, request.WorktreeError, request.NameOnly = nil, "", false
+	request.NameRefused = true
 	return request
 }
 
@@ -1178,33 +1382,46 @@ func poolNewDemandRequests(
 ) (map[string][]SessionRequest, map[string][]SessionRequest) {
 	protected := make(map[string][]SessionRequest)
 	inFlight := make(map[string][]SessionRequest)
-	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
-	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
-		if !sortedSessionInfos[i].CreatedAt.Equal(sortedSessionInfos[j].CreatedAt) {
-			return sortedSessionInfos[i].CreatedAt.Before(sortedSessionInfos[j].CreatedAt)
+	// The rows' indexes in creation order, bucketed by template once: every
+	// test but the agent's own is the same for every agent (A3).
+	sorted := make([]int, len(sessionInfos))
+	for i := range sorted {
+		sorted[i] = i
+	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a, b := &sessionInfos[sorted[i]], &sessionInfos[sorted[j]]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
 		}
-		return sortedSessionInfos[i].ID < sortedSessionInfos[j].ID
+		return a.ID < b.ID
 	})
+	byTemplate := make(map[string][]int)
+	for _, i := range sorted {
+		sb := &sessionInfos[i]
+		if sb.ID == "" || sb.Closed {
+			continue
+		}
+		if sessionHasProviderTerminalErrorInfo(*sb) {
+			continue
+		}
+		if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
+			continue
+		}
+		if !isPoolManagedSessionInfo(*sb) {
+			continue
+		}
+		template := normalizedSessionTemplateInfo(*sb, cfg)
+		byTemplate[template] = append(byTemplate[template], i)
+	}
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
 			continue
 		}
 		template := agent.QualifiedName()
-		for _, sb := range sortedSessionInfos {
-			if sb.ID == "" || sb.Closed {
-				continue
-			}
-			if sessionHasProviderTerminalErrorInfo(sb) {
-				continue
-			}
-			if _, ok := resumeSessionBeadIDs[sb.ID]; ok {
-				continue
-			}
-			if !isEphemeralSessionInfoForAgent(sb, agent) || !isPoolManagedSessionInfo(sb) {
-				continue
-			}
-			if normalizedSessionTemplateInfo(sb, cfg) != template {
+		for _, row := range byTemplate[template] {
+			sb := sessionInfos[row]
+			if !isEphemeralSessionInfoForAgent(sb, agent) {
 				continue
 			}
 			req := SessionRequest{
@@ -1302,7 +1519,7 @@ func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City,
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
+	return !pendingCreateLeaseExpiredForRollbackAt(info, decisionTime, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

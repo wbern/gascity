@@ -31,7 +31,7 @@ func TestSetMetadataBatchBounded_TimesOutWhenStoreBlocks(t *testing.T) {
 	defer close(store.release) // let the leaked write goroutine finish after the test
 
 	start := time.Now()
-	got := setMetadataBatchBounded(store, bead.ID, map[string]string{"k": "v"}, 50*time.Millisecond)
+	got := setMetadataBatchBounded(store, bead.ID, map[string]string{"test_k": "v"}, 50*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if !errors.Is(got, errStartWriteTimedOut) {
@@ -48,14 +48,41 @@ func TestSetMetadataBatchBounded_PassesThroughOnSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setMetadataBatchBounded(mem, bead.ID, map[string]string{"k": "v"}, time.Second); err != nil {
+	if err := setMetadataBatchBounded(mem, bead.ID, map[string]string{"test_k": "v"}, time.Second); err != nil {
 		t.Fatalf("setMetadataBatchBounded: %v", err)
 	}
 	got, err := mem.Get(bead.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Metadata["k"] != "v" {
-		t.Errorf("metadata k = %q, want %q", got.Metadata["k"], "v")
+	if got.Metadata["test_k"] != "v" {
+		t.Errorf("metadata test_k = %q, want %q", got.Metadata["test_k"], "v")
+	}
+}
+
+func TestBoundedStartWrite_ReturnsTheOpResult(t *testing.T) {
+	got, err := boundedStartWrite(time.Second, func() (int, error) { return 7, nil })
+	if err != nil || got != 7 {
+		t.Fatalf("boundedStartWrite = (%d, %v), want (7, nil)", got, err)
+	}
+	wantErr := errors.New("op failed")
+	if _, err := boundedStartWrite(time.Second, func() (int, error) { return 0, wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want the op's error", err)
+	}
+}
+
+func TestBoundedStartWrite_TimesOutAndDiscardsTheLateResult(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	start := time.Now()
+	got, err := boundedStartWrite(50*time.Millisecond, func() (int, error) {
+		<-release
+		return 7, nil
+	})
+	if !errors.Is(err, errStartWriteTimedOut) || got != 0 {
+		t.Fatalf("boundedStartWrite = (%d, %v), want (0, errStartWriteTimedOut)", got, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("bounded write took %s, expected fail-fast near the 50ms deadline", elapsed)
 	}
 }
