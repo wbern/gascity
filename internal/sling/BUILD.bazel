@@ -40,6 +40,7 @@ go_library(
 go_test(
     name = "sling_test",
     srcs = [
+        "attachment_scope_fixtures_test.go",
         "bead_from_getters_zero_handle_test.go",
         "cycle_native_store_test.go",
         "cycle_test.go",
