@@ -122,6 +122,170 @@ jobs:
       - name: Unit tests — bead store, bd dispatch, control dispatch, formula compiler, molecule graph
         run: go test ./internal/beads/ ./internal/bddispatch/ ./internal/dispatch/ ./internal/formula/ ./internal/molecule/ -count=1
 
+  # PR gate for generated-artifact drift (gci-bt1ev). ci.yml (which carries the
+  # upstream preflight-generated job) is disabled on this fork, so nothing
+  # else catches stale cli.md/config.md/schemas or the OpenAPI spec + generated
+  # client. The pre-commit hook cannot be relied on (golangci-lint hangs,
+  # gcw-0jxzv), so on drift this job emits an applicable patch: printed in the
+  # log, uploaded as an artifact, and (for the genschema docs) consumed by
+  # docs-autofix.yml. The dashboard SPA bundle/TS client (`make dashboard-ci`)
+  # needs Node + npm install, so it lives in the separate preflight-dashboard
+  # job below (gci-bt1ev.1).
+  preflight-generated:
+    name: Preflight / generated artifacts
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # genschema/genspec are pure Go; the transitive dolt ICU dependency
+      # needs CGO headers that are unnecessary here (matches the drift script).
+      CGO_ENABLED: "0"
+      # Make the spec->client drift check fatal instead of skipping.
+      GC_REQUIRE_OAPI_CODEGEN: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: generated
+        with:
+          filters: |
+            generated:
+              # Generator code and everything the generators read: the cobra
+              # command tree (cli.md), config structs (config.md, schemas) and
+              # the API surface (OpenAPI spec, events, generated client).
+              - 'cmd/**'
+              - 'internal/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'scripts/check-generated-docs-drift.sh'
+              - 'scripts/docs-autofix-push.sh'
+              - '.github/workflows/fork-verify.yml'
+              # Generated outputs (hand edits drift too).
+              - 'docs/reference/**'
+      - name: Decide whether to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ steps.generated.outputs.generated }}
+        run: |
+          if [ "$EVENT" != pull_request ] || [ "$CHANGED" = true ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No generated inputs/outputs changed; skipping drift checks."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        with:
+          go-version-file: go.mod
+      - name: Generated reference docs drift check
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        run: ./scripts/check-generated-docs-drift.sh
+      - name: OpenAPI spec + generated client drift check
+        if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
+        run: make spec-ci
+      - name: make check-schema
+        if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
+        run: make check-schema
+      - name: Print regeneration patch
+        id: patch
+        if: ${{ failure() }}
+        run: |
+          git diff > generated-drift.patch
+          if [ -s generated-drift.patch ]; then
+            echo "has_patch=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Generated artifacts are stale. Apply with: git apply generated-drift.patch (artifact 'generated-drift-patch'), or run 'make generate' / 'make spec-ci' and commit."
+            cat generated-drift.patch
+          fi
+      - name: Upload generated-docs freshness patch
+        if: ${{ failure() && hashFiles('generated-docs-freshness.patch') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-docs-freshness-patch
+          path: generated-docs-freshness.patch
+          retention-days: 7
+      - name: Upload full regeneration patch
+        if: ${{ failure() && steps.patch.outputs.has_patch == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-drift-patch
+          path: generated-drift.patch
+          retention-days: 7
+
+  # PR gate for dashboard drift (gci-bt1ev.1, child of gci-bt1ev): the typed TS
+  # client generated from internal/api/openapi.json and the embedded SPA bundle
+  # internal/api/dashboardspa/dist. `make dashboard-ci` typechecks, rebuilds the
+  # SPA, regenerates the client and fails if either tree differs (client:
+  # Makefile dashboard-ci `git diff --quiet` on gc-supervisor-client; bundle: the
+  # second `git diff --quiet -- internal/api/dashboardspa/dist` in the same
+  # target, which prints "dist/ is stale"). Separate from
+  # preflight-generated because it needs Node + npm ci and is path-filtered
+  # more narrowly. Node comes from .nvmrc (same as upstream ci.yml's "22").
+  preflight-dashboard:
+    name: Preflight / dashboard bundle + client
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: dashboard
+        with:
+          filters: |
+            dashboard:
+              - 'internal/api/dashboardspa/**'
+              - 'internal/api/dashboardbff/**'
+              - 'internal/api/openapi.json'
+              - 'Makefile'
+              - '.nvmrc'
+              - '.github/workflows/fork-verify.yml'
+      - name: Decide whether to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ steps.dashboard.outputs.dashboard }}
+        run: |
+          if [ "$EVENT" != pull_request ] || [ "$CHANGED" = true ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No dashboard inputs/outputs changed; skipping dashboard drift check."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: internal/api/dashboardspa/web/package-lock.json
+      - name: Dashboard bundle + client drift check
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        run: make dashboard-ci
+      - name: Print dashboard regeneration patch
+        id: patch
+        if: ${{ failure() }}
+        run: |
+          git diff -- internal/api/dashboardspa/dist internal/api/dashboardspa/web/shared/src/generated > dashboard-drift.patch
+          if [ -s dashboard-drift.patch ]; then
+            echo "has_patch=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Dashboard generated client/bundle is stale. Apply with: git apply dashboard-drift.patch (artifact 'dashboard-drift-patch'), or run 'make dashboard-build' + 'npm run generate:client' in internal/api/dashboardspa/web and commit."
+            cat dashboard-drift.patch
+          fi
+      - name: Upload dashboard regeneration patch
+        if: ${{ failure() && steps.patch.outputs.has_patch == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dashboard-drift-patch
+          path: dashboard-drift.patch
+          retention-days: 7
+
   handoff-config-proof:
     name: Fork / handoff-config proof
     needs: verify

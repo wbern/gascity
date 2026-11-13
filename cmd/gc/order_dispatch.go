@@ -116,7 +116,16 @@ const (
 	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
 	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
 	// closed order-tracking beads deleted per watchdog invocation.
-	orderTrackingRetentionWatchdogDeleteBudget = 100
+	//
+	// Every invocation pays one full closed-tracking list read (the retain
+	// floor is per-order, so it needs the whole bucket) no matter how few
+	// beads it then deletes. The budget must therefore out-run the closed-run
+	// inflow: a busy city closes ~42k order runs/day (~440 per 15m interval),
+	// so the former 100 let the backlog, and with it every later full read,
+	// grow without bound. 1000 per 15m is ~96k/day, ~2x the measured inflow,
+	// and still bounds one invocation's delete burst. Pinned by
+	// TestOrderTrackingRetentionWatchdogBudgetOutrunsInflow.
+	orderTrackingRetentionWatchdogDeleteBudget = 1000
 )
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
