@@ -126,7 +126,8 @@ jobs:
   # gcw-0jxzv), so on drift this job emits an applicable patch: printed in the
   # log, uploaded as an artifact, and (for the genschema docs) consumed by
   # docs-autofix.yml. The dashboard SPA bundle/TS client (`make dashboard-ci`)
-  # needs Node + npm install and is intentionally not covered here.
+  # needs Node + npm install, so it lives in the separate preflight-dashboard
+  # job below (gci-bt1ev.1).
   preflight-generated:
     name: Preflight / generated artifacts
     if: ${{ github.repository != 'gastownhall/gascity' }}
@@ -208,6 +209,78 @@ jobs:
         with:
           name: generated-drift-patch
           path: generated-drift.patch
+          retention-days: 7
+
+  # PR gate for dashboard drift (gci-bt1ev.1, child of gci-bt1ev): the typed TS
+  # client generated from internal/api/openapi.json and the embedded SPA bundle
+  # internal/api/dashboardspa/dist. `make dashboard-ci` typechecks, rebuilds the
+  # SPA, regenerates the client and fails if either tree differs (client:
+  # Makefile dashboard-ci `git diff --quiet` on gc-supervisor-client; bundle: the
+  # second `git diff --quiet -- internal/api/dashboardspa/dist` in the same
+  # target, which prints "dist/ is stale"). Separate from
+  # preflight-generated because it needs Node + npm ci and is path-filtered
+  # more narrowly. Node comes from .nvmrc (same as upstream ci.yml's "22").
+  preflight-dashboard:
+    name: Preflight / dashboard bundle + client
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: dashboard
+        with:
+          filters: |
+            dashboard:
+              - 'internal/api/dashboardspa/**'
+              - 'internal/api/dashboardbff/**'
+              - 'internal/api/openapi.json'
+              - 'Makefile'
+              - '.nvmrc'
+              - '.github/workflows/fork-verify.yml'
+      - name: Decide whether to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          CHANGED: ${{ steps.dashboard.outputs.dashboard }}
+        run: |
+          if [ "$EVENT" != pull_request ] || [ "$CHANGED" = true ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No dashboard inputs/outputs changed; skipping dashboard drift check."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: internal/api/dashboardspa/web/package-lock.json
+      - name: Dashboard bundle + client drift check
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        run: make dashboard-ci
+      - name: Print dashboard regeneration patch
+        id: patch
+        if: ${{ failure() }}
+        run: |
+          git diff -- internal/api/dashboardspa/dist internal/api/dashboardspa/web/shared/src/generated > dashboard-drift.patch
+          if [ -s dashboard-drift.patch ]; then
+            echo "has_patch=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Dashboard generated client/bundle is stale. Apply with: git apply dashboard-drift.patch (artifact 'dashboard-drift-patch'), or run 'make dashboard-build' + 'npm run generate:client' in internal/api/dashboardspa/web and commit."
+            cat dashboard-drift.patch
+          fi
+      - name: Upload dashboard regeneration patch
+        if: ${{ failure() && steps.patch.outputs.has_patch == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dashboard-drift-patch
+          path: dashboard-drift.patch
           retention-days: 7
 
   handoff-config-proof:
