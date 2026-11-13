@@ -5,12 +5,14 @@ go_library(
     srcs = [
         "gate.go",
         "repo_dir.go",
+        "violation_log.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/workrecord",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/citylayout",
         "//internal/storeref",
     ],
 )
@@ -21,6 +23,7 @@ go_test(
         "gate_test.go",
         "repo_dir_test.go",
         "testenv_import_test.go",
+        "violation_log_test.go",
     ],
     embed = [":workrecord"],
     deps = [

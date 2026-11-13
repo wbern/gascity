@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // alwaysReachable / neverReachable are injected commit-reachability oracles so
@@ -504,6 +507,60 @@ func TestWorkRecordEnforceEnabled(t *testing.T) {
 		t.Setenv(workRecordEnforceEnvVar, v)
 		if workRecordEnforceEnabled() {
 			t.Errorf("workRecordEnforceEnabled(%q) = true, want false", v)
+		}
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateRecordsViolationLog(t *testing.T) {
+	newStore := func() beads.Store {
+		return beads.NewMemStoreFrom(1, []beads.Bead{
+			{ID: "wr-bad", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+			{ID: "wr-ok", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}},
+		}, nil)
+	}
+	for _, enforce := range []bool{false, true} {
+		city := t.TempDir()
+		dirs := workRecordRepoDirs{cityPath: city, legacy: t.TempDir()}
+		var stderr strings.Builder
+		if got := evaluateWorkRecordCloseGate([]string{"close", "wr-ok"}, newStore(), nil, dirs, enforce, &stderr); got {
+			t.Fatalf("clean close blocked")
+		}
+		if _, err := os.Stat(workrecord.ViolationLogPath(city)); !os.IsNotExist(err) {
+			t.Fatalf("clean close wrote a log: %v", err)
+		}
+		block := evaluateWorkRecordCloseGate([]string{"close", "wr-bad"}, newStore(), nil, dirs, enforce, &stderr)
+		if block != enforce {
+			t.Fatalf("enforce=%v: block=%v", enforce, block)
+		}
+		data, err := os.ReadFile(workrecord.ViolationLogPath(city))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatalf("not one JSON line: %q", data)
+		}
+		if rec["door"] != "cli" || rec["bead"] != "wr-bad" || rec["blocked"] != enforce {
+			t.Fatalf("record = %v", rec)
+		}
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateUnwritableLogKeepsDecision(t *testing.T) {
+	store := func() beads.Store {
+		return beads.NewMemStoreFrom(1, []beads.Bead{
+			{ID: "wr-bad", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+		}, nil)
+	}
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, ".gc"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, enforce := range []bool{false, true} {
+		withLog := evaluateWorkRecordCloseGate([]string{"close", "wr-bad"}, store(), nil, workRecordRepoDirs{cityPath: city, legacy: t.TempDir()}, enforce, io.Discard)
+		noLog := evaluateWorkRecordCloseGate([]string{"close", "wr-bad"}, store(), nil, workRecordRepoDirs{legacy: t.TempDir()}, enforce, io.Discard)
+		if withLog != noLog || withLog != enforce {
+			t.Fatalf("enforce=%v: unwritable=%v nolog=%v", enforce, withLog, noLog)
 		}
 	}
 }

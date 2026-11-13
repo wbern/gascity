@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -505,4 +507,82 @@ func TestAPIBeadDeleteStaysOutsideTheWorkRecordGate(t *testing.T) {
 	if out := logged.String(); out != "" {
 		t.Fatalf("expected no gate output for a delete, got %q", out)
 	}
+}
+
+func TestAPIBeadCloseRecordsViolationLog(t *testing.T) {
+	for _, spelling := range closeSpellings() {
+		for _, enforce := range []bool{false, true} {
+			t.Run(spelling.name, func(t *testing.T) {
+				if enforce {
+					t.Setenv(workrecord.EnforceEnvVar, "1")
+				} else {
+					t.Setenv(workrecord.EnforceEnvVar, "")
+				}
+				st := newFakeState(t)
+				city := beads.NewMemStore()
+				st.cityBeadStore = city
+				st.stores = nil
+				st.cfg.Rigs = nil
+				cityPath := t.TempDir()
+				st.cityPath = cityPath
+				bad := seedGateBead(t, city, "wr-bad", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped})
+				ok := seedGateBead(t, city, "wr-ok", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp})
+				captureWorkRecordGateLog(t)
+				s := New(st)
+
+				if err := spelling.close(s, context.Background(), ok); err != nil {
+					t.Fatalf("clean close: %v", err)
+				}
+				if _, err := os.Stat(workrecord.ViolationLogPath(cityPath)); !os.IsNotExist(err) {
+					t.Fatalf("clean close wrote a log: %v", err)
+				}
+				err := spelling.close(s, context.Background(), bad)
+				if (err != nil) != enforce {
+					t.Fatalf("enforce=%v close err=%v", enforce, err)
+				}
+				data, rerr := os.ReadFile(workrecord.ViolationLogPath(cityPath))
+				if rerr != nil {
+					t.Fatal(rerr)
+				}
+				var rec map[string]any
+				if jerr := json.Unmarshal(data, &rec); jerr != nil {
+					t.Fatalf("not one JSON line: %q", data)
+				}
+				if rec["door"] != "http" || rec["bead"] != "wr-bad" || rec["blocked"] != enforce {
+					t.Fatalf("record = %v", rec)
+				}
+			})
+		}
+	}
+}
+
+func TestAPIBeadCloseUnwritableViolationLogKeepsDecision(t *testing.T) {
+	for _, enforce := range []bool{false, true} {
+		t.Setenv(workrecord.EnforceEnvVar, map[bool]string{true: "1", false: ""}[enforce])
+		st := newFakeState(t)
+		city := beads.NewMemStore()
+		st.cityBeadStore = city
+		st.stores = nil
+		st.cfg.Rigs = nil
+		cityPath := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityPath, ".gc"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		st.cityPath = cityPath
+		bad := seedGateBead(t, city, "wr-bad", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped})
+		captureWorkRecordGateLog(t)
+		err := New(st).gateWorkRecordClose(context.Background(), bad, city, mustGet(t, city, bad), nil)
+		if (err != nil) != enforce {
+			t.Fatalf("enforce=%v err=%v", enforce, err)
+		}
+	}
+}
+
+func mustGet(t *testing.T, s beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
