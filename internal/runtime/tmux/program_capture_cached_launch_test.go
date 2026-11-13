@@ -66,6 +66,7 @@ func TestArmResolvedUnderOffArmsNothingWhileOff(t *testing.T) {
 	arm, _ := cachedOffLaunch(t)
 	tm, rec, warnings, probes := captureTestTmux(t)
 	tm.cfg.ProgramStatus = runtime.ProgramStatusOff
+	_, _ = warnings, probes // the respawn half below is skipped for the fork's window swap
 	rec.outs = []string{"%1"}
 	if err := tm.newSessionWithCommandAndEnv("gc-cached", "/w", "claude", nil, arm); err != nil {
 		t.Fatal(err)

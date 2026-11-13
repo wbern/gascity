@@ -645,7 +645,7 @@ func (t *Tmux) run(args ...string) (string, error) {
 
 // runNoStart connects only to an already-running named server. -N must precede
 // the socket-selection flags because tmux parses it as a global option.
-func (t *Tmux) runNoStart(args ...string) error {
+func (t *Tmux) runNoStart(args ...string) error { //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 	_, err := t.runNoStartOutput(args...)
 	return err
 }

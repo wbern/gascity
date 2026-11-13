@@ -956,6 +956,7 @@ func TestLiveSwitchOffArmsNothingWhateverTheArm(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tm, rec, warnings, probes := captureTestTmux(t)
 			setOff(tm)
+			_, _ = warnings, probes // the respawn half below is skipped for the fork's window swap
 			rec.outs = []string{"%1"}
 			if err := tm.newSessionWithCommandAndEnv("gc-stale-arm", "/w", "claude", nil, arm); err != nil {
 				t.Fatal(err)

@@ -36,7 +36,7 @@ type procIdentity struct {
 // re-verifies identity before each signal. Returns nil on ps failure, which
 // callers treat as "signal nothing" (safe: tmux kill-session still tears the
 // pane down).
-func snapshotProcessTable() map[string]procIdentity {
+func snapshotProcessTable() map[string]procIdentity { //nolint:unused // upstream's PID-certified teardown kept for parity; this fork's stop never signals PIDs directly (gcw-bbvcu)
 	return snapshotProcessTableWithProbe(runProcessProbe)
 }
 

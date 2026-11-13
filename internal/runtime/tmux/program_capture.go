@@ -462,12 +462,12 @@ func disarmCommands(target string) [][]string {
 // pane id ("<rand>.<pane_id>"), the nonce an arm sets. A value inherited from
 // window, session or global scope names another pane, as the read side's
 // nonce compare tells apart.
-const paneArmedFormat = "#{m:*.#{pane_id},#{" + programTapOption + "}}"
+const paneArmedFormat = "#{m:*.#{pane_id},#{" + programTapOption + "}}" //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 
 // disarmIfArmedCommands is disarmCommands run only when target bears a nonce
 // bound to it (paneArmedFormat), in one if-shell -F: a pane never armed is
 // left exactly as it was, a pipe of its own included.
-func disarmIfArmedCommands(target string) [][]string {
+func disarmIfArmedCommands(target string) [][]string { //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 	return [][]string{{"if-shell", "-F", "-t", target, paneArmedFormat, tmuxCommandLines(disarmCommands(target))}}
 }
 
@@ -537,14 +537,14 @@ func outputBeforeError(err error) string {
 
 // respawnMarkerFormat is what the respawn list's display-message prints once
 // respawn-pane has run: the respawned pane's id.
-const respawnMarkerFormat = "#{pane_id}"
+const respawnMarkerFormat = "#{pane_id}" //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 
 // respawnPaneList is the one respawn command list: respawn-pane -k on target,
 // a display-message marker proving it ran, then follow. Every command that
 // must reach the new process before tmux reads its output goes in follow
 // (capture's re-arm or removal today; an identity-changing relaunch's input
 // fence).
-func respawnPaneList(target, workDir, command string, follow [][]string) [][]string {
+func respawnPaneList(target, workDir, command string, follow [][]string) [][]string { //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 	respawn := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
 		respawn = append(respawn, "-c", workDir)
@@ -556,7 +556,7 @@ func respawnPaneList(target, workDir, command string, follow [][]string) [][]str
 
 // runRespawnList runs respawnPaneList. err is non-nil when the pane was not
 // respawned; followErr is non-nil when it was, but a follow command failed.
-func (t *Tmux) runRespawnList(target, workDir, command string, follow [][]string) (followErr, err error) {
+func (t *Tmux) runRespawnList(target, workDir, command string, follow [][]string) (followErr, err error) { //nolint:unused // upstream respawn/arming model kept for parity; this fork swaps the window instead (#76, control-client crash)
 	_, err = t.run(tmuxArgvList(respawnPaneList(target, workDir, command, follow))...)
 	if err == nil {
 		return nil, nil
