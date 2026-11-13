@@ -1,9 +1,9 @@
 # Auto-fix stale generated reference docs on PRs.
 #
-# CI's preflight-generated job runs scripts/check-generated-docs-drift.sh,
+# fork-verify's preflight-generated job runs scripts/check-generated-docs-drift.sh,
 # which computes the exact regeneration patch (go run ./cmd/genschema) and
 # uploads it as the generated-docs-freshness-patch artifact when the docs are
-# stale. This workflow closes the loop: when a PR's CI run fails and left that
+# stale. This workflow closes the loop: when a PR's fork-verify run fails and left that
 # artifact, it pushes the regen commit to the PR branch (same-repo PRs) or
 # leaves an idempotent comment with the one-liner apply recipe (fork PRs).
 #
@@ -27,7 +27,7 @@ name: Docs Autofix
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["fork-verify"]
     types: [completed]
 
 permissions:
