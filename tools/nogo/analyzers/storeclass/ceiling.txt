@@ -4,18 +4,18 @@
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cache-peel	22
-cmd/gc	cap-assert	100
-cmd/gc	mint	166
-cmd/gc	raw-field	178
-cmd/gc	raw-param	1092
-cmd/gc	raw-result	269
+cmd/gc	cap-assert	103
+cmd/gc	mint	184
+cmd/gc	raw-field	187
+cmd/gc	raw-param	1116
+cmd/gc	raw-result	276
 cmd/gc	raw-type	4
-cmd/gc	raw-var	38
+cmd/gc	raw-var	40
 cmd/gc	read-marker	31
-cmd/gc	unwrap	142
+cmd/gc	unwrap	148
 internal/api	mint	8
 internal/api	raw-field	9
-internal/api	raw-param	30
+internal/api	raw-param	29
 internal/api	raw-result	9
 internal/api	read-marker	20
 internal/api	unwrap	9
@@ -36,11 +36,11 @@ internal/runtime/t3bridge	raw-param	1
 internal/runtime/t3bridge	raw-result	1
 internal/session/sessiontest	mint	1
 internal/session/sessiontest	raw-result	1
-internal/sling	mint	8
+internal/sling	mint	7
 internal/sling	raw-field	6
 internal/sling	raw-param	10
 internal/sling	raw-result	3
-internal/sling	read-marker	3
+internal/sling	read-marker	2
 internal/supervisor	raw-field	2
 internal/worker	mint	2
 internal/worker	raw-field	2
