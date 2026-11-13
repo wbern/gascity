@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "citylayout",
     srcs = [
+        "bdshim.go",
         "export.go",
         "layout.go",
         "runtime.go",
@@ -16,6 +17,7 @@ go_test(
     name = "citylayout_test",
     srcs = [
         "acp_transcripts_test.go",
+        "bdshim_test.go",
         "export_census_test.go",
         "export_test.go",
         "runtime_test.go",

@@ -48,6 +48,7 @@ filegroup(
 go_test(
     name = "watchdog_test",
     srcs = [
+        "fork_contract_test.go",
         "main_test.go",
         "testenv_import_test.go",
     ],

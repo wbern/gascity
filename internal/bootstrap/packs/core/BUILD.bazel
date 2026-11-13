@@ -73,6 +73,8 @@ go_library(
         "assets/scripts/order_outcome.sh",
         "assets/scripts/scope_bd.sh",
         "orders/binding-snapshot.toml",
+        "assets/scripts/escalate.py",
+        "assets/scripts/jsonl-archive-maintenance.sh",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
@@ -83,6 +85,7 @@ go_test(
     srcs = [
         "cascade_nudge_script_test.go",
         "cross_rig_deps_script_test.go",
+        "escalate_integration_test.go",
         "escalate_script_test.go",
         "human_gate_script_test.go",
         "notify_claims_stall_script_test.go",
@@ -91,6 +94,7 @@ go_test(
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
         "pack_scripts_unix_test.go",
+        "renudge_stale_human_gates_behavior_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

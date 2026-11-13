@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hooks",
     srcs = [
+        "codex_session_flags.go",
         "hooks.go",
         "preserve.go",
     ],
@@ -15,8 +16,10 @@ go_library(
     deps = [
         "//internal/bootstrap/packs/core",
         "//internal/citylayout",
+        "//internal/codexhooks",
         "//internal/fsys",
         "//internal/overlay",
+        "//internal/runtime",
         "//internal/shellquote",
     ],
 )

@@ -1,0 +1,72 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bddispatch",
+    srcs = [
+        "bead_summary.go",
+        "dispatch.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/bddispatch",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/bdshim",
+        "//internal/beadclient",
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/outputfirewall",
+        "//internal/telemetry",
+    ],
+)
+
+go_test(
+    name = "bddispatch_test",
+    srcs = [
+        "bead_summary_wire_test.go",
+        "delete_not_routed_test.go",
+        "dispatch_test.go",
+        "list_metadata_test.go",
+        "parse_list_test.go",
+        "show_truncation_test.go",
+        "testenv_import_test.go",
+        "update_target_test.go",
+    ],
+    embed = [":bddispatch"],
+    deps = [
+        "//internal/bdshim",
+        "//internal/beadclient",
+        "//internal/beads",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

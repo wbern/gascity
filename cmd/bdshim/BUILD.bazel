@@ -1,0 +1,82 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "bdshim_lib",
+    srcs = [
+        "claim.go",
+        "exec.go",
+        "main.go",
+        "resolve.go",
+        "routelog.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/cmd/bdshim",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/bddispatch",
+        "//internal/bdflags",
+        "//internal/bdguard",
+        "//internal/bdroute",
+        "//internal/bdshim",
+        "//internal/beadclient",
+        "//internal/beads",
+        "//internal/pathutil",
+        "//internal/processretry",
+    ],
+)
+
+go_binary(
+    name = "bdshim",
+    embed = [":bdshim_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bdshim_test",
+    srcs = [
+        "exec_test.go",
+        "lean_test.go",
+        "main_test.go",
+        "mistyped_metadata_test.go",
+        "pr_gate_test.go",
+        "rigscope_test.go",
+        "routelog_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":bdshim_lib"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

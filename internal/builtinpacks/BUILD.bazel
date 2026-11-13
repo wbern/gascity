@@ -26,6 +26,7 @@ go_test(
         "registry_test.go",
         "registry_validate_tree_test.go",
         "testenv_import_test.go",
+        "validate_cost_bench_test.go",
     ],
     data = glob(
         ["**"],

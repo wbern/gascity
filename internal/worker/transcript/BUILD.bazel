@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "transcript",
-    srcs = ["discovery.go"],
+    srcs = [
+        "discovery.go",
+        "usage.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/worker/transcript",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/sessionlog"],
@@ -14,6 +17,7 @@ go_test(
         "claude_underscore_test.go",
         "discovery_test.go",
         "testenv_import_test.go",
+        "usage_test.go",
     ],
     embed = [":transcript"],
     deps = [
