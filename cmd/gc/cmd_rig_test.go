@@ -3578,7 +3578,7 @@ func TestRigListAPIRenderMatchesLocalJSONContract(t *testing.T) {
 	if code := doRigList(fsys.OSFS{}, cityPath, true, &local, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("doRigList = %d, want 0", code)
 	}
-	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, api.CachedRead[[]api.RigView]{AgeSeconds: 2, Body: []api.RigView{}}, true, &routed, &bytes.Buffer{}); code != 0 {
+	if code := renderRigListFromAPI(cityPath, api.CachedRead[[]api.RigView]{AgeSeconds: 2, Body: []api.RigView{}}, true, &routed, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("renderRigListFromAPI = %d, want 0", code)
 	}
 	var localDoc, apiDoc RigListJSON

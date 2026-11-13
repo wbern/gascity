@@ -748,7 +748,7 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 			cr, err = c.ListRigs()
 			return err
 		},
-		func() int { return renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, jsonOutput, stdout, stderr) },
+		func() int { return renderRigListFromAPI(cityPath, cr, jsonOutput, stdout, stderr) },
 		func() int { return doRigList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr) },
 	)
 }
@@ -764,7 +764,8 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 // response); the JSON output carries an _cache_age_s envelope field, which
 // the server reports as 0 because the rig list is not read from the bead
 // cache, and human output prints no cache-age footer.
-func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
+func renderRigListFromAPI(cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
+	fs := fsys.OSFS{}
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
 	// API-render and serverless paths keep --json stderr clean for scripting.
