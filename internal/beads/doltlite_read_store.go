@@ -188,7 +188,7 @@ func (s *DoltliteReadStore) CompareAndSetMetadataPatch(id string, expected Bead,
 	if err != nil {
 		return false, fmt.Errorf("doltlite metadata patch: opening store: %w", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck // best-effort close of the short-lived write handle
 	tx, err := beginDoltliteImmediateTx(db)
 	if err != nil {
 		return false, fmt.Errorf("doltlite metadata patch: beginning transaction: %w", err)
@@ -1413,13 +1413,10 @@ type doltliteTableQuery struct {
 	skipTable bool
 }
 
-// buildDoltliteTableQuery resolves the storage-flag expressions, WHERE
-// clauses, args, and parent join for one storage table set. It returns
-// skipTable=true when the tier predicate excludes the whole table.
-func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any) (doltliteTableQuery, error) {
-	return s.buildDoltliteTableQueryCtx(context.Background(), query, tables, extraWhere, extraArgs)
-}
-
+// buildDoltliteTableQueryCtx resolves the storage-flag expressions, WHERE
+// clauses, args, and parent join for one storage table set, probing the schema
+// under ctx. It returns skipTable=true when the tier predicate excludes the
+// whole table.
 func (s *DoltliteReadStore) buildDoltliteTableQueryCtx(ctx context.Context, query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any) (doltliteTableQuery, error) {
 	flags, err := s.storageFlagExprsForCtx(ctx, tables)
 	if err != nil {

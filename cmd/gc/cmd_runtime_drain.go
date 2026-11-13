@@ -1623,20 +1623,22 @@ func finishRuntimeDrainAckResultFrom(dops drainOps, rowAcked bool, cityPath, tar
 	timedOut := false
 	var ackOutcomeErr error
 	if err := setDrainAckBounded(dops, sn); err != nil {
-		if errors.Is(err, errDrainAckTimeout) {
+		switch {
+		case errors.Is(err, errDrainAckTimeout):
 			// The write can still land after this timeout. Preserve the CLI's
 			// deferred result, but never report acknowledgement to the hook.
 			timedOut = true
 			ackOutcomeErr = err
 			fmt.Fprintf(stderr, "gc runtime drain-ack: timed out after %s writing drain-ack for %s; controller will re-drive on its next tick\n", drainAckMutationTimeout, sn) //nolint:errcheck // best-effort stderr
-		} else if runtime.OnlyMetadataNotMirrored(err) {
+		case runtime.OnlyMetadataNotMirrored(err):
 			// The ack is in force; only the runtime's view of it lags.
 			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
+		default:
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1, err
 		}
 	}
+
 	workerSite := false
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		if workerSite = noteWorkerSitePoke(stderr, "gc runtime drain-ack", err); !workerSite {

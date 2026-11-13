@@ -54,7 +54,7 @@ func TestDoltliteReadStoreListCtxHonorsCancelledContext(t *testing.T) {
 
 	_, err := store.ListCtx(ctx, ListQuery{AllowScan: true})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("ListCtx(cancelled ctx) error = %v, want context.Canceled", err)
+		t.Fatalf("ListCtx(canceled ctx) error = %v, want context.Canceled", err)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestDoltliteReadStoreListCtxCancelsWhileWaitingForReadConnection(t *testing
 	if err != nil {
 		t.Fatalf("acquiring only read connection: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck // test cleanup
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
