@@ -147,7 +147,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		// in-band and writes no provider-native file, so it shares no
 		// target with anyone.
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
-		if claimsStage1MCPTarget(view) {
+		if claimsStage1MCPTarget(view) && !skipsStage1MCPClaim(agent, view) {
 			stage1.add(key, view)
 		}
 		if writesMCPTarget(view) {

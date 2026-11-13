@@ -180,6 +180,7 @@ func assertNoAgentLocalConflictCause(t *testing.T, cityPath string, cfg *config.
 // the same provider at the city root; the error names the directory and the
 // implicit agent, not only the two projection hashes.
 func TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	cityPath := t.TempDir()
 	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
 	writeMCPSource(t, agentLocal, `
@@ -213,6 +214,7 @@ command = "uvx"
 // agent is reached. gc start still names the agent-local cause, as
 // mcp-shared-target does.
 func TestBuildStage1MCPTargetsNamesAgentLocalCauseBehindExplicitPeer(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	cityPath := t.TempDir()
 	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
 	writeMCPSource(t, agentLocal, `
@@ -239,6 +241,7 @@ command = "uvx"
 // deputy's catalog diverges from mayor's first, then from the implicit
 // agent's.
 func TestBuildStage1MCPTargetsNamesAgentLocalCauseBehindThirdPayload(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	cityPath := t.TempDir()
 	deputyMCP := filepath.Join(cityPath, "agents", "deputy", "mcp")
 	mayorMCP := filepath.Join(cityPath, "agents", "mayor", "mcp")
@@ -263,6 +266,7 @@ func TestBuildStage1MCPTargetsNamesAgentLocalCauseBehindThirdPayload(t *testing.
 // delivers MCP to that work_dir: a subprocess session cannot receive it there,
 // so the cause offers the shared mcp/ directory alone.
 func TestBuildStage1MCPTargetsAgentLocalCauseOffersWorkDirWhereStage2Delivers(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	for _, tt := range []struct {
 		session string
 		workDir bool
@@ -820,4 +824,13 @@ url = "http://localhost:3100/mcp/kb"
 	if got := targets[0].Agents; len(got) != 1 || got[0] != "claude" {
 		t.Fatalf("target agents = %+v, want [claude]", got)
 	}
+}
+
+// useUpstreamImplicitMCPClaims pins upstream's claims rule (every agent with a
+// provider claims its target) for a test of that rule.
+func useUpstreamImplicitMCPClaims(t *testing.T) {
+	t.Helper()
+	prev := forkSkipsImplicitEmptyMCPClaims
+	forkSkipsImplicitEmptyMCPClaims = false
+	t.Cleanup(func() { forkSkipsImplicitEmptyMCPClaims = prev })
 }

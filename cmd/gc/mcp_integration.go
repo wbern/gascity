@@ -291,6 +291,20 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// forkSkipsImplicitEmptyMCPClaims is the fork's rule (#181): an implicit
+// provider agent with an empty catalog projects nothing, so it does not claim
+// the target an explicit agent fills at the same scope root. Upstream counts
+// every agent with a provider as a claimant; deployed cities (the GC3 city's
+// mayor and claude-haiku share the city root) depend on the fork's rule. A
+// variable so upstream's claims tests can pin upstream's rule.
+var forkSkipsImplicitEmptyMCPClaims = true
+
+// skipsStage1MCPClaim reports whether agent, resolved to view, claims no
+// stage-1 target under the fork's rule.
+func skipsStage1MCPClaim(agent *config.Agent, view resolvedMCPProjection) bool {
+	return forkSkipsImplicitEmptyMCPClaims && agent.Implicit && len(view.Catalog.Servers) == 0
+}
+
 // claimsStage1MCPTarget reports whether a resolved view claims a stage-1
 // target, the provider-native file at its scope root: an agent with a
 // provider or servers claims it even when its catalog is empty, so every
@@ -340,6 +354,9 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
 		skips.add(mcpAgentLabel(agent), view.Skipped)
+		if skipsStage1MCPClaim(agent, view) {
+			continue
+		}
 		if claimsStage1MCPTarget(view) {
 			claims.add(view.Projection.Provider+"|"+view.Projection.Target, view)
 		}

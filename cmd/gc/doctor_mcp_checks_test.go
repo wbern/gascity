@@ -148,6 +148,7 @@ url = "https://example.com/deputy"
 // mcp-shared-target counts stage-1 claimants as the start gate does, so doctor
 // reports a stage-1 conflict exactly when gc start refuses the city.
 func TestMCPSharedTargetDoctorCheckAgreesWithStage1Gate(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	claude := map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}}
 	acp := true
 	acpProviders := builtinProviderAliasesForTest("claude")
@@ -246,6 +247,7 @@ func TestMCPSharedTargetDoctorCheckAgreesWithStage1Gate(t *testing.T) {
 // agent gc injects for its provider at the city root, so gc start refuses the
 // city; mcp-shared-target reports it and names the agent-local directory.
 func TestMCPSharedTargetDoctorCheckReportsImplicitAgentLocalConflict(t *testing.T) {
+	useUpstreamImplicitMCPClaims(t)
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	writeProjectedMCPCity(t, cityDir, `
