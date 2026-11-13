@@ -189,10 +189,10 @@ func (s *Store) ExecutionEvidence(id string) (Info, WorkStarted, bool, error) {
 }
 
 func (s *Store) executionBead(id string) (beads.Bead, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
-	live := beads.HandlesFor(s.store.Store).Live
+	live := beads.HandlesFor(s.store).Live
 	if live == nil {
 		return beads.Bead{}, beads.ErrConditionalWriteUnsupported
 	}

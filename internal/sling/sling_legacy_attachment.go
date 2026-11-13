@@ -261,9 +261,9 @@ func isAbandonedPreparingRoot(root beads.Bead, live []beads.Bead, source beads.B
 // target: where the classes share one store a legacy root is work class. The
 // molecule helpers take a typed target (upstream T9); a legacy root lives in the
 // store that minted it.
-func legacyRootMolecule(deps SlingDeps, store beads.Store) beads.MoleculeTarget {
+func legacyRootMolecule(deps SlingDeps, store beads.StoreReader) beads.MoleculeTarget {
 	if deps.graphRelocated() && beads.SameStore(store, deps.GraphStore) {
-		return beads.GraphMolecule(beads.GraphStore{Store: store})
+		return beads.GraphMolecule(deps.GraphStore)
 	}
-	return beads.WorkMolecule(beads.WorkStore{Store: store})
+	return beads.WorkMolecule(deps.Store)
 }

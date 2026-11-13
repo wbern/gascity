@@ -1201,7 +1201,7 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 		} else if scoped != nil {
 			readStore = scoped
 		}
-		if lister, ok := readStore.(beads.CtxLister); ok {
+		if lister, ok := beads.As[beads.CtxLister](readStore); ok {
 			rows, err := lister.ListCtx(reqCtx, query)
 			done <- listResult{rows: rows, err: err}
 			return

@@ -295,11 +295,20 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 // an unbound rig report loudly, which is what buildStores already intends when
 // it skips rigs with no site binding "so the API reports no store for the rig
 // and operators notice the unbound state".
-func rigScopeNames(stores map[string]beads.Store, rig string) ([]string, error) {
+func rigScopeNames(stores map[string]beads.WorkStore, rig string) ([]string, error) {
+	return rigScope(rig, func() []string { return sortedWorkStoreNames(stores) }, func(name string) bool {
+		_, ok := stores[name]
+		return ok
+	})
+}
+
+// rigScope is rigScopeNames over any store map: all lists the names of an
+// unscoped read, has reports whether a named rig has a store.
+func rigScope(rig string, all func() []string, has func(name string) bool) ([]string, error) {
 	if rig == "" {
-		return sortedRigNames(stores), nil
+		return all(), nil
 	}
-	if _, ok := stores[rig]; !ok {
+	if !has(rig) {
 		// Deliberately names both causes. A rig declared in city.toml but
 		// missing its site binding is skipped by buildStores, so it reaches
 		// here looking exactly like a typo — and it is reachable from a UI

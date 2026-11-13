@@ -70,7 +70,7 @@ func resolveReadyFederationParallelism() int {
 // readySource pairs a federation store with its stable partial-error label.
 type readySource struct {
 	label string
-	store beads.Store
+	store beads.WorkStore
 }
 
 // readyResult carries one store's Ready() outcome back from its goroutine.
@@ -149,7 +149,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 
 	stores := s.state.BeadStores()
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
-	rigNames, err := rigScopeNames(stores, input.Rig)
+	rigNames, err := rigScope(input.Rig, func() []string { return sortedRigNames(stores) }, func(name string) bool {
+		_, ok := stores[name]
+		return ok
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -583,11 +586,7 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 	// BeadStores accessor is reviewed residue and a new caller takes its handle
 	// from Stores() (state_stores_test.go). The map keeps BeadStores' shape: the
 	// city store under the city name, then each opened rig.
-	typed := s.state.Stores()
-	stores := map[string]beads.Store{s.state.CityName(): typed.Work().Store}
-	for _, r := range typed.Rigs() {
-		stores[r.Name] = r.Work.Store
-	}
+	stores := workStoresByName(s.state.Stores(), s.state.CityName())
 	rigNames, err := rigScopeNames(stores, input.Rig)
 	if err != nil {
 		return nil, err
@@ -595,7 +594,7 @@ func (s *Server) humaHandleBeadEphemeral(_ context.Context, input *BeadEphemeral
 	var all []beads.Bead
 	for _, rigName := range rigNames {
 		store := stores[rigName]
-		if store == nil {
+		if beads.IsNilStore(store) {
 			continue
 		}
 		query := beads.ListQuery{
@@ -706,7 +705,8 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 	index := s.latestIndex()
 
-	stores := s.state.BeadStores()
+	st := s.state.Stores()
+	stores := workStoresByName(st, s.state.CityName())
 	rigNames, err := rigScopeNames(stores, input.Rig)
 	if err != nil {
 		return nil, err
@@ -728,7 +728,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	cityName := s.state.CityName()
 	sources := make([]readySource, 0, len(rigNames)+1)
 	if input.Rig == "" {
-		sources = append(sources, readySource{label: "city", store: s.state.CityBeadStore()})
+		sources = append(sources, readySource{label: "city", store: st.Work()})
 	}
 	for _, rigName := range rigNames {
 		if rigName == cityName && input.Rig == "" {
@@ -747,7 +747,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	results := make([]readyResult, len(sources))
 	if readyFederationParallelism <= 1 {
 		for i, src := range sources {
-			if src.store == nil {
+			if beads.IsNilStore(src.store) {
 				continue
 			}
 			ready, err := beads.ReadyPreferCache(src.store, readyFederationQuery())
@@ -756,11 +756,11 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	} else {
 		var wg sync.WaitGroup
 		for i, src := range sources {
-			if src.store == nil {
+			if beads.IsNilStore(src.store) {
 				continue
 			}
 			wg.Add(1)
-			go func(i int, store beads.Store) {
+			go func(i int, store beads.WorkStore) {
 				defer wg.Done()
 				readyFederationSem <- struct{}{}
 				defer func() { <-readyFederationSem }()
@@ -782,7 +782,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 	var legs []readyLeg
 	for i, src := range sources {
-		if src.store == nil {
+		if beads.IsNilStore(src.store) {
 			continue
 		}
 		pa.attempt()
@@ -815,7 +815,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(s.state.Stores())}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(st)}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()

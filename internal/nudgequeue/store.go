@@ -178,7 +178,7 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 // label, deduplicates attempts. A losing attempt may roll back only this new
 // identity, which no other new enqueue adopts.
 func (s *Store) CreateShadow(item Item) (beadID string, created bool, err error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return "", false, nil
 	}
 	meta := map[string]string{
@@ -420,7 +420,7 @@ func (s *Store) FindItemShadow(item Item) (NudgeShadow, bool, error) {
 	if item.BeadID == "" {
 		return s.FindIncludingTerminal(item.ID)
 	}
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return NudgeShadow{}, false, nil
 	}
 	b, err := s.store.Get(item.BeadID)

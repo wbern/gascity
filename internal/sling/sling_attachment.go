@@ -251,7 +251,7 @@ type attachmentScope struct {
 // storeLegError ties a store fault to the store that raised it, so the guard
 // that reports it can name the leg. It reads as the fault itself.
 type storeLegError struct {
-	Store beads.Store
+	Store beads.StoreReader
 	Err   error
 }
 
@@ -270,12 +270,6 @@ func (s attachmentScope) labelFault(err error) error {
 		return fmt.Errorf("%s: %w", s.graphRef, err)
 	}
 	return err
-}
-
-// singleStoreAttachmentScope is the scope of a caller that hands one store for
-// both the source bead and its attachments.
-func singleStoreAttachmentScope(store beads.Store) attachmentScope {
-	return attachmentScope{work: beads.WorkStore{Store: store}, graph: beads.GraphStore{Store: store}}
 }
 
 // graphRelocated reports whether this sling's graph class lives in a physically
@@ -649,33 +643,6 @@ func (e *MoleculeAttachedError) Unwrap() error {
 		return nil
 	}
 	return subtreeProbeError(e.BeadID, e.Label, e.AttachmentID, e.Unreadable)
-}
-
-// CheckNoMoleculeChildren returns an error if the bead already has an attached
-// molecule or wisp child that is still open. This probe never retires families:
-// an unassigned source is not proof that its descendants have no live custody.
-func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, false)
-}
-
-// CheckBatchNoMoleculeChildren checks all open children for existing molecule
-// attachments before any wisps are created.
-func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, false)
-}
-
-// CheckNoMoleculeChildrenAllowLiveWorkflow is like CheckNoMoleculeChildren
-// but permits an existing live workflow attachment (used on --force graph
-// launches that will supersede the existing root under the source-workflow
-// lock).
-func CheckNoMoleculeChildrenAllowLiveWorkflow(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, true)
-}
-
-// CheckBatchNoMoleculeChildrenAllowLiveWorkflow is the batch variant of
-// CheckNoMoleculeChildrenAllowLiveWorkflow.
-func CheckBatchNoMoleculeChildrenAllowLiveWorkflow(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, true)
 }
 
 func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope attachmentScope, _ *SlingResult, allowLiveWorkflow bool) error {

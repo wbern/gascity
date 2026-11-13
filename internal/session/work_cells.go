@@ -15,6 +15,8 @@ import (
 // work_ladder the hook reads, its pending release.
 // WorkStartedKey is declared with the fork's execution-evidence record in
 // claim_execution.go.
+
+// WorkLadderKey is the session-row metadata key of the v2 lane's work-ladder cell.
 const WorkLadderKey = "work_ladder"
 
 // How a claim reached a turn: one the hook minted, or an existing assignment
