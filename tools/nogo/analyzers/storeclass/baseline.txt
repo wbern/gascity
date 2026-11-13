@@ -1771,7 +1771,6 @@ internal/api/handler_status.go	statusStoreWorkCounts	raw-param	1
 internal/api/handler_status.go	statusStoreWorkCountsFor	raw-param	1
 internal/api/handler_status.go	statusStoredWorkCounts	raw-param	1
 internal/api/huma_handlers_beads.go	Server.humaHandleBeadList	read-marker	1
-internal/api/huma_handlers_beads.go	Server.humaHandleBeadReady	raw-param	1
 internal/api/huma_handlers_beads.go	beadListFanOut	raw-param	1
 internal/api/huma_handlers_beads.go	beadListLeg	raw-field	1
 internal/api/huma_handlers_beads.go	beadListLegCount	raw-param	1
