@@ -214,7 +214,10 @@ jobs:
   # PR gate for dashboard drift (gci-bt1ev.1, child of gci-bt1ev): the typed TS
   # client generated from internal/api/openapi.json and the embedded SPA bundle
   # internal/api/dashboardspa/dist. `make dashboard-ci` typechecks, rebuilds the
-  # SPA, regenerates the client and fails if either tree differs. Separate from
+  # SPA, regenerates the client and fails if either tree differs (client:
+  # Makefile dashboard-ci `git diff --quiet` on gc-supervisor-client; bundle: the
+  # second `git diff --quiet -- internal/api/dashboardspa/dist` in the same
+  # target, which prints "dist/ is stale"). Separate from
   # preflight-generated because it needs Node + npm ci and is path-filtered
   # more narrowly. Node comes from .nvmrc (same as upstream ci.yml's "22").
   preflight-dashboard:
