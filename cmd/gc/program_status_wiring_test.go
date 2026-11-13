@@ -270,7 +270,9 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 			cfg := newCity(tc.mode)
 			resolved := resolve(t, cfg)
 			sessionCfg := worker.ResolvedSessionConfig{Runtime: worker.ResolvedRuntime{Hints: workerSessionCreateHints(resolved)}}
-			applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, cityDir, "worker", "", resolved)
+			if err := applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, cityDir, "worker", "", resolved); err != nil {
+				t.Fatalf("applyWorkerCreateRuntimeInputs: %v", err)
+			}
 			if got := sessionCfg.Runtime.Hints.ProgramStatus; got != tc.wantArm {
 				t.Errorf("Hints.ProgramStatus = %+v, want %+v", got, tc.wantArm)
 			}
@@ -306,7 +308,9 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 		cfg := newCity("on")
 		resolved := resolve(t, cfg)
 		sessionCfg := worker.ResolvedSessionConfig{Runtime: worker.ResolvedRuntime{Hints: workerSessionCreateHints(resolved)}}
-		applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, t.TempDir(), "worker", config.SessionTransportACP, resolved)
+		if err := applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, t.TempDir(), "worker", config.SessionTransportACP, resolved); err != nil {
+			t.Fatalf("applyWorkerCreateRuntimeInputs: %v", err)
+		}
 		if got := sessionCfg.Runtime.Hints.ProgramStatus; got != (runtime.ProgramStatusArm{}) {
 			t.Errorf("ACP Hints.ProgramStatus = %+v, want disarmed", got)
 		}

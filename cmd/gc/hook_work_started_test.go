@@ -868,7 +868,7 @@ func TestRuntimeDrainAckRefusesASeatHoldingStartedWork(t *testing.T) {
 			}
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
-			code := runtimeDrainAck(dops, sessionRuntimeTarget{sessionName: "worker-1", sessionID: "gc-7", display: "worker-1"}, c.operator, "tok-7", false, &stdout, &stderr)
+			code := runtimeDrainAck(dops, sessionRuntimeTarget{sessionName: "worker-1", sessionID: "gc-7", display: "worker-1"}, c.operator, "tok-7", &stdout, &stderr)
 			if code != c.want || dops.acked["worker-1"] != (c.want == 0) || (got != nil) != c.passed {
 				t.Fatalf("code %d (want %d), acked %v, pass ran %v; stderr=%s", code, c.want, dops.acked["worker-1"], got != nil, stderr.String())
 			}

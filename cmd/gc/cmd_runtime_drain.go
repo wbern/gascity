@@ -1572,17 +1572,14 @@ func setDrainAckBounded(dops drainOps, sn string) error {
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) int {
-	code, _ := doRuntimeDrainAckResultFor(dops, cityPath, targetName, sn, sessionID, caller, jsonOutput, stdout, stderr)
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	code, _ := doRuntimeDrainAckResultFor(dops, cityPath, targetName, sn, sessionID, drainAckCaller{}, jsonOutput, stdout, stderr)
 	return code
 }
 
-func doRuntimeDrainAckResult(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
-	return doRuntimeDrainAckResultFor(dops, cityPath, targetName, sn, sessionID, drainAckCaller{}, jsonOutput, stdout, stderr)
-}
-
-// doRuntimeDrainAckResultFor is doRuntimeDrainAckResult for an identified
-// caller (an operator, or the seat itself).
+// doRuntimeDrainAckResultFor acknowledges the drain for an identified caller (an
+// operator, or the seat itself) and returns the exit code with the cause of a
+// refusal.
 func doRuntimeDrainAckResultFor(dops drainOps, cityPath, targetName, sn, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) (int, error) {
 	if err := drainAckReleaseHeldClaims(cityPath, sn, caller, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort diagnostic

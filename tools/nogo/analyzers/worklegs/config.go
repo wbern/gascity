@@ -17,7 +17,6 @@ var Analyzer = New(Config{
 			"controllerState.WakeStartRefusal": "cs.cityWorkStore(): the API's controller work store",
 			"doSessionWake":                    "deps.store: cmdSessionWake's openCityStore",
 			"cmdSessionClose":                  "openCityStore",
-			"drainAckSeat":                     "openCityStoreAtWithConfig in openDrainAckCity (the drain-ack release and its started-claim check)",
 			"doStartStandalone":                "oneShotStore, the store the one-shot pass registers as the work leg",
 			"gather":                           "gatherEnv.WorkStore: cr.cityBeadStore (newPlannerHost)",
 			"gatherEnv.externalReadsEnv":       "gatherEnv.WorkStore, as gather mints it",
@@ -26,7 +25,6 @@ var Analyzer = New(Config{
 			"CityRuntime.workLegs":       "over cityWorkLegOf(cr.cityWorkStore())",
 			"wakeWillNotStart":           "over wakeVerdictDeps.work, minted by its two callers",
 			"cmdSessionClose":            "over its cityWorkLegOf",
-			"drainAckSeat":               "over its cityWorkLegOf",
 			"doStartStandalone":          "over its cityWorkLegOf",
 			"gather":                     "over its cityWorkLegOf",
 			"gatherEnv.externalReadsEnv": "over its cityWorkLegOf",
@@ -37,7 +35,10 @@ var Analyzer = New(Config{
 	// releaseServed, which alone names the release writes; the rest is their
 	// own layering.
 	Releases: map[string]map[string]string{
-		"workAssignment.ReleaseWorkBead":         {"releaseServed": "the verb's release of one claim"},
+		"workAssignment.ReleaseWorkBead": {
+			"releaseServed": "the verb's release of one claim",
+			"releaseUnexecutedClaimsOnDrainAckProtocolFor": "the fork's drain-ack execution protocol (work_started evidence, drain-admission reservations, an operator ack keeping a started claim): its unfenced tier, over the census legs it reads",
+		},
 		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim carrying gc.detached, clearing it in the release write"},
 		"releaseOrphanedPoolAssignment":          {"releaseServed": "the verb's release of one claim (the orphan write)"},
 		"workAssignment.releaseWorkBead": {

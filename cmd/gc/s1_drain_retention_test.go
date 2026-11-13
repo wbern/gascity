@@ -58,7 +58,7 @@ func TestS1DrainAckRetainsWorkAndDoesNotPokeOrAcknowledge(t *testing.T) {
 	drainAckPokeController = func(string, reconcilekey.Key) error { poked = true; return nil }
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code, err := doRuntimeDrainAckResult(dops, "", "worker-1", "worker-1", "", false, &stdout, &stderr)
+	code, err := doRuntimeDrainAckResultFor(dops, "", "worker-1", "worker-1", "", drainAckCaller{}, false, &stdout, &stderr)
 	if code == 0 || !errors.Is(err, held) || poked || dops.acked["worker-1"] {
 		t.Fatalf("retained work acknowledged: code=%d err=%v poked=%v ack=%v", code, err, poked, dops.acked)
 	}
@@ -542,7 +542,7 @@ func TestS1CensusToAckExcludesInFlightAdmission(t *testing.T) {
 				}
 			}
 			var stdout, stderr bytes.Buffer
-			code, err := doRuntimeDrainAckResult(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, false, &stdout, &stderr)
+			code, err := doRuntimeDrainAckResultFor(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, drainAckCaller{}, false, &stdout, &stderr)
 			if !race {
 				if code != 0 || err != nil || !ops.acked["worker-1"] {
 					t.Fatalf("empty ack control failed: code=%d err=%v stderr=%s", code, err, stderr.String())
@@ -641,7 +641,7 @@ func TestS1HookDoesNotReportAckAfterUncertainProviderTimeout(t *testing.T) {
 	ops := s1DelayedAckOps{drainOps: base, release: release, done: done}
 	var stdout, stderr bytes.Buffer
 	ack := func(io.Writer) error {
-		code, err := doRuntimeDrainAckResult(ops, "", "worker-1", "worker-1", "", false, io.Discard, &stderr)
+		code, err := doRuntimeDrainAckResultFor(ops, "", "worker-1", "worker-1", "", drainAckCaller{}, false, io.Discard, &stderr)
 		if err != nil {
 			return err
 		}

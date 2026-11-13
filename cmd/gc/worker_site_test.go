@@ -1937,7 +1937,7 @@ func TestWorkerSiteV2DrainAckSucceedsOnItsRowAck(t *testing.T) {
 
 			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
 			var stdout, stderr bytes.Buffer
-			code := runtimeDrainAck(newDrainOps(guard.New()), target, false, "tok-a", false, &stdout, &stderr)
+			code := runtimeDrainAck(newDrainOps(guard.New()), target, false, "tok-a", &stdout, &stderr)
 			if code != tc.wantCode {
 				t.Fatalf("drain-ack = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
 			}

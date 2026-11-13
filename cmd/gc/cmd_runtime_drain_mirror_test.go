@@ -188,7 +188,7 @@ func TestClearSoftReloadConfigDriftDrainAckToleratesMirrorFailure(t *testing.T) 
 	if dt.get("s-a") != nil {
 		t.Fatal("the drain is still tracked after its ack was cleared")
 	}
-	if got, _ := sp.Fake.GetMeta("worker", "GC_DRAIN_ACK"); got != "" {
+	if got, _ := sp.GetMeta("worker", "GC_DRAIN_ACK"); got != "" {
 		t.Fatalf("GC_DRAIN_ACK = %q, want it cleared", got)
 	}
 }

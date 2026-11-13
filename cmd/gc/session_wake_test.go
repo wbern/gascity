@@ -1919,7 +1919,7 @@ func TestS1CanonicalDrainCancellationReopensAdmission(t *testing.T) {
 			if failAck {
 				ops = s1AckBeforeWriteFailureOps{ops}
 			}
-			code, err := doRuntimeDrainAckResult(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, true, io.Discard, io.Discard)
+			code, err := doRuntimeDrainAckResultFor(ops, fixture.city, "worker-1", "worker-1", fixture.seat.ID, drainAckCaller{}, true, io.Discard, io.Discard)
 			if (err != nil) != failAck || (code != 0) != failAck {
 				t.Fatalf("wrong ACK stage: code=%d err=%v", code, err)
 			}

@@ -617,11 +617,10 @@ func computePoolDesiredStatesParkedAt(
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
-	scaleCheckDemand map[string]scaleCheckDemand,
 	decisionTime time.Time,
 	parked parkedSeats,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, parked, nil)
+	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, parked, nil)
 }
 
 // computePoolDesiredStatesWithOptionsParked is computePoolDesiredStatesWithOptions

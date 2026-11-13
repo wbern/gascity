@@ -226,7 +226,8 @@ func TestDrainAckRowWithoutConditionalWriter(t *testing.T) {
 // preE3DoRuntimeDrainAck is doRuntimeDrainAck as it was before E3, frozen as
 // the legacy oracle.
 func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, drainAckCaller{}, stderr)
+	// The frozen legacy oracle: the pre-E3 path never read this release's error.
+	_ = drainAckReleaseHeldClaims(cityPath, sn, drainAckCaller{}, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -278,8 +279,8 @@ func freshDrainAckRow(t *testing.T, city, id string) beads.Bead {
 // runtimeDrainAck is upstream's int-returning entry point over the fork's
 // runtimeDrainAckResult, which also reports the ack outcome error (a timed-out
 // write must not read as acknowledged to the hook). These tests read the code.
-func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, envToken string, jsonOutput bool, stdout, stderr io.Writer) int {
-	code, _ := runtimeDrainAckResult(dops, target, operator, envToken, jsonOutput, stdout, stderr)
+func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, envToken string, stdout, stderr io.Writer) int {
+	code, _ := runtimeDrainAckResult(dops, target, operator, envToken, false, stdout, stderr)
 	return code
 }
 
@@ -681,7 +682,7 @@ func TestRuntimeDrainAckReleasesARoutelessClaimInBothModes(t *testing.T) {
 
 			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
 			var stdout, stderr bytes.Buffer
-			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", false, &stdout, &stderr); code != 0 {
+			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", &stdout, &stderr); code != 0 {
 				t.Fatalf("drain-ack = %d, want 0; stderr=%s", code, stderr.String())
 			}
 			// A fresh handle: the file store opened above may not see the
@@ -1088,7 +1089,7 @@ func TestRuntimeDrainAckKeepsNonPlainStrandsInBothModes(t *testing.T) {
 
 			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
 			var stdout, stderr bytes.Buffer
-			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", false, &stdout, &stderr); code != 0 {
+			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", &stdout, &stderr); code != 0 {
 				t.Fatalf("drain-ack = %d, want 0; stderr=%s", code, stderr.String())
 			}
 			cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
