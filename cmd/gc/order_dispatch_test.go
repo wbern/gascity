@@ -11192,3 +11192,64 @@ title = "Do work"
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
 }
+
+// TestOrderTrackingRetentionWatchdogBudgetOutrunsInflow pins that the
+// watchdog's per-invocation delete budget out-runs the measured closed
+// order-run inflow (~42k/day on a busy city). With the former budget of 100 the
+// closed backlog, and every full closed-list read over it, grew without bound.
+func TestOrderTrackingRetentionWatchdogBudgetOutrunsInflow(t *testing.T) {
+	const measuredInflowPerDay = 42000
+	invocationsPerDay := int((24 * time.Hour) / orderTrackingRetentionWatchdogInterval)
+	if got := orderTrackingRetentionWatchdogDeleteBudget * invocationsPerDay; got < measuredInflowPerDay {
+		t.Fatalf("watchdog capacity = %d deletes/day, below measured inflow %d/day", got, measuredInflowPerDay)
+	}
+}
+
+// TestSweepClosedOrderTrackingRetentionBounded_DrainsBacklogAcrossInvocations
+// is the regression for "bounded must not mean silently dropped": a backlog far
+// larger than the per-invocation budget is fully pruned over successive
+// invocations, the retain floor survives, and a drained store deletes nothing.
+func TestSweepClosedOrderTrackingRetentionBounded_DrainsBacklogAcrossInvocations(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}
+	const eligible, budget = 25, 10
+	total := minClosedOrderTrackingRetained + eligible
+	seed := make([]beads.Bead, 0, total)
+	for i := range total {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("drain-%03d", i),
+			Title:     "order:drain",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:drain", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(1000, seed, nil)
+
+	var got []int
+	for range 4 {
+		n, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded([]beads.Store{store}, now, policy, nil, budget)
+		if err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		got = append(got, n)
+	}
+	want := []int{10, 10, 5, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("per-invocation deletes = %v, want %v", got, want)
+		}
+	}
+	left, err := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(left) != minClosedOrderTrackingRetained {
+		t.Fatalf("remaining closed = %d, want retain floor %d", len(left), minClosedOrderTrackingRetained)
+	}
+}
