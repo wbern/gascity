@@ -175,6 +175,11 @@ func TestDoltliteReadStoreGetReadsCloseReason(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
+	// The store memoizes the schema probe for an open snapshot, whose columns never
+	// change in production; this test adds one under the open handle.
+	store.columnMu.Lock()
+	store.columnCache = nil
+	store.columnMu.Unlock()
 
 	got, err := store.Get("gc-ready")
 	if err != nil {
