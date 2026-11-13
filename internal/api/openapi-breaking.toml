@@ -281,3 +281,27 @@ target = "components"
 # removed the problem type `urn:gascity:error:when-not-supported` from ErrorModel.type x-gascity-problem-types
 reason = "the lane now runs every message when as a lane op (now and the legacy interrupt as a deliver-now unit), so POST /v0/city/{cityName}/session/{id}/ops accepts them and no route returns when-not-supported; the type existed only for that refusal (#8144)"
 pr = "#8145"
+
+[[waiver]]
+fingerprint = "89642f3464a2"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{base}"
+# the response property `Admission` became optional for the status `200`
+reason = "fork-only AgentPatch.Admission is a pointer now serialized omitempty like its sibling patch fields (see the waivers above for ga-8hk1fe): unset patches omit it instead of sending null, and the spec marks it optional to match the wire (gas-city-wbern upstream integration, wbern/gascity#275)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "889873c1049b"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{dir}/{base}"
+# the response property `Admission` became optional for the status `200`
+reason = "fork-only AgentPatch.Admission is a pointer now serialized omitempty like its sibling patch fields (see the waivers above for ga-8hk1fe): unset patches omit it instead of sending null, and the spec marks it optional to match the wire (gas-city-wbern upstream integration, wbern/gascity#275)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "efa7c32e57c8"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agents"
+# the response property `items/items/Admission` became optional for the status `200`
+reason = "fork-only AgentPatch.Admission is a pointer now serialized omitempty like its sibling patch fields (see the waivers above for ga-8hk1fe): unset patches omit it instead of sending null, and the spec marks it optional to match the wire (gas-city-wbern upstream integration, wbern/gascity#275)"
+pr = "#7084"
