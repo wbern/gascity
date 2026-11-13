@@ -832,16 +832,9 @@ var controlReadyNow = time.Now
 // and the registry loser's CachingStores are pure in-memory snapshots
 // (CachedReady never touches a backing), so an overwritten entry is never a
 // use-after-close.
-func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
-	entry := controlReadyCacheFor(dir, cityPath, cfg, nil, false)
-	if entry == nil {
-		return nil
-	}
-	return entry.caches
-}
-
-// controlReadyCacheFor is controlReadyCachesFor keyed additionally by the
-// worker environment, the ephemeral tier, and the parsed query. A
+//
+// controlReadyCacheFor is keyed by scope dir, the worker environment, the
+// ephemeral tier, and the parsed query. A
 // bdshim-fronted environment (controlReadyUsesSummary) primes the entry with
 // the same ONE unscoped ready call controlReadyFallbackReady issues, through
 // the bounded --summary-json contract, filtered in Go by evaluateControlReady

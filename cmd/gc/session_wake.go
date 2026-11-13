@@ -52,15 +52,35 @@ type metadataBatchWriter interface {
 // goroutine drains rather than leaking unboundedly. This bounds only the start
 // path — the shared store interface is intentionally left unchanged.
 func setMetadataBatchBounded(store metadataBatchWriter, id string, kvs map[string]string, timeout time.Duration) error {
-	done := make(chan error, 1)
-	go func() { done <- store.SetMetadataBatch(id, kvs) }()
+	_, err := boundedStartWrite(timeout, func() (struct{}, error) {
+		return struct{}{}, store.SetMetadataBatch(id, kvs)
+	})
+	return err
+}
+
+// boundedStartWrite runs op with a wall-clock deadline: the result of an op that
+// outlives timeout is discarded and errStartWriteTimedOut returned, while the
+// op's goroutine drains on the store's own timeout. op must hand its results
+// back through its return value, never through variables the caller reads
+// after a timeout.
+func boundedStartWrite[T any](timeout time.Duration, op func() (T, error)) (T, error) {
+	type result struct {
+		val T
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := op()
+		done <- result{v, err}
+	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case err := <-done:
-		return err
+	case r := <-done:
+		return r.val, r.err
 	case <-timer.C:
-		return errStartWriteTimedOut
+		var zero T
+		return zero, errStartWriteTimedOut
 	}
 }
 
@@ -98,7 +118,10 @@ func preWakeCommit(
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
 	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
-		return sessFront.ApplyPatch(info.ID, batch)
+		_, err := boundedStartWrite(startPathWriteTimeout, func() (struct{}, error) {
+			return struct{}{}, sessFront.ApplyPatch(info.ID, batch)
+		})
+		return err
 	})
 }
 
@@ -128,23 +151,36 @@ func preWakeCommitUnder(
 		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
 	}
 	now := clk.Now()
-	var resetPrior map[string]string
-	freshWake := false
-	inc, err = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
-		Expect: info,
-		By:     sessions.ActorController,
-		Now:    now,
-		// The mint's generation, token, epoch and last_woke_at win over the
-		// patch's, which are decided on the same read.
-		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
-			_, _, batch, class := preWakePatch(fresh, now, "")
-			fold = class.Into(fresh.ID, batch)
-			resetPrior = freshWakeResetPriorValues(fresh)
-			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
-			return fold
-		},
-		FreshContext: shouldBumpContinuationEpoch,
+	// The mint's results travel back through the return value: past the bound the
+	// mint goroutine may still run its Patch callback, which must not write
+	// variables this function reads.
+	type minted struct {
+		inc        sessions.Incarnation
+		fold       sessions.MetadataPatch
+		resetPrior map[string]string
+		freshWake  bool
+	}
+	m, err := boundedStartWrite(startPathWriteTimeout, func() (minted, error) {
+		var out minted
+		var mintErr error
+		out.inc, mintErr = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
+			Expect: info,
+			By:     sessions.ActorController,
+			Now:    now,
+			// The mint's generation, token, epoch and last_woke_at win over the
+			// patch's, which are decided on the same read.
+			Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
+				_, _, batch, class := preWakePatch(fresh, now, "")
+				out.fold = class.Into(fresh.ID, batch)
+				out.resetPrior = freshWakeResetPriorValues(fresh)
+				out.freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
+				return out.fold
+			},
+			FreshContext: shouldBumpContinuationEpoch,
+		})
+		return out, mintErr
 	})
+	inc, fold, resetPrior, freshWake := m.inc, m.fold, m.resetPrior, m.freshWake
 	switch {
 	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
 		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)

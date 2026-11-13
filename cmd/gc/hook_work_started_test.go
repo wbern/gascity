@@ -494,7 +494,7 @@ func TestHookDiscoveryDrainAckFenceHoldsAStartedClaim(t *testing.T) {
 	stdout := &orderedWriter{l: l}
 	var stderr bytes.Buffer
 	runner := func(string, string) (string, error) { return "", nil }
-	code := doHookDiscovery("q", "/rig", false, opts, ops, runner, stdout, &stderr, hookVisibility{})
+	code := doHookDiscoveryWithContext(context.Background(), "q", "/rig", false, opts, ops, runner, stdout, &stderr, hookVisibility{})
 
 	got := decodeTurnBoundResult(t, stdout.buf.String())
 	if code != 0 || got.Reason != hookClaimWorkReasonStartedClaimHeld || l.acked {
@@ -1033,7 +1033,7 @@ func TestStartedGateBlockedClaimSurvivesTheNudge(t *testing.T) {
 }
 
 // TestPlainHookPassesIdentitiesToTheDiscoveryDoor (E1, at the call site):
-// `gc hook` hands doHookDiscovery the seat's assignee and identities, which
+// `gc hook` hands doHookDiscoveryWithContext the seat's assignee and identities, which
 // the drain-ack fence on that door matches a started claim's assignee
 // against. (Plain `gc hook` refuses --drain-ack today, "requires --claim", so
 // the fence there is defense in depth: it holds the moment that changes.)

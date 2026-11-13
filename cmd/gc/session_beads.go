@@ -1221,38 +1221,6 @@ func sweepAssignedWorkLegs(legs WorkLegs, stderr io.Writer, visit func(index int
 // the plan themselves, report whether a leg set existed, and hand visit the
 // store-ref the drain-ack reservation records.
 
-// sweepAssignedWorkLegsForCity runs visit over the leg set a session-retirement scan
-// reads — the city/leading work store, every rig work store by name, then every
-// relocated class binding — and reports whether every leg was read.
-//
-// It is the one place the unclaim/reassign/drain-ack family gets its stores, so
-// "release reads the stores the claim can land in" is true by construction
-// rather than by four lists that have to be kept in step. The binding goes LAST
-// because it is the ledger of last resort, the same order the claim reaches it
-// in (claim_class_route.go escalates off the work store), and a leg that
-// resolved back to the leading store is deduped rather than scanned twice.
-//
-// These sweeps are VOID and their callers have no error channel, so a leg whose
-// read fails is logged by visit and the pass continues — deliberately NOT the
-// resolver's fail-loud policy, because the alternative on a best-effort
-// idempotent sweep is releasing less on this tick and no diagnosis at all. The
-// gates that DO have an error channel consume the policy
-// (assignedWorkScanComplete).
-//
-// So be precise about what the bool means: visit returns nothing, so the
-// executor never sees a leg error and res.Partial is always false here. It
-// reports only that the city HAD a resolvable leg set — false is the refused
-// city, where every infrastructure class answers with the refusal and a
-// work-only sweep would release from the wrong ledger. Per-leg read failures
-// are surfaced by visit's own stderr line and, for the one caller that reports
-// a result, by unclaimResult.Failed; that is what stops the stranded-repair
-// path from calling a repair clean.
-func sweepAssignedWorkLegsForCity(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, stderr io.Writer, visit func(index int, s beads.Store)) bool {
-	return sweepAssignedWorkLegsWithRefs(cityPath, cfg, store, rigStores, identifiers, stderr, func(index int, s beads.Store, _ string) {
-		visit(index, s)
-	})
-}
-
 func sweepAssignedWorkLegsWithRefs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, stderr io.Writer, visit func(index int, s beads.Store, ref string)) bool {
 	if store == nil {
 		return false

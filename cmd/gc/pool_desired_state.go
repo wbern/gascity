@@ -39,6 +39,7 @@ type poolNewDemandLoadVeto struct {
 	Vetoed  bool
 	Load    float64
 	Ceiling float64
+	NumCPU  int
 }
 
 // resolvePoolNewDemandLoadVeto probes the host load once and decides whether
@@ -48,13 +49,46 @@ type poolNewDemandLoadVeto struct {
 // DesiredStateResult, mirroring PoolNewDemandInterleaveSeed) rather than
 // letting computePoolDesiredStates probe internally.
 func resolvePoolNewDemandLoadVeto(cfg *config.City, scaleCheckCounts map[string]int) poolNewDemandLoadVeto {
-	if pct := cfg.Daemon.PoolNewDemandMaxLoadPercent(); pct > 0 && len(scaleCheckCounts) > 0 {
-		if load, err := poolNewDemandLoadAverageFn(); err == nil {
-			ceiling := float64(runtime.NumCPU()) * float64(pct) / 100
-			if load > ceiling {
-				return poolNewDemandLoadVeto{Vetoed: true, Load: load, Ceiling: ceiling}
-			}
-		}
+	if len(scaleCheckCounts) == 0 {
+		return poolNewDemandLoadVeto{}
+	}
+	return poolNewDemandLoadVetoFor(cfg, scaleCheckCounts, readPoolNewDemandLoad(cfg))
+}
+
+// poolLoadReading is one probe of the host: its 1-minute load average and the
+// CPU count the veto ceiling scales with. OK is false when the guard is off or
+// the load was unreadable, which proceeds (fail-open).
+type poolLoadReading struct {
+	Load   float64
+	NumCPU int
+	OK     bool
+}
+
+// readPoolNewDemandLoad probes the host load once, when the guard is enabled.
+// The reconciler's gather phase takes the reading so the allocator's decision
+// stays a pure function of its inputs; resolvePoolNewDemandLoadVeto takes it
+// for the callers that decide outside that pass.
+func readPoolNewDemandLoad(cfg *config.City) poolLoadReading {
+	if cfg.Daemon.PoolNewDemandMaxLoadPercent() <= 0 {
+		return poolLoadReading{}
+	}
+	load, err := poolNewDemandLoadAverageFn()
+	if err != nil {
+		return poolLoadReading{}
+	}
+	return poolLoadReading{Load: load, NumCPU: runtime.NumCPU(), OK: true}
+}
+
+// poolNewDemandLoadVetoFor is the veto verdict for reading: a function of its
+// arguments alone.
+func poolNewDemandLoadVetoFor(cfg *config.City, scaleCheckCounts map[string]int, reading poolLoadReading) poolNewDemandLoadVeto {
+	pct := cfg.Daemon.PoolNewDemandMaxLoadPercent()
+	if pct <= 0 || len(scaleCheckCounts) == 0 || !reading.OK {
+		return poolNewDemandLoadVeto{}
+	}
+	ceiling := float64(reading.NumCPU) * float64(pct) / 100
+	if reading.Load > ceiling {
+		return poolNewDemandLoadVeto{Vetoed: true, Load: reading.Load, Ceiling: ceiling, NumCPU: reading.NumCPU}
 	}
 	return poolNewDemandLoadVeto{}
 }
@@ -586,14 +620,51 @@ func computePoolDesiredStatesParkedAt(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	decisionTime time.Time,
 	parked parkedSeats,
-	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, parked, trace)
+	return computePoolDesiredStatesWithOptionsParked(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nextPoolNewDemandInterleaveSeed(), resolvePoolNewDemandLoadVeto(cfg, scaleCheckCounts), nil, decisionTime, parked, nil)
 }
 
 // computePoolDesiredStatesWithOptionsParked is computePoolDesiredStatesWithOptions
 // with the pass's parked seats (see computePoolDesiredStatesParkedAt).
 func computePoolDesiredStatesWithOptionsParked(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	newDemandInterleaveSeed uint64,
+	loadVeto poolNewDemandLoadVeto,
+	admissionVerdicts map[string]AdmissionVerdict,
+	decisionTime time.Time,
+	parked parkedSeats,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	// The zero decision time reads the wall clock here, at the edge: the
+	// allocator's pure decide always supplies its pass's clock and calls
+	// computePoolDesiredStatesDecided directly.
+	if decisionTime.IsZero() {
+		decisionTime = time.Now()
+	}
+	// The veto's trace belongs to the edge as well: it records at the controller's
+	// clock under a lock, and the allocator's decide (which passes no trace) must
+	// not reach it.
+	if loadVeto.Vetoed && trace != nil {
+		trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
+			"load":              loadVeto.Load,
+			"max_load_percent":  cfg.Daemon.PoolNewDemandMaxLoadPercent(),
+			"num_cpu":           loadVeto.NumCPU,
+			"ceiling":           loadVeto.Ceiling,
+			"templates_at_risk": len(scaleCheckCounts),
+		})
+	}
+	return computePoolDesiredStatesDecided(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, newDemandInterleaveSeed, loadVeto, admissionVerdicts, decisionTime, parked, trace)
+}
+
+// computePoolDesiredStatesDecided is computePoolDesiredStatesWithOptionsParked
+// at a decision time that is set: the body is a function of its arguments (the
+// trace, when given, only observes it).
+func computePoolDesiredStatesDecided(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
@@ -662,9 +733,6 @@ func computePoolDesiredStatesWithOptionsParked(
 	// session for it would only drain-and-re-wake every tick (gcw-ehvg P1a).
 	// It shares the caller's decision time when one was supplied.
 	now := decisionTime
-	if now.IsZero() {
-		now = time.Now()
-	}
 
 	var resumeRequests []SessionRequest
 	wakeRequestedTemplates := make(map[string]struct{})
@@ -917,15 +985,6 @@ func computePoolDesiredStatesWithOptionsParked(
 	// let the two calls independently reach opposite verdicts on the same
 	// tick (PR #131 review cycle 2).
 	newDemandVetoed := loadVeto.Vetoed
-	if newDemandVetoed && trace != nil {
-		trace.RecordControllerDecision(TraceSitePoolNewDemandLoadVeto, TraceReasonHostLoadVeto, TraceOutcomeSkipped, traceRecordPayload{
-			"load":              loadVeto.Load,
-			"max_load_percent":  cfg.Daemon.PoolNewDemandMaxLoadPercent(),
-			"num_cpu":           runtime.NumCPU(),
-			"ceiling":           loadVeto.Ceiling,
-			"templates_at_risk": len(scaleCheckCounts),
-		})
-	}
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests

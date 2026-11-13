@@ -63,8 +63,14 @@ type allocInputs struct {
 	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
 	ScaleCheckStartedAt time.Time
 	ClaimsSeen          map[workClaim]time.Time
-	Obs                 *ObservationSnapshot
-	ObsMaxAge           time.Duration
+	// PoolNewDemandInterleaveSeed is the pass's rotation seed for the pool's fair-share
+	// new-demand interleave, and PoolLoad the host-load reading its load veto judges:
+	// the advance of a process counter and a probe of the host, so the gather phase
+	// takes both and the decide stays a function of its inputs.
+	PoolNewDemandInterleaveSeed uint64
+	PoolLoad                    poolLoadReading
+	Obs                         *ObservationSnapshot
+	ObsMaxAge                   time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).

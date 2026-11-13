@@ -89,8 +89,12 @@ type World struct {
 	// pairing guard (claimHeldTemplates) reads both.
 	ScaleCheckStartedAt time.Time
 	ClaimsSeen          map[workClaim]time.Time
-	Obs                 *ObservationSnapshot
-	ObsMaxAge           time.Duration
+	// PoolNewDemandInterleaveSeed and PoolLoad are the pass's pool new-demand facts,
+	// drawn and probed once by gather (see allocInputs).
+	PoolNewDemandInterleaveSeed uint64
+	PoolLoad                    poolLoadReading
+	Obs                         *ObservationSnapshot
+	ObsMaxAge                   time.Duration
 	// Patrol is the patrol interval, read once by gather, so the decide
 	// never reaches the config's environment-backed reader.
 	Patrol     time.Duration
@@ -239,6 +243,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.Patrol = env.patrol()
+	w.PoolNewDemandInterleaveSeed, w.PoolLoad = nextPoolNewDemandInterleaveSeed(), readPoolNewDemandLoad(cfg)
 	w.ObsMaxAge = 2 * w.Patrol
 	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, w.ObsMaxAge)
 	w.AliasOwed = p.aliasOwedFor(w.Census)

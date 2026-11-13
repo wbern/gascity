@@ -575,31 +575,10 @@ func (e *AttachmentProbeError) Error() string {
 func (e *AttachmentProbeError) Unwrap() error { return e.Err }
 
 // subtreeProbeError is the AttachmentProbeError for an attachment whose
-// subtree could not be read (attachmentActiveWork's unreadable): the guard
+// subtree could not be read: the guard
 // read the attachment but could not tell whether a worker holds a step.
 func subtreeProbeError(beadID, label, attachmentID string, unreadable error) *AttachmentProbeError {
 	return &AttachmentProbeError{BeadID: beadID, Err: fmt.Errorf("reading the subtree of attached %s %s: %w", label, attachmentID, unreadable)}
-}
-
-// attachmentActiveWork reports why an unassigned source's stale attachment may
-// not be burned to make room for a new one: the beads of its subtree a worker
-// holds (in_progress, or hooked), or the error that kept the subtree from
-// being read. Fails closed: an unreadable subtree is never burned.
-func attachmentActiveWork(a AttachedBead) (held []string, unreadable error) {
-	if a.Store == nil {
-		return nil, errors.New("its store is unavailable")
-	}
-	// a.Store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	subtree, err := molecule.ListSubtree(beads.GraphMolecule(beads.GraphStore{Store: a.Store}), a.Bead.ID)
-	if err != nil {
-		return nil, err
-	}
-	for _, b := range subtree {
-		if b.Status == "in_progress" || b.Status == "hooked" {
-			held = append(held, b.ID)
-		}
-	}
-	return held, nil
 }
 
 // MoleculeAttachedError reports that a bead already has a live, non-workflow

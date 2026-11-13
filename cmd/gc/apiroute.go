@@ -195,7 +195,7 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	case identity.PID == 0:
 		// No controller socket: the supervisor-managed client, nil unless the
 		// supervisor runs the city. A supervisor that requires grants keeps
-		// the local fallback for the routes that honour that requirement, and
+		// the local fallback for the routes that honor that requirement, and
 		// the standalone-only route never reaches the supervisor.
 		if route == apiRouteStandaloneOnly || supervisorRequiresGrantFor(route) {
 			return nil
@@ -327,7 +327,7 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 	switch {
 	case identity.PID == 0:
 		// No controller socket: a supervisor that requires grants is why a
-		// route that honours them got nil.
+		// route that honors them got nil.
 		if supervisorRequiresGrantFor(route) {
 			return "grant-required"
 		}

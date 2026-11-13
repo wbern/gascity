@@ -91,7 +91,8 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths, Census: w.Census, Demand: w.Demand,
-		ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
+		ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen,
+		PoolNewDemandInterleaveSeed: w.PoolNewDemandInterleaveSeed, PoolLoad: w.PoolLoad, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
 		Episodes: w.Episodes, SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,
 	})

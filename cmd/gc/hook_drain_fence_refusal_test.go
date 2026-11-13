@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -150,7 +151,7 @@ func TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal(t *testing.T) {
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=" + drainPendingTestSessionID, "GC_TEMPLATE=beads--gc__run-operator"}}
 	ops := hookClaimOps{DrainPending: hookSessionDrainPending}
 
-	code := doHookDiscovery("bd ready", "/rig", false, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
+	code := doHookDiscoveryWithContext(context.Background(), "bd ready", "/rig", false, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
 
 	if code != hookExitWorkQueryFailed {
 		t.Errorf("code = %d, want %d (fence failed closed); stderr=%s", code, hookExitWorkQueryFailed, e.stderr.String())

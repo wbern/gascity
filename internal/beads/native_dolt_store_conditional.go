@@ -818,17 +818,6 @@ func (s *NativeDoltStore) CompareAndSetMetadataPatch(id string, expected Bead, p
 	return swapped, nil
 }
 
-func metadataRawValuesFromNative(raw json.RawMessage) (map[string]json.RawMessage, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	var values map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &values); err != nil {
-		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
-	}
-	return values, nil
-}
-
 // nativeMetadataCASValue encodes one string-shaped metadata value for the role.
 // The empty string is the CLEAR, and the role spells a clear as a nil value.
 func nativeMetadataCASValue(value string) (*json.RawMessage, error) {

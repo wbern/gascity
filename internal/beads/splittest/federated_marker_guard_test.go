@@ -96,10 +96,6 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of the step reminder's molecule union (S3a): graph roots in the graph store, v1 poured molecules on the work legs",
 	},
-	"internal/sling/sling.go graphWorkflowAttachmentInGraphStore": {
-		"federated", 1,
-		"graph.v2 root test against the graph store: a v1 poured root lives in the work store, and the miss is the answer (not graph)",
-	},
 	"internal/sling/sling_attachment.go getFromStores": {
 		"federated", 1,
 		"first-owner attachment probe (S3a): graph store or, for a v1 poured molecule, the work store",

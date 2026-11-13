@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,7 +54,7 @@ func (e *discoveryDrainEnv) run(jsonOut bool) int {
 		JSON: jsonOut,
 	}
 	ops := hookClaimOps{DrainPending: e.probe.probe}
-	return doHookDiscovery("bd ready", "/rig", false, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
+	return doHookDiscoveryWithContext(context.Background(), "bd ready", "/rig", false, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
 }
 
 // A draining seat's plain hook must not hand it the next link in the chain.
@@ -154,7 +155,7 @@ func TestHookDiscoveryInjectSkipsTheFence(t *testing.T) {
 
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=" + drainPendingTestSessionID}}
 	ops := hookClaimOps{DrainPending: e.probe.probe}
-	code := doHookDiscovery("bd ready", "/rig", true, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
+	code := doHookDiscoveryWithContext(context.Background(), "bd ready", "/rig", true, opts, ops, e.runner(), &e.stdout, &e.stderr, hookVisibility{})
 
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)

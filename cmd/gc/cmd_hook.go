@@ -924,18 +924,6 @@ func hookClaimCollapsedIdentity(a *config.Agent, info *session.Info, runtimeAlia
 	return ""
 }
 
-// loadHookClaimSessionInfo reads the current persisted session projection and
-// classifies whether the runtime may act on it. The returned Info is valid only
-// for hookClaimSessionEligible; callers must not consume it for stale or
-// unavailable outcomes.
-func loadHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (session.Info, hookClaimSessionVerdict, string) {
-	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
-	if info == nil {
-		return session.Info{}, verdict, reason
-	}
-	return *info, verdict, reason
-}
-
 // currentHookClaimTrigger reloads the current session after the early identity
 // fence, because a warm pool slot's process environment belongs to its startup,
 // not necessarily to its presently rebound work. A verified current session
@@ -1788,11 +1776,11 @@ func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCo
 	}
 }
 
-// hookDiscover is doHookDiscovery, a seam for tests of what plain `gc hook`
+// hookDiscover is doHookDiscoveryWithContext, a seam for tests of what plain `gc hook`
 // hands it. Tests that swap it MUST NOT call t.Parallel().
 var hookDiscover = doHookDiscoveryWithContext
 
-// doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
+// doHookDiscoveryWithContext is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
 // wrapper is where the F-D fence lives for the non-claim path.
 //
@@ -1808,12 +1796,9 @@ var hookDiscover = doHookDiscoveryWithContext
 // because the packs ALREADY route that answer to `gc runtime drain-ack` and
 // exit. No prompt changes are needed to make the seat leave; the answer it
 // already knows how to obey is simply now the true one.
-func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, ops hookClaimOps, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
-	return doHookDiscoveryWithContext(context.Background(), workQuery, dir, inject, opts, ops, runner, stdout, stderr, visibility)
-}
-
-// doHookDiscoveryWithContext is doHookDiscovery with the caller's context, which
-// bounds the managed output-firewall publish of the discovery result.
+// doHookDiscoveryWithContext is the work-discovery claim path, run under the
+// caller's context, which bounds the managed output-firewall publish of the
+// discovery result.
 func doHookDiscoveryWithContext(ctx context.Context, workQuery, dir string, inject bool, opts hookClaimOptions, ops hookClaimOps, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	// An inject invocation reads nothing and answers nothing, so there is no
 	// work to withhold and no reason to pay for a probe.

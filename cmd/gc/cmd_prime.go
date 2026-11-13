@@ -840,10 +840,14 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt += hookContextSuffix
 	}
 	if hookMode && hookFormat != "" {
-		_ = writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt)
+		if err := writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt); err == nil && afterDelivery != nil {
+			afterDelivery()
+		}
 		return
 	}
-	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
+	if _, err := fmt.Fprint(stdout, prompt); err == nil && afterDelivery != nil { //nolint:errcheck // best-effort stdout
+		afterDelivery()
+	}
 }
 
 func readPrimeHookContext() primeHookContext {

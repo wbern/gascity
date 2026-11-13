@@ -508,10 +508,6 @@ type NativeDoltStore struct {
 	// window is hit. Zero (the default) leaves the pool's idle lifetime
 	// unbounded, matching prior behavior.
 	connMaxIdleTime time.Duration
-	// afterMetadataMergeRead, when set, runs after each read that starts a
-	// metadata merge attempt, before its checked write. Only tests set it, to
-	// land a competing write in the window the compare-and-swap protects.
-	afterMetadataMergeRead func(id string)
 
 	// readOnlyReason, when non-empty, latches this handle read-only: every
 	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches

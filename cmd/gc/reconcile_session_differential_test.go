@@ -650,7 +650,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	if poolDesired == nil {
 		work, _ := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, assigned, refs)
 		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, open, result.ScaleCheckCounts, nil, now,
-			parkSeatsForResult(cfg, open, result, now.UTC()), nil)),
+			parkSeatsForResult(cfg, open, result, now.UTC()))),
 			updated, effectivePoolPartialRetentionTemplates(result))
 	}
 	if poolDesired == nil {

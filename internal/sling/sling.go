@@ -1857,15 +1857,3 @@ func mapsCloneWithout(in map[string]string, drop string) map[string]string {
 	}
 	return out
 }
-
-// graphWorkflowAttachmentInGraphStore is IsGraphWorkflowAttachment asked of
-// the graph store for a root a recipe just poured: a v1 poured root (work
-// class) lives in the work store, and missing it there is the right answer
-// ("not graph.v2").
-func graphWorkflowAttachmentInGraphStore(graphStore beads.GraphStore, rootID string) (graph bool) {
-	_ = beads.FederatedRead(func() error {
-		graph = IsGraphWorkflowAttachment(graphStore, rootID)
-		return nil
-	})
-	return graph
-}

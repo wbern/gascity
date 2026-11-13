@@ -493,7 +493,7 @@ func clearOperatorDrainRow(store beads.Store, sessionID string) error {
 // doRuntimeDrain sets the drain signal on a session. It is the whole drain
 // in a legacy city.
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
-	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer, targets ...sessionRuntimeTarget,
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
 ) int {
 	return drainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr)
 }

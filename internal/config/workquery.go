@@ -223,12 +223,7 @@ func heldLabelCountJQ() string {
 	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
 
-// openBlockerCountJQ counts the blockers in a blocked_by array that are not
-// closed. Status interpretation is otherwise left to the shared Go filter, so
-// any non-closed status counts.
-const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
-
-// strictOpenBlockerCountJQ is openBlockerCountJQ for evidence that must be
+// strictOpenBlockerCountJQ is the open-blocker count for evidence that must be
 // well formed: a blocked_by that is not an array of {id, status} objects is an
 // error, never a count. The federated window filter uses it so malformed
 // blocker evidence makes jq fail, the filter fail open, and the strict serve

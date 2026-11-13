@@ -120,7 +120,7 @@ type failingNamedProviderProjectionStore struct {
 func (s *failingNamedProviderProjectionStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	// The projection patch writes provider = codex (a direct builtin leaves
 	// provider_kind empty, the single rule every writer shares), so the write is
-	// recognised by provider.
+	// recognized by provider.
 	if kvs["provider"] == "codex" {
 		return errors.New("injected named provider projection write failure")
 	}
