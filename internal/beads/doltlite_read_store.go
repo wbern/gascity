@@ -468,6 +468,23 @@ func (s *DoltliteReadStore) ListByMetadata(filters map[string]string, limit int,
 	})
 }
 
+// ReadyWhere narrows this store's own Ready to the rows keep admits. It is
+// defined here so the embedded BdStore's ReadyWhere, which shells out to bd,
+// is never promoted past the native read above it.
+func (s *DoltliteReadStore) ReadyWhere(q ReadyQuery, keep func(Bead) bool) ([]Bead, error) {
+	rows, err := s.Ready(q)
+	if err != nil || keep == nil {
+		return rows, err
+	}
+	kept := make([]Bead, 0, len(rows))
+	for _, row := range rows {
+		if keep(row) {
+			kept = append(kept, row)
+		}
+	}
+	return kept, nil
+}
+
 // Ready returns the beads with no open blockers, cached per Dolt commit hash.
 func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	rq := readyQueryFromArgs(query)

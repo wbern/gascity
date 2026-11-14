@@ -3690,7 +3690,17 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 // Ready returns open ready beads via bd ready, including ephemeral rows for
 // wisp-aware tier modes.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	q := readyQueryFromArgs(query)
+	return s.ReadyWhere(readyQueryFromArgs(query), nil)
+}
+
+// ReadyWhere is Ready restricted to the candidates keep admits; a nil keep
+// admits all of them. keep runs before the work-outcome veto, which is decided
+// per candidate from that candidate's own dependencies, so the rows returned
+// are exactly the rows of Ready that keep admits -- without the closed-blocker
+// lookups for the rest of the frontier. A caller that wants a small slice of a
+// large ready set (the control dispatcher's own queue) uses this to avoid
+// paying those lookups on every scan.
+func (s *BdStore) ReadyWhere(q ReadyQuery, keep func(Bead) bool) ([]Bead, error) {
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
 	args := bdReadyArgs(q, includeEphemeral)
 	out, err := s.runBDTransientRead(args...)
@@ -3711,12 +3721,19 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// to decide whether candidates' own Dependencies field is trustworthy.
 	s.noteInlineDependencyProjection(issues, allBeads)
 	candidates := make([]Bead, 0, len(issues))
+	// frontier counts candidates before keep, so the unread-store notice below
+	// still describes the store rather than the caller's predicate.
+	frontier := 0
 	now := time.Now().UTC()
 	for _, bead := range allBeads {
 		if !IsReadyCandidateForTier(bead, now, q.TierMode) {
 			continue
 		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
+			continue
+		}
+		frontier++
+		if keep != nil && !keep(bead) {
 			continue
 		}
 		candidates = append(candidates, bead)
@@ -3735,7 +3752,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		}
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
 	}
-	if len(result) == 0 && readyReadIsWholeFrontier(q) {
+	if len(result) == 0 && (keep == nil || frontier == 0) && readyReadIsWholeFrontier(q) {
 		s.noticeIfStoreCannotSeeItsLedger("bd ready")
 	}
 	return result, nil
