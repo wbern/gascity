@@ -1073,7 +1073,7 @@ func controlReadyLegsReadyWhere(dir, cityPath string, cfg *config.City, keep fun
 		query := beads.ReadyQuery{TierMode: beads.TierBoth}
 		var ready []beads.Bead
 		var err error
-		if scoped, ok := engine.(controlReadyScopedReader); ok && keep != nil {
+		if scoped, ok := beads.As[controlReadyScopedReader](engine); ok && keep != nil {
 			ready, err = scoped.ReadyWhere(query, keep)
 		} else {
 			ready, err = engine.Ready(query)
