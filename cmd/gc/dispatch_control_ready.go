@@ -304,6 +304,34 @@ func mergeControlReadyGroups(groups ...[]beads.Bead) []beads.Bead {
 	return merged
 }
 
+// controlReadySelectable returns the predicate for "evaluateControlReady could
+// select this bead": assigned to one of the candidates, or unassigned and
+// routed to one of the routes. It is deliberately a superset of the tiers
+// (no caps, no hold-label or instantiating filter), so narrowing a ready set
+// by it before evaluateControlReady never changes the answer.
+func controlReadySelectable(parsed parsedControlReadyQuery, envList []string) func(beads.Bead) bool {
+	candidates := make(map[string]struct{})
+	for _, cand := range controlReadyCandidates(parsed, envList) {
+		candidates[cand] = struct{}{}
+	}
+	routes := make(map[string]struct{})
+	for _, route := range controlReadyRoutes(parsed) {
+		routes[route] = struct{}{}
+	}
+	return func(b beads.Bead) bool {
+		if b.Assignee != "" {
+			_, ok := candidates[b.Assignee]
+			return ok
+		}
+		for _, key := range []string{beadmeta.RunTargetMetadataKey, beadmeta.RoutedToMetadataKey} {
+			if _, ok := routes[b.Metadata[key]]; ok {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // evaluateControlReady answers a control-dispatcher readiness scan against an
 // already-fetched ready set (from CachedReady or the single batched
 // fallback), applying the exact candidate precedence, legacy/bare route
@@ -1007,6 +1035,23 @@ func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) 
 // fallback, it keeps the complete ready set until route selection: truncating
 // before selection can hide a control behind unrelated ready work.
 func controlReadyLegsReady(dir, cityPath string, cfg *config.City) ([]beads.Bead, bool, error) {
+	return controlReadyLegsReadyWhere(dir, cityPath, cfg, nil)
+}
+
+// controlReadyScopedReader is a ledger that can narrow a ready read to the
+// beads a predicate admits before doing per-bead follow-up reads for them.
+type controlReadyScopedReader interface {
+	ReadyWhere(query beads.ReadyQuery, keep func(beads.Bead) bool) ([]beads.Bead, error)
+}
+
+// controlReadyLegsReadyWhere is controlReadyLegsReady for a caller that
+// will only select beads keep admits. The whole ready set is still read once
+// per leg, so nothing is truncated before selection; a leg that supports it
+// just skips its per-bead follow-up reads (BdStore's closed-blocker lookups,
+// two more bd processes per scan, one of them a scan of every closed ephemeral
+// bead) for beads this dispatcher could never select. A leg that does not
+// support it returns its whole ready set, as before. A nil keep admits all.
+func controlReadyLegsReadyWhere(dir, cityPath string, cfg *config.City, keep func(beads.Bead) bool) ([]beads.Bead, bool, error) {
 	sources, owned, err := controlReadyLegSourcesFn(dir, cityPath, cfg)
 	if err != nil {
 		log.Printf("control-ready scan: opening ledgers for %s: %v; using discovery fallback", dir, err)
@@ -1024,7 +1069,15 @@ func controlReadyLegsReady(dir, cityPath string, cfg *config.City) ([]beads.Bead
 	}
 	legs := make([][]beads.Bead, 0, len(sources))
 	for _, source := range sources {
-		ready, err := bindingEngine(source).Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		engine := bindingEngine(source)
+		query := beads.ReadyQuery{TierMode: beads.TierBoth}
+		var ready []beads.Bead
+		var err error
+		if scoped, ok := engine.(controlReadyScopedReader); ok && keep != nil {
+			ready, err = scoped.ReadyWhere(query, keep)
+		} else {
+			ready, err = engine.Ready(query)
+		}
 		if err != nil {
 			return nil, true, fmt.Errorf("control-ready scan: reading ledger for %s: %w", dir, err)
 		}
@@ -1057,7 +1110,7 @@ func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
-	if ready, opened, err := controlReadyLegsReady(dir, cityPath, cfg); opened {
+	if ready, opened, err := controlReadyLegsReadyWhere(dir, cityPath, cfg, controlReadySelectable(parsed, envList)); opened {
 		if err != nil {
 			return nil, true, err
 		}
