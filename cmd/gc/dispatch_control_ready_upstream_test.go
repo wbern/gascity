@@ -279,3 +279,103 @@ func TestControlReadyLiveBdLegPreservesBlockedWorkOutcome(t *testing.T) {
 		})
 	}
 }
+
+// An idle dispatcher must not pay closed-blocker lookups for the rest of the
+// city's ready set: the work-outcome veto is only owed for beads this
+// dispatcher could select, and it still fires for those.
+func TestControlReadyLiveBdLegScopesBlockerLookupsToOwnQueue(t *testing.T) {
+	target := "gascity/control-dispatcher"
+	unrelated := `{"id":"bd-unrelated","status":"open","issue_type":"task","assignee":"some-worker","dependency_count":1,"dependencies":[{"issue_id":"bd-unrelated","depends_on_id":"bd-blocker","type":"blocks"}]}`
+	routed := `{"id":"bd-control","status":"open","issue_type":"task","metadata":{"gc.routed_to":"` + target + `"},"dependency_count":1,"dependencies":[{"issue_id":"bd-control","depends_on_id":"bd-blocker","type":"blocks"}]}`
+	for _, tc := range []struct {
+		name        string
+		ready       string
+		blocked     bool
+		wantQueue   int
+		wantLookups bool
+	}{
+		{name: "idle queue issues no lookups", ready: "[" + unrelated + "]"},
+		{name: "own control is still checked", ready: "[" + unrelated + "," + routed + "]", wantQueue: 1, wantLookups: true},
+		{name: "own blocked control is still vetoed", ready: "[" + unrelated + "," + routed + "]", blocked: true, wantLookups: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			reads, lookups := 0, 0
+			store := beads.NewBdStore(dir, func(_, _ string, args ...string) ([]byte, error) {
+				switch args[0] {
+				case "ready":
+					reads++
+					return []byte(tc.ready), nil
+				case "list":
+					lookups++
+					metadata := ""
+					if tc.blocked {
+						metadata = `,"metadata":{"gc.work_outcome":"blocked"}`
+					}
+					return []byte(`[{"id":"bd-blocker","status":"closed","issue_type":"task"` + metadata + `}]`), nil
+				case "query":
+					lookups++
+					return []byte(`[]`), nil
+				default:
+					return nil, fmt.Errorf("unexpected bd command: %v", args)
+				}
+			})
+			installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+				return []beads.Store{store}, nil, nil
+			})
+			query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+			queue, handled, err := tryControlReadyScan(query, dir, nil)
+			if err != nil || !handled {
+				t.Fatalf("scan: handled=%t err=%v", handled, err)
+			}
+			if len(queue) != tc.wantQueue || reads != 1 || (lookups > 0) != tc.wantLookups {
+				t.Fatalf("queue=%v ready calls=%d blocker lookups=%d; want %d queued, 1 ready call, lookups=%t", queue, reads, lookups, tc.wantQueue, tc.wantLookups)
+			}
+		})
+	}
+}
+
+// The selection predicate must admit everything evaluateControlReady could
+// select, so scoping the read can never drop a bead from the queue.
+func TestControlReadySelectableAdmitsEverythingEvaluateSelects(t *testing.T) {
+	parsed := parsedControlReadyQuery{target: "rig/control-dispatcher", controlSessionName: "sess-1", legacyTarget: "rig/workflow-control", bareTarget: "control-dispatcher"}
+	envList := []string{"GC_SESSION_NAME=sess-2", "GC_ALIAS=alias", "GC_SESSION_ID=id-9"}
+	var ready []beads.Bead
+	n := 0
+	add := func(b beads.Bead) {
+		n++
+		b.ID = fmt.Sprintf("b-%d", n)
+		ready = append(ready, b)
+	}
+	for _, assignee := range append(controlReadyCandidates(parsed, envList), "stranger", "") {
+		for _, typ := range []string{"task", controlReadyExcludeType} {
+			add(beads.Bead{Assignee: assignee, Type: typ})
+			for _, key := range []string{beadmeta.RunTargetMetadataKey, beadmeta.RoutedToMetadataKey} {
+				for _, route := range append(controlReadyRoutes(parsed), "elsewhere") {
+					add(beads.Bead{Assignee: assignee, Type: typ, Metadata: map[string]string{key: route}})
+					add(beads.Bead{Assignee: assignee, Type: typ, Metadata: map[string]string{key: route}, Labels: []string{beadmeta.DispatchHoldLabels[0]}})
+				}
+			}
+		}
+	}
+	selectable := controlReadySelectable(parsed, envList)
+	var kept []beads.Bead
+	for _, b := range ready {
+		if selectable(b) {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(ready) {
+		t.Fatalf("fixture does not discriminate: kept %d of %d", len(kept), len(ready))
+	}
+	want := evaluateControlReady(ready, parsed, envList)
+	got := evaluateControlReady(kept, parsed, envList)
+	if len(want) == 0 || len(got) != len(want) {
+		t.Fatalf("scoped evaluation selected %d beads; unscoped selected %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("selection diverged at %d: scoped=%s unscoped=%s", i, got[i].ID, want[i].ID)
+		}
+	}
+}
