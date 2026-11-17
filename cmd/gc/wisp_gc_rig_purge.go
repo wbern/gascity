@@ -15,8 +15,8 @@ import (
 )
 
 // purgeRigStoresEnv selects whether the wisp GC purges expired closed workflow
-// roots from rig stores (the city-store purge never sees them). Values: "off",
-// "dry-run" (the default: log what would be deleted, delete nothing) and "on".
+// roots from rig stores (the city-store purge never sees them). Values: "off"
+// (the default), "dry-run" (log what would be deleted, delete nothing) and "on".
 const purgeRigStoresEnv = "GC_WISP_GC_PURGE_RIG_STORES"
 
 // rigPurgeMode is the parsed purgeRigStoresEnv value.
@@ -29,16 +29,18 @@ const (
 	rigPurgeOn     rigPurgeMode = "on"
 )
 
-// parseRigPurgeMode maps an env value to a mode; anything but "off" or "on"
-// (including unset) is the non-mutating dry-run.
+// parseRigPurgeMode maps an env value to a mode; anything but "dry-run" or "on"
+// (including unset and unrecognized values) is off.
 func parseRigPurgeMode(v string) rigPurgeMode {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "off":
 		return rigPurgeOff
 	case "on":
 		return rigPurgeOn
-	default:
+	case "dry-run":
 		return rigPurgeDryRun
+	default:
+		return rigPurgeOff
 	}
 }
 

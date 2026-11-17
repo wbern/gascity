@@ -32,7 +32,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 func TestParseRigPurgeMode(t *testing.T) {
 	for in, want := range map[string]rigPurgeMode{
-		"": rigPurgeDryRun, "dry-run": rigPurgeDryRun, "garbage": rigPurgeDryRun,
+		"": rigPurgeOff, "dry-run": rigPurgeDryRun, "garbage": rigPurgeOff,
 		"off": rigPurgeOff, "OFF": rigPurgeOff, "on": rigPurgeOn, " On ": rigPurgeOn,
 	} {
 		if got := parseRigPurgeMode(in); got != want {
