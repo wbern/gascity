@@ -21,6 +21,10 @@ type routeLogLine struct {
 	Exit        int    `json:"exit"`
 	DurMS       int64  `json:"dur_ms"`
 	Shape       string `json:"shape,omitempty"`
+	// Actor is the caller identity bd itself attributes writes to (BEADS_ACTOR:
+	// order:<name> for order execs, the agent identity for sessions). Empty
+	// when the caller set none.
+	Actor string `json:"actor,omitempty"`
 }
 
 // logDisposition appends a best-effort JSONL record of one dispatch. It never
@@ -38,6 +42,7 @@ func logDisposition(verb string, args []string, disposition string, exit int, st
 		Exit:        exit,
 		DurMS:       time.Since(start).Milliseconds(),
 		Shape:       bdshim.CommandShape(args),
+		Actor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 	}
 	enc, err := json.Marshal(line)
 	if err != nil {
