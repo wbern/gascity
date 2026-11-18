@@ -116,6 +116,9 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 	for _, violation := range violations {
 		workRecordGateLogf("work-record gate (%s): close of %s: %s", mode, id, violation)
 	}
+	logged := prospective
+	logged.ID = id
+	workrecord.RecordViolations(s.state.CityPath(), workrecord.DoorHTTP, logged, enforce, violations)
 	if enforce && len(violations) > 0 {
 		return apierr.ConflictWrongState.Msg("conflict: bead " + id + " does not satisfy the work-record close contract: " + strings.Join(violations, "; "))
 	}
