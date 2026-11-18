@@ -577,7 +577,7 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	// or may (a fork lane's fallback to the read-only cache). A fork
 	// repository's own CI has no Blacksmith: ubuntu-latest
 	// (TestBazelForkRepositoryFromEventContext).
-	if want := "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+	if want := "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' && 'ubuntu-24.04' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
 		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 
@@ -1211,8 +1211,8 @@ func TestBazelForkRepositoryFromEventContext(t *testing.T) {
 				if c.upstream && !strings.HasPrefix(got, "blacksmith-") {
 					t.Errorf("%s: job %s (lane %s) runs-on %q, want a Blacksmith label upstream", c.name, id, lane, got)
 				}
-				if !c.upstream && got != "ubuntu-latest" {
-					t.Errorf("%s: job %s (lane %s) runs-on %q in mode %s, want ubuntu-latest (no Blacksmith in a fork)", c.name, id, lane, got, mode)
+				if !c.upstream && got != "ubuntu-24.04" {
+					t.Errorf("%s: job %s (lane %s) runs-on %q in mode %s, want ubuntu-24.04 (no Blacksmith in a fork)", c.name, id, lane, got, mode)
 				}
 			}
 		}
