@@ -131,3 +131,9 @@ mail bodies are never returned, and consent is approved by a passphrase typed
 into a page outside the model. Phase 4 writes (send to session, send mail) must
 add a propose/confirm step approved the same out-of-band way; stop, kill, reset,
 delete, close, config and hold-release are never exposed.
+
+## 9. Linux (GC3) variant
+`deploy/gc-mcp-run.sh` + `deploy/gc-mcp.service` are the systemd user-unit
+equivalent of section 4. They are not installed by anything in this repo; the
+install commands are in the unit file header. Same prerequisites (passphrase hash
+in `~/.config/gc-mcp/env`), same human go for any Funnel/tunnel.
