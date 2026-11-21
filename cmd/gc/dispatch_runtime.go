@@ -1043,7 +1043,7 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
-	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+	if queue, handled, err := tryControlReadyScanIdleGated(workQuery, dir, env); handled {
 		if err != nil {
 			log.Printf("control-ready query failed for %s: %v; continuing serve loop", dir, err)
 			return nil, nil
