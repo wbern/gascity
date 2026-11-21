@@ -1101,9 +1101,18 @@ func controlReadyLegsReadyWhere(dir, cityPath string, cfg *config.City, keep fun
 // precedence, legacy/bare route aliasing, and the instantiating-metadata
 // dedup filter are reproduced exactly by evaluateControlReady.
 func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []hookBead, handled bool, err error) {
+	queue, handled, _, err = controlReadyScanWithSource(workQuery, dir, env)
+	return queue, handled, err
+}
+
+// controlReadyScanWithSource is tryControlReadyScan that also reports live:
+// whether the answer came from a live read of the scope's own ledgers
+// (controlReadyLegsReadyWhere) rather than a cached snapshot or a fallback
+// read with its own environment.
+func controlReadyScanWithSource(workQuery, dir string, env map[string]string) (queue []hookBead, handled, live bool, err error) {
 	parsed, ok := parseControlReadyQuery(workQuery)
 	if !ok {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 
 	cityPath := cityForStoreDir(dir)
@@ -1112,27 +1121,33 @@ func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []
 
 	if ready, opened, err := controlReadyLegsReadyWhere(dir, cityPath, cfg, controlReadySelectable(parsed, envList)); opened {
 		if err != nil {
-			return nil, true, err
+			return nil, true, true, err
 		}
-		return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+		return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, true, nil
 	}
+	queue, err = controlReadyScanFallback(dir, cityPath, cfg, env, envList, parsed)
+	return queue, true, false, err
+}
 
+// controlReadyScanFallback answers a control-ready scan whose ledgers could
+// not be opened: from the bounded cache when it applies, else a fallback read.
+func controlReadyScanFallback(dir, cityPath string, cfg *config.City, env map[string]string, envList []string, parsed parsedControlReadyQuery) ([]hookBead, error) {
 	if !parsed.includeEphemeral || controlReadyUsesSummary(env) {
 		if entry := controlReadyCacheFor(dir, cityPath, cfg, env, parsed.includeEphemeral, parsed); entry != nil {
 			if entry.err != nil {
 				if rows, ok, err := cachedControlReadyIncompleteSummaryFallback(entry, dir, cityPath, env, parsed); ok {
 					if err != nil {
-						return nil, true, err
+						return nil, err
 					}
-					return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), true, nil
+					return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), nil
 				}
-				return nil, true, entry.err
+				return nil, entry.err
 			}
 			if entry.caches == nil {
-				return beadsToHookBeads(evaluateControlReady(entry.ready, parsed, envList)), true, nil
+				return beadsToHookBeads(evaluateControlReady(entry.ready, parsed, envList)), nil
 			}
 			if ready, ok := cachedControlReadyUnion(entry.caches); ok {
-				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), nil
 			}
 		}
 	}
@@ -1141,11 +1156,11 @@ func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []
 	if err != nil {
 		if rows, ok, fallbackErr := controlReadyIncompleteSummaryFallback(err, dir, cityPath, env, parsed); ok {
 			if fallbackErr != nil {
-				return nil, true, fallbackErr
+				return nil, fallbackErr
 			}
-			return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), true, nil
+			return beadsToHookBeads(evaluateControlReady(rows, parsed, envList)), nil
 		}
-		return nil, true, err
+		return nil, err
 	}
-	return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+	return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), nil
 }
