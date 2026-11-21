@@ -1,25 +1,28 @@
 // OAuth 2.1 authorization server for the MCP server: auth-code + PKCE (S256),
-// dynamic client registration (RFC 7591), audience-bound tokens (RFC 8707).
+// audience-bound tokens (RFC 8707). Consent is approved by the OWNER typing a
+// passphrase into a page served by this process, so the model never sees it.
 //
-// Consent is approved by the OWNER typing a passphrase into a page served by
-// this process. The passphrase never touches the model, so a prompt-injected
-// transcript cannot approve anything. Tokens are opaque random values; only
-// SHA-256 hashes are stored.
+// Client model (security review fix): by default there is ONE static client whose
+// id only the owner holds ("Use your own OAuth client" in Claude) and NO /register
+// endpoint. Dynamic registration exists only behind an explicit flag and is
+// restricted to an exact redirect-URI allowlist with hard caps.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Response } from "express";
-import { InvalidGrantError, InvalidTokenError, InvalidTargetError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidGrantError, InvalidTokenError, InvalidTargetError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 export const SCOPE = "gc:read";
+export const CLAUDE_CALLBACKS = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"];
 const ACCESS_TTL_S = 3600;
 const REFRESH_TTL_S = 30 * 24 * 3600;
 const CODE_TTL_MS = 5 * 60_000;
 const PENDING_TTL_MS = 10 * 60_000;
+const MAX_FAILS_PER_RID = 5;
 
 const sha = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
 const rand = (n = 32) => crypto.randomBytes(n).toString("base64url");
@@ -43,54 +46,64 @@ export function verifyPassphrase(pass: string, stored: string): boolean {
 export class RateLimiter {
   private hits = new Map<string, number[]>();
   constructor(private max: number, private windowMs: number, private now: () => number = Date.now) {}
-  /** records a hit; returns false when the key is over its limit */
   hit(key: string): boolean {
     const t = this.now();
     const arr = (this.hits.get(key) ?? []).filter((x) => t - x < this.windowMs);
     if (arr.length >= this.max) { this.hits.set(key, arr); return false; }
     arr.push(t);
     this.hits.set(key, arr);
+    if (this.hits.size > 10_000) for (const [k, v] of this.hits) if (!v.some((x) => t - x < this.windowMs)) this.hits.delete(k);
     return true;
   }
-  /** over the limit without recording a hit */
   blocked(key: string): boolean {
     const t = this.now();
     return (this.hits.get(key) ?? []).filter((x) => t - x < this.windowMs).length >= this.max;
   }
 }
 
-// ---- persistent state (clients + refresh-token hashes only) ----------------
+// ---- persistent state: client registry + refresh-token hashes only ----------
 interface Persisted {
   clients: Record<string, OAuthClientInformationFull>;
-  refresh: Record<string, { clientId: string; scopes: string[]; exp: number }>;
+  refresh: Record<string, { clientId: string; scopes: string[]; exp: number; fam: string }>;
+  used: Record<string, { fam: string; exp: number }>; // rotated-out refresh hashes (reuse detection)
 }
-interface PendingAuth { client: OAuthClientInformationFull; params: AuthorizationParams; exp: number }
+interface PendingAuth { client: OAuthClientInformationFull; params: AuthorizationParams; exp: number; fails: number }
 interface CodeRec { clientId: string; challenge: string; redirectUri: string; scopes: string[]; exp: number }
-interface AccessRec { clientId: string; scopes: string[]; exp: number }
+interface AccessRec { clientId: string; scopes: string[]; exp: number; fam: string }
 
 export interface ProviderOpts {
   resource: URL;                 // canonical audience of this MCP server
   ownerHash: string;             // scrypt1$... from hashPassphrase
+  staticClientId?: string;       // the owner's own OAuth client (recommended)
+  allowDcr?: boolean;            // OFF by default
+  redirectAllow?: string[];      // exact redirect URIs accepted (default: Claude callbacks)
+  maxClients?: number;
   stateFile?: string;            // omit for memory-only (tests)
   now?: () => number;
-  failedConsent?: RateLimiter;   // limits wrong-passphrase attempts per source
+  onEvent?: (note: string, ok: boolean) => void;
 }
 
 export class OwnerApprovalProvider implements OAuthServerProvider {
-  private st: Persisted = { clients: {}, refresh: {} };
+  private st: Persisted = { clients: {}, refresh: {}, used: {} };
   private pending = new Map<string, PendingAuth>();
   private codes = new Map<string, CodeRec>();
   private access = new Map<string, AccessRec>();
   private now: () => number;
-  readonly failedConsent: RateLimiter;
+  private allow: string[];
+  readonly failedBySource: RateLimiter;
+  readonly failedGlobal: RateLimiter;
 
   constructor(private o: ProviderOpts) {
     this.now = o.now ?? Date.now;
-    this.failedConsent = o.failedConsent ?? new RateLimiter(5, 5 * 60_000, this.now);
+    this.allow = o.redirectAllow ?? CLAUDE_CALLBACKS;
+    this.failedBySource = new RateLimiter(5, 5 * 60_000, this.now);
+    this.failedGlobal = new RateLimiter(30, 15 * 60_000, this.now);
     if (o.stateFile && fs.existsSync(o.stateFile)) {
-      try { this.st = { clients: {}, refresh: {}, ...JSON.parse(fs.readFileSync(o.stateFile, "utf8")) }; } catch { /* start clean */ }
+      try { this.st = { clients: {}, refresh: {}, used: {}, ...JSON.parse(fs.readFileSync(o.stateFile, "utf8")) }; } catch { /* start clean */ }
     }
   }
+
+  private emit(note: string, ok = true) { this.o.onEvent?.(note, ok); }
 
   private save() {
     if (!this.o.stateFile) return;
@@ -100,16 +113,36 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     fs.renameSync(tmp, this.o.stateFile);
   }
 
+  private staticClient(): OAuthClientInformationFull | undefined {
+    if (!this.o.staticClientId) return undefined;
+    return { client_id: this.o.staticClientId, redirect_uris: this.allow, token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "Claude (owner client)", scope: SCOPE } as OAuthClientInformationFull;
+  }
+
   get clientsStore(): OAuthRegisteredClientsStore {
-    return {
-      getClient: (id) => this.st.clients[id],
-      registerClient: (c) => {
-        const full = { ...c, client_id: rand(18), client_id_issued_at: Math.floor(this.now() / 1000) } as OAuthClientInformationFull;
+    const store: OAuthRegisteredClientsStore = {
+      getClient: (id) => (this.o.staticClientId && id === this.o.staticClientId ? this.staticClient() : this.st.clients[id]),
+    };
+    if (this.o.allowDcr) {
+      store.registerClient = (c) => {
+        const uris = (c.redirect_uris ?? []).map(String);
+        if (!uris.length || uris.length > 2 || uris.some((u) => !this.allow.includes(u))) {
+          this.emit("dcr rejected: redirect_uri not allowlisted", false);
+          throw new InvalidClientMetadataError("redirect_uris must be exact Claude callback URLs");
+        }
+        if (Object.keys(this.st.clients).length >= (this.o.maxClients ?? 25)) {
+          this.emit("dcr rejected: client cap reached", false);
+          throw new InvalidClientMetadataError("too many registered clients");
+        }
+        const full = { ...c, redirect_uris: uris, client_name: String(c.client_name ?? "client").slice(0, 60), token_endpoint_auth_method: "none",
+          client_id: rand(18), client_id_issued_at: Math.floor(this.now() / 1000) } as OAuthClientInformationFull;
         this.st.clients[full.client_id] = full;
         this.save();
+        this.emit("dcr registered client");
         return full;
-      },
-    };
+      };
+    }
+    return store;
   }
 
   private checkResource(r?: URL) {
@@ -120,15 +153,20 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     try { this.checkResource(params.resource); } catch { res.status(400).type("text/plain").send("invalid_target"); return; }
     for (const [k, v] of this.pending) if (v.exp < this.now()) this.pending.delete(k);
+    if (this.pending.size >= 50) { res.status(503).type("text/plain").send("busy"); return; }
     const rid = rand(24);
-    this.pending.set(rid, { client, params, exp: this.now() + PENDING_TTL_MS });
-    const host = new URL(params.redirectUri).host;
+    this.pending.set(rid, { client, params, exp: this.now() + PENDING_TTL_MS, fails: 0 });
+    this.emit("authorize page served");
+    const redirect = esc(params.redirectUri);
     res.status(200)
-      .set({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" })
+      .set({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY",
+        // form-action must include the callback origins: Chrome applies it to the post-submit redirect too.
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai https://claude.com; frame-ancestors 'none'" })
       .send(`<!doctype html><meta name=viewport content="width=device-width"><title>Approve Gas City access</title>
 <body style="font:16px system-ui;max-width:28em;margin:2em auto;padding:0 1em">
 <h2>Approve Gas City access?</h2>
-<p><b>${esc(client.client_name ?? "An application")}</b> (returns to <code>${esc(host)}</code>) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+<p>An application (<b>${esc(client.client_name ?? "unnamed")}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+<p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from Claude.</p>
 <form method=post action="/consent">
 <input type=hidden name=rid value="${esc(rid)}">
 <p><label>Owner passphrase<br><input type=password name=passphrase autocomplete=current-password autofocus style="width:100%;font-size:1em"></label></p>
@@ -138,7 +176,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
 
   // Step 2: owner submits the passphrase. Returns the redirect target.
   consent(rid: string, passphrase: string, decision: string, source: string): { status: number; redirect?: string; message?: string } {
-    if (this.failedConsent.blocked(source)) return { status: 429, message: "Too many attempts. Try again later." };
+    if (this.failedGlobal.blocked("all") || this.failedBySource.blocked(source)) return { status: 429, message: "Too many failed attempts. Try again later." };
     const p = this.pending.get(rid);
     if (!p || p.exp < this.now()) return { status: 400, message: "This approval request expired. Start again from the app." };
     const back = (q: Record<string, string>) => {
@@ -147,14 +185,19 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
       if (p.params.state) u.searchParams.set("state", p.params.state);
       return u.toString();
     };
-    if (decision !== "approve") { this.pending.delete(rid); return { status: 302, redirect: back({ error: "access_denied" }) }; }
+    if (decision !== "approve") { this.pending.delete(rid); this.emit("consent denied"); return { status: 302, redirect: back({ error: "access_denied" }) }; }
     if (!verifyPassphrase(passphrase ?? "", this.o.ownerHash)) {
-      this.failedConsent.hit(source);
+      this.failedBySource.hit(source);
+      this.failedGlobal.hit("all");
+      p.fails += 1;
+      if (p.fails >= MAX_FAILS_PER_RID) { this.pending.delete(rid); this.emit("consent request burned after repeated wrong passphrase", false); }
+      else this.emit("consent wrong passphrase", false);
       return { status: 401, message: "Wrong passphrase." };
     }
     this.pending.delete(rid); // single use
     const code = rand(32);
     this.codes.set(sha(code), { clientId: p.client.client_id, challenge: p.params.codeChallenge, redirectUri: p.params.redirectUri, scopes: [SCOPE], exp: this.now() + CODE_TTL_MS });
+    this.emit("consent approved, code issued");
     return { status: 302, redirect: back({ code }) };
   }
 
@@ -171,23 +214,39 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     if (!rec || rec.clientId !== client.client_id || rec.exp < this.now()) throw new InvalidGrantError("invalid or expired grant");
     if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     this.checkResource(resource);
-    return this.issue(client.client_id, rec.scopes);
+    this.emit("token issued from code");
+    return this.issue(client.client_id, rec.scopes, rand(12));
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, _scopes?: string[], resource?: URL): Promise<OAuthTokens> {
     const key = sha(refreshToken);
+    const reused = this.st.used[key];
+    if (reused) { // a rotated-out token came back: assume theft, kill the whole family
+      this.revokeFamily(reused.fam);
+      this.emit("refresh token REUSE detected, family revoked", false);
+      throw new InvalidGrantError("invalid or expired grant");
+    }
     const rec = this.st.refresh[key];
-    delete this.st.refresh[key]; // rotate: old token is dead either way
-    if (!rec || rec.clientId !== client.client_id || rec.exp < this.now()) { this.save(); throw new InvalidGrantError("invalid or expired grant"); }
+    if (!rec || rec.clientId !== client.client_id || rec.exp < this.now()) throw new InvalidGrantError("invalid or expired grant");
+    delete this.st.refresh[key];
+    this.st.used[key] = { fam: rec.fam, exp: rec.exp };
     this.checkResource(resource);
-    return this.issue(client.client_id, rec.scopes);
+    this.emit("token issued from refresh");
+    return this.issue(client.client_id, rec.scopes, rec.fam);
   }
 
-  private issue(clientId: string, scopes: string[]): OAuthTokens {
+  private revokeFamily(fam: string) {
+    for (const [k, v] of Object.entries(this.st.refresh)) if (v.fam === fam) delete this.st.refresh[k];
+    for (const [k, v] of this.access) if (v.fam === fam) this.access.delete(k);
+    this.save();
+  }
+
+  private issue(clientId: string, scopes: string[], fam: string): OAuthTokens {
     const at = rand(32), rt = rand(32);
-    this.access.set(sha(at), { clientId, scopes, exp: this.now() + ACCESS_TTL_S * 1000 });
-    this.st.refresh[sha(rt)] = { clientId, scopes, exp: this.now() + REFRESH_TTL_S * 1000 };
+    this.access.set(sha(at), { clientId, scopes, exp: this.now() + ACCESS_TTL_S * 1000, fam });
+    this.st.refresh[sha(rt)] = { clientId, scopes, exp: this.now() + REFRESH_TTL_S * 1000, fam };
     for (const [k, v] of Object.entries(this.st.refresh)) if (v.exp < this.now()) delete this.st.refresh[k];
+    for (const [k, v] of Object.entries(this.st.used)) if (v.exp < this.now()) delete this.st.used[k];
     this.save();
     return { access_token: at, token_type: "Bearer", expires_in: ACCESS_TTL_S, refresh_token: rt, scope: scopes.join(" ") };
   }
@@ -195,13 +254,23 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const rec = this.access.get(sha(token));
     if (!rec || rec.exp < this.now()) throw new InvalidTokenError("invalid or expired token");
-    // Audience is fixed to this server: tokens are only ever minted for it.
     return { token, clientId: rec.clientId, scopes: rec.scopes, expiresAt: Math.floor(rec.exp / 1000), resource: this.o.resource };
   }
 
-  async revokeToken(_c: OAuthClientInformationFull, req: { token: string }): Promise<void> {
-    this.access.delete(sha(req.token));
-    delete this.st.refresh[sha(req.token)];
+  async revokeToken(client: OAuthClientInformationFull, req: { token: string }): Promise<void> {
+    const key = sha(req.token);
+    const a = this.access.get(key), r = this.st.refresh[key];
+    const rec = a ?? r;
+    if (!rec || rec.clientId !== client.client_id) return; // not yours: silently ignore (RFC 7009)
+    this.revokeFamily(rec.fam); // revoking either token kills the whole family
+    this.emit("token family revoked by client");
+  }
+
+  /** Owner kill switch: forget every token and pending grant (clients/passphrase stay). */
+  revokeAll(): void {
+    this.st.refresh = {}; this.st.used = {};
+    this.access.clear(); this.codes.clear(); this.pending.clear();
     this.save();
+    this.emit("ALL tokens revoked");
   }
 }

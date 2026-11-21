@@ -1,5 +1,6 @@
 # Linux (GC3) user unit. NOT installed by this repo. To enable, after the owner
-# passphrase hash is in ~/.config/gc-mcp/env and the human has approved exposure:
+# passphrase hash is in ~/.config/gc-mcp/env (value single-quoted) and the human has approved exposure.
+# Production GC3 deployment is the gc_mcp role in gas-city-infra; this is a minimal example:
 #   mkdir -p ~/.config/systemd/user && cp gc-mcp.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now gc-mcp
 # Stop/rollback: systemctl --user disable --now gc-mcp

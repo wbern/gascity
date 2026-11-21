@@ -47,3 +47,26 @@ describe("redactText false positives", () => {
     expect(redactText("tok Zk3jQ9vLx2mP7aRt5NwB8cYd4HeUf6GsIo1VnXq0 end")).toContain("[redacted]");
   });
 });
+
+describe("redactText: additional credential shapes", () => {
+  const j = (...p: string[]) => p.join("");
+  const cases: [string, string][] = [
+    [j("pay ", "sk", "_live_", "51Habcdefghijklmnop"), j("sk", "_live_")],
+    [j("key ", "AI", "zaSyA-abcdefghijklmnopqrstuvwxyz012345"), j("AI", "zaSy")],
+    [j("tok ", "np", "m_abcdefghijklmnopqrstuvwxyz0123456789"), j("np", "m_abc")],
+    [j("tok ", "gl", "pat-abcdefghijklmnopqrstu"), j("gl", "pat-")],
+    [j("ts ", "ts", "key-auth-abcdefghijklmnop"), j("ts", "key-auth")],
+    ["postgres://admin:hunter2secret@db.internal:5432/x", "hunter2secret"],
+    [j("-----BEGIN ", "RSA PRIVATE KEY-----\nMIIEabc123\n-----END RSA PRIVATE KEY-----"), "MIIEabc123"],
+    ["the password is correcthorsebattery", "correcthorsebattery"],
+    ["secret was Zk3jQ9vLx2mP", "Zk3jQ9vLx2mP"],
+    ["aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY ok", "bPxRfiCYEXAMPLEKEY"],
+  ];
+  for (const [input, leaked] of cases) {
+    it(`redacts ${leaked}`, () => {
+      const out = redactText(input);
+      expect(out).not.toContain(leaked);
+      expect(out).toContain("[redacted]");
+    });
+  }
+});

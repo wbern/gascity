@@ -1,194 +1,292 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createApp, listen } from "../src/app.js";
+import { createApp, listen, type AppOpts } from "../src/app.js";
 import { GcClient } from "../src/gc-client.js";
 import { hashPassphrase } from "../src/oauth.js";
 import * as F from "./fixtures/index.js";
-import type http from "node:http";
 
 const PASS = "correct horse battery staple";
-let srv: http.Server, base: string, dir: string, clock: number;
+const CID = "owner-client-id-0123456789ab";
+const CB = "https://claude.ai/api/mcp/auth_callback";
 const b64u = (b: Buffer) => b.toString("base64url");
+const HASH = hashPassphrase(PASS); // scrypt once for the whole file
+const cleanups: (() => void)[] = [];
+afterAll(() => cleanups.forEach((f) => f()));
 
-beforeAll(async () => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-"));
-  const fetchImpl = (async (url: string) => {
-    const p = new URL(url).pathname;
-    const body = p.endsWith("/status") ? F.status : p.endsWith("/usage") ? F.usage : { items: [] };
-    return new Response(JSON.stringify(body), { status: 200 });
-  }) as unknown as typeof fetch;
-  clock = Date.now();
-  // port 0 then patch publicUrl: listen first on a fixed ephemeral port
-  const probe = await new Promise<http.Server>((r) => { const s = (require("node:http") as typeof http).createServer().listen(0, "127.0.0.1", () => r(s)); });
-  const port = (probe.address() as { port: number }).port; probe.close();
-  base = `http://127.0.0.1:${port}`;
-  const { app } = createApp({
-    deps: { gc: new GcClient({ baseUrl: "http://x", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() },
-    publicUrl: new URL(base), ownerHash: hashPassphrase(PASS),
-    stateFile: path.join(dir, "state.json"), auditFile: path.join(dir, "audit.jsonl"),
-    callsPerMinute: 5, now: () => clock,
+const fetchImpl = (async (url: string) => {
+  const p = new URL(url).pathname;
+  const body = p.endsWith("/status") ? F.status : p.endsWith("/usage") ? F.usage : { items: [] };
+  return new Response(JSON.stringify(body), { status: 200 });
+}) as unknown as typeof fetch;
+
+async function freePort() {
+  return new Promise<number>((res) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => res(p)); }); });
+}
+
+async function boot(over: Partial<AppOpts> = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-"));
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const t = { clock: Date.now() };
+  const { app, provider } = createApp({
+    deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() },
+    publicUrl: new URL(base), ownerHash: HASH, staticClientId: CID,
+    stateFile: path.join(dir, "state.json"), auditFile: path.join(dir, "audit.jsonl"), controlDir: dir,
+    callsPerMinute: 5, now: () => t.clock, ...over,
   });
-  srv = await listen(app, port);
-});
-afterAll(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const srv = await listen(app, port);
+  cleanups.push(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const H = (xff?: string) => (xff ? { "x-forwarded-for": xff } : {});
+  const authorize = (cid = CID, challenge = "x".repeat(43), resource = `${base}/mcp`, redirect = CB, xff?: string) => {
+    const u = new URL(`${base}/authorize`);
+    Object.entries({ response_type: "code", client_id: cid, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state: "st8", scope: "gc:read", resource }).forEach(([k, v]) => u.searchParams.set(k, v));
+    return fetch(u, { redirect: "manual", headers: H(xff) });
+  };
+  const ridOf = (html: string) => /name=rid value="([^"]+)"/.exec(html)![1];
+  const consent = (rid: string, passphrase: string, decision = "approve", xff?: string) =>
+    fetch(`${base}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...H(xff) }, body: new URLSearchParams({ rid, passphrase, decision }) });
+  const flow = async (passphrase = PASS) => {
+    const verifier = b64u(crypto.randomBytes(32));
+    const challenge = b64u(crypto.createHash("sha256").update(verifier).digest());
+    const a = await authorize(CID, challenge);
+    expect(a.status).toBe(200);
+    const c = await consent(ridOf(await a.text()), passphrase);
+    return { verifier, c };
+  };
+  const token = (code: string, verifier: string, extra: Record<string, string> = {}) =>
+    fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: CID, code, code_verifier: verifier, redirect_uri: CB, resource: `${base}/mcp`, ...extra }) });
+  const refresh = (rt: string) => fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: CID, refresh_token: rt, resource: `${base}/mcp` }) });
+  const getCode = (c: Response) => new URL(c.headers.get("location")!).searchParams.get("code")!;
+  const mcpCall = (tok: string | null, xff?: string) => fetch(`${base}/mcp`, { method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(tok ? { authorization: `Bearer ${tok}` } : {}), ...H(xff) },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  const login = async () => { const { verifier, c } = await flow(); return (await (await token(getCode(c), verifier)).json()) as { access_token: string; refresh_token: string }; };
+  return { base, dir, t, provider, authorize, consent, ridOf, flow, token, refresh, getCode, mcpCall, login };
+}
 
-async function register() {
-  const r = await fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], client_name: "Claude", token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }) });
-  expect(r.status).toBe(201);
-  return (await r.json()) as { client_id: string };
-}
-async function authorize(clientId: string, challenge: string, resource = `${base}/mcp`) {
-  const u = new URL(`${base}/authorize`);
-  Object.entries({ response_type: "code", client_id: clientId, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: challenge, code_challenge_method: "S256", state: "st8", scope: "gc:read", resource }).forEach(([k, v]) => u.searchParams.set(k, v));
-  return fetch(u, { redirect: "manual" });
-}
-const ridOf = (html: string) => /name=rid value="([^"]+)"/.exec(html)![1];
-async function consent(rid: string, passphrase: string, decision = "approve") {
-  return fetch(`${base}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, passphrase, decision }) });
-}
-async function fullFlow(passphrase = PASS) {
-  const { client_id } = await register();
-  const verifier = b64u(crypto.randomBytes(32));
-  const challenge = b64u(crypto.createHash("sha256").update(verifier).digest());
-  const a = await authorize(client_id, challenge);
-  expect(a.status).toBe(200);
-  const c = await consent(ridOf(await a.text()), passphrase);
-  return { client_id, verifier, c };
-}
-async function token(client_id: string, code: string, verifier: string, extra: Record<string, string> = {}) {
-  return fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "authorization_code", client_id, code, code_verifier: verifier, redirect_uri: "https://claude.ai/api/mcp/auth_callback", resource: `${base}/mcp`, ...extra }) });
-}
-const getCode = (c: Response) => new URL(c.headers.get("location")!).searchParams.get("code")!;
-const mcpCall = (tok: string | null) => fetch(`${base}/mcp`, { method: "POST",
-  headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(tok ? { authorization: `Bearer ${tok}` } : {}) },
-  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
-
-describe("discovery", () => {
-  it("serves RFC 9728 protected-resource and RFC 8414 AS metadata", async () => {
-    const pr = await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json() as any;
-    expect(pr.resource).toBe(`${base}/mcp`);
-    expect(pr.authorization_servers).toContain(`${base}/`);
-    const as = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json() as any;
+describe("discovery and static client", () => {
+  it("serves RFC 9728 / 8414 metadata and has NO registration endpoint by default", async () => {
+    const s = await boot();
+    const pr = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp`)).json()) as any;
+    expect(pr.resource).toBe(`${s.base}/mcp`);
+    const as = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server`)).json()) as any;
     expect(as.code_challenge_methods_supported).toContain("S256");
-    expect(as.registration_endpoint).toBe(`${base}/register`);
+    expect(as.registration_endpoint).toBeUndefined();
+    expect((await fetch(`${s.base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(404);
   });
   it("401s without a token and points at the resource metadata", async () => {
-    const r = await mcpCall(null);
+    const s = await boot();
+    const r = await s.mcpCall(null);
     expect(r.status).toBe(401);
     expect(r.headers.get("www-authenticate")).toContain("resource_metadata=");
+  });
+  it("unknown client id and non-allowlisted redirect are refused at authorize", async () => {
+    const s = await boot();
+    expect((await s.authorize("someone-else")).status).toBe(400);
+    expect((await s.authorize(CID, "x".repeat(43), `${s.base}/mcp`, "https://evil.example/cb")).status).toBe(400);
   });
 });
 
 describe("authorization-code + PKCE flow", () => {
-  it("owner passphrase -> code -> token -> tool call, via a real MCP client", async () => {
-    const { client_id, verifier, c } = await fullFlow();
+  it("owner passphrase -> code -> token -> tool call via a real MCP client", async () => {
+    const s = await boot();
+    const { verifier, c } = await s.flow();
     expect(c.status).toBe(302);
     expect(new URL(c.headers.get("location")!).searchParams.get("state")).toBe("st8");
-    const t = await token(client_id, getCode(c), verifier);
-    expect(t.status).toBe(200);
-    const tok = (await t.json()) as { access_token: string; refresh_token: string };
+    const tok = (await (await s.token(s.getCode(c), verifier)).json()) as { access_token: string };
     const client = new Client({ name: "t", version: "1" });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${s.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
     expect((await client.listTools()).tools).toHaveLength(7);
     const r = await client.callTool({ name: "city_status", arguments: {} });
     expect((r.content as { text: string }[])[0].text).toMatch(/23 of 40 agents running/);
     await client.close();
   });
-  it("wrong passphrase issues no code", async () => {
-    const { c } = await fullFlow("nope nope nope nope");
+  it("wrong passphrase issues no code; deny returns access_denied", async () => {
+    const s = await boot();
+    const { c } = await s.flow("nope nope nope nope");
     expect(c.status).toBe(401);
     expect(c.headers.get("location")).toBeNull();
+    const a = await s.authorize();
+    const d = await s.consent(s.ridOf(await a.text()), PASS, "deny");
+    expect(new URL(d.headers.get("location")!).searchParams.get("error")).toBe("access_denied");
   });
-  it("deny returns access_denied", async () => {
-    const { client_id } = await register();
-    const a = await authorize(client_id, "x".repeat(43));
-    const c = await consent(ridOf(await a.text()), PASS, "deny");
-    expect(new URL(c.headers.get("location")!).searchParams.get("error")).toBe("access_denied");
+  it("code is single-use; wrong PKCE verifier fails; foreign audience refused", async () => {
+    const s = await boot();
+    const a = await s.flow();
+    const code = s.getCode(a.c);
+    expect((await s.token(code, a.verifier)).status).toBe(200);
+    expect((await s.token(code, a.verifier)).status).toBe(400);
+    const b = await s.flow();
+    expect((await s.token(s.getCode(b.c), b64u(crypto.randomBytes(32)))).status).toBe(400);
+    expect((await s.authorize(CID, "x".repeat(43), "https://evil.example/mcp")).status).toBe(400);
   });
-  it("authorization code is single-use", async () => {
-    const { client_id, verifier, c } = await fullFlow();
-    const code = getCode(c);
-    expect((await token(client_id, code, verifier)).status).toBe(200);
-    expect((await token(client_id, code, verifier)).status).toBe(400);
+  it("expired and garbage tokens are refused", async () => {
+    const s = await boot();
+    const { access_token } = await s.login();
+    expect((await s.mcpCall(access_token)).status).toBe(200);
+    s.t.clock += 2 * 3600 * 1000;
+    expect((await s.mcpCall(access_token)).status).toBe(401);
+    expect((await s.mcpCall("not-a-real-token")).status).toBe(401);
   });
-  it("wrong PKCE verifier is rejected", async () => {
-    const { client_id, c } = await fullFlow();
-    expect((await token(client_id, getCode(c), b64u(crypto.randomBytes(32)))).status).toBe(400);
-  });
-  it("rejects a different audience at authorize time (RFC 8707)", async () => {
-    const { client_id } = await register();
-    const r = await authorize(client_id, "x".repeat(43), "https://evil.example/mcp");
-    expect(r.status).toBe(400);
-  });
-  it("refresh rotates: the old refresh token dies", async () => {
-    const { client_id, verifier, c } = await fullFlow();
-    const t = (await (await token(client_id, getCode(c), verifier)).json()) as { refresh_token: string };
-    const refresh = (rt: string) => fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", client_id, refresh_token: rt, resource: `${base}/mcp` }) });
-    const r1 = await refresh(t.refresh_token);
-    expect(r1.status).toBe(200);
-    expect((await refresh(t.refresh_token)).status).toBe(400);
-  });
-  it("expired access tokens are refused", async () => {
-    const { client_id, verifier, c } = await fullFlow();
-    const t = (await (await token(client_id, getCode(c), verifier)).json()) as { access_token: string };
-    expect((await mcpCall(t.access_token)).status).toBe(200);
-    clock += 2 * 3600 * 1000;
-    expect((await mcpCall(t.access_token)).status).toBe(401);
-    clock -= 2 * 3600 * 1000;
-  });
-  it("garbage bearer tokens are refused", async () => {
-    expect((await mcpCall("not-a-real-token")).status).toBe(401);
+  it("consent page allows the Claude callback in form-action (Chrome applies it to the redirect)", async () => {
+    const s = await boot();
+    const a = await s.authorize();
+    const csp = a.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("form-action 'self' https://claude.ai");
+    expect(a.headers.get("x-frame-options")).toBe("DENY");
   });
 });
 
-describe("abuse limits", () => {
-  it("locks out repeated wrong passphrases from one source", async () => {
-    const { client_id } = await register();
-    const a = await authorize(client_id, "x".repeat(43));
-    const rid = ridOf(await a.text());
-    let last = 0;
-    for (let i = 0; i < 8; i++) last = (await consent(rid, "wrong wrong wrong")).status;
-    expect(last).toBe(429);
-    // even the right passphrase is refused while locked out
-    expect((await consent(rid, PASS)).status).toBe(429);
-    clock += 6 * 60_000;
+describe("refresh rotation and reuse detection", () => {
+  it("rotates, and a replayed old refresh token revokes the whole family", async () => {
+    const s = await boot();
+    const t1 = await s.login();
+    const r1 = await s.refresh(t1.refresh_token);
+    expect(r1.status).toBe(200);
+    const t2 = (await r1.json()) as { access_token: string; refresh_token: string };
+    expect((await s.mcpCall(t2.access_token)).status).toBe(200);
+    expect((await s.refresh(t1.refresh_token)).status).toBe(400); // replay
+    expect((await s.refresh(t2.refresh_token)).status).toBe(400); // family revoked
+    expect((await s.mcpCall(t2.access_token)).status).toBe(401);
+  });
+});
+
+describe("consent abuse limits", () => {
+  it("burns a consent request after 5 wrong passphrases even from different sources", async () => {
+    const s = await boot({ trustProxy: 1 });
+    const a = await s.authorize(CID, "x".repeat(43), `${s.base}/mcp`, CB, "198.51.100.1");
+    const rid = s.ridOf(await a.text());
+    for (let i = 0; i < 5; i++) expect((await s.consent(rid, "wrong wrong wrong", "approve", `198.51.100.${10 + i}`)).status).toBe(401);
+    expect((await s.consent(rid, PASS, "approve", "198.51.100.99")).status).toBe(400);
+  });
+  it("locks one source out but does not affect another", async () => {
+    const s = await boot({ trustProxy: 1 });
+    const a = await s.authorize();
+    const rid = s.ridOf(await a.text());
+    for (let i = 0; i < 4; i++) await s.consent(rid, "wrong wrong wrong", "approve", "198.51.100.7");
+    const b = await s.authorize();
+    const rid2 = s.ridOf(await b.text());
+    for (let i = 0; i < 5; i++) await s.consent(rid2, "wrong wrong wrong", "approve", "198.51.100.7");
+    expect((await s.consent(s.ridOf(await (await s.authorize()).text()), PASS, "approve", "198.51.100.7")).status).toBe(429);
+    expect((await s.consent(s.ridOf(await (await s.authorize()).text()), PASS, "approve", "203.0.113.5")).status).toBe(302);
+  });
+});
+
+describe("shared-IP denial of service (security review finding 1)", () => {
+  it("with no trusted proxy, flooding public endpoints never blocks the owner's /mcp calls", async () => {
+    const s = await boot();
+    const tok = await s.login();
+    for (let b = 0; b < 8; b++) await Promise.all(Array.from({ length: 50 }, () => fetch(`${s.base}/.well-known/oauth-authorization-server`)));
+    expect((await s.mcpCall(tok.access_token)).status).toBe(200);
+  });
+  it("with a trusted proxy, limits are per real client IP", async () => {
+    const s = await boot({ trustProxy: 1 });
+    const tok = await s.login();
+    for (let i = 0; i < 305; i++) await fetch(`${s.base}/.well-known/oauth-authorization-server`, { headers: { "x-forwarded-for": "198.51.100.50" } });
+    expect((await fetch(`${s.base}/healthz`, { headers: { "x-forwarded-for": "198.51.100.50" } })).status).toBe(200); // healthz is exempt
+    expect((await s.mcpCall(tok.access_token, "198.51.100.50")).status).toBe(429);
+    expect((await s.mcpCall(tok.access_token, "203.0.113.77")).status).toBe(200);
+  });
+});
+
+describe("dynamic registration (opt-in, restricted)", () => {
+  const reg = (base: string, body: object) => fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  it("rejects an attacker redirect, accepts the Claude callback, clips names, caps the count", async () => {
+    const s = await boot({ allowDcr: true });
+    expect((await reg(s.base, { redirect_uris: ["https://evil.example/cb"], client_name: "Claude", token_endpoint_auth_method: "none" })).status).toBe(400);
+    const ok = await reg(s.base, { redirect_uris: [CB], client_name: "N".repeat(500), token_endpoint_auth_method: "none" });
+    expect(ok.status).toBe(201);
+    expect(((await ok.json()) as { client_name: string }).client_name.length).toBeLessThanOrEqual(60);
+    let last = 201;
+    for (let i = 0; i < 30; i++) last = (await reg(s.base, { redirect_uris: [CB], client_name: "c", token_endpoint_auth_method: "none" })).status;
+    expect(last).toBe(400);
+    const state = fs.readFileSync(path.join(s.dir, "state.json"), "utf8");
+    expect(state.length).toBeLessThan(20_000);
+  });
+});
+
+describe("owner controls and perimeter", () => {
+  it("DISABLED flag stops serving immediately; healthz stays up", async () => {
+    const s = await boot();
+    const tok = await s.login();
+    fs.writeFileSync(path.join(s.dir, "DISABLED"), "");
+    expect((await s.mcpCall(tok.access_token)).status).toBe(503);
+    expect((await fetch(`${s.base}/healthz`)).status).toBe(200);
+    fs.unlinkSync(path.join(s.dir, "DISABLED"));
+    expect((await s.mcpCall(tok.access_token)).status).toBe(200);
+  });
+  it("REVOKE_ALL flag drops every token and is consumed", async () => {
+    const s = await boot();
+    const tok = await s.login();
+    fs.writeFileSync(path.join(s.dir, "REVOKE_ALL"), "");
+    expect((await s.mcpCall(tok.access_token)).status).toBe(401);
+    expect(fs.existsSync(path.join(s.dir, "REVOKE_ALL"))).toBe(false);
+    expect((await s.refresh(tok.refresh_token)).status).toBe(400);
+  });
+  it("rejects an unexpected Host header (421)", async () => {
+    const s = await boot();
+    const port = new URL(s.base).port;
+    const status = await new Promise<number>((res) => {
+      const rq = http.request({ host: "127.0.0.1", port, path: "/.well-known/oauth-authorization-server", headers: { host: "evil.example" } }, (r) => { r.resume(); res(r.statusCode!); });
+      rq.end();
+    });
+    expect(status).toBe(421);
+  });
+  it("pins /mcp and /token to allowed source ranges but never /authorize", async () => {
+    const s = await boot({ trustProxy: 1, allowCidrs: ["203.0.113.0/24"] });
+    expect((await s.mcpCall(null, "198.51.100.7")).status).toBe(403);
+    expect((await s.mcpCall(null, "203.0.113.9")).status).toBe(401);
+    const t = await fetch(`${s.base}/token`, { method: "POST", headers: { "x-forwarded-for": "198.51.100.7", "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=authorization_code" });
+    expect(t.status).toBe(403);
+    expect((await s.authorize(CID, "x".repeat(43), `${s.base}/mcp`, CB, "198.51.100.7")).status).toBe(200);
+  });
+  it("refuses a CIDR allowlist without a trusted proxy (every caller would look like the proxy)", () => {
+    expect(() => createApp({ deps: {} as never, publicUrl: new URL("http://127.0.0.1:1"), ownerHash: HASH, allowCidrs: ["203.0.113.0/24"] })).toThrow(/trustProxy/);
   });
   it("rate-limits tool calls per client", async () => {
-    const { client_id, verifier, c } = await fullFlow();
-    const tok = ((await (await token(client_id, getCode(c), verifier)).json()) as { access_token: string }).access_token;
+    const s = await boot();
+    const tok = await s.login();
     const codes: number[] = [];
-    for (let i = 0; i < 7; i++) codes.push((await mcpCall(tok)).status);
-    expect(codes.slice(0, 5).every((s) => s === 200)).toBe(true);
+    for (let i = 0; i < 7; i++) codes.push((await s.mcpCall(tok.access_token)).status);
+    expect(codes.slice(0, 5).every((c) => c === 200)).toBe(true);
     expect(codes.slice(5)).toEqual([429, 429]);
-    clock += 61_000;
   });
 });
 
-describe("audit log + persistence", () => {
-  it("records tool calls without any token or passphrase", async () => {
-    const { client_id, verifier, c } = await fullFlow();
-    const tok = ((await (await token(client_id, getCode(c), verifier)).json()) as { access_token: string }).access_token;
-    clock += 61_000;
+describe("audit log and state at rest", () => {
+  it("records failures, token events and tool calls; never a token or passphrase", async () => {
+    const s = await boot();
+    const tok = await s.login();
+    await s.mcpCall("garbage-token");
+    await s.consent("nope", "wrong-passphrase-value");
     const client = new Client({ name: "t", version: "1" });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok}` } } }));
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${s.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
     await client.callTool({ name: "city_status", arguments: {} });
     await client.close();
-    const log = fs.readFileSync(path.join(dir, "audit.jsonl"), "utf8");
+    const log = fs.readFileSync(path.join(s.dir, "audit.jsonl"), "utf8");
+    expect(log).toContain("/mcp -> 401");
+    expect(log).toContain("consent approved");
+    expect(log).toContain("token issued from code");
     expect(log).toContain('"tool":"city_status"');
-    expect(log).not.toContain(tok);
-    expect(log).not.toContain(PASS);
+    for (const secret of [tok.access_token, tok.refresh_token, PASS, "wrong-passphrase-value", "garbage-token", CID]) expect(log).not.toContain(secret);
+    expect((fs.statSync(path.join(s.dir, "audit.jsonl")).mode & 0o777).toString(8)).toBe("600");
   });
-  it("state file holds hashes only and is mode 0600", () => {
-    const f = path.join(dir, "state.json");
+  it("state file holds hashes only and is mode 0600", async () => {
+    const s = await boot();
+    const tok = await s.login();
+    const f = path.join(s.dir, "state.json");
     expect((fs.statSync(f).mode & 0o777).toString(8)).toBe("600");
-    const s = fs.readFileSync(f, "utf8");
-    expect(s).not.toMatch(/access_token|code_verifier/);
+    const raw = fs.readFileSync(f, "utf8");
+    expect(raw).not.toContain(tok.refresh_token);
+    expect(raw).not.toContain(tok.access_token);
   });
 });

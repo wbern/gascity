@@ -1,5 +1,5 @@
 // Drives the full OAuth 2.1 flow against a running gc-mcp, then calls a tool.
-// Usage: DEMO_PASSPHRASE=... node scripts/oauth-demo.mjs http://127.0.0.1:47811
+// Usage: DEMO_PASSPHRASE=... DEMO_CLIENT_ID=... node scripts/oauth-demo.mjs http://127.0.0.1:47811
 // Prints steps and statuses only; never prints tokens, codes or the passphrase.
 import crypto from "node:crypto";
 const base = process.argv[2], pass = process.env.DEMO_PASSPHRASE;
@@ -12,8 +12,15 @@ const as = await jget("/.well-known/oauth-authorization-server");
 step("AS metadata (RFC 8414)", `pkce=${as.code_challenge_methods_supported}, dcr=${!!as.registration_endpoint}`);
 const unauth = await fetch(base + "/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" });
 step("no token", `HTTP ${unauth.status}, WWW-Authenticate has resource_metadata=${/resource_metadata=/.test(unauth.headers.get("www-authenticate") ?? "")}`);
-const reg = await (await fetch(base + "/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], client_name: "demo", token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }) })).json();
-step("dynamic client registration (RFC 7591)", "ok");
+const reg = { client_id: process.env.DEMO_CLIENT_ID };
+const probe = await fetch(base + "/register", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+step("dynamic registration endpoint", `HTTP ${probe.status} (404 = disabled, as intended); using the owner's static client`);
+const evil = new URL(base + "/authorize");
+Object.entries({ response_type: "code", client_id: reg.client_id, redirect_uri: "https://evil.example/cb", code_challenge: "x".repeat(43), code_challenge_method: "S256", resource: pr.resource }).forEach(([k, v]) => evil.searchParams.set(k, v));
+step("authorize with an attacker redirect_uri", `HTTP ${(await fetch(evil, { redirect: "manual" })).status} (400 = refused)`);
+const unk = new URL(base + "/authorize");
+Object.entries({ response_type: "code", client_id: "not-the-owner-client", redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: "x".repeat(43), code_challenge_method: "S256", resource: pr.resource }).forEach(([k, v]) => unk.searchParams.set(k, v));
+step("authorize with an unknown client id", `HTTP ${(await fetch(unk, { redirect: "manual" })).status} (400 = refused)`);
 const verifier = b64u(crypto.randomBytes(32)), challenge = b64u(crypto.createHash("sha256").update(verifier).digest());
 const u = new URL(base + "/authorize");
 Object.entries({ response_type: "code", client_id: reg.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: challenge, code_challenge_method: "S256", state: "demo", scope: "gc:read", resource: pr.resource }).forEach(([k, v]) => u.searchParams.set(k, v));
