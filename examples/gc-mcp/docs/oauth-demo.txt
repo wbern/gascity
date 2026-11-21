@@ -1,0 +1,10 @@
+- protected-resource metadata (RFC 9728): resource=http://127.0.0.1:47811/mcp
+- AS metadata (RFC 8414): pkce=S256, dcr=true
+- no token: HTTP 401, WWW-Authenticate has resource_metadata=true
+- dynamic client registration (RFC 7591): ok
+- consent page served: asks for owner passphrase
+- wrong passphrase: HTTP 401, redirect=none
+- owner approves: HTTP 302, code issued
+- token exchange (PKCE S256, audience-bound): token_type=Bearer, expires_in=3600, scope=gc:read
+- replay of the same code: HTTP 400
+- authorized tools/call city_status: HTTP 200 -> gc2: 20 of 187 agents running; 97 in progress, 1383 ready; 2927 unread mail. 2591 model calls today.

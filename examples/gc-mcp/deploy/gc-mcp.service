@@ -1,0 +1,21 @@
+# Linux (GC3) user unit. NOT installed by this repo. To enable, after the owner
+# passphrase hash is in ~/.config/gc-mcp/env and the human has approved exposure:
+#   mkdir -p ~/.config/systemd/user && cp gc-mcp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now gc-mcp
+# Stop/rollback: systemctl --user disable --now gc-mcp
+[Unit]
+Description=Gas City MCP server (read-only, loopback)
+After=network.target
+
+[Service]
+# Adjust the path to this checkout's examples/gc-mcp.
+ExecStart=%h/gc2/rigs/gas-city-wbern/examples/gc-mcp/deploy/gc-mcp-run.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/gc-mcp
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
