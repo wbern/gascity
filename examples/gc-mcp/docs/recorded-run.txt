@@ -1,0 +1,23 @@
+# Recorded run against a live Gas City supervisor (phase 1, pre-auth build).
+# Answer text is scrubbed for the public repo; sizes and latencies are real.
+
+## city_status {}  (181ms, 100 chars)
+gc2: 20 of 187 agents runnin … [content scrubbed]
+
+## list_sessions {"limit":4}  (68ms, 126 chars)
+23 sessions: 20 active, 3 as … [content scrubbed]
+
+## peek_session {"session":"gc-architect","tail":2}  (68ms, 390 chars)
+gc-architect, last 2 message … [content scrubbed]
+
+## mail_inbox {"limit":3}  (642ms, 190 chars)
+726 unread. Newest: Reminder … [content scrubbed]
+
+## ready_work {"limit":3}  (414ms, 249 chars)
+1383 ready. Top: …  [content scrubbed]
+
+## bead_show {"id":"gcw-ti563"}  (6ms, 325 chars)
+gcw-ti563: Gas City MCP serv … [content scrubbed]
+
+## whats_new {"since":"30m"}  (11ms, 102 chars)
+In the last 30m: 78 order.fi … [content scrubbed]
