@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --no-file-parallelism",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "gen:guide": "node scripts/gen-guide-sources.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

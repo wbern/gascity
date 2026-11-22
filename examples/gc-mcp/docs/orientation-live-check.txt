@@ -1,0 +1,8 @@
+Overnight Batch A live backend smoke: source-only, no deploy
+2026-11-22T22:29:03.422Z
+Host clodcod; city gc2. Actual loopback reads only; no mutation.
+{"topic":"overview","bytes":1299,"version":"2026-11-22.1"}
+{"topic":"roles","bytes":1459,"version":"2026-11-22.1","observation":{"untrusted":true,"complete":true,"total":185,"shown":1,"omitted":0,"agents":[{"name":"gc-architect","membership":"not_reported","purpose":"unknown","persistence":"unknown","state":"idle","running":true}],"observed_at":"2026-11-22T22:29:03.977Z"}}
+{"topic":"capabilities","bytes":1208,"version":"2026-11-22.1","observation":{"untrusted":true,"checked":true,"target":"gc-architect","turn_endpoint":"not_available_404","available_signals":["state","running","submission_capabilities"],"completion":"not_proven","observed_at":"2026-11-22T22:29:04.387Z"}}
+Agent-side conversation excerpts recovered from claude-william were dated 2026-11-13; not evidence of tonight phone conversation. No ChatGPT phone transcript recovered.
+Validation: 297-test suite passed; final guide and OAuth targeted reruns passed. Role inference, directory bounds and false completion mutations caught by intended assertions.

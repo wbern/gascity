@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildGuideTools } from "./guide.js";
 import { DOMAIN_SCHEMAS, type DomainOp } from "./domain.js";
 import { buildApiReadTools } from "./api-read.js";
 import { TRANSCRIPT_MAX_BYTES, type GcClient } from "./gc-client.js";
@@ -45,6 +46,7 @@ function toGoDuration(s: string): string {
 export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const { gc } = d;
   const reads: ToolDef[] = [
+    ...buildGuideTools(d, who),
     ...buildApiReadTools(d, who),
     ...buildBriefingTools(d, who),
     {

@@ -139,3 +139,33 @@ spoken session reads and submit/respond return `incomplete_sessions`. A visible
 unique name is insufficient: an unseen session may have the same name.
 The HTTP regressions cover two DCR clients with the same display name through
 PKCE, OAuth and MCP, including cursor and send-marker isolation.
+
+### Operational orientation (overnight Batch A)
+
+Initialization carries compact first-contact operating rules. `city_guide`
+provides bounded deeper guidance for overview, roles, work, communication,
+operations and capabilities. The trusted curated rules have a version and
+public source-file SHA-256 provenance from the core boot/claim/mail/dispatch
+standards and this connector contract. Run `npm run gen:guide` after reviewing
+guidance against a changed source; drift tests require matching provenance.
+Runtime tools never open those files or arbitrary paths, and never project raw
+private prompts, environment variables or credentials.
+
+Roles can read the installed agent directory and optionally resolve one name.
+Only names, reported pool membership, running/state and explicit unknown-purpose
+markers are projected. Names do not establish role powers or persistence.
+Incomplete directory reads do not authorize a guessed match. Capabilities can
+probe one named/default session and its turn endpoint; missing installed routes
+and missing completion signals stay explicit. Curated standards and untrusted
+runtime observations are separate fields, with observation time and a bounded
+4096-byte structured response. No write is added or gated by a new approval.
+
+Mail stored, submit accepted, receipt, execution, reply and completed work are
+separate claims. First-contact guidance forbids inferring completion from active
+state, unchanged text or absent status. The owner can request a longer check-back
+budget across bounded calls without a repeated permission question; timing out
+never authorizes resending the original message.
+
+Until reliable reply tracking is shipped, the existing wait tool `complete` flag
+is a reply heuristic and must not be treated as proof the requested work finished.
+The first-contact guide names that limitation explicitly.
