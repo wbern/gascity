@@ -81,3 +81,27 @@ ChatGPT clients remain as a fallback.
 Env uses `GC_MCP_*` names on purpose: agent sessions export `GC_CITY` as a path.
 Security model, residual risks, hostname decision and phone setup: `docs/runbook.md`. Samples: `docs/oauth-demo.txt`, `docs/discovery-e2e.txt` (path-prefixed OAuth discovery through a real nginx),
 `docs/recorded-run.txt` (scrubbed).
+
+### Transparent reads (audit Batch 2)
+
+`gc_api_list_operations` discovers the supported city GET operations by subject,
+with path/query parameter schemas and paged catalogue output. `gc_api_read` calls
+one operation by its OpenAPI id. It accepts only declared parameters, supports
+repeated query values, and optionally selects top-level response fields. No raw
+URL, configuration, patches, provider settings, external messages or streams are
+exposed. The generated catalogue imports the generated `operations` type; run
+`node scripts/gen-read-catalog.mjs` after updating the OpenAPI specification.
+Contract tests reject drift.
+
+Read data is labelled untrusted and redacted before paging. Each structured
+result is at most 4096 JSON characters. Join `page` fragments until `done` to
+reconstruct the response. The outer `next_cursor` continues a fragment; the
+response's own `next_cursor` continues an API list via `query.cursor`. API cursors
+are held server-side and represented by client/operation-bound handles so
+credential redaction cannot destroy them. Both kinds expire after five minutes,
+are bounded in memory, and disappear on restart. Upstream totals and partial
+flags remain data, without inferred summaries. With optional session read lists
+configured, raw reads fail closed; use the session-aware spoken tools instead.
+
+`docs/recorded-batch2.txt` records actual loopback supervisor reads on clodcod;
+it does not claim that this source has been deployed.

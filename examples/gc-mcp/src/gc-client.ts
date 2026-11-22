@@ -51,9 +51,12 @@ export class GcClient {
     return this.send("POST", url, payload, { "content-type": "application/json", "x-gc-request": "gc-mcp", "idempotency-key": idempotencyKey });
   }
 
-  async get<T = unknown>(path: string, query: Record<string, string | number | undefined> = {}, timeoutMs?: number, maxBytes?: number): Promise<T> {
+  async get<T = unknown>(path: string, query: Record<string, string | number | boolean | string[] | undefined> = {}, timeoutMs?: number, maxBytes?: number): Promise<T> {
     const u = new URL(`${this.o.baseUrl}/v0/city/${encodeURIComponent(this.o.city)}${path}`);
-    for (const [k, v] of Object.entries(query)) if (v !== undefined) u.searchParams.set(k, String(v));
+    for (const [k, v] of Object.entries(query)) if (v !== undefined) {
+      if (Array.isArray(v)) for (const item of v) u.searchParams.append(k, item);
+      else u.searchParams.set(k, String(v));
+    }
     return (await this.send("GET", u.toString(), undefined, {}, timeoutMs, maxBytes)) as T;
   }
 

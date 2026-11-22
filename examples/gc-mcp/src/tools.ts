@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildApiReadTools } from "./api-read.js";
 import { TRANSCRIPT_MAX_BYTES, type GcClient } from "./gc-client.js";
 import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
 import { disambiguation, listPages, resolveSession, labelOf } from "./sessions.js";
@@ -43,6 +44,7 @@ function toGoDuration(s: string): string {
 export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const { gc } = d;
   const reads: ToolDef[] = [
+    ...buildApiReadTools(d, who),
     ...buildBriefingTools(d, who),
     {
       name: "city_status", title: "Quick health check of the city",

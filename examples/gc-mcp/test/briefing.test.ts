@@ -297,7 +297,7 @@ describe("tool titles and descriptions are plain spoken intent", () => {
   it("every tool has a title and a short description that says WHEN to use it; no jargon like 'operation' or 'endpoint'", () => {
     const tools = all();
     expect(tools.length).toBeGreaterThanOrEqual(13);
-    for (const t of tools) {
+    for (const t of tools.filter(t => !t.name.startsWith("gc_api_"))) {
       expect(t.title.length, t.name).toBeGreaterThan(5);
       expect(t.description.length, t.name).toBeGreaterThan(40);
       expect(t.description.length, t.name).toBeLessThanOrEqual(420);

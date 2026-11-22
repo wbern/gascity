@@ -28,7 +28,7 @@ describe("tools", () => {
   it("every tool is read-only annotated", () => {
     const { t } = tools({});
     expect(t.map((x) => x.name).sort()).toEqual(
-      ["bead_show", "briefing", "city_status", "latest_reply", "list_sessions", "mail_inbox", "peek_session", "read_more", "ready_work", "session_state", "wait_for_reply", "what_is_working_on", "whats_new"],
+      ["bead_show", "briefing", "city_status", "gc_api_list_operations", "gc_api_read", "latest_reply", "list_sessions", "mail_inbox", "peek_session", "read_more", "ready_work", "session_state", "wait_for_reply", "what_is_working_on", "whats_new"],
     );
     for (const x of t) expect(x.annotations.readOnlyHint).toBe(true);
   });
