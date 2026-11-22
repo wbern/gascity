@@ -13,6 +13,8 @@
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+_dolt_guard="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}/assets/scripts/session_guard.sh"
+[ -r "$_dolt_guard" ] && { . "$_dolt_guard"; dolt_refuse_inside_agent_session restart || exit 77; }
 GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh}"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then

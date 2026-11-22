@@ -4831,26 +4831,42 @@ if [ -r "$enospc_helper" ]; then
 else
     # Some focused shell harnesses execute gc-beads-bd's prelude as a single
     # temporary file without sibling assets. Keep the production helper as the
-    # canonical copy, but preserve the same detector behavior for those harnesses.
+    # canonical copy, but preserve the same detector behavior for those harnesses
+    # (including the free-space check: dolt-enospc.sh documents why).
+    # _dolt_enospc_free_bytes <path>... prints the smallest free-byte count across the
+    # existing paths (df -Pk: portable POSIX output, 1K blocks); empty when none could
+    # be measured.
+    _dolt_enospc_free_bytes() {
+        _de_min=""
+        for _de_path in "$@"; do
+            [ -n "$_de_path" ] && [ -e "$_de_path" ] || continue
+            _de_kb=$(df -Pk -- "$_de_path" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}')
+            [ -n "$_de_kb" ] || continue
+            _de_bytes=$((_de_kb * 1024))
+            if [ -z "$_de_min" ] || [ "$_de_bytes" -lt "$_de_min" ]; then
+                _de_min=$_de_bytes
+            fi
+        done
+        printf '%s' "$_de_min"
+    }
+
     recovery_should_skip_due_to_enospc() {
         [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        # Scan the recent log tail rather than the whole file; an old transient
+        # ENOSPC error from a since-resolved disk-pressure event should not block
+        # recovery indefinitely.
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
-        return 0
-    }
-fi
 
-fsync_stall_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-fsync-stall.sh"
-if [ -r "$fsync_stall_helper" ]; then
-    . "$fsync_stall_helper"
-else
-    # Focused shell harnesses can run gc-beads-bd without sibling assets. The
-    # production helper is the only copy of the detector, so say that the
-    # guard is missing rather than silently dropping it.
-    recovery_should_skip_due_to_fsync_stall() {
-        echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside gc-beads-bd" >&2
-        return 1
+        _de_clear="${GC_DOLT_ENOSPC_CLEAR_FREE_BYTES:-2147483648}"
+        case "$_de_clear" in ''|*[!0-9]*) _de_clear=2147483648 ;; esac
+        _de_free=$(_dolt_enospc_free_bytes "${GC_DOLT_DATA_DIR:-}" "${DATA_DIR:-}" "$(dirname -- "$LOG_FILE")")
+        if [ -n "$_de_free" ] && [ "$_de_free" -ge "$_de_clear" ]; then
+            echo "dolt-enospc: ENOSPC lines in the recent log are stale (free ${_de_free} bytes >= ${_de_clear}); not blocking recovery" >&2
+            return 1
+        fi
+        return 0
     }
 fi
 

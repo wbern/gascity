@@ -47,6 +47,7 @@ go_library(
         "assets/scripts/mol-dog-phantom-db.sh",
         "assets/scripts/port_resolve.sh",
         "assets/scripts/runtime.sh",
+        "assets/scripts/session_guard.sh",
         "commands/cleanup/command.toml",
         "commands/cleanup/run.sh",
         "commands/compact/command.toml",
