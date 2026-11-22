@@ -219,7 +219,9 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	// Capture the tracker and stores on the tick goroutine: a config reload
 	// may replace cr.wg while the sweep runs.
 	wg, sessionLedger, mailStore, rigStores := cr.wg, cr.infraSessionLedger(), cr.mailBeadStore(), cr.rigBeadStores()
+	var rigPurgeTTL time.Duration
 	if m, ok := wg.(*memoryWispGC); ok {
+		rigPurgeTTL = m.ttl
 		m.orphanCooldown = &cr.orphanCooldown
 		m.orphanIdentity = identity
 		m.orphanNow = cr.orphanNow
@@ -228,7 +230,8 @@ func (cr *CityRuntime) launchWispGC(now time.Time) {
 	if !cr.wispSweeps.start(now, func(ctx context.Context) (int, error) {
 		defer wispGCSweepsByCity.Delete(cityKey)
 		purged, err := runWispGCWithContext(ctx, wg, legs, graphStore, sessionLedger, mailStore, now)
-		return purged, errors.Join(err, sweepLeakedRigSteps(ctx, rigStores))
+		rigPurged, rigErr := purgeClosedRigRoots(ctx, rigStores, rigPurgeTTL, now)
+		return purged + rigPurged, errors.Join(err, rigErr, sweepLeakedRigSteps(ctx, rigStores))
 	}) {
 		wispGCSweepsByCity.Delete(cityKey)
 	}
