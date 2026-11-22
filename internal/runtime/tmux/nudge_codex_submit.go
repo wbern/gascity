@@ -73,8 +73,9 @@ func codexComposerName(state codexComposerState) string {
 }
 
 var (
-	codexSGR     = regexp.MustCompile("\x1b\\[[0-9;]*m")
-	codexDimText = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
+	codexSGR           = regexp.MustCompile("\x1b\\[[0-9;]*m")
+	codexWarningFooter = regexp.MustCompile(`^⚠ [1-9][0-9]* warnings? · f2 to view$`)
+	codexDimText       = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
 )
 
 // captureCodexComposer retains terminal styling to distinguish a dim input
@@ -219,7 +220,8 @@ func codexRenderedDraftMatches(lines []string, message string) bool {
 func codexFooterLine(line string) bool {
 	return strings.HasPrefix(line, "tab to queue message") ||
 		strings.HasPrefix(strings.ToLower(line), "gpt-") ||
-		strings.Contains(line, "% context left") || strings.Contains(line, "? for shortcuts")
+		strings.Contains(line, "% context left") || strings.Contains(line, "? for shortcuts") ||
+		codexWarningFooter.MatchString(line)
 }
 
 func codexDimPlaceholder(raw, content string) bool {

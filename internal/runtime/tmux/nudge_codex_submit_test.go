@@ -19,6 +19,15 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		state   codexComposerState
 		queue   bool
 	}{
+		{"agent navigation with warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "← for agents · ? for shortcuts     ⚠ 3 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"inline warning footer", []string{"› reminder", "", "GPT-6.1-Sol low · ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"styled wrapped warning footer", []string{"› reminder", "", "  \x1b[38;2;246;226;183mGPT-6.1-Sol low\x1b[39m · workspace", "\x1b[39m    ⚠ \x1b[38;2;196;167;103m2 warnings\x1b[39m · \x1b[1mf2\x1b[0m to view"}, "reminder", codexComposerOwned, false},
+		{"warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"singular warning footer", []string{"› reminder", "", "⚠ 1 warning · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"warning-like human suffix without separator", []string{"› reminder", "  ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerUnknown, false},
+		{"warning text inside human draft", []string{"› reminder", "  ⚠ 2 warnings · f2 to view", "  human addition", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"warning text alone is human draft", []string{"› ⚠ 2 warnings · f2 to view", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"unrecognized warning-like human suffix", []string{"› reminder", "", "  ⚠ please review · f2 to view"}, "reminder", codexComposerOther, false},
 		{"raw multiline busy", []string{"• Working (esc to interrupt)", "› <system-reminder>", "  do work", "  </system-reminder>", "", "  tab to queue message   75% context left"}, "<system-reminder>\ndo work\n</system-reminder>", codexComposerOwned, true},
 		{"placeholder with terminal padding", []string{"› [Pasted Content 4414 chars]                                                        ", "", "tab to queue message"}, "message", codexComposerPaste, true},
 		{"anonymous marker collides with payload", []string{"› [Pasted Content 12 chars]", "", "GPT-6 low"}, "[Pasted Content 12 chars]", codexComposerPaste, false},
