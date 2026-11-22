@@ -1,8 +1,4 @@
-// Minimal client for the Gas City supervisor API (loopback only).
-// Reads are GET-only. The ONLY mutations it can ever send are the two operations in WRITE_OPS below
-// (submit a message to a session, respond to a pending interaction): a fixed table of method + path,
-// a validated session id, a size limit, no redirects. There is no generic post/put/delete and no way to
-// reach stop, kill, reset, close, config, holds, beads or anything else; tests pin this.
+// Loopback supervisor transport. Mutations are a fixed table; no arbitrary verb or URL.
 /** What went wrong, split so a person is told the truth: "not found" is not "too large" is not "Gas City is down". */
 export type GcErrorKind = "not_found" | "too_large" | "timeout" | "unavailable" | "refused";
 export class GcError extends Error {
@@ -23,8 +19,13 @@ export interface GcClientOpts {
 
 /** The complete list of mutating operations this client can send. Anything not here cannot be sent. */
 export const WRITE_OPS = {
-  submit: { suffix: "submit", operationId: "submit-session" },
-  respond: { suffix: "respond", operationId: "respond-session" },
+  submit: { path: "/session/{id}/submit", operationId: "submit-session" },
+  respond: { path: "/session/{id}/respond", operationId: "respond-session" },
+  mail_send: { path: "/mail", operationId: "send-mail" },
+  mail_reply: { path: "/mail/{id}/reply", operationId: "reply-mail" },
+  mail_mark_read: { path: "/mail/{id}/read", operationId: "post-v0-city-by-city-name-mail-by-id-read" },
+  bead_create: { path: "/beads", operationId: "create-bead" },
+  bead_sling: { path: "/sling", operationId: "post-v0-city-by-city-name-sling" },
 } as const;
 export type WriteOp = keyof typeof WRITE_OPS;
 /** A transcript segment can be large; it is read with a higher cap than other calls, and a bigger one is reported as "too large" (never as "Gas City is down"). */
@@ -39,15 +40,15 @@ export class GcClient {
     if (!LOOPBACK.has(host)) throw new Error(`gc-mcp only talks to a loopback supervisor, refusing ${host}`);
   }
 
-  /** The only mutation entry point: a fixed operation on one session. The id is validated, the body is capped. */
+  /** The only mutation entry point: a fixed operation, validated id, capped body. */
   async write(op: WriteOp, sessionId: string, body: Record<string, unknown>, idempotencyKey: string): Promise<unknown> {
-    const def = WRITE_OPS[op];
+    const def = Object.hasOwn(WRITE_OPS, op) ? WRITE_OPS[op] : undefined;
     if (!def) throw new Error("operation not allowed");
     if (!SESSION_ID.test(sessionId)) throw new Error("invalid session id");
     if (!/^[A-Za-z0-9-]{8,64}$/.test(idempotencyKey)) throw new Error("invalid idempotency key");
     const payload = JSON.stringify(body);
-    if (payload.length > MAX_WRITE_BYTES) throw new GcError(0, "request too large");
-    const url = `${this.o.baseUrl}/v0/city/${encodeURIComponent(this.o.city)}/session/${encodeURIComponent(sessionId)}/${def.suffix}`;
+    if (Buffer.byteLength(payload, "utf8") > MAX_WRITE_BYTES) throw new GcError(0, "request too large");
+    const url = `${this.o.baseUrl}/v0/city/${encodeURIComponent(this.o.city)}${def.path.replace("{id}", encodeURIComponent(sessionId))}`;
     return this.send("POST", url, payload, { "content-type": "application/json", "x-gc-request": "gc-mcp", "idempotency-key": idempotencyKey });
   }
 

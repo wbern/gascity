@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DOMAIN_SCHEMAS, type DomainOp } from "./domain.js";
 import { buildApiReadTools } from "./api-read.js";
 import { TRANSCRIPT_MAX_BYTES, type GcClient } from "./gc-client.js";
 import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
@@ -201,5 +202,19 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       handler: async (a) => gate.respond(who, a.session === undefined ? undefined : String(a.session), String(a.action), a.text === undefined ? undefined : String(a.text), a.request_id === undefined ? undefined : String(a.request_id)),
     },
   ];
+  const domainMeta:Record<DomainOp,[string,string]>={
+    mail_send:['Send mail to an agent','Use when the owner asks you to send mail to an agent. Sends from human, with a subject and optional body.'],
+    mail_reply:['Reply to a mail message','Use when the owner asks you to reply to a particular mail message by id. Sends from human.'],
+    mail_mark_read:['Mark a message as read','Use when the owner asks you to mark one mail message as read.'],
+    bead_create:['Create a piece of work','Use when the owner asks you to create a new task in a named rig. Creates work; ask separately before routing it.'],
+    bead_sling:['Route work to an agent','Use when the owner asks you to route an existing piece of work to a named worker or pool in a named rig. No forced reassignment.'],
+  };
+  for(const kind of Object.keys(DOMAIN_SCHEMAS) as DomainOp[]){
+    const needsId=kind==='mail_reply'||kind==='mail_mark_read';
+    writeTools.push({name:kind,title:domainMeta[kind][0],description:domainMeta[kind][1],isWrite:true,annotations:WRITE_ANN,
+      inputShape:{...DOMAIN_SCHEMAS[kind].shape,...(needsId?{id:z.string().min(1).max(128)}:{})},
+      handler:async a=>{const{id,...body}=a;return gate.operation(who,kind,needsId?String(id):'city',body);},
+    });
+  }
   return [...reads, ...writeTools];
 }

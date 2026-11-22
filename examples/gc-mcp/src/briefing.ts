@@ -75,7 +75,7 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
       inputShape: {}, annotations: RO,
       handler: guard(async () => {
         const now = clock.now();
-        const client = who?.client ?? "";
+        const client = who?.principal ?? who?.client ?? "";
         const last = memory.get(client);
         const windowMs = Math.min(MAX_WINDOW_MS, last === undefined ? FIRST_WINDOW_MS : Math.max(60_000, now - last));
         const since = last === undefined ? "12h" : `${Math.max(1, Math.round(windowMs / 60_000))}m`;

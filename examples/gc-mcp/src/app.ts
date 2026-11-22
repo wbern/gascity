@@ -234,7 +234,7 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
     const client = req.auth?.clientId ?? "?";
     if (!callLimiter.hit(client)) { res.status(429).json({ error: "rate_limited" }); return; }
     const mcp = createMcpServer(deps, (c) => audit.write({ kind: "tool", client: crypto.createHash("sha256").update(client).digest("hex").slice(0, 8), app: provider.clientName(client), tool: c.tool, args: c.args, ok: c.ok, ms: c.ms, chars: c.chars }),
-      { client: provider.clientName(client) ?? "unknown client", scopes: req.auth?.scopes ?? [] });
+      { client: provider.clientName(client) ?? "unknown client", principal: client, scopes: req.auth?.scopes ?? [] });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { void transport.close(); void mcp.close(); });
     try {

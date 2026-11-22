@@ -158,7 +158,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const wait = Math.min(MAX_WAIT_S, Math.max(1, Math.floor(Number(a.max_seconds ?? 15)) || 15)) * 1000;
         const deadline = start + wait;
         // "since when": the caller's marker, else the last time THIS client sent to this session, else now (the next reply from here on)
-        const since = parseMarker(a.since) ?? d.markers?.get(who?.client ?? "", String(hit.id)) ?? start;
+        const since = parseMarker(a.since) ?? d.markers?.get(who?.principal ?? who?.client ?? "", String(hit.id)) ?? start;
         let seen = "", prev = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false;
         // The session record is small; a transcript segment can be hundreds of KB. So poll the record to notice change and read the transcript only when
         // something changed, at least every 7.5 s, and never more than 3 times per call.

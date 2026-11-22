@@ -1,8 +1,9 @@
-// Phase 4: write control. Two operations only (submit a message to a session, respond to a pending interaction), each behind the same rails:
-// a separate OAuth scope, an explicit enable flag, a kill-switch file, a default-deny list for other people's sessions, a rate limit, a size
-// cap, a resend guard, and an audit line for EVERY attempt (sent or refused). Nothing destructive exists here: no stop, kill, reset, close,
-// config, hold release or bead edit, and gc-client.ts cannot send them (WRITE_OPS is a fixed table).
+// Approved writes share scope, enable flag, kill switch, rate limit, size cap,
+// replay protection, confirmation hook and audit. Session lists apply to terminal
+// input; domain actions have strict schemas and a fixed transport table.
 import crypto from "node:crypto";
+import { DOMAIN_SCHEMAS, type DomainOp } from "./domain.js";
+import { redactDeep } from "./redact.js";
 import fs from "node:fs";
 import path from "node:path";
 import { GcClient, GcError } from "./gc-client.js";
@@ -35,7 +36,7 @@ export function validatePatterns(list: string[], what: string): string[] {
   return list;
 }
 
-export interface ConfirmCtx { client: string; session: string; kind: "submit" | "respond"; intent?: string; length: number }
+export interface ConfirmCtx { client: string; session: string; kind: "submit" | "respond" | DomainOp; intent?: string; length: number }
 export interface Confirmation { allow: boolean; reason?: string }
 /**
  * THE hook for a second factor. Today every write that passed the rails is allowed. A TOTP or push check slots in HERE (and only here):
@@ -65,13 +66,14 @@ export interface WriteConfig {
   replayWindowMs?: number;    // default 60 s
   confirm?: (ctx: ConfirmCtx) => Promise<Confirmation>;
 }
-export interface WriteCtx { client: string; scopes: string[] }
+export interface WriteCtx { client: string; principal?: string; scopes: string[] }
 export interface WriteResult { text: string; structured: Record<string, unknown> }
 
 export class WriteGate {
   private limiter: RateLimiter;
   private deny: string[];
   private allow?: string[];
+  private domainPending = new Map<string, Promise<WriteResult>>();
   private replays = new Map<string, { at: number; res: WriteResult }>();
   readonly markers: SendMarkers;
   constructor(private gc: GcClient, private cfg: WriteConfig, private audit: (e: AuditEvent) => void, private nowMs: () => number = Date.now, markers?: SendMarkers) {
@@ -116,8 +118,50 @@ export class WriteGate {
     }, { action, text, requestId });
   }
 
-  private async run(ctx: WriteCtx, kind: "submit" | "respond", query: string | undefined, preview: string, intent: Intent | undefined,
+  /** Domain writes enter the same run boundary and share its limiter, replay cache, switches and audit. */
+  operation(ctx:WriteCtx,kind:DomainOp,id:string,body:Record<string,unknown>):Promise<WriteResult>{
+    return this.run(ctx,kind,id,JSON.stringify(body),undefined,async(target,key)=>
+      await this.gc.write(kind,target,kind==='mail_send'||kind==='mail_reply'?{...body,from:'human'}:body,key) as Record<string,unknown>);
+  }
+
+  private async runDomain(ctx:WriteCtx,kind:DomainOp,id:string,preview:string,send:(id:string,key:string)=>Promise<Record<string,unknown>>):Promise<WriteResult>{
+    const log=(result:string,ok:boolean)=>this.audit({kind:'write',app:ctx.client,session:id,intent:kind,length:preview.length,result,ok});
+    const refuse=(reason:string,text:string):WriteResult=>{log(reason,false);return{text,structured:{sent:false,reason}};};
+    if(!ctx.scopes.includes(WRITE_SCOPE))return refuse('no_write_scope','This connection only has read access.');
+    if(!this.active)return refuse('writes_disabled','Writes are switched off by the owner.');
+    if(!Object.hasOwn(DOMAIN_SCHEMAS,kind)||!SESSION_ID.test(id)||Buffer.byteLength(preview,'utf8')>8000)return refuse('bad_input','That action has invalid or oversized input.');
+    let body:unknown;try{body=JSON.parse(preview);}catch{return refuse('bad_input','That action has invalid input.');}
+    const parsed=DOMAIN_SCHEMAS[kind].safeParse(body);
+    if(!parsed.success)return refuse('bad_input','That action has invalid or unapproved fields.');
+    const digest=crypto.createHash('sha256').update([ctx.principal??ctx.client,kind,id,JSON.stringify(parsed.data)].join('\0')).digest('hex');
+    const now=this.nowMs(),windowMs=this.cfg.replayWindowMs??REPLAY_WINDOW_MS;
+    for(const[k,v]of this.replays)if(now-v.at>windowMs)this.replays.delete(k);
+    const seen=this.replays.get(digest);if(seen){log('replayed',seen.res.structured.sent===true);return{...seen.res,structured:{...seen.res.structured,replayed:true}};}
+    const pending=this.domainPending.get(digest);if(pending){const r=await pending;log('replayed',r.structured.sent===true);return{...r,structured:{...r.structured,replayed:true}};}
+    if(!this.limiter.hit('writes'))return refuse('rate_limited','Too many actions in the last minute. Try again shortly.');
+    const attempt=(async():Promise<WriteResult>=>{
+      let confirmation:Confirmation;
+      try{confirmation=await(this.cfg.confirm??confirmWrite)({client:ctx.client,session:id,kind,length:preview.length});}
+      catch{return refuse('confirmation_failed','Owner confirmation could not be checked, so nothing was sent.');}
+      if(!confirmation.allow)return refuse('confirmation_refused','The owner confirmation was not given, so nothing was sent.');
+      if(!this.active)return refuse('writes_disabled','Writes are switched off by the owner.');
+      // A failure may have happened after acceptance. Cache that uncertain outcome too: never blindly resend.
+      const key=crypto.randomUUID();let result:WriteResult;
+      try{
+        const raw=redactDeep(await send(id,key));
+        const response=Object.fromEntries(['id','status','request_id','bead_id','convoy_id','run_id'].filter(k=>typeof raw[k]==='string').map(k=>[k,clip(String(raw[k]),128)]));log('sent',true);
+        result={text:'Gas City accepted that action.',structured:{sent:true,operation:kind,response,untrusted:true}};
+      }catch(e){log('outcome_unknown',false);result={text:'The action could not be confirmed. Check its result before trying again.',structured:{sent:false,reason:'outcome_unknown',status:e instanceof GcError?e.status:0}};}
+      this.replays.set(digest,{at:this.nowMs(),res:result});if(this.replays.size>200)this.replays.delete(this.replays.keys().next().value!);
+      return result;
+    })();
+    this.domainPending.set(digest,attempt);
+    try{return await attempt;}finally{this.domainPending.delete(digest);}
+  }
+
+  private async run(ctx: WriteCtx, kind: "submit" | "respond" | DomainOp, query: string | undefined, preview: string, intent: Intent | undefined,
     send: (id: string, key: string) => Promise<Record<string, unknown>>, extra?: { action: string; text?: string; requestId?: string }): Promise<WriteResult> {
+    if(kind!=='submit'&&kind!=='respond')return this.runDomain(ctx,kind,query??'city',preview,send);
     const text = kind === "submit" ? preview : (extra?.text ?? "");
     const length = text.length;
     const asked = (query ?? "").trim() || (this.cfg.defaultSession ?? "");
@@ -154,7 +198,7 @@ export class WriteGate {
     // 5. a repeated identical send within the window (voice clients retry) returns the first acknowledgement instead of sending twice
     const now = this.nowMs();
     const windowMs = this.cfg.replayWindowMs ?? REPLAY_WINDOW_MS;
-    const rkey = crypto.createHash("sha256").update([ctx.client, kind, hit.id, intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
+    const rkey = crypto.createHash("sha256").update([ctx.principal??ctx.client, kind, hit.id, intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
     for (const [k, v] of this.replays) if (now - v.at > windowMs) this.replays.delete(k);
     const seen = this.replays.get(rkey);
     if (seen) { log("replayed", true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
@@ -166,7 +210,7 @@ export class WriteGate {
     // 8. send: a fresh idempotency key per call, and a marker so wait_for_reply knows "since when"
     const key = crypto.randomUUID();
     const sentAt = this.nowMs();
-    this.markers.set(ctx.client, String(hit.id), sentAt);
+    this.markers.set(ctx.principal??ctx.client, String(hit.id), sentAt);
     try {
       const r = await send(String(hit.id), key);
       log("sent", true, hit.id);

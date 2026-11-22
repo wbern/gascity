@@ -57,8 +57,8 @@ const R = { client: "Claude (owner client)", scopes: ["gc:read"] };
 // ---------------------------------------------------------------- the client: a fixed allowlist of POST operations
 describe("GcClient: the only mutations are the fixed write operations", () => {
   const mk = () => { const s = supervisor(); return { s, c: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl: s.fetchImpl }) }; };
-  it("the allowlist is exactly submit and respond", () => {
-    expect(Object.keys(WRITE_OPS).sort()).toEqual(["respond", "submit"]);
+  it("the allowlist contains exactly the seven approved writes", () => {
+    expect(Object.keys(WRITE_OPS).sort()).toEqual(["bead_create", "bead_sling", "mail_mark_read", "mail_reply", "mail_send", "respond", "submit"]);
     expect(WRITE_OPS.submit.operationId).toBe("submit-session");
     expect(WRITE_OPS.respond.operationId).toBe("respond-session");
   });
@@ -383,7 +383,7 @@ async function boot(over: Partial<AppOpts> = {}) {
   const audit = () => fs.readFileSync(path.join(dir, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   return { base, dir, sup, login, tools, call, rpc, audit, provider, res };
 }
-const WRITE_NAMES = ["respond_to_session", "send_to_session"];
+const WRITE_NAMES = ["respond_to_session", "send_to_session", "mail_send", "mail_reply", "mail_mark_read", "bead_create", "bead_sling"];
 // the MCP SDK answers an unknown tool with either a JSON-RPC error or a result flagged isError: both mean "not callable"
 const failed = (r: any) => !!(r.error || r.result?.isError);
 
@@ -437,6 +437,23 @@ describe("writes ON: scope gating end to end", () => {
       else expect(t.annotations.readOnlyHint).toBe(true);
     }
     expect(s.sup.posts().length).toBe(0);
+  });
+  it("domain actions cross OAuth and MCP, read-only tokens cannot call any, and writes never log their arguments",async()=>{
+    const s=await boot(on),ro=(await s.login(CLAUDE,CB,'gc:read')).token.access_token,rw=(await s.login(CLAUDE,CB,'gc:read gc:write')).token.access_token;
+    const actions:[string,Record<string,unknown>,string][]=[
+      ['mail_send',{to:'crm/steve',subject:'Hi',body:'Hello'},'/mail'],
+      ['mail_reply',{id:'m1',body:'Hello'},'/mail/m1/reply'],
+      ['mail_mark_read',{id:'m1'},'/mail/m1/read'],
+      ['bead_create',{title:'Task',rig:'gas-city-wbern'},'/beads'],
+      ['bead_sling',{target:'worker',bead:'b1',rig:'gas-city-wbern'},'/sling'],
+    ];
+    for(const[name,args,route]of actions){
+      expect(failed(await s.call(ro,name,args)),name).toBe(true);
+      const r=await s.call(rw,name,args);expect(r.result.structuredContent.sent,name).toBe(true);
+      expect(s.sup.posts().at(-1)?.path).toBe('/v0/city/gc2'+route);
+    }
+    expect(s.sup.posts()).toHaveLength(5);
+    expect(s.audit().filter(e=>e.kind==='tool'&&actions.some(a=>a[0]===e.tool)).every(e=>e.args===undefined)).toBe(true);
   });
   it("send_to_session works end to end with a gc:write token, and the audit trail names the client without the text", async () => {
     const s = await boot(on);

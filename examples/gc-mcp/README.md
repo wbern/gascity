@@ -2,22 +2,22 @@
 
 # gc-mcp — Gas City MCP server (voice control)
 
-Fork-owned. Read-only MCP server (Streamable HTTP, stateless) in front of the
+Fork-owned. MCP server (Streamable HTTP, stateless) in front of the
 loopback Gas City supervisor API, protected by OAuth 2.1. Tools: `city_status`,
 `list_sessions`, `peek_session`, `mail_inbox`, `ready_work`, `bead_show`,
 `whats_new` — all `readOnlyHint`, spoken-length answers plus structuredContent,
 every string passed through `src/redact.ts`.
-Phase 4 (optional, OFF by default): `GC_MCP_WRITES_ENABLED=1` adds two WRITE tools, `send_to_session` and `respond_to_session`, behind the separate
+Optional writes (OFF by default): `GC_MCP_WRITES_ENABLED=1` adds seven WRITE tools (session input, mail send/reply/mark-read, bead creation and routing), behind the separate
 scope `gc:write` (see "Write control" below). Without it the server is read-only exactly as before.
 
-Safety properties (all tested): GET-only upstream client restricted to loopback;
+Safety properties (tested): upstream client restricted to loopback, with GET reads and a fixed POST allowlist;
 binds 127.0.0.1; OAuth 2.1 auth-code + PKCE S256 with ONE static owner client (Claude) plus an
 OPTIONAL second static client for ChatGPT (off by default, see below) and no
 dynamic registration by default; audience-bound opaque tokens (hashes at rest),
 rotating refresh tokens with reuse detection; consent approved by an owner passphrase
 typed into a page outside the model (scrypt, per-request and global lockouts); output
 redacted before clipping and labelled untrusted; Host check, size/time limits, kill-switch
-files; per-client rate limit; rotated, redacted audit log. No write tools exist.
+files; per-client rate limit; rotated, redacted audit log. Write tools require explicit enablement and scope.
 
     npm ci && npm run gen:types && npm test && npm run build
     node scripts/hash-passphrase.mjs            # prints GC_MCP_OWNER_HASH value
@@ -34,8 +34,7 @@ No dynamic registration, no CIMD, no change to the owner passphrase gate.
 
 Write control (Phase 4, `GC_MCP_WRITES_ENABLED=1`): `send_to_session(session, text, intent)` (intent `default|follow_up|interrupt_now`) and
 `respond_to_session(session, action, text?, request_id?)`, implemented with the supervisor's `submit-session` and `respond-session` operations (the blessed way, not
-tmux). The client can send ONLY those two operations (a fixed table in `gc-client.ts`; tests pin that stop, kill, reset, close, config, beads and any other path cannot be
-sent). Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (the consent page lists the scopes); write tools carry no `readOnlyHint` and are listed only to a
+tmux). The client sends only the seven approved operations in the fixed table in `gc-client.ts`; tests exclude stop, kill, reset, close, delete, config and forced reassignment. Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (the consent page lists the scopes); write tools carry no `readOnlyHint` and are listed only to a
 `gc:write` token; text <= 4000 plain characters; 20 writes/minute; the session must exist; NO session is denied by default (gc3 is the owner's machine: `gc:write` sends to any session, `gc:read` reads any session, and a session a person is attached to is treated like any other). The lists are OPTIONAL operator settings, empty by default: `GC_MCP_WRITE_DENY_SESSIONS`, `GC_MCP_WRITE_ALLOW_SESSIONS`, `GC_MCP_READ_DENY_SESSIONS`, `GC_MCP_PEEK_ALLOW`, and `GC_MCP_WRITE_ALLOW_ATTACHED=0` to refuse attached sessions; every attempt,
 sent or refused, is audited (client name, session, intent, length, an 80-character redacted preview, outcome); `WRITES_DISABLED` in the state dir turns writes off for the next
 request while reads keep working. `confirmWrite()` in `src/writes.ts` is the single place a later second factor (TOTP/push) slots in; it allows today.
@@ -94,7 +93,7 @@ exposed. The generated catalogue imports the generated `operations` type; run
 Contract tests reject drift.
 
 Read data is labelled untrusted and redacted before paging. Each structured
-result is at most 4096 JSON characters. Join `page` fragments until `done` to
+result is at most 4096 UTF-8 JSON bytes. Join `page` fragments until `done` to
 reconstruct the response. The outer `next_cursor` continues a fragment; the
 response's own `next_cursor` continues an API list via `query.cursor`. API cursors
 are held server-side and represented by client/operation-bound handles so
@@ -105,3 +104,31 @@ configured, raw reads fail closed; use the session-aware spoken tools instead.
 
 `docs/recorded-batch2.txt` records actual loopback supervisor reads on clodcod;
 it does not claim that this source has been deployed.
+
+
+### Mail and work actions (audit Batch 3)
+
+The read catalogue includes mail bodies and threads, bead lists, dependencies and
+work graphs, convoys, order details/history and run details/steps. Discover the
+matching read by subject, then pass its declared parameters. These reads do not
+mark mail as read.
+
+With writes enabled and `gc:write` granted, `mail_send`, `mail_reply` and
+`mail_mark_read` operate on mail; sends and replies identify the sender as
+`human`. `bead_create` requires a named rig. `bead_sling` routes an existing bead
+to a named target in a named rig, optionally using a formula. Creation and routing
+are separate calls, so a failed route leaves the created bead visible. No force,
+reassign, close, archive, delete, configuration or lifecycle action is exposed.
+Optional session lists govern session tools; they do not restrict these explicit
+mail and work actions.
+
+All five actions enter `WriteGate.run`, share its rate limit and kill switch,
+validate strict input schemas, audit attempts without mail/task bodies, and call
+the existing confirmation hook. Bodies are capped at 8000 UTF-8 bytes and text
+fields at 4000 characters. Responses contain short acknowledgements and selected
+identifiers. Simultaneous identical calls share one attempt; an identical retry
+within 60 seconds returns the cached result. A lost response is reported as
+`outcome_unknown` and cached too. Verify state before repeating: this in-memory
+protection does not survive server restart or the replay window, and the API does
+not offer durable idempotency for every action. No production mutations were used
+in author validation; live deployment and verification remain with crm/steve.

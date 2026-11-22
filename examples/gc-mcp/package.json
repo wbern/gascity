@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only (phase 1) MCP server exposing Gas City to voice assistants",
+  "description": "OAuth-protected MCP server exposing Gas City to voice assistants",
   "scripts": {
     "gen:types": "openapi-typescript ../../internal/api/openapi.json -o src/api-types.ts",
     "build": "tsc -p tsconfig.json",
