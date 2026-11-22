@@ -49,7 +49,7 @@ export async function confirmWrite(_ctx: ConfirmCtx): Promise<Confirmation> {
 /** When each client last sent to each session, so wait_for_reply knows "since when". In memory: a restart forgets it, which only means "from now". */
 export class SendMarkers {
   private m = new Map<string, number>();
-  private handles = new Map<string, { client: string; session: string; since: number }>();
+  private handles = new Map<string, { client: string; session: string; since: number; firstReplyId?: string }>();
   create(client: string, session: string, since: number): string {
     const handle = `h${crypto.randomUUID()}`;
     this.handles.set(handle, { client, session, since });
@@ -58,7 +58,13 @@ export class SendMarkers {
   }
   resolve(client: string, handle: string) {
     const entry = this.handles.get(handle);
-    return entry?.client === client ? { session: entry.session, since: entry.since } : undefined;
+    return entry?.client === client ? { session: entry.session, since: entry.since, firstReplyId: entry.firstReplyId } : undefined;
+  }
+  pinFirstReply(client: string, handle: string, id: string): string | undefined {
+    const entry = this.handles.get(handle);
+    if (!entry || entry.client !== client) return undefined;
+    entry.firstReplyId ??= id;
+    return entry.firstReplyId;
   }
   set(client: string, sessionId: string, ms: number) { this.m.set(`${client}|${sessionId}`, ms); if (this.m.size > 500) this.m.delete(this.m.keys().next().value as string); }
   get(client: string, sessionId: string): number | undefined { return this.m.get(`${client}|${sessionId}`); }

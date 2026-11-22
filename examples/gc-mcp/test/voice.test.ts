@@ -273,6 +273,19 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     expect(gap.text).toContain("Continuity is unknown");
     expect(w.posts()).toHaveLength(1);
   });
+  it("a handle-only retry never silently substitutes output when its first candidate was compacted away", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "Initial candidate.")] } });
+    const { gate, d } = w.mk();
+    const ack = await gate.submit(W, undefined, "check tests");
+    const tool = w.tool(d, W, "wait_for_reply"), args = { handle: ack.structured.handle, max_seconds: 1 };
+    const first = await tool.handler(args);
+    expect(first.structured.page).toBe("Initial candidate.");
+    w.transcripts["gc2-wisp-www"] = [asst(T0 + 1000, "Different segment candidate.")];
+    const retry = await tool.handler(args);
+    expect(retry.structured).toMatchObject({ reply_available: false, reason: "reply_candidate_unavailable", page: "", complete: false });
+    expect(retry.text).not.toContain("Different segment candidate");
+    expect(w.posts()).toHaveLength(1);
+  });
   it("initial handle retries return the first candidate even if later output has arrived", async () => {
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "First candidate.")] } });
     const { gate, d } = w.mk();

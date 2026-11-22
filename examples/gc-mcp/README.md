@@ -173,7 +173,13 @@ clients remain supported. After receiving a candidate, pass its `reply_id` as
 `after_reply_id` on the next wait to suppress that unchanged candidate and wait
 boundedly for different output. Keep arguments unchanged when retrying a lost
 response: reading never consumes or advances a server-side acknowledgement.
-Handles start with the first available candidate after their send boundary;
+A single deadline starts before session lookup and is carried through every
+lookup page, status read, transcript read and sleep. Each transport read aborts
+at its remaining budget; `waited_ms` includes lookup. No background read races
+continue after a timeout.
+Handles pin their first available candidate fingerprint after the send boundary;
+a handle-only retry returns that candidate or `reply_candidate_unavailable`
+if it was removed, never silently substitutes a later segment's output.
 `after_reply_id` selects the first candidate after that fingerprint. Retries do
 not skip it just because newer candidates arrived. If compaction or editing
 removes the fingerprint, `reply_cursor_unavailable` reports unknown continuity;
