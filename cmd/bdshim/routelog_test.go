@@ -12,6 +12,7 @@ import (
 func TestLogDispositionWritesRedactedCommandShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bdshim.jsonl")
 	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("BEADS_ACTOR", "")
 
 	logDisposition("list", []string{
 		"--status=in_progress",
@@ -126,5 +127,41 @@ func TestLogDispositionDoesNotRotateUnderCap(t *testing.T) {
 
 	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
 		t.Fatalf("must not rotate under the cap (err=%v)", err)
+	}
+}
+
+func TestLogDispositionRecordsCallerActor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bdshim.jsonl")
+	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("BEADS_ACTOR", "order:reaper")
+
+	logDisposition("list", []string{"--json"}, "passthrough", 0, time.Now())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read route log: %v", err)
+	}
+	var got routeLogLine
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal route log: %v", err)
+	}
+	if got.Actor != "order:reaper" {
+		t.Fatalf("actor = %q, want order:reaper", got.Actor)
+	}
+}
+
+func TestLogDispositionOmitsActorWhenUnset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bdshim.jsonl")
+	t.Setenv("GC_BDSHIM_LOG", path)
+	t.Setenv("BEADS_ACTOR", "")
+
+	logDisposition("list", []string{"--json"}, "passthrough", 0, time.Now())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read route log: %v", err)
+	}
+	if strings.Contains(string(data), `"actor"`) {
+		t.Fatalf("route log has an actor key with no BEADS_ACTOR: %s", data)
 	}
 }
