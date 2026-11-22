@@ -49,6 +49,17 @@ export async function confirmWrite(_ctx: ConfirmCtx): Promise<Confirmation> {
 /** When each client last sent to each session, so wait_for_reply knows "since when". In memory: a restart forgets it, which only means "from now". */
 export class SendMarkers {
   private m = new Map<string, number>();
+  private handles = new Map<string, { client: string; session: string; since: number }>();
+  create(client: string, session: string, since: number): string {
+    const handle = `h${crypto.randomUUID()}`;
+    this.handles.set(handle, { client, session, since });
+    if (this.handles.size > 500) this.handles.delete(this.handles.keys().next().value!);
+    return handle;
+  }
+  resolve(client: string, handle: string) {
+    const entry = this.handles.get(handle);
+    return entry?.client === client ? { session: entry.session, since: entry.since } : undefined;
+  }
   set(client: string, sessionId: string, ms: number) { this.m.set(`${client}|${sessionId}`, ms); if (this.m.size > 500) this.m.delete(this.m.keys().next().value as string); }
   get(client: string, sessionId: string): number | undefined { return this.m.get(`${client}|${sessionId}`); }
 }
@@ -73,6 +84,7 @@ export class WriteGate {
   private limiter: RateLimiter;
   private deny: string[];
   private allow?: string[];
+  private sessionPending = new Map<string, Promise<WriteResult>>();
   private domainPending = new Map<string, Promise<WriteResult>>();
   private replays = new Map<string, { at: number; res: WriteResult }>();
   readonly markers: SendMarkers;
@@ -203,33 +215,48 @@ export class WriteGate {
     for (const [k, v] of this.replays) if (now - v.at > windowMs) this.replays.delete(k);
     const seen = this.replays.get(rkey);
     if (seen) { log("replayed", true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
-    // 6. rate limit (a replay or a refusal above never spends it)
-    if (!this.limiter.hit("writes")) return refuse("rate_limited", "Too many messages sent in the last minute. Try again shortly.", hit.id);
-    // 7. the second-factor hook (allow today)
-    const c = await (this.cfg.confirm ?? confirmWrite)({ client: ctx.client, session: String(hit.id), kind, intent, length });
-    if (!c.allow) return refuse("confirmation_refused", `The owner confirmation was not given${c.reason ? ` (${clip(redactText(c.reason), 60)})` : ""}, so nothing was sent.`, hit.id);
-    // 8. send: a fresh idempotency key per call, and a marker so wait_for_reply knows "since when"
-    const key = crypto.randomUUID();
-    const sentAt = this.nowMs();
-    this.markers.set(ctx.principal??ctx.client, String(hit.id), sentAt);
-    try {
-      const r = await send(String(hit.id), key);
-      log("sent", true, hit.id);
-      const queued = hit.running === false ? " It is not running, so the message is queued." : "";
-      const said = speakName(label);   // "crm/steve" is spoken "crm slash steve"
-      const say = kind === "submit"
-        ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Ask me to wait for its reply."
-        : `Answered ${said} with "${clip(redactText(extra!.action), 32)}".`;
-      const out: WriteResult = { text: clip(say, 280), structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
-        marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
-      this.replays.set(rkey, { at: now, res: out });
-      if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value as string);
-      return out;
-    } catch (e) {
-      const status = e instanceof GcError ? e.status : 0;
-      log(`error:${status || "no_response"}`, false, hit.id);
-      const why = e instanceof GcError ? clip(redactText(e.message), 80) : "unexpected error";
-      return { text: clip(`Gas City refused or could not take that for ${label} (${status || "no response"}: ${why}). Nothing was sent.`, 280), structured: { sent: false, reason: "error", status } };
+    const pending = this.sessionPending.get(rkey);
+    if (pending) {
+      const result = await pending;
+      log("replayed", true, hit.id);
+      return { text: result.text, structured: { ...result.structured, replayed: true } };
     }
+    const attempt = (async (): Promise<WriteResult> => {
+      // 6. rate limit (a replay or a refusal above never spends it)
+      if (!this.limiter.hit("writes")) return refuse("rate_limited", "Too many messages sent in the last minute. Try again shortly.", hit.id);
+      // 7. the second-factor hook (allow today)
+      const c = await (this.cfg.confirm ?? confirmWrite)({ client: ctx.client, session: String(hit.id), kind, intent, length });
+      if (!c.allow) return refuse("confirmation_refused", `The owner confirmation was not given${c.reason ? ` (${clip(redactText(c.reason), 60)})` : ""}, so nothing was sent.`, hit.id);
+      if (!this.active) return refuse("writes_disabled", "Writes are switched off by the owner.", hit.id);
+      // 8. send: a fresh idempotency key per call, and a marker so wait_for_reply knows "since when"
+      const key = crypto.randomUUID();
+      const sentAt = this.nowMs();
+      const handle = this.markers.create(ctx.principal??ctx.client, String(hit.id), sentAt);
+      this.markers.set(ctx.principal??ctx.client, String(hit.id), sentAt);
+      try {
+        const r = await send(String(hit.id), key);
+        log("sent", true, hit.id);
+        const queued = hit.running === false ? " The session is not running; delivery is not confirmed." : "";
+        const said = speakName(label);   // "crm/steve" is spoken "crm slash steve"
+        const say = kind === "submit"
+          ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Ask me to wait for its reply."
+          : `Answered ${said} with "${clip(redactText(extra!.action), 32)}".`;
+        const out: WriteResult = { text: clip(say, 280), structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
+          handle, completion: "not_proven", marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
+        this.replays.set(rkey, { at: now, res: out });
+        if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value as string);
+        return out;
+      } catch (e) {
+        const status = e instanceof GcError ? e.status : 0;
+        log(`error:${status || "no_response"}`, false, hit.id);
+        const why = e instanceof GcError ? clip(redactText(e.message), 80) : "unexpected error";
+        const out: WriteResult = { text: clip(`Delivery to ${label} could not be confirmed (${status || "no response"}: ${why}). Check before sending again.`, 280), structured: { sent: false, reason: "outcome_unknown", status, handle, marker: markerOf(sentAt), completion: "not_proven" } };
+        this.replays.set(rkey, { at: now, res: out });
+        if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value!);
+        return out;
+      }
+    })();
+    this.sessionPending.set(rkey, attempt);
+    try { return await attempt; } finally { this.sessionPending.delete(rkey); }
   }
 }

@@ -110,7 +110,12 @@ describe('OAuth client send-marker identity through HTTP MCP',()=>{
    expect(r.status).toBe(200);const text=await r.text(),line=text.split('\n').find(x=>x.startsWith('data:'));
    return JSON.parse(line?line.slice(5):text).result.structuredContent;
   };
-  expect((await call(ta.token.access_token,'send_to_session',{session:'agent',text:'Hello'})).sent).toBe(true);
+  const ack=await call(ta.token.access_token,'send_to_session',{session:'agent',text:'Hello'});
+  expect(ack.sent).toBe(true);expect(ack.handle).toMatch(/^h/);
+  const stolen=await call(tb.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(stolen).toMatchObject({found:false,reason:'unknown_handle'});
+  const tracked=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(tracked).toMatchObject({reply_available:true,complete:false,completion:'not_proven',handle:ack.handle});
   const own=await call(ta.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(own.page).toContain('Reply for the sending client.');
   const other=await call(tb.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(other.page).toBe('');expect(other.since).toBe('m'+waitStart);expect(posts).toBe(1);
  });

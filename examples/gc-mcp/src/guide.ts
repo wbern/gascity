@@ -17,7 +17,7 @@ const GUIDE:Record<Topic,{sources:Source[];rules:string[]}>={
  overview:{sources:['principles','claim','reply'],rules:[
   'Gas City coordinates configured agents, scoped work beads and formulas. Role names and powers come from city configuration, never from the name alone.',
   'Inspect the current city, target, bead custody, readiness and existing work before acting. Open or unassigned backlog is not evidence of abandonment or authority to dispatch.',
-  'A message stored, an input accepted, an agent receipt and completed work are separate evidence. Active state or unchanged text does not prove completion. The current wait tool complete flag is a reply heuristic, not proof of task completion.',
+  'A message stored, an input accepted, an agent receipt and completed work are separate evidence. Active state or unchanged text does not prove completion. The wait tool reports candidate output with completion not proven; a send handle preserves one connection\'s target and boundary, not causal proof of a reply.',
   'Use existing authorization; do not invent a new approval ceremony. Preserve human holds, drafts, task ownership and the configured review/deployment path.',
  ]},
  roles:{sources:['principles','claim','dispatch','agents'],rules:[

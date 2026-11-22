@@ -152,21 +152,24 @@ describe("WriteGate: send_to_session", () => {
     expect((await g.submit(W, "mayor", "hi", "now" as any)).structured).toMatchObject({ sent: false, reason: "bad_intent" });
     expect(sup.posts().length).toBe(0);
   });
-  it("a supervisor refusal or outage is spoken as nothing sent, never thrown, and audited", async () => {
+  it("an unconfirmed submit is honest, audited, and does not resend on retry", async () => {
     for (const [status, json] of [[409, { detail: "busy" }], [503, { detail: "down" }]] as const) {
-      const { g, events } = gate({}, supervisor(() => ({ status, json })));
+      const { g, events, sup } = gate({}, supervisor(() => ({ status, json })));
       const r = await g.submit(W, "mayor", "hi");
-      expect(r.structured).toMatchObject({ sent: false, reason: "error", status });
-      expect(r.text).toContain("Nothing was sent");
-      expect(events.at(-1)).toMatchObject({ result: `error:${status}`, ok: false });
+      expect(r.structured).toMatchObject({ sent: false, reason: "outcome_unknown", status });
+      expect(r.text).toContain("could not be confirmed");
+      const retry = await g.submit(W, "mayor", "hi");
+      expect(retry.structured).toMatchObject({ replayed: true, handle: r.structured.handle });
+      expect(sup.posts()).toHaveLength(1);
+      expect(events).toContainEqual(expect.objectContaining({ result: `error:${status}`, ok: false }));
     }
     const down = gate({}, { ...supervisor(), fetchImpl: (async () => { throw new Error("connect refused"); }) as unknown as typeof fetch, calls: [], posts: () => [] });
     expect((await down.g.submit(W, "mayor", "hi")).structured).toMatchObject({ sent: false });
     expect(down.events.at(-1).result).toMatch(/^lookup_failed/);
   });
-  it("tells you when the session is not running (the message is queued)", async () => {
+  it("reports a nonrunning session without guessing delivery or queue state", async () => {
     const { g } = gate();
-    expect((await g.submit(W, "devops", "hi")).text).toContain("queued");
+    expect((await g.submit(W, "devops", "hi")).text).toContain("delivery is not confirmed");
   });
 });
 

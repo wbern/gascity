@@ -148,6 +148,32 @@ describe("send_to_session: default session, resolution and no send on doubt", ()
 });
 
 describe("idempotent resend: a voice client that retries does not send twice", () => {
+  it("concurrent identical sends share one backend POST and handle", async () => {
+    const w = world(); const { gate } = w.mk();
+    const [a, b] = await Promise.all([gate.submit(W, "steve", "one request"), gate.submit(W, "steve", "one request")]);
+    expect(w.posts()).toHaveLength(1);
+    expect(a.structured.handle).toMatch(/^h/);
+    expect(b.structured.handle).toBe(a.structured.handle);
+  });
+  it("preserves multiple outstanding boundaries and refuses a different OAuth principal", async () => {
+    const w = world(); const { gate, d } = w.mk();
+    const owner = { ...W, principal: "oauth-owner" };
+    const first = await gate.submit(owner, "steve", "first request");
+    w.clock.t += 2000;
+    const second = await gate.submit(owner, "steve", "second request");
+    expect(first.structured.handle).not.toBe(second.structured.handle);
+    w.transcripts["gc2-wisp-s1"] = [asst(T0 + 1000, "Output between sends.")];
+    const tool = buildTools(d, owner).find(t => t.name === "wait_for_reply")!;
+    const a = await tool.handler({ handle: first.structured.handle, max_seconds: 1 });
+    const b = await tool.handler({ handle: second.structured.handle, max_seconds: 1 });
+    expect(a.structured).toMatchObject({ reply_available: true, since: `m${T0}`, correlation: "temporal_only", complete: false });
+    expect(b.structured).toMatchObject({ reply_available: false, since: `m${T0 + 2000}` });
+    const thief = buildTools(d, { ...owner, principal: "oauth-other" }).find(t => t.name === "wait_for_reply")!;
+    const denied = await thief.handler({ handle: first.structured.handle, max_seconds: 1 });
+    expect(denied.structured).toMatchObject({ found: false, reason: "unknown_handle" });
+    expect(w.posts()).toHaveLength(2);
+  });
+
   it("an identical send within 60 s from the same client returns the first acknowledgement, with ONE supervisor call", async () => {
     const w = world(); const { gate } = w.mk();
     const a = await gate.submit(W, "steve", "please run the build");
@@ -200,13 +226,21 @@ describe("session_state: working | idle | waiting for input", () => {
 });
 
 describe("wait_for_reply: bounded, since the send, never unbounded", () => {
-  it("returns the first complete reply after our own send (not an older one)", async () => {
+  it("never proves completion from an unchanged interim reply and active session", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I will investigate and report back.")] } });
+    const { d } = w.mk();
+    const r = await w.tool(d, W, "wait_for_reply").handler({ since: `m${T0}`, max_seconds: 2 });
+    expect(r.structured).toMatchObject({ complete: false, completion: "not_proven", reply_available: true });
+    expect(r.text).not.toMatch(/completed|finished/);
+  });
+
+  it("returns the first candidate reply after our own send (not an older one)", async () => {
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 - 60_000, "An OLD reply from before the send.")] }, onSleep: (t) => { if (t >= T0 + 3000) w.transcripts["gc2-wisp-www"] = [asst(T0 - 60_000, "An OLD reply from before the send."), asst(T0 + 2500, "Done. All 160 tests pass and I pushed the branch.")]; } });
     const { gate, d } = w.mk();
     await gate.submit(W, undefined, "run the tests");
     const r = await w.tool(d, W, "wait_for_reply").handler({});
-    expect(r.structured).toMatchObject({ complete: true });
-    expect(r.text).toContain("replied");
+    expect(r.structured).toMatchObject({ complete: false, completion: "not_proven", reply_available: true });
+    expect(r.text).toContain("completion unverified");
     expect(r.text).toContain("All 160 tests pass");
     expect(r.text).not.toContain("OLD reply");
     expect((r.structured as any).waited_ms).toBeLessThanOrEqual(15_000);
@@ -218,7 +252,7 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     w.clock.t += 8_000;                                          // the voice client took 8 s to call wait_for_reply
     w.transcripts["gc2-wisp-www"] = [asst(T0 + 2_000, "Finished while you were asking: all green.")];
     const r = await w.tool(d, W, "wait_for_reply").handler({});
-    expect(r.structured).toMatchObject({ complete: true });
+    expect(r.structured).toMatchObject({ complete: false, completion: "not_proven", reply_available: true });
     expect(r.text).toContain("all green");
     // another client has no marker for this session, so for it the same reply is older than "now" and is not returned
     const other = await w.tool(d, { client: "Claude (owner client)", scopes: ["gc:read"] }, "wait_for_reply").handler({ max_seconds: 2 });
@@ -231,7 +265,7 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     const r = await w.tool(d, W, "wait_for_reply").handler({});
     expect(r.structured).toMatchObject({ complete: false, page: "" });
     expect((r.structured as any).fetches).toBeLessThanOrEqual(3);                        // the transcript is read at most 3 times per wait
-    expect(r.text).toMatch(/still working/);
+    expect(r.text).toMatch(/No new reply/);
     expect((r.structured as any).waited_ms).toBeLessThanOrEqual(15_000);
     const during = w.calls.slice(before);
     expect(during.filter((c) => c.path.endsWith("/transcript")).length).toBeLessThanOrEqual(3);          // big reads: at most 3
@@ -257,14 +291,14 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     await gate.submit(W, undefined, "go");
     const r = await w.tool(d, W, "wait_for_reply").handler({ max_seconds: 6 });
     expect(r.structured).toMatchObject({ complete: false });
-    expect(r.text).toMatch(/still working\. So far/);
+    expect(r.text).toMatch(/untrusted/);
     expect((r.structured as any).page).toContain("Working on it");
   });
   it("an explicit marker from the send acknowledgement is honoured", async () => {
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "Reply after the marker.")] } });
     const { d } = w.mk();
     const r = await w.tool(d, W, "wait_for_reply").handler({ since: `m${T0}` });
-    expect(r.structured).toMatchObject({ complete: true });
+    expect(r.structured).toMatchObject({ complete: false, completion: "not_proven", reply_available: true });
     const later = await w.tool(d, W, "wait_for_reply").handler({ since: `m${T0 + 10_000}`, max_seconds: 2 });
     expect(later.structured).toMatchObject({ complete: false });
   });

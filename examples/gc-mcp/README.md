@@ -64,7 +64,7 @@ A spoken name is resolved against the live session list (`src/sessions.ts`): exa
 (`steve` is `crm/steve`; `crm slash steve` works); if more than one fits, the tool asks ("I found crm slash steve and crm slash bob, which one?") and sends nothing.
 Read tools for the loop (all spoken text <= 280 characters, full text in structuredContent, replies redacted, links dropped and labelled untrusted): `session_state`
 (working | idle | waiting for input | not running), `latest_reply`, `read_more(offset)` for the rest of a long reply, and `wait_for_reply(max_seconds <= 20, default 15)`, which polls the
-transcript for the first reply after our own send (the send acknowledgement carries a marker) and always returns inside 20 seconds ("still working" or the reply so far).
+transcript for candidate output after our own send (use its handle, or the legacy marker). Output never proves completion; repeat bounded checks within the agreed wait budget.
 A repeated identical send within 60 seconds from the same client returns the first acknowledgement instead of sending twice (voice clients retry); each real send has its own
 idempotency key. Any `gc:read` token reads any session's replies (the default session only fills in an omitted name).
 
@@ -166,8 +166,17 @@ state, unchanged text or absent status. The owner can request a longer check-bac
 budget across bounded calls without a repeated permission question; timing out
 never authorizes resending the original message.
 
-Until reliable reply tracking is shipped, the existing wait tool `complete` flag
-is a reply heuristic and must not be treated as proof the requested work finished.
+Send acknowledgements include a connection-bound `handle`. Pass it alone to
+`wait_for_reply` to retain that send's target and timestamp boundary even after
+another send. Unknown/other-client handles fail closed; old `marker`/`since`
+clients remain supported. Handles currently live in bounded process memory
+(maximum 500); restart or eviction returns unknown, never permission to resend.
+Transcript output is a **temporal candidate**, not causal attribution or task
+completion: `complete:false`, `completion:not_proven`, and `reply_available`
+are explicit. Active/idle state and unchanged text never prove completion.
+Concurrent identical sends share one backend attempt; an unconfirmed attempt is
+cached for the configured replay window (default 60 seconds) to avoid retrying an
+uncertain side effect. Outside that window, check before sending again.
 The first-contact guide names that limitation explicitly.
 
 ### Verified role standards snapshots
