@@ -12,9 +12,9 @@ export const MAX_WAIT_S = 20;
 export const POLL_MS = 1500;
 const FULL_MAX = 8000;                  // the most of a reply put into structuredContent
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
-const realClock = { now: () => Date.now(), sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) };
+export const realClock = { now: () => Date.now(), sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) };
 
-type Found = { hit: SessionRef } | { say: ToolResult };
+export type Found = { hit: SessionRef } | { say: ToolResult };
 
 function isDefault(d: Deps, hit: SessionRef): boolean {
   const q = (d.defaultSession ?? "").trim().toLowerCase();
@@ -22,7 +22,7 @@ function isDefault(d: Deps, hit: SessionRef): boolean {
 }
 
 /** Resolve a spoken name (or the default) and check that this token may READ it. */
-async function target(d: Deps, who: WriteCtx | undefined, session?: string): Promise<Found> {
+export async function target(d: Deps, who: WriteCtx | undefined, session?: string): Promise<Found> {
   const res = await resolveSession(d.gc, session, d.defaultSession);
   if (res.kind === "nodefault") return { say: { text: "Which session? No default session is set.", structured: { found: false, reason: "no_session" } } };
   if (res.kind === "bad") return { say: { text: "That is not a valid session name.", structured: { found: false, reason: "bad_name" } } };
@@ -35,6 +35,19 @@ async function target(d: Deps, who: WriteCtx | undefined, session?: string): Pro
   const writeOk = !!who?.scopes.includes(WRITE_SCOPE) && !!d.writes?.active && d.writes.permits(hit).ok;
   if (!peekOk && !isDefault(d, hit) && !writeOk) return { say: { text: "That session is not allowed to be read by voice.", structured: { found: true, allowed: false } } };
   return { hit };
+}
+
+export type AgentState = "waiting for input" | "stuck" | "not running" | "working" | "idle" | "unknown";
+/** One place that decides working / idle / waiting / stuck / not running from what the supervisor reports about a session. */
+export function deriveState(full: any, hit: SessionRef, waiting: boolean): AgentState {
+  const ps = full?.program_status?.state as string | undefined;
+  const raw = String(full?.state ?? hit.state ?? "");
+  if (waiting || ps === "blocked") return "waiting for input";
+  if (/strand|fail|error|crash|stuck|quarantin|dead/i.test(raw)) return "stuck";
+  if (full?.running === false || hit.running === false || /asleep|closed|stopp|suspend|creating|drain/i.test(raw)) return "not running";
+  if (ps === "working" || full?.turn?.state === "running" || /work|busy|think|tool/i.test(String(full?.activity ?? ""))) return "working";
+  if (ps === "idle" || ps === "done" || ps === "error" || full?.turn?.state === "ended" || /idle|wait|ready/i.test(String(full?.activity ?? "")) || /active/i.test(raw)) return "idle";
+  return "unknown";
 }
 
 interface Turn { role?: string; text?: string; timestamp?: string }
@@ -76,8 +89,8 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
 
   return [
     {
-      name: "session_state", title: "Is the session working, idle or waiting for me?",
-      description: "One short answer about one agent session: working, idle, waiting for input (with what it asks) or not running. Say a name; leave it out for the default session.",
+      name: "session_state", title: "Is the agent busy, idle or waiting for me",
+      description: "Use when the person asks if an agent is busy, free, stuck or waiting for them. One short answer: working, idle, waiting for input (and what it asks) or not running. Say a name, or leave it out for their own session.",
       inputShape: { session: sess }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);
@@ -86,21 +99,15 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const full: any = await d.gc.get(`/session/${encodeURIComponent(hit.id)}`).catch(() => hit);
         let pending: any = null;
         try { const p: any = await d.gc.get(`/session/${encodeURIComponent(hit.id)}/pending`); pending = p?.pending && (p.pending.request_id || p.pending.prompt) ? p.pending : null; } catch { /* not supported or none */ }
-        const ps = full?.program_status?.state as string | undefined;
-        let state: "waiting for input" | "working" | "idle" | "not running" | "unknown";
-        if (pending || ps === "blocked") state = "waiting for input";
-        else if (full?.running === false || /asleep|closed|stopp|suspend|creating|drain/i.test(String(full?.state ?? hit.state ?? ""))) state = "not running";
-        else if (ps === "working" || full?.turn?.state === "running" || /work|busy|think|tool/i.test(String(full?.activity ?? ""))) state = "working";
-        else if (ps === "idle" || ps === "done" || ps === "error" || full?.turn?.state === "ended" || /idle|wait|ready/i.test(String(full?.activity ?? "")) || /active/i.test(String(full?.state ?? ""))) state = "idle";
-        else state = "unknown";
+        const state = deriveState(full, hit, !!pending);
         const ask = pending ? ` It asks: ${clip(clean(pending.prompt ?? pending.kind ?? ""), 140)}` : "";
         return { text: clip(`${speakName(label)} is ${state}.${ask}`, SPOKEN_MAX),
           structured: { found: true, id: hit.id, name: label, state, running: full?.running, raw_state: full?.state ?? hit.state, activity: full?.activity, waiting_for: pending ? { kind: pending.kind, request_id: pending.request_id, prompt: clip(clean(pending.prompt ?? ""), 400), options: pending.options } : undefined, untrusted: !!pending } };
       }),
     },
     {
-      name: "latest_reply", title: "Latest reply from a session",
-      description: "The newest thing an agent session said (the first part, spoken length). Use read_more for the rest. Say a name; leave it out for the default session.",
+      name: "latest_reply", title: "What did the agent last say",
+      description: "Use when the person asks what an agent last said or answered. Gives the newest thing it said, the first part at spoken length; use read_more for the rest. Say a name, or leave it out for their own session.",
       inputShape: { session: sess }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);
@@ -112,8 +119,8 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "read_more", title: "Read the rest of a long reply",
-      description: "Continue the newest reply of a session from a character offset (use next_offset from the previous answer).",
+      name: "read_more", title: "Keep reading the last answer",
+      description: "Use when the person says yes to 'want more?' after a long answer. Reads on from where the last answer stopped; pass next_offset from the previous answer.",
       inputShape: { session: sess, offset: z.number().int().min(0).max(1_000_000) }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);
@@ -126,8 +133,8 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "wait_for_reply", title: "Wait for an agent's reply",
-      description: "After send_to_session, wait up to max_seconds (at most 20, default 15) for the session's next reply and read its start; or say it is still working. Never waits longer than 20 seconds: call again to keep waiting.",
+      name: "wait_for_reply", title: "Wait for the agent's answer",
+      description: "Use right after send_to_session to hear the answer. Waits up to 15 seconds (at most 20) for the agent's next reply and reads its start, or says it is still working; call again to keep waiting.",
       inputShape: { session: sess, max_seconds: z.number().int().min(1).max(MAX_WAIT_S).optional(), since: z.string().max(24).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);

@@ -28,7 +28,7 @@ describe("tools", () => {
   it("every tool is read-only annotated", () => {
     const { t } = tools({});
     expect(t.map((x) => x.name).sort()).toEqual(
-      ["bead_show", "city_status", "latest_reply", "list_sessions", "mail_inbox", "peek_session", "read_more", "ready_work", "session_state", "wait_for_reply", "whats_new"],
+      ["bead_show", "briefing", "city_status", "latest_reply", "list_sessions", "mail_inbox", "peek_session", "read_more", "ready_work", "session_state", "wait_for_reply", "what_is_working_on", "whats_new"],
     );
     for (const x of t) expect(x.annotations.readOnlyHint).toBe(true);
   });
@@ -180,7 +180,7 @@ describe("the supervisor client: reads are GET-only, the only mutations are the 
     const t = buildTools({ gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date(), defaultSession: "gc-architect", clock });
     const args: Record<string, unknown> = { city_status: {}, list_sessions: { limit: 3, state: "active" }, peek_session: { session: "gc-architect", tail: 2 },
       mail_inbox: { limit: 2 }, ready_work: { limit: 2 }, bead_show: { id: "gcw-ti563" }, whats_new: { since: "1h" },
-      session_state: {}, latest_reply: {}, read_more: { offset: 0 }, wait_for_reply: { max_seconds: 2 } };
+      session_state: {}, latest_reply: {}, read_more: { offset: 0 }, wait_for_reply: { max_seconds: 2 }, briefing: {}, what_is_working_on: {} };
     for (const tool of t) await tool.handler(args[tool.name]);
     expect(seen.length).toBeGreaterThan(7);
     expect(new Set(seen.map((r) => r.method))).toEqual(new Set(["GET"]));

@@ -55,9 +55,10 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const audit = new AuditLog(o.auditFile ?? null);
   const writesOn = !!o.writes?.enabled;
   const markers = o.deps.markers ?? new SendMarkers();
+  const briefings = o.deps.briefings ?? new Map<string, number>();
   const deps = writesOn
-    ? { ...o.deps, markers, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
-    : { ...o.deps, markers };
+    ? { ...o.deps, markers, briefings, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
+    : { ...o.deps, markers, briefings };
   const provider = new OwnerApprovalProvider({
     writesEnabled: writesOn,
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, chatgpt: o.chatgpt, allowDcr: o.allowDcr, stateFile: o.stateFile, now,

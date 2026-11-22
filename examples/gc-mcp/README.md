@@ -1,3 +1,5 @@
+> **North star (William):** "I want to get into the car in the morning, start a Claude voice chat, and converse with my agents on gc3 to see how they are doing; right up there with being able to talk to Slay CRM. I cannot emphasize enough that I want this to feel SIMPLE."
+
 # gc-mcp — Gas City MCP server (voice control)
 
 Fork-owned. Read-only MCP server (Streamable HTTP, stateless) in front of the
@@ -38,6 +40,12 @@ sent). Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (
 `GC_MCP_WRITE_DENY_SESSIONS`), an optional `GC_MCP_WRITE_ALLOW_SESSIONS`, and sessions with a person attached are refused unless `GC_MCP_WRITE_ALLOW_ATTACHED=1` (the default session is exempt); every attempt,
 sent or refused, is audited (client name, session, intent, length, an 80-character redacted preview, outcome); `WRITES_DISABLED` in the state dir turns writes off for the next
 request while reads keep working. `confirmWrite()` in `src/writes.ts` is the single place a later second factor (TOTP/push) slots in; it allows today.
+
+Voice-first read experience: `briefing` answers "how are my agents doing?" in ONE call as 3 to 5 short spoken sentences (400 characters at most): what needs the owner FIRST (open human
+decisions, agents waiting for input, stuck work), how many agents are working, idle or waiting, the busiest by what they work on (titles, never ids), unread mail, and what changed since the
+last briefing (per client, in memory; the first call looks back 12 hours). A source the supervisor cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers
+"what is steve working on?" in a sentence or two. The server sends `instructions` in the initialize result written for a spoken assistant, and every tool's title and description is plain
+spoken intent ("Ask how the agents are doing", "Say something to an agent").
 
 Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
 A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match

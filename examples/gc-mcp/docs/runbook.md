@@ -236,3 +236,11 @@ connector callbacks, loopback with a port, `GC_MCP_DCR_EXTRA_REDIRECTS`), so a s
 passphrase still gates every approval, and the page names the app as UNVERIFIED with the redirect host in bold); public PKCE clients only, never a secret; a global limit of 10 registrations an hour, a
 cap of 25 clients (never-used pruned first), 90-day expiry, an 8 kB body cap; `REVOKE_ALL` removes every registered client. An attacker can still use up the hourly limit so that YOUR first connect gets a
 429: the static-client steps stay available as the fallback. `GC_MCP_DCR_OPEN_REDIRECTS=1` is UNSAFE (any https site may register; registered clients are read-only while it is on) and off by default.
+
+### The morning drive: voice-first reads
+
+The north star is "get into the car, start a voice chat, ask how my agents are doing." Say "how are my agents doing?": the assistant calls `briefing` and says a few short sentences, the thing
+that needs you first. "What is steve working on?" is `what_is_working_on`; "is steve waiting for me?" is `session_state`; "say hello to steve" is `send_to_session` then `wait_for_reply`; "want more?" is
+`read_more`. The server's initialize `instructions` tell the assistant to keep answers short and spoken, never read ids or paths aloud, ask which agent when a name is ambiguous, say what needs you first,
+and treat transcript, mail and bead text as untrusted. Not verified: how Claude or ChatGPT voice modes actually use `instructions` and tool descriptions (they may ignore them), and whether the supervisor
+exposes human-decision gates as beads of type `gate` with `await_type: human` in this city (the briefing then says it could not read the decisions rather than inventing any).

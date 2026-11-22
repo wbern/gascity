@@ -3,6 +3,7 @@ import type { GcClient } from "./gc-client.js";
 import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
 import { disambiguation, resolveSession, identifiers, labelOf, type SessionRef } from "./sessions.js";
 import { buildVoiceTools } from "./voice.js";
+import { buildBriefingTools } from "./briefing.js";
 import { INTENTS, MAX_WRITE_TEXT, WRITE_SCOPE, type SendMarkers, type WriteCtx, type WriteGate } from "./writes.js";
 
 export interface ToolDef {
@@ -22,6 +23,7 @@ export interface Deps {
   gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate;
   defaultSession?: string;      // GC_MCP_DEFAULT_SESSION: what "session" means when nobody says one (voice: nobody says session ids)
   markers?: SendMarkers;        // when each client last sent to each session, so wait_for_reply knows "since when"
+  briefings?: Map<string, number>;   // per client: when it last asked for a briefing (in memory; a restart forgets it, which only widens the next window)
   clock?: Clock;                // tests inject a fake clock; production uses Date.now and setTimeout
 }
 
@@ -44,9 +46,10 @@ function toGoDuration(s: string): string {
 export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const { gc } = d;
   const reads: ToolDef[] = [
+    ...buildBriefingTools(d, who),
     {
-      name: "city_status", title: "City status",
-      description: "One-sentence health of Gas City: agents running, work, unread mail, spend today.",
+      name: "city_status", title: "Quick health check of the city",
+      description: "Use when the person wants a one-line health check of the whole city: agents running, work in progress, unread mail and spend today. For how are my agents doing, use briefing instead.",
       inputShape: {}, annotations: RO,
       handler: guard(async () => {
         const s: any = await gc.get("/status");
@@ -67,8 +70,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "list_sessions", title: "List sessions",
-      description: "Summarise live agent sessions by state and name the most recently active ones.",
+      name: "list_sessions", title: "Who is around",
+      description: "Use when the person asks which agents are around or active right now. Says how many there are by state and names the most recently active ones.",
       inputShape: { limit: z.number().int().min(1).max(20).optional(), state: z.string().max(32).optional() },
       annotations: RO,
       handler: guard(async (a) => {
@@ -87,8 +90,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "peek_session", title: "Peek at a session",
-      description: "Read the last few messages of one agent session. Say a name ('steve', 'the mayor'); leave it out for the default session.",
+      name: "peek_session", title: "See what an agent recently said",
+      description: "Use when the person wants the last few messages of an agent's conversation. Say a name ('steve', 'the mayor'), or leave it out for their own session.",
       inputShape: { session: z.string().min(1).max(128).optional(), tail: z.number().int().min(1).max(6).optional() },
       annotations: RO,
       handler: guard(async (a) => {
@@ -112,8 +115,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "mail_inbox", title: "Mail inbox",
-      description: "Unread mail count and the newest subjects (subjects only, never bodies).",
+      name: "mail_inbox", title: "Check my mail",
+      description: "Use when the person asks about their mail. Says how many are unread and who the newest are from (subjects only, never the body).",
       inputShape: { limit: z.number().int().min(1).max(10).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const limit = a.limit ?? 5;
@@ -131,8 +134,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "ready_work", title: "Ready work",
-      description: "How many beads are ready to work and the top few titles.",
+      name: "ready_work", title: "What work is ready to start",
+      description: "Use when the person asks what work is ready or waiting to be picked up. Says how many pieces are ready and the top few titles.",
       inputShape: { limit: z.number().int().min(1).max(10).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const limit = a.limit ?? 3;
@@ -147,8 +150,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "bead_show", title: "Show a bead",
-      description: "Title, status, owner and a short description for one bead id.",
+      name: "bead_show", title: "Look up one piece of work",
+      description: "Use when the person asks about one specific piece of work by its id. Gives its title, status, who has it and a short description.",
       inputShape: { id: z.string().min(1).max(128) }, annotations: RO,
       handler: guard(async (a) => {
         if (!ID.test(String(a.id))) throw new Error("invalid bead id");
@@ -161,8 +164,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       }),
     },
     {
-      name: "whats_new", title: "What's new",
-      description: "Summarise city events in a recent window like 30m, 2h or 1d.",
+      name: "whats_new", title: "What happened recently",
+      description: "Use when the person asks what happened or what is new in a window like 30m, 2h or 1d. Summarises the recent changes in the city.",
       inputShape: { since: z.string().max(8).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const since = toGoDuration(a.since ?? "30m");
@@ -184,15 +187,15 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const WRITE_ANN = { destructiveHint: false, openWorldHint: false, idempotentHint: false } as const;
   const writeTools: ToolDef[] = [
     {
-      name: "send_to_session", title: "Send a message to an agent session", isWrite: true,
-      description: "Send a text message to one agent session, like typing into its terminal. Say a name ('steve', 'the mayor'); leave session out for the default session. It returns at once with an acknowledgement; use wait_for_reply to hear the answer. intent: default, follow_up (queue it after the current turn) or interrupt_now (interrupt the current turn first). Cannot stop, kill, reset or change anything else.",
+      name: "send_to_session", title: "Say something to an agent", isWrite: true,
+      description: "Use when the person says tell, ask or say something to an agent. Sends the words like typing into its terminal; say a name or leave it out for their own session. It returns at once: then use wait_for_reply to hear the answer. intent: default, follow_up (after its current step) or interrupt_now. Cannot stop, kill or change anything else.",
       inputShape: { session: z.string().min(1).max(128).optional(), text: z.string().min(1).max(MAX_WRITE_TEXT), intent: z.enum(INTENTS).optional() },
       annotations: WRITE_ANN,
       handler: async (a) => gate.submit(who, a.session === undefined ? undefined : String(a.session), String(a.text), a.intent ?? "default"),
     },
     {
-      name: "respond_to_session", title: "Answer a waiting agent session", isWrite: true,
-      description: "Answer an agent session that is waiting on you (a pending question or permission request): a short action word such as allow or deny, optional reply text, optional request id.",
+      name: "respond_to_session", title: "Answer an agent that is waiting for you", isWrite: true,
+      description: "Use when an agent is waiting on the person (a question or a permission request). Sends a short answer word such as allow or deny, with optional words and request id.",
       inputShape: { session: z.string().min(1).max(128).optional(), action: z.string().min(1).max(32), text: z.string().max(MAX_WRITE_TEXT).optional(), request_id: z.string().max(128).optional() },
       annotations: WRITE_ANN,
       handler: async (a) => gate.respond(who, a.session === undefined ? undefined : String(a.session), String(a.action), a.text === undefined ? undefined : String(a.text), a.request_id === undefined ? undefined : String(a.request_id)),

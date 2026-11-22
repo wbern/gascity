@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildTools, type Deps } from "./tools.js";
 import type { WriteCtx } from "./writes.js";
+import { INSTRUCTIONS } from "./instructions.js";
 
 export interface CallInfo { tool: string; args: unknown; ok: boolean; ms: number; chars: number }
 
 export function createMcpServer(deps: Deps, onCall?: (c: CallInfo) => void, who?: WriteCtx): McpServer {
-  const server = new McpServer({ name: "gas-city", version: "0.2.0" });
+  const server = new McpServer({ name: "gas-city", version: "0.3.0" }, { instructions: INSTRUCTIONS });
   for (const t of buildTools(deps, who)) {
     server.registerTool(
       t.name,
