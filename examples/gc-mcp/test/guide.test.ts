@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import {GcClient} from '../src/gc-client.js';
 import {buildTools} from '../src/tools.js';
 import {INSTRUCTIONS} from '../src/instructions.js';
+import {GUIDE_SOURCES} from '../src/guide-sources.js';
 const calls:string[]=[];
 const client=(response:(p:string)=>unknown)=>new GcClient({baseUrl:'http://127.0.0.1:1',city:'c',fetchImpl:(async(url:string)=>{const p=new URL(url).pathname.replace('/v0/city/c','');calls.push(p);const b=response(p);return new Response(JSON.stringify(b),{status:b===null?404:200});})as typeof fetch});
 const deps=(gc:GcClient)=>({gc,mailAgent:'human',now:()=>new Date('2026-11-22T22:20:00Z')});
@@ -14,6 +15,7 @@ describe('bounded operational orientation',()=>{
  });
  it('serves versioned, source-backed standards without reading the supervisor for static topics',async()=>{
   const gc=client(()=>{throw Error('static guidance must not fetch runtime data');});
+  for(const source of Object.values(GUIDE_SOURCES)){const raw=fs.readFileSync(new URL('../../../'+source.path,import.meta.url));expect(crypto.createHash('sha256').update(raw).digest('hex')).toBe(source.sha256);}
   for(const topic of ['overview','work','communication','operations']){
    const t=guide(gc);expect(t.annotations.readOnlyHint).toBe(true);const r=await t.handler({topic});
    expect(r.structured.version).toBeTypeOf('string');expect(r.structured.provenance).toBeInstanceOf(Array);expect(r.text.length).toBeLessThanOrEqual(280);expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(4096);
