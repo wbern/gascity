@@ -14,7 +14,7 @@ PASS  client starts the flow and asks for a browser redirect
 PASS  consent page is served through nginx and shows the redirect target
 PASS  owner passphrase approves and the callback carries a code
 PASS  token exchange succeeds (PKCE, audience-bound to the exact /mcp resource)
-PASS  tools/list over /mcp returns 7 read-only tools
+PASS  tools/list over /mcp returns 11 read-only tools (7 read + 4 voice-loop; no write tool without gc:write)
 PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in progress, 12 ready; 3 unread mail. 
 PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
 PASS  host-root protected-resource alias answers with the same resource  -> https://mcp.gc3.enmansbyra.se:39609/mcp

@@ -113,7 +113,7 @@ try {
   await client.connect(new StreamableHTTPClientTransport(new URL(serverUrl), { authProvider: provider, fetch: fetchFn }));
   const tools = (await client.listTools()).tools;
   const result = await client.callTool({ name: "city_status", arguments: {} });
-  step(tools.length === 7 && tools.every((t) => t.annotations?.readOnlyHint), "tools/list over /mcp returns 7 read-only tools");
+  step(tools.length === 11 && tools.every((t) => t.annotations?.readOnlyHint), "tools/list over /mcp returns 11 read-only tools (7 read + 4 voice-loop; no write tool without gc:write)");
   step(/23 of 40 agents running/.test(result.content[0].text), "tools/call city_status answers", result.content[0].text.slice(0, 70));
   await client.close();
 
