@@ -184,8 +184,18 @@ if it was removed, never silently substitutes a later segment's output.
 not skip it just because newer candidates arrived. If compaction or editing
 removes the fingerprint, `reply_cursor_unavailable` reports unknown continuity;
 check the latest output before explicitly resetting the cursor. This is not a
-causal completion signal or a guarantee of history beyond the available segment. Handles currently live in bounded process memory
-(maximum 500); restart or eviction returns unknown, never permission to resend.
+causal completion signal or a guarantee of history beyond the available segment.
+
+Production startup stores bounded handle metadata in `reply-state.json` inside
+`GC_MCP_STATE_DIR` (maximum 500 handles, 24-hour logical expiry). The atomic,
+owner-private file contains only client/session IDs, send boundaries, expiry and
+first-candidate fingerprints; it contains no request/reply bodies or credentials.
+Handles and candidate pins survive restart. Expiry, eviction or unavailable
+history remain explicit and never authorize resending. Corrupt/incompatible or
+nonprivate state refuses startup; a failed save disables continuation instead of
+silently discarding state. `handle_persistence` distinguishes private-file from
+memory-only embedding/testing. This does **not** persist the send replay journal:
+retry deduplication remains process-local and bounded to its replay window.
 `read_more(reply_id, offset)` continues that selected reply anywhere in the
 available segment, even when newer replies exist. Without `reply_id` it retains
 the legacy newest-reply default. Missing/edited/compacted selected replies return

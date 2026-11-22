@@ -1,4 +1,5 @@
 // Shared text helpers for every tool: clip, untrusted-content cleaning, and the guard that maps supervisor errors to speakable text.
+import { ReplyStateError } from "./reply-state.js";
 import { GcError } from "./gc-client.js";
 import { redactDeep, redactText } from "./redact.js";
 
@@ -32,6 +33,7 @@ export function guard(fn: (a: any) => Promise<ToolResult>): (a: any) => Promise<
       return { text: redactText(r.text), structured: redactDeep(r.structured) };
     } catch (e) {
       if (e instanceof GcError) return gcErrorResult(e);
+      if (e instanceof ReplyStateError) return { text: "Reply tracking is unavailable, so automatic continuation stopped. Do not resend automatically.", structured: { error: true, kind: "reply_state_unavailable", automatic_retry: false, completion: "not_proven" } };
       throw e;
     }
   };

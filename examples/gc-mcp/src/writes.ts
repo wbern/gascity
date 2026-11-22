@@ -13,6 +13,8 @@ import { disambiguation, identifiers, labelOf, resolveSession, type SessionRef }
 import { clip, speakName } from "./text.js";
 import type { AuditEvent } from "./audit.js";
 
+import { SendMarkers } from "./reply-state.js";
+export { SendMarkers } from "./reply-state.js";
 export { WRITE_SCOPE };
 export const MAX_WRITE_TEXT = 4000;
 export const INTENTS = ["default", "follow_up", "interrupt_now"] as const;
@@ -46,29 +48,6 @@ export async function confirmWrite(_ctx: ConfirmCtx): Promise<Confirmation> {
   return { allow: true };
 }
 
-/** When each client last sent to each session, so wait_for_reply knows "since when". In memory: a restart forgets it, which only means "from now". */
-export class SendMarkers {
-  private m = new Map<string, number>();
-  private handles = new Map<string, { client: string; session: string; since: number; firstReplyId?: string }>();
-  create(client: string, session: string, since: number): string {
-    const handle = `h${crypto.randomUUID()}`;
-    this.handles.set(handle, { client, session, since });
-    if (this.handles.size > 500) this.handles.delete(this.handles.keys().next().value!);
-    return handle;
-  }
-  resolve(client: string, handle: string) {
-    const entry = this.handles.get(handle);
-    return entry?.client === client ? { session: entry.session, since: entry.since, firstReplyId: entry.firstReplyId } : undefined;
-  }
-  pinFirstReply(client: string, handle: string, id: string): string | undefined {
-    const entry = this.handles.get(handle);
-    if (!entry || entry.client !== client) return undefined;
-    entry.firstReplyId ??= id;
-    return entry.firstReplyId;
-  }
-  set(client: string, sessionId: string, ms: number) { this.m.set(`${client}|${sessionId}`, ms); if (this.m.size > 500) this.m.delete(this.m.keys().next().value as string); }
-  get(client: string, sessionId: string): number | undefined { return this.m.get(`${client}|${sessionId}`); }
-}
 export const markerOf = (ms: number) => `m${ms}`;
 export const parseMarker = (s?: string): number | undefined => (s && /^m\d{10,16}$/.test(s) ? Number(s.slice(1)) : undefined);
 
@@ -239,6 +218,7 @@ export class WriteGate {
       const sentAt = this.nowMs();
       const handle = this.markers.create(ctx.principal??ctx.client, String(hit.id), sentAt);
       this.markers.set(ctx.principal??ctx.client, String(hit.id), sentAt);
+      if (!this.active) return refuse("writes_disabled", "Writes are switched off by the owner.", hit.id);
       try {
         const r = await send(String(hit.id), key);
         log("sent", true, hit.id);
@@ -248,7 +228,7 @@ export class WriteGate {
           ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Completion is not yet verified."
           : `Answered ${said} with "${clip(redactText(extra!.action), 32)}".`;
         const out: WriteResult = { text: clip(say, 280), structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
-          handle, completion: "not_proven", marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
+          handle, handle_persistence: this.markers.persistent ? "private_file" : "process_memory", completion: "not_proven", marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
         this.replays.set(rkey, { at: now, res: out });
         if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value as string);
         return out;
@@ -256,7 +236,7 @@ export class WriteGate {
         const status = e instanceof GcError ? e.status : 0;
         log(`error:${status || "no_response"}`, false, hit.id);
         const why = e instanceof GcError ? clip(redactText(e.message), 80) : "unexpected error";
-        const out: WriteResult = { text: clip(`Delivery to ${label} could not be confirmed (${status || "no response"}: ${why}). Check before sending again.`, 280), structured: { sent: false, reason: "outcome_unknown", status, handle, marker: markerOf(sentAt), completion: "not_proven" } };
+        const out: WriteResult = { text: clip(`Delivery to ${label} could not be confirmed (${status || "no response"}: ${why}). Check before sending again.`, 280), structured: { sent: false, reason: "outcome_unknown", status, handle, handle_persistence: this.markers.persistent ? "private_file" : "process_memory", marker: markerOf(sentAt), completion: "not_proven" } };
         this.replays.set(rkey, { at: now, res: out });
         if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value!);
         return out;

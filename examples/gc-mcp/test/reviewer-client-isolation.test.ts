@@ -61,7 +61,7 @@ async function boot(over: Partial<AppOpts> = {}) {
   };
   const meta = async () => (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as any;
   const state = () => (fs.existsSync(path.join(dir, "state.json")) ? JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")) : { clients: {} });
-  return { base, dir, clock, provider, register, reg, registered, authorize, consent, login, form, meta, state, res };
+  return { base, dir, clock, provider, register, reg, registered, authorize, consent, login, form, meta, state, res, stop: () => new Promise<void>((resolve, reject) => srv.close(e => e ? reject(e) : resolve())) };
 }
 const ON = { allowDcr: true };
 
@@ -122,5 +122,45 @@ describe('OAuth client send-marker identity through HTTP MCP',()=>{
   expect(lostResponseRetry.reply_id).toBe(tracked.reply_id);
   const own=await call(ta.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(own.page).toContain('Reply for the sending client.');
   const otherStart=clock.t;const other=await call(tb.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(other.page).toBe('');expect(other.since).toBe('m'+otherStart);expect(posts).toBe(1);
+ });
+});
+
+describe("persistent reply continuity through OAuth and HTTP MCP", () => {
+ it("restores handles and pinned candidates across app restart without a resend or client identity collision", async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"gc-reply-restart-"));cleanups.push(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const sent=1_800_000_000_000;
+  const clock={t:sent+5000,now(){return this.t;},async sleep(ms:number){this.t+=ms;}};
+  let posts=0,turns=[{role:"assistant",text:"Original candidate.",timestamp:new Date(sent+1000).toISOString()}];
+  const fetchImpl=(async(url:string,init:RequestInit)=>{
+   const p=new URL(url).pathname;
+   if(init.method==="POST"){posts++;return new Response(JSON.stringify({status:"accepted"}));}
+   const body=p.endsWith("/sessions")?{total:1,items:[{id:"s1",alias:"agent",state:"active",running:true}]}
+    :p.endsWith("/transcript")?{turns}:{id:"s1",state:"active"};
+   return new Response(JSON.stringify(body));
+  })as typeof fetch;
+  const opts={allowDcr:true,writes:{enabled:true},stateFile:path.join(dir,"oauth.json"),replyStateFile:path.join(dir,"reply-state.json"),deps:{gc:new GcClient({baseUrl:"http://127.0.0.1:1",city:"gc2",fetchImpl}),mailAgent:"human",now:()=>new Date(sent),clock}};
+  const first=await boot(opts);
+  const a=await first.registered([CLAUDE_CB],{client_name:"Same label"}),b=await first.registered([CLAUDE_CB],{client_name:"Same label"});
+  const login=await first.login(a.client_id,CLAUDE_CB,"gc:read gc:write");
+  const call=async(res:string,token:string,name:string,args:object)=>{
+   const r=await fetch(res,{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream",authorization:"Bearer "+token},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split("\n").find(x=>x.startsWith("data:"));
+   return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const ack=await call(first.res,login.token.access_token,"send_to_session",{session:"agent",text:"Check the result"});
+  expect(ack.handle_persistence).toBe("private_file");
+  const before=await call(first.res,login.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(before.page).toBe("Original candidate.");
+  await first.stop();
+  const second=await boot(opts);
+  const owner=await second.login(a.client_id,CLAUDE_CB,"gc:read gc:write"),other=await second.login(b.client_id,CLAUDE_CB,"gc:read gc:write");
+  const restored=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(restored).toMatchObject({reply_id:before.reply_id,page:"Original candidate.",complete:false});
+  const denied=await call(second.res,other.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(denied).toMatchObject({found:false,reason:"unknown_handle"});
+  turns=[{role:"assistant",text:"Different segment.",timestamp:new Date(sent+2000).toISOString()}];
+  const compacted=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(compacted).toMatchObject({reply_available:false,reason:"reply_candidate_unavailable",complete:false});
+  expect(posts).toBe(1);
  });
 });

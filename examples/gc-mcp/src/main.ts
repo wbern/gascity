@@ -128,6 +128,7 @@ const { app } = createApp({
   allowDcr: process.env.GC_MCP_ALLOW_DCR === "1",
   dcr,
   stateFile: path.join(stateDir, "oauth-state.json"),
+  replyStateFile: path.join(stateDir, "reply-state.json"),
   controlDir: stateDir,
   auditFile: path.join(stateDir, "audit.jsonl"),
   trustProxy: net.trustProxy,
