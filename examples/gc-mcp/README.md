@@ -48,6 +48,15 @@ transcript for the first reply after our own send (the send acknowledgement carr
 A repeated identical send within 60 seconds from the same client returns the first acknowledgement instead of sending twice (voice clients retry); each real send has its own
 idempotency key. A gc:write token may read the replies of sessions it may write to; a read-only token only reads the default session and `GC_MCP_PEEK_ALLOW`.
 
+Simple connect (optional, `GC_MCP_ALLOW_DCR=1`): the server accepts dynamic client registration (RFC 7591), so Claude or ChatGPT needs only the server URL, then you type the owner
+passphrase: no client id, no redirect URI to copy. A registration is accepted ONLY if every redirect URI is an exact, canonical Claude callback, ChatGPT connector callback
+(`https://chatgpt.com/connector/oauth/<id>` or `https://chatgpt.com/connector_platform_oauth_redirect`), a loopback `http://127.0.0.1|localhost:<port>/...` URL, or listed in
+`GC_MCP_DCR_EXTRA_REDIRECTS`; anything else is `invalid_redirect_uri`. Registered clients are PUBLIC (a requested secret method is ignored, no secret is created or stored), PKCE-only.
+Limits: registration rate limit 10 an hour for everyone (one shared address behind the NAT; only successful registrations count), 25 clients (the oldest never-used is pruned), unused
+for 90 days = forgotten, 8 kB request cap, names sanitised. The consent page shows the name as UNVERIFIED, the redirect host in bold, first time or known, read-only or READ AND WRITE.
+`REVOKE_ALL` also removes every registered client. `GC_MCP_DCR_OPEN_REDIRECTS=1` (UNSAFE, off) lets any https redirect register; registered clients are then read-only. The static Claude and
+ChatGPT clients remain as a fallback.
+
 Env uses `GC_MCP_*` names on purpose: agent sessions export `GC_CITY` as a path.
 Security model, residual risks, hostname decision and phone setup: `docs/runbook.md`. Samples: `docs/oauth-demo.txt`, `docs/discovery-e2e.txt` (path-prefixed OAuth discovery through a real nginx),
 `docs/recorded-run.txt` (scrubbed).

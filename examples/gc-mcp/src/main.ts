@@ -6,6 +6,7 @@ import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
 import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
 import { validatePatterns, type WriteConfig } from "./writes.js";
+import { validateExtraRedirects } from "./dcr.js";
 import { resolveNetwork, resolveMcpPath, resolveIssuerPath } from "./netconfig.js";
 
 const port = Number(process.env.GC_MCP_PORT ?? 47811);
@@ -72,6 +73,18 @@ const defaultSession = (process.env.GC_MCP_DEFAULT_SESSION ?? "").trim() || unde
 if (defaultSession && !/^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,127}$/.test(defaultSession)) { console.error("gc-mcp: GC_MCP_DEFAULT_SESSION must be a plain session name"); process.exit(2); }
 console.error(`gc-mcp: default session: ${defaultSession ?? "(none)"}`);   // ctl status reads this line; the env file (it holds a hash) is never read
 
+// Dynamic client registration (GC_MCP_ALLOW_DCR=1): paste the URL, click Connect, type the passphrase. Redirects must be in the safe set
+// (Claude, ChatGPT connector, loopback) plus exact GC_MCP_DCR_EXTRA_REDIRECTS. GC_MCP_DCR_OPEN_REDIRECTS=1 lets ANY https redirect register: UNSAFE, off by default.
+let dcr: { extraRedirects: string[]; openRedirects: boolean } | undefined;
+if (process.env.GC_MCP_ALLOW_DCR === "1") {
+  try {
+    const extra = (process.env.GC_MCP_DCR_EXTRA_REDIRECTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    dcr = { extraRedirects: validateExtraRedirects(extra), openRedirects: process.env.GC_MCP_DCR_OPEN_REDIRECTS === "1" };
+  } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+  console.error(`gc-mcp: dynamic client registration ON (${dcr.extraRedirects.length} extra redirect(s))`);
+  if (dcr.openRedirects) console.error("gc-mcp: WARNING GC_MCP_DCR_OPEN_REDIRECTS=1: ANY https redirect URI may register. This is UNSAFE; registered clients are read-only while it is on.");
+}
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
@@ -87,6 +100,7 @@ const { app } = createApp({
   chatgpt,
   writes,
   allowDcr: process.env.GC_MCP_ALLOW_DCR === "1",
+  dcr,
   stateFile: path.join(stateDir, "oauth-state.json"),
   controlDir: stateDir,
   auditFile: path.join(stateDir, "audit.jsonl"),

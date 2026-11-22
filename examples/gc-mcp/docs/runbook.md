@@ -227,3 +227,12 @@ Set `GC_MCP_DEFAULT_SESSION=claude-william` (or whichever session is yours): eve
 The loop is `send_to_session` (returns at once with an acknowledgement and a marker), `wait_for_reply` (at most 20 seconds, so it returns before a chat client's tool timeout; call it again to keep waiting),
 `session_state` (working, idle, waiting for input), `latest_reply` and `read_more` for long replies. A retried identical send within 60 seconds is acknowledged, not sent twice.
 Not verified: how ChatGPT voice mode treats tool latency and the acknowledgement; whether the transcript's assistant turns arrive in the shape the tests model; the 1.5 s poll interval against a busy supervisor.
+
+## Simple connect: dynamic client registration (optional, OFF by default)
+
+`GC_MCP_ALLOW_DCR=1` turns on `/register` and advertises `registration_endpoint` (and only then). Claude and ChatGPT then connect with just the URL: they register themselves, you type the owner
+passphrase on the consent page. **The new risk, plainly:** an open registration endpoint on the internet. Mitigations: every redirect URI must be in the safe set (exact Claude callbacks, ChatGPT
+connector callbacks, loopback with a port, `GC_MCP_DCR_EXTRA_REDIRECTS`), so a stranger cannot register a client that sends an approval code to their own site; registration alone grants nothing (the
+passphrase still gates every approval, and the page names the app as UNVERIFIED with the redirect host in bold); public PKCE clients only, never a secret; a global limit of 10 registrations an hour, a
+cap of 25 clients (never-used pruned first), 90-day expiry, an 8 kB body cap; `REVOKE_ALL` removes every registered client. An attacker can still use up the hourly limit so that YOUR first connect gets a
+429: the static-client steps stay available as the fallback. `GC_MCP_DCR_OPEN_REDIRECTS=1` is UNSAFE (any https site may register; registered clients are read-only while it is on) and off by default.

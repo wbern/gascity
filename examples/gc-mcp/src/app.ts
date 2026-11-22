@@ -24,6 +24,7 @@ export interface AppOpts {
   ownerHash: string;
   staticClientId?: string;     // the owner's own OAuth client id (recommended)
   allowDcr?: boolean;          // dynamic client registration: OFF unless explicitly enabled
+  dcr?: { extraRedirects?: string[]; openRedirects?: boolean; maxClients?: number; perHour?: number; ttlDays?: number };   // registration policy (see src/dcr.ts)
   writes?: WriteConfig;        // Phase 4 write tools (send_to_session, respond_to_session): absent or enabled:false = read-only server, gc:write not advertised
   chatgpt?: ChatgptClientSpec; // optional second STATIC client for ChatGPT (exact https://chatgpt.com/ redirects; empty = cannot authorize)
   stateFile?: string;
@@ -60,6 +61,8 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const provider = new OwnerApprovalProvider({
     writesEnabled: writesOn,
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, chatgpt: o.chatgpt, allowDcr: o.allowDcr, stateFile: o.stateFile, now,
+    dcrExtraRedirects: o.dcr?.extraRedirects, dcrOpenRedirects: o.dcr?.openRedirects, maxClients: o.dcr?.maxClients, dcrPerHour: o.dcr?.perHour,
+    clientTtlMs: o.dcr?.ttlDays ? o.dcr.ttlDays * 86_400_000 : undefined,
     consentPath: oauthPath("consent"),
     onEvent: (note, ok, app) => audit.write({ kind: "auth", ok, note, app }),
   });
@@ -170,7 +173,25 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   app.use(oauthPath("token"), ...secretGate, tokenHandler({ provider, rateLimit: false }));
   app.use(oauthPath("revoke"), ...secretGate, revocationHandler({ provider, rateLimit: false }));
   if (provider.clientsStore.registerClient) {
-    app.use(oauthPath("register"), clientRegistrationHandler({ clientsStore: provider.clientsStore, clientSecretExpirySeconds: 0, rateLimit: false }));
+    // In front of the SDK handler: the global registration limit answers 429 before anything is parsed, and the body is capped at 8 kB.
+    app.use(oauthPath("register"),
+      (req: express.Request, res: express.Response, next: express.NextFunction) => {
+        if (req.method === "POST" && provider.registrationBlocked()) { res.set("retry-after", "3600").status(429).json({ error: "too_many_requests", error_description: "too many client registrations; try again later" }); return; }
+        next();
+      },
+      express.json({ limit: "8kb" }),
+      (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+        res.status(400).json({ error: "invalid_client_metadata", error_description: "the registration request is too large or not JSON" });
+      },
+      // Redirect check BEFORE the SDK's schema, so every unsafe shape (javascript:, userinfo, look-alikes, wildcards) answers invalid_redirect_uri (RFC 7591).
+      (req: express.Request, res: express.Response, next: express.NextFunction) => {
+        if (req.method === "POST" && !provider.redirectsAllowed((req.body as { redirect_uris?: unknown } | undefined)?.redirect_uris)) {
+          res.status(400).json({ error: "invalid_redirect_uri", error_description: "every redirect_uri must be an exact Claude or ChatGPT connector callback, a loopback URL with a port, or an operator-allowed URI" });
+          return;
+        }
+        next();
+      },
+      clientRegistrationHandler({ clientsStore: provider.clientsStore, clientSecretExpirySeconds: 0, rateLimit: false }));
   }
 
   app.post(oauthPath("consent"), express.urlencoded({ extended: false, limit: "4kb" }), (req, res) => {

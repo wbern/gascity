@@ -366,7 +366,7 @@ describe("shared-IP denial of service (security review finding 1)", () => {
 
 describe("dynamic registration (opt-in, restricted)", () => {
   const reg = (base: string, body: object) => fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  it("rejects an attacker redirect, accepts the Claude callback, clips names, caps the count", async () => {
+  it("rejects an attacker redirect, accepts the Claude callback, clips names, rate-limits registration (cap and pruning: dcr.test.ts)", async () => {
     const s = await boot({ allowDcr: true });
     expect((await reg(s.base, { redirect_uris: ["https://evil.example/cb"], client_name: "Claude", token_endpoint_auth_method: "none" })).status).toBe(400);
     const ok = await reg(s.base, { redirect_uris: [CB], client_name: "N".repeat(500), token_endpoint_auth_method: "none" });
@@ -374,7 +374,7 @@ describe("dynamic registration (opt-in, restricted)", () => {
     expect(((await ok.json()) as { client_name: string }).client_name.length).toBeLessThanOrEqual(60);
     let last = 201;
     for (let i = 0; i < 30; i++) last = (await reg(s.base, { redirect_uris: [CB], client_name: "c", token_endpoint_auth_method: "none" })).status;
-    expect(last).toBe(400);
+    expect(last).toBe(429);   // the global registration limit (10 an hour) answers before the cap matters
     const state = fs.readFileSync(path.join(s.dir, "state.json"), "utf8");
     expect(state.length).toBeLessThan(20_000);
   });

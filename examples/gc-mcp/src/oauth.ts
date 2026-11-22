@@ -10,7 +10,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Response } from "express";
-import { InvalidGrantError, InvalidTokenError, InvalidTargetError, InvalidClientMetadataError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidGrantError, InvalidTokenError, InvalidTargetError, OAuthError, TooManyRequestsError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { CLAUDE_CALLBACKS, MAX_REDIRECTS_PER_CLIENT, isSafeRedirect, sanitizeClientName } from "./dcr.js";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
@@ -18,7 +19,10 @@ import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextproto
 
 export const SCOPE = "gc:read";
 export const WRITE_SCOPE = "gc:write";   // Phase 4: only grantable when the server runs with writes enabled
-export const CLAUDE_CALLBACKS = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"];
+export { CLAUDE_CALLBACKS };
+/** RFC 7591 section 3.2.2: a redirect URI the server refuses to register. */
+export class InvalidRedirectUriError extends OAuthError { static errorCode = "invalid_redirect_uri"; }
+const DAY_MS = 86_400_000;
 export const CLAUDE_NAME = "Claude (owner client)";
 export const CHATGPT_NAME = "ChatGPT (owner client)";
 
@@ -91,6 +95,7 @@ interface Persisted {
   clients: Record<string, OAuthClientInformationFull>;
   refresh: Record<string, { clientId: string; scopes: string[]; exp: number; fam: string }>;
   used: Record<string, { fam: string; exp: number }>; // rotated-out refresh hashes (reuse detection)
+  clientMeta: Record<string, { at: number; last: number; used: boolean }>; // registered clients only: when registered, last seen, ever signed in
 }
 interface PendingAuth { client: OAuthClientInformationFull; params: AuthorizationParams; scopes: string[]; exp: number; fails: number }
 interface CodeRec { clientId: string; challenge: string; redirectUri: string; scopes: string[]; exp: number }
@@ -104,15 +109,20 @@ export interface ProviderOpts {
   writesEnabled?: boolean;       // Phase 4: gc:write can be requested and granted; OFF by default (tokens stay gc:read)
   consentPath?: string;          // where the consent form posts (default /consent; follows the issuer path)
   allowDcr?: boolean;            // OFF by default
-  redirectAllow?: string[];      // exact redirect URIs accepted (default: Claude callbacks)
-  maxClients?: number;
+  redirectAllow?: string[];      // exact redirect URIs for the STATIC Claude client (default: Claude callbacks)
+  dcrExtraRedirects?: string[];  // exact extra redirect URIs a registered client may use (GC_MCP_DCR_EXTRA_REDIRECTS)
+  dcrOpenRedirects?: boolean;    // UNSAFE (GC_MCP_DCR_OPEN_REDIRECTS=1): any clean https redirect may register. OFF by default.
+  dcrPerHour?: number;           // global registration limit (everyone shares one source address behind the NAT); default 10
+  clientTtlMs?: number;          // a registered client unused this long is forgotten; default 90 days
+  maxClients?: number;           // registered-client cap; the oldest UNUSED is pruned to make room; default 25
   stateFile?: string;            // omit for memory-only (tests)
   now?: () => number;
   onEvent?: (note: string, ok: boolean, client?: string) => void;   // client = the OAuth client's display name
 }
 
 export class OwnerApprovalProvider implements OAuthServerProvider {
-  private st: Persisted = { clients: {}, refresh: {}, used: {} };
+  private st: Persisted = { clients: {}, refresh: {}, used: {}, clientMeta: {} };
+  private dcrLimiter: RateLimiter;
   private pending = new Map<string, PendingAuth>();
   private codes = new Map<string, CodeRec>();
   private access = new Map<string, AccessRec>();
@@ -131,9 +141,12 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     }
     this.failedBySource = new RateLimiter(5, 5 * 60_000, this.now);
     this.failedGlobal = new RateLimiter(30, 15 * 60_000, this.now);
+    this.dcrLimiter = new RateLimiter(o.dcrPerHour ?? 10, 3_600_000, this.now);
     if (o.stateFile && fs.existsSync(o.stateFile)) {
-      try { this.st = { clients: {}, refresh: {}, used: {}, ...JSON.parse(fs.readFileSync(o.stateFile, "utf8")) }; } catch { /* start clean */ }
+      try { this.st = { clients: {}, refresh: {}, used: {}, clientMeta: {}, ...JSON.parse(fs.readFileSync(o.stateFile, "utf8")) }; } catch { /* start clean */ }
     }
+    // clients registered by an older build have no usage record: treat them as just seen
+    for (const id of Object.keys(this.st.clients)) this.st.clientMeta[id] ??= { at: this.now(), last: this.now(), used: true };
   }
 
   private emit(note: string, ok = true, clientId?: string) { this.o.onEvent?.(note, ok, clientId ? this.clientName(clientId) : undefined); }
@@ -142,7 +155,8 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   clientName(clientId: string): string | undefined {
     if (clientId === this.o.staticClientId) return CLAUDE_NAME;
     if (this.o.chatgpt && clientId === this.o.chatgpt.clientId) return CHATGPT_NAME;
-    return this.st.clients[clientId]?.client_name;
+    const dyn = this.st.clients[clientId];
+    return dyn ? `${dyn.client_name ?? "client"} (registered, unverified)` : undefined;
   }
 
   /** True when this client must present a secret at /token and /revoke (ChatGPT confidential mode only). */
@@ -185,28 +199,91 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   get clientsStore(): OAuthRegisteredClientsStore {
     const store: OAuthRegisteredClientsStore = {
       getClient: (id) => (this.o.staticClientId && id === this.o.staticClientId ? this.staticClient()
-        : this.o.chatgpt && id === this.o.chatgpt.clientId ? this.chatgptClient() : this.st.clients[id]),
+        : this.o.chatgpt && id === this.o.chatgpt.clientId ? this.chatgptClient() : this.dcrClient(id)),
     };
     if (this.o.allowDcr) {
       store.registerClient = (c) => {
+        // Every redirect URI must be in the safe set (Claude, ChatGPT connector, loopback, operator extras); one bad URI rejects the client.
         const uris = (c.redirect_uris ?? []).map(String);
-        if (!uris.length || uris.length > 2 || uris.some((u) => !this.allow.includes(u))) {
-          this.emit("dcr rejected: redirect_uri not allowlisted", false);
-          throw new InvalidClientMetadataError("redirect_uris must be exact Claude callback URLs");
+        const policy = { extra: this.o.dcrExtraRedirects, open: this.o.dcrOpenRedirects };
+        if (!uris.length || uris.length > MAX_REDIRECTS_PER_CLIENT || uris.some((u) => !isSafeRedirect(u, policy))) {
+          this.emit("dcr rejected: redirect_uri not in the safe set", false);
+          throw new InvalidRedirectUriError("every redirect_uri must be an exact Claude or ChatGPT connector callback, a loopback URL with a port, or an operator-allowed URI");
         }
-        if (Object.keys(this.st.clients).length >= (this.o.maxClients ?? 25)) {
-          this.emit("dcr rejected: client cap reached", false);
-          throw new InvalidClientMetadataError("too many registered clients");
-        }
-        const full = { ...c, redirect_uris: uris, client_name: String(c.client_name ?? "client").slice(0, 60), token_endpoint_auth_method: "none",
-          client_id: rand(18), client_id_issued_at: Math.floor(this.now() / 1000) } as OAuthClientInformationFull;
+        // Counted only when it would succeed, so a flood of bad requests cannot lock the owner out of registering.
+        if (!this.dcrLimiter.hit("register")) { this.emit("dcr rejected: registration rate limit", false); throw new TooManyRequestsError("too many client registrations; try again later"); }
+        this.pruneClients(true);
+        const t = this.now();
+        // PUBLIC clients only, whatever was asked: a minimal record built here, never the request echoed back, never a secret.
+        const full = { client_id: rand(18), client_id_issued_at: Math.floor(t / 1000), redirect_uris: uris, client_name: sanitizeClientName(c.client_name),
+          token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], scope: this.scopeString() } as OAuthClientInformationFull;
         this.st.clients[full.client_id] = full;
+        this.st.clientMeta[full.client_id] = { at: t, last: t, used: false };
         this.save();
-        this.emit("dcr registered client");
+        this.emit("dcr registered client", true, full.client_id);
         return full;
       };
     }
     return store;
+  }
+
+  /** True when `uris` is a non-empty list of at most 5 strings, ALL in the safe set. */
+  redirectsAllowed(uris: unknown): boolean {
+    if (!Array.isArray(uris) || uris.length === 0 || uris.length > MAX_REDIRECTS_PER_CLIENT) return false;
+    const policy = { extra: this.o.dcrExtraRedirects, open: this.o.dcrOpenRedirects };
+    return uris.every((u) => typeof u === "string" && isSafeRedirect(u, policy));
+  }
+  /** True while the global registration limit is spent (the app answers 429 before touching the body). */
+  registrationBlocked(): boolean { return this.dcrLimiter.blocked("register"); }
+  /** Number of registered (dynamic) clients, for status output and tests. */
+  registeredCount(): number { return Object.keys(this.st.clients).length; }
+
+  private ttl(): number { return this.o.clientTtlMs ?? 90 * DAY_MS; }
+  private isDynamic(id: string): boolean { return !!this.st.clients[id]; }
+
+  /** A registered client, or undefined when unknown or unused for the TTL (it is forgotten on the spot). */
+  private dcrClient(id: string): OAuthClientInformationFull | undefined {
+    const c = this.st.clients[id];
+    if (!c) return undefined;
+    const m = this.st.clientMeta[id];
+    if (m && this.now() - m.last > this.ttl()) { this.dropClient(id); this.save(); return undefined; }
+    return c;
+  }
+
+  private dropClient(id: string) {
+    delete this.st.clients[id]; delete this.st.clientMeta[id];
+    for (const [k, v] of Object.entries(this.st.refresh)) if (v.clientId === id) delete this.st.refresh[k];
+    for (const [k, v] of this.access) if (v.clientId === id) this.access.delete(k);
+    for (const [k, v] of this.codes) if (v.clientId === id) this.codes.delete(k);
+  }
+
+  /** Forget expired clients; with room=true also evict until one more fits: never-used clients first, then the least recently used. */
+  private pruneClients(room = false) {
+    for (const id of Object.keys(this.st.clients)) { const m = this.st.clientMeta[id]; if (m && this.now() - m.last > this.ttl()) this.dropClient(id); }
+    if (!room) return;
+    const max = this.o.maxClients ?? 25;
+    while (Object.keys(this.st.clients).length >= max) {
+      const [victim] = Object.keys(this.st.clients).sort((x, y) => {
+        const mx = this.st.clientMeta[x], my = this.st.clientMeta[y];
+        return (Number(mx?.used) - Number(my?.used)) || ((mx?.last ?? 0) - (my?.last ?? 0));
+      });
+      this.dropClient(victim);
+    }
+  }
+
+  private touch(id: string, used = false) {
+    const m = this.st.clientMeta[id];
+    if (!m) return;
+    m.last = this.now(); if (used) m.used = true;
+  }
+
+  private ago(ms: number): string {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return "less than a minute";
+    const unit = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+    if (s < 3600) return unit(Math.floor(s / 60), "minute");
+    if (s < 86_400) return unit(Math.floor(s / 3600), "hour");
+    return unit(Math.floor(s / 86_400), "day");
   }
 
   private checkResource(r?: URL) {
@@ -220,9 +297,14 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     if (this.pending.size >= 50) { res.status(503).type("text/plain").send("busy"); return; }
     const rid = rand(24);
     // Granted = gc:read always; gc:write only when the client ASKED for it and writes are enabled. Anything else requested is ignored.
-    // Only the owner's two STATIC clients can ever hold gc:write (a dynamically registered client never can).
+    // gc:write: the owner's two STATIC clients, and registered clients ONLY while redirects are restricted to the safe set (with the unsafe
+    // open-redirect switch on, any site could be the redirect, so a registered client is read-only).
     const isStatic = client.client_id === this.o.staticClientId || client.client_id === this.o.chatgpt?.clientId;
-    const scopes = [SCOPE, ...(this.o.writesEnabled && isStatic && (params.scopes ?? []).includes(WRITE_SCOPE) ? [WRITE_SCOPE] : [])];
+    const dyn = this.isDynamic(client.client_id);
+    const mayWrite = isStatic || (dyn && !this.o.dcrOpenRedirects);
+    const scopes = [SCOPE, ...(this.o.writesEnabled && mayWrite && (params.scopes ?? []).includes(WRITE_SCOPE) ? [WRITE_SCOPE] : [])];
+    const seen = dyn ? { ...this.st.clientMeta[client.client_id] } : undefined;   // as it was BEFORE this visit
+    if (dyn) { this.touch(client.client_id); this.save(); }
     this.pending.set(rid, { client, params, scopes, exp: this.now() + PENDING_TTL_MS, fails: 0 });
     this.emit("authorize page served", true, client.client_id);
     const redirect = esc(params.redirectUri);
@@ -230,6 +312,12 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     // Per client: Claude's page allows only Claude's origins, ChatGPT's page only chatgpt.com.
     const origins = [...new Set(client.redirect_uris.map((u) => new URL(String(u)).origin))];
     const name = client.client_name ?? "unnamed";
+    // A registered client chose its own name and anyone could have registered it: say so, say WHERE the result goes, and whether it is new.
+    const host = new URL(params.redirectUri).host;
+    const dynamicNote = seen
+      ? `<b>UNVERIFIED</b>: anyone can register an app under any name. This one registered ${this.ago(this.now() - seen.at)} ago. ${seen.used
+        ? `It has signed in before; last used ${this.ago(this.now() - seen.last)} ago.` : "This is the <b>first time</b> it asks for access."}<br>After you approve, the result goes to <b>${esc(host)}</b>. If that is not the app you just opened, press Deny.`
+      : "";
     res.status(200)
       .set({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY",
         "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origins.join(" ")}; frame-ancestors 'none'` })
@@ -241,7 +329,7 @@ ${scopes.includes(WRITE_SCOPE)
 <p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`
   : `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads; it cannot send anything.</p>
 <p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`}
-<p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from <b>${esc(name.replace(/ \(owner client\)$/, ""))}</b>.</p>
+<p>It will be sent back to:<br><code>${redirect}</code><br>${seen ? dynamicNote : `Only approve if you just started this from <b>${esc(name.replace(/ \(owner client\)$/, ""))}</b>.`}</p>
 <form method=post action="${esc(this.o.consentPath ?? "/consent")}">
 <input type=hidden name=rid value="${esc(rid)}">
 <p><label>Owner passphrase<br><input type=password name=passphrase autocomplete=current-password autofocus style="width:100%;font-size:1em"></label></p>
@@ -289,6 +377,7 @@ ${scopes.includes(WRITE_SCOPE)
     if (!rec || rec.clientId !== client.client_id || rec.exp < this.now()) throw new InvalidGrantError("invalid or expired grant");
     if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     this.checkResource(resource);
+    this.touch(client.client_id, true);
     this.emit("token issued from code", true, client.client_id);
     return this.issue(client.client_id, rec.scopes, rand(12));
   }
@@ -306,6 +395,7 @@ ${scopes.includes(WRITE_SCOPE)
     delete this.st.refresh[key];
     this.st.used[key] = { fam: rec.fam, exp: rec.exp };
     this.checkResource(resource);
+    this.touch(client.client_id, true);
     this.emit("token issued from refresh", true, client.client_id);
     return this.issue(client.client_id, rec.scopes, rec.fam);
   }
@@ -341,9 +431,10 @@ ${scopes.includes(WRITE_SCOPE)
     this.emit("token family revoked by client", true, client.client_id);
   }
 
-  /** Owner kill switch: forget every token and pending grant (clients/passphrase stay). */
+  /** Owner kill switch: forget every token, pending grant AND every registered client (the static clients and the passphrase stay). */
   revokeAll(): void {
     this.st.refresh = {}; this.st.used = {};
+    this.st.clients = {}; this.st.clientMeta = {};
     this.access.clear(); this.codes.clear(); this.pending.clear();
     this.save();
     this.emit("ALL tokens revoked");
