@@ -18,6 +18,30 @@ import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextproto
 
 export const SCOPE = "gc:read";
 export const CLAUDE_CALLBACKS = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"];
+export const CLAUDE_NAME = "Claude (owner client)";
+export const CHATGPT_NAME = "ChatGPT (owner client)";
+
+/** A second STATIC client for ChatGPT (no dynamic registration). Its redirect URI is per connection
+ *  (https://chatgpt.com/connector/oauth/<id>) and only known after the owner creates the connector, so the
+ *  list is configuration: an empty list means this client cannot authorize at all (fail closed). */
+export interface ChatgptClientSpec {
+  clientId: string;
+  redirectUris: string[];        // exact https://chatgpt.com/... URIs (validateChatgptRedirects)
+  secretHash?: string;           // optional scrypt1$ verifier: when set the client is confidential (client_secret_post)
+}
+
+/** Throws unless every entry is an exact https://chatgpt.com/<path> URI: no other host or port, no userinfo,
+ *  no fragment, no wildcard or whitespace, and a real path. Returns the list unchanged. */
+export function validateChatgptRedirects(uris: string[]): string[] {
+  for (const raw of uris) {
+    let u: URL;
+    try { u = new URL(raw); } catch { throw new Error(`ChatGPT redirect URI is not a URL: ${JSON.stringify(raw).slice(0, 80)}`); }
+    const bad = !raw.startsWith("https://chatgpt.com/") || u.protocol !== "https:" || u.hostname !== "chatgpt.com" || u.port !== ""
+      || u.username !== "" || u.password !== "" || u.hash !== "" || /[\s*\\]/.test(raw) || u.pathname.length < 2;
+    if (bad) throw new Error(`ChatGPT redirect URI must be an exact https://chatgpt.com/<path> URL: ${JSON.stringify(raw).slice(0, 80)}`);
+  }
+  return uris;
+}
 const ACCESS_TTL_S = 3600;
 const REFRESH_TTL_S = 30 * 24 * 3600;
 const CODE_TTL_MS = 5 * 60_000;
@@ -75,13 +99,14 @@ export interface ProviderOpts {
   resource: URL;                 // canonical audience of this MCP server
   ownerHash: string;             // scrypt1$... from hashPassphrase
   staticClientId?: string;       // the owner's own OAuth client (recommended)
+  chatgpt?: ChatgptClientSpec;   // optional second static client for ChatGPT; absent = disabled
   consentPath?: string;          // where the consent form posts (default /consent; follows the issuer path)
   allowDcr?: boolean;            // OFF by default
   redirectAllow?: string[];      // exact redirect URIs accepted (default: Claude callbacks)
   maxClients?: number;
   stateFile?: string;            // omit for memory-only (tests)
   now?: () => number;
-  onEvent?: (note: string, ok: boolean) => void;
+  onEvent?: (note: string, ok: boolean, client?: string) => void;   // client = the OAuth client's display name
 }
 
 export class OwnerApprovalProvider implements OAuthServerProvider {
@@ -97,6 +122,11 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   constructor(private o: ProviderOpts) {
     this.now = o.now ?? Date.now;
     this.allow = o.redirectAllow ?? CLAUDE_CALLBACKS;
+    if (o.chatgpt) {
+      if (!o.chatgpt.clientId || o.chatgpt.clientId === o.staticClientId) throw new Error("the ChatGPT client id must be set and different from the Claude client id");
+      if (o.chatgpt.secretHash !== undefined && !o.chatgpt.secretHash.startsWith("scrypt1$")) throw new Error("the ChatGPT secret hash must be a scrypt1$ verifier");
+      validateChatgptRedirects(o.chatgpt.redirectUris);
+    }
     this.failedBySource = new RateLimiter(5, 5 * 60_000, this.now);
     this.failedGlobal = new RateLimiter(30, 15 * 60_000, this.now);
     if (o.stateFile && fs.existsSync(o.stateFile)) {
@@ -104,7 +134,33 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     }
   }
 
-  private emit(note: string, ok = true) { this.o.onEvent?.(note, ok); }
+  private emit(note: string, ok = true, clientId?: string) { this.o.onEvent?.(note, ok, clientId ? this.clientName(clientId) : undefined); }
+
+  /** Display name of a client id for the consent page and the audit log. */
+  clientName(clientId: string): string | undefined {
+    if (clientId === this.o.staticClientId) return CLAUDE_NAME;
+    if (this.o.chatgpt && clientId === this.o.chatgpt.clientId) return CHATGPT_NAME;
+    return this.st.clients[clientId]?.client_name;
+  }
+
+  /** True when this client must present a secret at /token and /revoke (ChatGPT confidential mode only). */
+  clientNeedsSecret(clientId: string): boolean {
+    return !!this.o.chatgpt?.secretHash && clientId === this.o.chatgpt.clientId;
+  }
+
+  /** Verifies the client secret in constant time against the scrypt verifier. True for clients that need none. */
+  verifyClientSecret(clientId: string, secret: string | undefined): boolean {
+    if (!this.clientNeedsSecret(clientId)) return true;
+    return typeof secret === "string" && secret.length > 0 && secret.length <= 512 && verifyPassphrase(secret, this.o.chatgpt!.secretHash!);
+  }
+
+  private chatgptClient(): OAuthClientInformationFull | undefined {
+    const c = this.o.chatgpt;
+    if (!c) return undefined;
+    // NOT the SDK's client_secret field: the SDK compares that as plain text. The secret is verified by verifyClientSecret().
+    return { client_id: c.clientId, redirect_uris: c.redirectUris, token_endpoint_auth_method: c.secretHash ? "client_secret_post" : "none",
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CHATGPT_NAME, scope: SCOPE } as OAuthClientInformationFull;
+  }
 
   private save() {
     if (!this.o.stateFile) return;
@@ -117,12 +173,13 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   private staticClient(): OAuthClientInformationFull | undefined {
     if (!this.o.staticClientId) return undefined;
     return { client_id: this.o.staticClientId, redirect_uris: this.allow, token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "Claude (owner client)", scope: SCOPE } as OAuthClientInformationFull;
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CLAUDE_NAME, scope: SCOPE } as OAuthClientInformationFull;
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
     const store: OAuthRegisteredClientsStore = {
-      getClient: (id) => (this.o.staticClientId && id === this.o.staticClientId ? this.staticClient() : this.st.clients[id]),
+      getClient: (id) => (this.o.staticClientId && id === this.o.staticClientId ? this.staticClient()
+        : this.o.chatgpt && id === this.o.chatgpt.clientId ? this.chatgptClient() : this.st.clients[id]),
     };
     if (this.o.allowDcr) {
       store.registerClient = (c) => {
@@ -157,17 +214,20 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     if (this.pending.size >= 50) { res.status(503).type("text/plain").send("busy"); return; }
     const rid = rand(24);
     this.pending.set(rid, { client, params, exp: this.now() + PENDING_TTL_MS, fails: 0 });
-    this.emit("authorize page served");
+    this.emit("authorize page served", true, client.client_id);
     const redirect = esc(params.redirectUri);
+    // form-action must include the callback origins: Chrome applies it to the post-submit redirect too.
+    // Per client: Claude's page allows only Claude's origins, ChatGPT's page only chatgpt.com.
+    const origins = [...new Set(client.redirect_uris.map((u) => new URL(String(u)).origin))];
+    const name = client.client_name ?? "unnamed";
     res.status(200)
       .set({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY",
-        // form-action must include the callback origins: Chrome applies it to the post-submit redirect too.
-        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai https://claude.com; frame-ancestors 'none'" })
+        "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origins.join(" ")}; frame-ancestors 'none'` })
       .send(`<!doctype html><meta name=viewport content="width=device-width"><title>Approve Gas City access</title>
 <body style="font:16px system-ui;max-width:28em;margin:2em auto;padding:0 1em">
 <h2>Approve Gas City access?</h2>
-<p>An application (<b>${esc(client.client_name ?? "unnamed")}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
-<p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from Claude.</p>
+<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+<p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from <b>${esc(name.replace(/ \(owner client\)$/, ""))}</b>.</p>
 <form method=post action="${esc(this.o.consentPath ?? "/consent")}">
 <input type=hidden name=rid value="${esc(rid)}">
 <p><label>Owner passphrase<br><input type=password name=passphrase autocomplete=current-password autofocus style="width:100%;font-size:1em"></label></p>
@@ -186,19 +246,19 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
       if (p.params.state) u.searchParams.set("state", p.params.state);
       return u.toString();
     };
-    if (decision !== "approve") { this.pending.delete(rid); this.emit("consent denied"); return { status: 302, redirect: back({ error: "access_denied" }) }; }
+    if (decision !== "approve") { this.pending.delete(rid); this.emit("consent denied", true, p.client.client_id); return { status: 302, redirect: back({ error: "access_denied" }) }; }
     if (!verifyPassphrase(passphrase ?? "", this.o.ownerHash)) {
       this.failedBySource.hit(source);
       this.failedGlobal.hit("all");
       p.fails += 1;
-      if (p.fails >= MAX_FAILS_PER_RID) { this.pending.delete(rid); this.emit("consent request burned after repeated wrong passphrase", false); }
-      else this.emit("consent wrong passphrase", false);
+      if (p.fails >= MAX_FAILS_PER_RID) { this.pending.delete(rid); this.emit("consent request burned after repeated wrong passphrase", false, p.client.client_id); }
+      else this.emit("consent wrong passphrase", false, p.client.client_id);
       return { status: 401, message: "Wrong passphrase." };
     }
     this.pending.delete(rid); // single use
     const code = rand(32);
     this.codes.set(sha(code), { clientId: p.client.client_id, challenge: p.params.codeChallenge, redirectUri: p.params.redirectUri, scopes: [SCOPE], exp: this.now() + CODE_TTL_MS });
-    this.emit("consent approved, code issued");
+    this.emit("consent approved, code issued", true, p.client.client_id);
     return { status: 302, redirect: back({ code }) };
   }
 
@@ -215,7 +275,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     if (!rec || rec.clientId !== client.client_id || rec.exp < this.now()) throw new InvalidGrantError("invalid or expired grant");
     if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     this.checkResource(resource);
-    this.emit("token issued from code");
+    this.emit("token issued from code", true, client.client_id);
     return this.issue(client.client_id, rec.scopes, rand(12));
   }
 
@@ -224,7 +284,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     const reused = this.st.used[key];
     if (reused) { // a rotated-out token came back: assume theft, kill the whole family
       this.revokeFamily(reused.fam);
-      this.emit("refresh token REUSE detected, family revoked", false);
+      this.emit("refresh token REUSE detected, family revoked", false, client.client_id);
       throw new InvalidGrantError("invalid or expired grant");
     }
     const rec = this.st.refresh[key];
@@ -232,7 +292,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     delete this.st.refresh[key];
     this.st.used[key] = { fam: rec.fam, exp: rec.exp };
     this.checkResource(resource);
-    this.emit("token issued from refresh");
+    this.emit("token issued from refresh", true, client.client_id);
     return this.issue(client.client_id, rec.scopes, rec.fam);
   }
 
@@ -264,7 +324,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     const rec = a ?? r;
     if (!rec || rec.clientId !== client.client_id) return; // not yours: silently ignore (RFC 7009)
     this.revokeFamily(rec.fam); // revoking either token kills the whole family
-    this.emit("token family revoked by client");
+    this.emit("token family revoked by client", true, client.client_id);
   }
 
   /** Owner kill switch: forget every token and pending grant (clients/passphrase stay). */

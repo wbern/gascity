@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
+import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
 import { resolveNetwork, resolveMcpPath, resolveIssuerPath } from "./netconfig.js";
 
 const port = Number(process.env.GC_MCP_PORT ?? 47811);
@@ -30,6 +31,26 @@ if (!staticClientId) {
   staticClientId = fs.readFileSync(idFile, "utf8").trim();
 }
 
+// Optional second static client for ChatGPT: OFF unless GC_MCP_CHATGPT_ENABLED=1. Its own persisted client id; redirect URIs are
+// configuration (they are per connection and only known after the connector is created), exact https://chatgpt.com/... only;
+// an empty list leaves the client unable to authorize. GC_MCP_CHATGPT_SECRET_HASH (scrypt1$, like the owner hash) makes it confidential.
+let chatgpt: ChatgptClientSpec | undefined;
+if (process.env.GC_MCP_CHATGPT_ENABLED === "1") {
+  const gptIdFile = path.join(stateDir, "chatgpt-client-id");
+  if (!fs.existsSync(gptIdFile)) {
+    fs.writeFileSync(gptIdFile, crypto.randomBytes(18).toString("base64url") + "\n", { mode: 0o600 });
+    console.error(`gc-mcp: created ChatGPT OAuth client id (also readable at ${gptIdFile})`);
+  }
+  const secretHash = process.env.GC_MCP_CHATGPT_SECRET_HASH || undefined;
+  const redirectUris = (process.env.GC_MCP_CHATGPT_REDIRECTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    if (secretHash && !secretHash.startsWith("scrypt1$")) throw new Error("GC_MCP_CHATGPT_SECRET_HASH must be an scrypt1$ verifier");
+    chatgpt = { clientId: fs.readFileSync(gptIdFile, "utf8").trim(), redirectUris: validateChatgptRedirects(redirectUris), secretHash };
+    if (chatgpt.clientId === staticClientId) throw new Error("the ChatGPT client id must differ from the Claude client id");
+  } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+  console.error(`gc-mcp: ChatGPT client enabled (${chatgpt.redirectUris.length} redirect URI(s), ${secretHash ? "confidential" : "public"})` + (chatgpt.redirectUris.length ? "" : ": it cannot authorize until GC_MCP_CHATGPT_REDIRECTS is set"));
+}
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
@@ -41,6 +62,7 @@ const { app } = createApp({
   publicUrl: new URL(publicUrlRaw),
   ownerHash,
   staticClientId,
+  chatgpt,
   allowDcr: process.env.GC_MCP_ALLOW_DCR === "1",
   stateFile: path.join(stateDir, "oauth-state.json"),
   controlDir: stateDir,

@@ -190,3 +190,17 @@ hash + restart.
 `deploy/gc-mcp-run.sh` + `deploy/gc-mcp.service` are a minimal systemd example. Production
 GC3 deployment is the `gc_mcp` Ansible role in gas-city-infra (hardened unit, dedicated
 user, SOPS-sourced env). On macOS use a launchd agent running the same wrapper.
+
+## ChatGPT as a second client (optional, off by default)
+
+Two steps, because ChatGPT's redirect URI is per connection and only exists after the connector is created:
+
+1. **Enable with no redirects.** `GC_MCP_CHATGPT_ENABLED=1`, restart. The client id is created in the state dir (`chatgpt-client-id`, 0600).
+   The ChatGPT client cannot authorize yet (fail closed). Optional: `GC_MCP_CHATGPT_SECRET_HASH` (scrypt1$ verifier) for a confidential client.
+2. **Create the connector in ChatGPT** (chatgpt.com/plugins) with URL `<GC_MCP_PUBLIC_URL>/mcp`, "user-defined OAuth client", the ChatGPT client id
+   (and the secret if confidential). Copy the redirect URI the plugin page shows. Set `GC_MCP_CHATGPT_REDIRECTS=<that exact URI>` and restart.
+   Then connect, approve with the owner passphrase on the consent page (it names ChatGPT), and test in TEXT first.
+
+Not verified against a live ChatGPT: whether it sends `client_secret_post` or HTTP Basic (only post is accepted), the exact redirect URI
+shape, and whether it works with a public client. Failed secret attempts are limited per source address; behind a proxy that hides callers
+(`GC_MCP_TRUST_PROXY=0`, or a source-NATting firewall) that bucket is shared, so wrong secrets can lock ChatGPT out for five minutes.

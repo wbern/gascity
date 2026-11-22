@@ -5,6 +5,7 @@ import { redactText } from "./redact.js";
 export interface AuditEvent {
   kind: "tool" | "auth";
   client?: string;
+  app?: string;      // OAuth client display name (Claude / ChatGPT), never a secret
   tool?: string;
   args?: unknown;
   ok?: boolean;
