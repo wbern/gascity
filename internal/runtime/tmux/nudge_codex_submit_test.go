@@ -19,6 +19,29 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		state   codexComposerState
 		queue   bool
 	}{
+		{"busy queue with dot-separated plan mode", []string{"› reminder", "", "tab to queue message · Plan mode"}, "reminder", codexComposerOwned, true},
+		{"compact queue with dot-separated plan mode", []string{"› reminder", "", "tab to queue · Plan mode"}, "reminder", codexComposerOwned, true},
+		{"navigation with dot-separated plan mode", []string{"› reminder", "", "← for agents · Plan mode (shift+tab to cycle)"}, "reminder", codexComposerOwned, false},
+		{"busy queue with plan mode", []string{"› reminder", "", "tab to queue message   Plan mode · ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, true},
+		{"compact busy queue footer", []string{"› reminder", "", "tab to queue"}, "reminder", codexComposerOwned, true},
+		{"compact queue with goal and warning", []string{"› reminder", "", "tab to queue          Goal stalled (/goal resume) · ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, true},
+		{"compact queue with context", []string{"› reminder", "", "tab to queue   75% context left"}, "reminder", codexComposerOwned, true},
+		{"queue-like human suffix", []string{"› reminder", "", "  tab to queue message for human"}, "reminder", codexComposerOther, false},
+		{"compact goal navigation footer", []string{"› reminder", "", "GPT-6.1-Sol low", "← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2"}, "reminder", codexComposerOwned, false},
+		{"compact warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "⚠ 2 · f2"}, "reminder", codexComposerOwned, false},
+		{"styled empty compact goal footer", []string{"\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything", "\x1b[0m ", "  GPT-6.1-Sol low · workspace", "\x1b[39m  \x1b[1m←\x1b[0m for agents          \x1b[38;5;5mGoal stalled (/goal resume)\x1b[39m · ⚠ \x1b[38;2;196;167;103m2\x1b[39m · \x1b[1mf2"}, "reminder", codexComposerEmpty, false},
+		{"compact footer-like human suffix without separator", []string{"› reminder", "  ← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2"}, "reminder", codexComposerUnknown, false},
+		{"compact footer inside human draft", []string{"› reminder", "  ← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2", "  human addition", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"compact-like human suffix", []string{"› reminder", "", "  ← for agents please review · ⚠ 2 · f2"}, "reminder", codexComposerOther, false},
+		{"agent navigation with warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "← for agents · ? for shortcuts     ⚠ 3 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"inline warning footer", []string{"› reminder", "", "GPT-6.1-Sol low · ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"styled wrapped warning footer", []string{"› reminder", "", "  \x1b[38;2;246;226;183mGPT-6.1-Sol low\x1b[39m · workspace", "\x1b[39m    ⚠ \x1b[38;2;196;167;103m2 warnings\x1b[39m · \x1b[1mf2\x1b[0m to view"}, "reminder", codexComposerOwned, false},
+		{"warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"singular warning footer", []string{"› reminder", "", "⚠ 1 warning · f2 to view"}, "reminder", codexComposerOwned, false},
+		{"warning-like human suffix without separator", []string{"› reminder", "  ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerUnknown, false},
+		{"warning text inside human draft", []string{"› reminder", "  ⚠ 2 warnings · f2 to view", "  human addition", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"warning text alone is human draft", []string{"› ⚠ 2 warnings · f2 to view", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"unrecognized warning-like human suffix", []string{"› reminder", "", "  ⚠ please review · f2 to view"}, "reminder", codexComposerOther, false},
 		{"raw multiline busy", []string{"• Working (esc to interrupt)", "› <system-reminder>", "  do work", "  </system-reminder>", "", "  tab to queue message   75% context left"}, "<system-reminder>\ndo work\n</system-reminder>", codexComposerOwned, true},
 		{"placeholder with terminal padding", []string{"› [Pasted Content 4414 chars]                                                        ", "", "tab to queue message"}, "message", codexComposerPaste, true},
 		{"anonymous marker collides with payload", []string{"› [Pasted Content 12 chars]", "", "GPT-6 low"}, "[Pasted Content 12 chars]", codexComposerPaste, false},
@@ -52,6 +75,47 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 				t.Fatalf("observation=%+v want state=%v queue=%v", obs, tc.state, tc.queue)
 			}
 		})
+	}
+}
+
+// Codex 0.170 composes the goal and warning labels independently and changes
+// their widths after input. Exercise the source-defined labels in each layout.
+func TestCodexComposerStatusFooterVariants(t *testing.T) {
+	goals := []string{"", "Pursuing goal", "Pursuing goal (10% used)", "Goal paused (/goal resume)", "Goal stalled (/goal resume)", "Goal hit usage limits (/goal resume)", "Goal unmet (10% used)", "Goal abandoned", "Goal achieved", "Goal achieved (10% used)"}
+	warnings := []string{"", "⚠ 2 warnings · f2 to view", "⚠ 1 warning · f2 to view", "⚠ 2 · f2", "⚠ 2"}
+	for _, goal := range goals {
+		for _, warning := range warnings {
+			for _, navigation := range []string{"", "← for agents"} {
+				var indicators []string
+				if goal != "" {
+					indicators = append(indicators, goal)
+				}
+				if warning != "" {
+					indicators = append(indicators, warning)
+				}
+				footer := strings.Join(indicators, " · ")
+				if navigation != "" {
+					if footer == "" {
+						footer = navigation
+					} else {
+						footer = navigation + "          " + footer
+					}
+				}
+				if footer == "" {
+					continue
+				}
+				t.Run(footer, func(t *testing.T) {
+					obs := readCodexComposer([]string{"› reminder", "", "GPT-6.1-Sol low", footer}, "reminder")
+					if obs.composer != codexComposerOwned {
+						t.Fatalf("footer rejected: %+v", obs)
+					}
+					foreign := readCodexComposer([]string{"› reminder", "  " + footer, "  human addition", "", "GPT-6.1-Sol low"}, "reminder")
+					if foreign.composer != codexComposerOther {
+						t.Fatalf("human addition lost: %+v", foreign)
+					}
+				})
+			}
+		}
 	}
 }
 
