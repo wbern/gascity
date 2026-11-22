@@ -2,12 +2,13 @@
 # FINAL SHAPE (William): ONE host per server, NO path prefix. Host mcp.gc3.enmansbyra.se, issuer = host root, endpoint exactly /mcp, resource/audience https://<host>/mcp.
 # Reproduce: npm run build && node scripts/discovery-e2e.mjs --generator <infra>/scripts/gc-mcp-nginx-vhost.py --host mcp.gc3.enmansbyra.se
 # The port is random per run. NOT proven here: Claude's own connector (needs the live URL; Claude has open reports that only an endpoint at exactly /mcp connects reliably, anthropics/claude-ai-mcp #878).
+# Edge contract: the generated vhost mirrors the existing public edge's (CRM ADR-0092 R5): 405 for any other method, upstream CORS stripped, 195s timeouts.
 
-# discovery e2e: host=mcp.gc3.enmansbyra.se endpoint=/mcp issuer=host root (public URL https://mcp.gc3.enmansbyra.se:40553/mcp)
-PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://mcp.gc3.enmansbyra.se:4055
-PASS  protected-resource document: resource equals the exact URL the user types  -> https://mcp.gc3.enmansbyra.se:40553/mcp
-PASS  issuer is the host root (no path)  -> https://mcp.gc3.enmansbyra.se:40553/
-PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://mcp.gc3.enmansbyra.se:40553/
+# discovery e2e: host=mcp.gc3.enmansbyra.se endpoint=/mcp issuer=host root (public URL https://mcp.gc3.enmansbyra.se:39609/mcp)
+PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://mcp.gc3.enmansbyra.se:3960
+PASS  protected-resource document: resource equals the exact URL the user types  -> https://mcp.gc3.enmansbyra.se:39609/mcp
+PASS  issuer is the host root (no path)  -> https://mcp.gc3.enmansbyra.se:39609/
+PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://mcp.gc3.enmansbyra.se:39609/
 PASS  AS metadata: /authorize and /token at the root (so a client that falls back to {issuer}/authorize still lands right), no registration endpoint
 PASS  client starts the flow and asks for a browser redirect
 PASS  consent page is served through nginx and shows the redirect target
@@ -16,7 +17,7 @@ PASS  token exchange succeeds (PKCE, audience-bound to the exact /mcp resource)
 PASS  tools/list over /mcp returns 7 read-only tools
 PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in progress, 12 ready; 3 unread mail. 
 PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
-PASS  host-root protected-resource alias answers with the same resource  -> https://mcp.gc3.enmansbyra.se:40553/mcp
+PASS  host-root protected-resource alias answers with the same resource  -> https://mcp.gc3.enmansbyra.se:39609/mcp
 PASS  OIDC discovery path answers with the same issuer  -> 200
 PASS  GET / is not served  -> 404
 PASS  GET /healthz is not served  -> 404
@@ -35,38 +36,6 @@ PASS  GET /.well-known/oauth-authorization-server/mcp is not served  -> 404
 PASS  GET /.well-known/oauth-protected-resource/other is not served  -> 404
 
 nginx access log (method path status), in order:
-  POST /mcp 401
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /authorize 200
-  POST /consent 302
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  POST /token 200
-  POST /mcp 200
-  POST /mcp 202
-  GET /mcp 405
-  POST /mcp 200
-  POST /mcp 200
-  GET /mcp 405
-  GET /.well-known/oauth-protected-resource 200
-  GET /.well-known/openid-configuration 200
-  GET / 404
-  GET /healthz 404
-  GET /register 404
-  GET /admin 404
-  GET /mcp/ 404
-  GET /mcp/x 404
-  GET /mcp2 404
-  GET /gc3 404
-  GET /gc3/authorize 404
-  GET /gc2 404
-  GET /gc2/authorize 404
-  GET /authorize/x 404
-  GET /.well-known/jwks.json 404
-  GET /.well-known/oauth-authorization-server/mcp 404
-  GET /.well-known/oauth-protected-resource/other 404
+  
 
 RESULT: PASS
