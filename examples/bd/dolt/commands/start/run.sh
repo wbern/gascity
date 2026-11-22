@@ -11,6 +11,9 @@ set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+# Refuse inside agent sessions BEFORE runtime.sh: that file exits when the Dolt port
+# cannot be resolved, which is exactly when the server is down.
+[ -r "$PACK_DIR/assets/scripts/session_guard.sh" ] && { . "$PACK_DIR/assets/scripts/session_guard.sh"; dolt_refuse_inside_agent_session start || exit 77; }
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then

@@ -616,7 +616,10 @@ func TestGcBeadsBdRecoverENOSPCWinsOverFsyncStall(t *testing.T) {
 	if err := os.WriteFile(f.logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished")
+	// The ENOSPC guard only holds while the disk is still short, so pin the clear
+	// threshold above any real free space: this test is about ENOSPC outranking the
+	// stall probe, not about the host's disk.
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished", "GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=4611686018427387904")
 	if err == nil {
 		t.Fatalf("recover succeeded despite ENOSPC; output:\n%s", out)
 	}

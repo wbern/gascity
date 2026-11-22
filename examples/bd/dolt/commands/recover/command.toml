@@ -1,1 +1,1 @@
-description = "Recover Dolt from read-only state"
+description = "Recover Dolt from read-only state (refused inside agent sessions)"

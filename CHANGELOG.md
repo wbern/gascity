@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **`gc dolt start|restart|recover` refuse inside agent sessions; stale ENOSPC
+  log lines no longer block Dolt recovery.** A Dolt server started from an
+  agent session is a descendant of it and dies when the session is stopped
+  (a session's `gc dolt restart --force` took the bead store down fleet-wide
+  for ~14 minutes). The three commands now exit 77 when `GC_SESSION_ID` is set;
+  an operator who means it sets `GC_DOLT_ALLOW_SESSION_CONTROL=1`. Separately,
+  ENOSPC lines in the last 1000 lines of `dolt.log` only block recovery and
+  `gc dolt restart` while the Dolt volume is still short on space: once it has
+  at least `GC_DOLT_ENOSPC_CLEAR_FREE_BYTES` free (default 2 GiB) the evidence is
+  treated as stale. Inode exhaustion, quotas and a full backup-remote volume are
+  not detected; raise the threshold above the free space to keep the refusal.
+
 - **A stranded split-store city serves degraded instead of refusing.** A
   converged city whose work store holds infrastructure beads the binding
   does not serve (for example ordinary work that a plain `bd create`

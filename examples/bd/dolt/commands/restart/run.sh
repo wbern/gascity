@@ -13,6 +13,8 @@
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
+_dolt_guard="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}/assets/scripts/session_guard.sh"
+[ -r "$_dolt_guard" ] && { . "$_dolt_guard"; dolt_refuse_inside_agent_session restart || exit 77; }
 GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh}"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
@@ -58,6 +60,17 @@ if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then
   # GC_BEADS_BD_SCRIPT may be the stable city shim; the helper ships next
   # to the real script in the bd pack (the sibling of this dolt pack).
   BD_SCRIPT_DIR="$(CDPATH= cd -- "$DOLT_PACK_DIR/../assets/scripts" 2>/dev/null && pwd || printf '%s' "$BD_SCRIPT_DIR")"
+fi
+# The detector measures free space on the Dolt data volume, and DATA_DIR is only
+# computed further down: resolve it the way runtime.sh does so the check is not
+# limited to the log directory (the data may live on another volume).
+DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
+if [ -z "${GC_DOLT_DATA_DIR:-}" ] && [ ! -d "$DATA_DIR" ]; then
+  if [ -d "$PACK_STATE_DIR" ] || [ ! -d "$GC_CITY_PATH/.gc/dolt-data" ]; then
+    DATA_DIR="$PACK_STATE_DIR/dolt-data"
+  else
+    DATA_DIR="$GC_CITY_PATH/.gc/dolt-data"
+  fi
 fi
 . "$BD_SCRIPT_DIR/dolt-enospc.sh"
 # The fsync-stall helper is resolved on its own: a shim directory can carry
