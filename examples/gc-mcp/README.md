@@ -169,7 +169,16 @@ never authorizes resending the original message.
 Send acknowledgements include a connection-bound `handle`. Pass it alone to
 `wait_for_reply` to retain that send's target and timestamp boundary even after
 another send. Unknown/other-client handles fail closed; old `marker`/`since`
-clients remain supported. Handles currently live in bounded process memory
+clients remain supported. After receiving a candidate, pass its `reply_id` as
+`after_reply_id` on the next wait to suppress that unchanged candidate and wait
+boundedly for different output. Keep arguments unchanged when retrying a lost
+response: reading never consumes or advances a server-side acknowledgement.
+Handles start with the first available candidate after their send boundary;
+`after_reply_id` selects the first candidate after that fingerprint. Retries do
+not skip it just because newer candidates arrived. If compaction or editing
+removes the fingerprint, `reply_cursor_unavailable` reports unknown continuity;
+check the latest output before explicitly resetting the cursor. This is not a
+causal completion signal or a guarantee of history beyond the available segment. Handles currently live in bounded process memory
 (maximum 500); restart or eviction returns unknown, never permission to resend.
 Transcript output is a **temporal candidate**, not causal attribution or task
 completion: `complete:false`, `completion:not_proven`, and `reply_available`

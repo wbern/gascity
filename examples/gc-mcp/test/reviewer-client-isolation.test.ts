@@ -116,7 +116,11 @@ describe('OAuth client send-marker identity through HTTP MCP',()=>{
   expect(stolen).toMatchObject({found:false,reason:'unknown_handle'});
   const tracked=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
   expect(tracked).toMatchObject({reply_available:true,complete:false,completion:'not_proven',handle:ack.handle});
+  const unchanged=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,after_reply_id:tracked.reply_id,max_seconds:1});
+  expect(unchanged).toMatchObject({reply_available:false,page:'',waited_ms:1000,after_reply_id:tracked.reply_id});
+  const lostResponseRetry=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(lostResponseRetry.reply_id).toBe(tracked.reply_id);
   const own=await call(ta.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(own.page).toContain('Reply for the sending client.');
-  const other=await call(tb.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(other.page).toBe('');expect(other.since).toBe('m'+waitStart);expect(posts).toBe(1);
+  const otherStart=clock.t;const other=await call(tb.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(other.page).toBe('');expect(other.since).toBe('m'+otherStart);expect(posts).toBe(1);
  });
 });

@@ -227,6 +227,73 @@ describe("session_state: working | idle | waiting for input", () => {
 });
 
 describe("wait_for_reply: bounded, since the send, never unbounded", () => {
+  it("waits past an acknowledged interim candidate; explicit cursors make lost-response retries repeatable", async () => {
+    let publish = false;
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I'll check.")] }, onSleep: t => {
+      if (publish) w.transcripts["gc2-wisp-www"].push(asst(t, "Tests now pass; here is the result."));
+    } });
+    const { gate, d } = w.mk();
+    const ack = await gate.submit(W, undefined, "check tests");
+    const tool = w.tool(d, W, "wait_for_reply");
+    const args = { handle: ack.structured.handle, max_seconds: 3 };
+    const interim = await tool.handler(args);
+    const repeatedInitial = await tool.handler(args); // simulate loss of the first response
+    expect(repeatedInitial.structured.reply_id).toBe(interim.structured.reply_id);
+    const nextArgs = { ...args, after_reply_id: interim.structured.reply_id };
+    const unchanged = await tool.handler(nextArgs);
+    expect(unchanged.structured).toMatchObject({ reply_available: false, page: "", waited_ms: 3000, after_reply_id: interim.structured.reply_id });
+    expect(unchanged.text).not.toContain("I'll check");
+    publish = true;
+    const next = await tool.handler(nextArgs);
+    expect(next.structured.page).toContain("Tests now pass");
+    expect(next.structured.reply_id).not.toBe(interim.structured.reply_id);
+    expect(next.structured).toMatchObject({ complete: false, completion: "not_proven" });
+    expect(Number(next.structured.waited_ms)).toBeGreaterThanOrEqual(POLL_MS);
+    w.transcripts["gc2-wisp-www"].push(asst(w.clock.t + 100, "A later candidate must not replace a lost response."));
+    const lostNextRetry = await tool.handler(nextArgs);
+    expect(lostNextRetry.structured.reply_id).toBe(next.structured.reply_id);
+    expect(w.posts()).toHaveLength(1);
+  });
+  it("a two-minute budget waits without narrating the same candidate, and reports missing cursor continuity", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I'll check.")] } });
+    const { gate, d } = w.mk();
+    const ack = await gate.submit(W, undefined, "check tests");
+    const tool = w.tool(d, W, "wait_for_reply");
+    const first = await tool.handler({ handle: ack.structured.handle });
+    const started = w.clock.t;
+    for (let i = 0; i < 8; i++) {
+      const next = await tool.handler({ handle: ack.structured.handle, after_reply_id: first.structured.reply_id, max_seconds: 15 });
+      expect(next.structured).toMatchObject({ page: "", reply_available: false, waited_ms: 15000 });
+      expect(next.text).not.toContain("I'll check");
+    }
+    expect(w.clock.t - started).toBe(120000);
+    w.transcripts["gc2-wisp-www"] = [asst(w.clock.t, "The prior segment has disappeared.")];
+    const gap = await tool.handler({ handle: ack.structured.handle, after_reply_id: first.structured.reply_id, max_seconds: 1 });
+    expect(gap.structured).toMatchObject({ reason: "reply_cursor_unavailable", reply_available: false, page: "", complete: false });
+    expect(gap.text).toContain("Continuity is unknown");
+    expect(w.posts()).toHaveLength(1);
+  });
+  it("initial handle retries return the first candidate even if later output has arrived", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "First candidate.")] } });
+    const { gate, d } = w.mk();
+    const ack = await gate.submit(W, undefined, "check tests");
+    const tool = w.tool(d, W, "wait_for_reply"), args = { handle: ack.structured.handle };
+    const first = await tool.handler(args);
+    w.transcripts["gc2-wisp-www"].push(asst(T0 + 1000, "Later candidate."));
+    const retry = await tool.handler(args);
+    expect(retry.structured.reply_id).toBe(first.structured.reply_id);
+    const advanced = await tool.handler({ ...args, after_reply_id: first.structured.reply_id });
+    expect(advanced.structured.page).toBe("Later candidate.");
+  });
+  it("an unchanged one-second wait consumes its wait budget rather than returning in a hot loop", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I'll check.")] } });
+    const { d } = w.mk();
+    const tool = w.tool(d, W, "wait_for_reply");
+    const first = await tool.handler({ since: `m${T0}`, max_seconds: 1 });
+    const next = await tool.handler({ since: `m${T0}`, after_reply_id: first.structured.reply_id, max_seconds: 1 });
+    expect(next.structured).toMatchObject({ reply_available: false, waited_ms: 1000, page: "" });
+  });
+
   it("refuses a disappeared handle target even if another alias exactly or partially matches its old ID", async () => {
     for (const alias of ["gc2-wisp-s1", "gc2-wisp-s1-replacement"]) {
       const sessions = [{ ...SESS[1] }];

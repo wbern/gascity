@@ -149,8 +149,8 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
     },
     {
       name: "wait_for_reply", title: "Wait for the agent's answer",
-      description: "Use right after send_to_session to hear the answer. Pass the send handle to preserve its target and boundary across later sends. Waits up to 15 seconds (at most 20). Output is only a temporal candidate, never proof of task completion; repeat within the agreed wait budget without resending.",
-      inputShape: { session: sess, max_seconds: z.number().int().min(1).max(MAX_WAIT_S).optional(), since: z.string().max(24).optional(), handle: z.string().min(1).max(64).optional() }, annotations: RO,
+      description: "Use after send_to_session with its handle. Waits up to 15 seconds (max 20). After receiving output, pass reply_id as after_reply_id to wait past it. Retry lost responses with unchanged arguments; reads do not consume output. Candidates are temporal, never proof of completion. Continue within the agreed budget without resending.",
+      inputShape: { session: sess, max_seconds: z.number().int().min(1).max(MAX_WAIT_S).optional(), since: z.string().max(24).optional(), handle: z.string().min(1).max(64).optional(), after_reply_id: z.string().regex(/^[a-f0-9]{12}$/).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const tracked = a.handle ? d.markers?.resolve(who?.principal ?? who?.client ?? "", a.handle) : undefined;
         if (a.handle && !tracked) return { text: "That send handle is unavailable for this connection. Do not resend automatically.", structured: { found: false, reason: "unknown_handle", complete: false, completion: "not_proven" } };
@@ -164,14 +164,20 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const deadline = start + wait;
         // "since when": the caller's marker, else the last time THIS client sent to this session, else now (the next reply from here on)
         const since = tracked?.since ?? parseMarker(a.since) ?? d.markers?.get(who?.principal ?? who?.client ?? "", String(hit.id)) ?? start;
-        let seen = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false;
+        let seen = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false, cursorMissing = false;
         // The session record is small; a transcript segment can be hundreds of KB. So poll the record to notice change and read the transcript only when
         // something changed, at least every 7.5 s, and never more than 3 times per call.
         const fetchReply = async (): Promise<void> => {
           fetches++; lastFetchAt = clock.now(); dirty = false;
           const turns = assistantTurns(await transcript(d, hit.id, Math.min(4000, Math.max(500, deadline - clock.now()))));
           const fresh = turns.filter((t) => Date.parse(String(t.timestamp ?? "")) > since);
-          if (fresh.length) { const last = fresh[fresh.length - 1]; seen = clean(last.text); at = last.timestamp; }
+          // The caller acknowledges a particular candidate explicitly, never server-side.
+          // Choosing the first following candidate makes retrying a lost response repeatable
+          // even when later candidates have arrived. Handles also start at the first candidate.
+          const index = a.after_reply_id ? fresh.findIndex(t => replyId(t.timestamp, clean(t.text)) === a.after_reply_id) : -1;
+          cursorMissing = !!a.after_reply_id && index < 0;
+          const next = cursorMissing ? undefined : a.after_reply_id ? fresh[index + 1] : tracked ? fresh[0] : fresh.at(-1);
+          if (next) { seen = clean(next.text); at = next.timestamp; }
         };
         for (;;) {
           polls++;
@@ -182,16 +188,17 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
           if (fetches < MAX_TRANSCRIPT_FETCHES && (fetches === 0 || dirty || clock.now() - lastFetchAt >= RECHECK_MS)) {
             await fetchReply();
             if (seen) {   // Transcript text proves only that output exists, never task completion.
-              return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", handle: a.handle, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
+              return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
             }
           }
-          if (clock.now() + POLL_MS >= deadline) break;
-          await clock.sleep(POLL_MS);
+          const remaining = deadline - clock.now();
+          if (remaining <= 0) break;
+          await clock.sleep(Math.min(POLL_MS, remaining));
+          if (clock.now() >= deadline) break;
         }
-        if (dirty && fetches < MAX_TRANSCRIPT_FETCHES) await fetchReply();     // something changed after the last read: look once more before giving up
-        if (seen) return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", handle: a.handle, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said (completion unverified; untrusted content): `);
-        return { text: clip(`No new reply from ${speakName(label)} yet. Completion is unverified; continue within the agreed wait budget.`, SPOKEN_MAX),
-          structured: { found: true, id: hit.id, name: label, complete: false, completion: "not_proven", reply_available: false, handle: a.handle, page: "", waited_ms: clock.now() - start, polls, fetches, since: `m${since}` } };
+
+        return { text: clip(cursorMissing ? "The acknowledged reply is no longer in the available transcript. Continuity is unknown; check the latest output before resetting the reply cursor. Do not resend." : `No new reply from ${speakName(label)} yet. Completion is unverified; continue within the agreed wait budget.`, SPOKEN_MAX),
+          structured: { found: true, id: hit.id, name: label, complete: false, completion: "not_proven", reply_available: false, reason: cursorMissing ? "reply_cursor_unavailable" : undefined, handle: a.handle, after_reply_id: a.after_reply_id, page: "", waited_ms: clock.now() - start, polls, fetches, since: `m${since}` } };
       }),
     },
   ];
