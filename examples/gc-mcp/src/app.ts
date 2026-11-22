@@ -25,6 +25,7 @@ export interface AppOpts {
   trustProxy?: number;         // trusted reverse-proxy hops; 0 = none (default). Needed to know real client IPs.
   allowCidrs?: string[];       // restrict /mcp and /token to these sources (requires trustProxy >= 1)
   extraHosts?: string[];       // extra accepted Host names (publicUrl host + loopback are always accepted)
+  peerAllow?: string[];        // exact TCP peer addresses allowed to connect at all (the reverse proxy); others are dropped
   now?: () => number;
 }
 
@@ -50,6 +51,20 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", trust);
+  // Pin the TCP peer BEFORE anything else (even /healthz): when bound to a LAN address, any
+  // neighbour that is not the reverse proxy gets its connection dropped without a response.
+  if (o.peerAllow?.length) {
+    const allowed = new Set(o.peerAllow);
+    const lastNote = new Map<string, number>();
+    app.use((req, _res, next) => {
+      const peer = (req.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
+      if (allowed.has(peer)) { next(); return; }
+      const t = now();
+      if (t - (lastNote.get(peer) ?? 0) > 60_000) { lastNote.set(peer, t); audit.write({ kind: "auth", ok: false, note: `connection from unpinned peer ${peer} dropped` }); }
+      req.socket.destroy();
+    });
+  }
+
   app.get("/healthz", (_q, r) => void r.send("ok"));
 
   // owner kill switch: touch DISABLED to stop serving, touch REVOKE_ALL to drop every token.

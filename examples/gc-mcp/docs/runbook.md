@@ -1,21 +1,27 @@
 # Runbook: Gas City by voice (Claude + gc-mcp)
 
 Status: DESIGN + HARDENED BUILD. Nothing here has been applied to any host.
-Every step that touches Tailscale, a tunnel, systemd/launchd or the phone needs
+Every step that touches DNS, the reverse proxy, the firewall, systemd/launchd or the phone needs
 a human go. Production deployment on GC3 is owned by `gas-city-infra`
 (`doc/gc-mcp-deployment.md`, role `gc_mcp`); this file describes the service itself.
 
 ## 1. What runs where
 
 ```
-Claude (voice) ─► Claude cloud ──HTTPS :443──► public hostname ──► gc-mcp 127.0.0.1:47811
-                                                                       │ loopback, GET-only
-                                                                       ▼
-                                                   Gas City supervisor 127.0.0.1:8372 (never public)
+Claude (voice) -> Claude cloud --HTTPS :443--> public hostname (DNS at HostUp)
+                                                   |
+                                  your LAN nginx (TLS, source allowlist, rate limit)
+                                                   |  one private hop, one pinned peer
+                                                   v
+                                  gc-mcp on ONE private IP of the GC3 host (e.g. 192.168.23.69:47811)
+                                                   | loopback, GET-only
+                                                   v
+                                  Gas City supervisor 127.0.0.1:8372 (never public)
 ```
 One gc-mcp per machine, next to the supervisor it fronts (GC3 first; the Mac city is a
-second instance). It binds 127.0.0.1 only. The raw supervisor API has no auth and must
-never be public.
+second instance). Default bind is 127.0.0.1. When a reverse proxy on another LAN host must reach
+it, bind ONE validated private address instead (section 4). The raw supervisor API has no auth
+and must never be public.
 
 ## 2. Security model (read before exposing)
 
@@ -41,10 +47,10 @@ Anyone who gets past auth can read agent transcripts, mail subjects and bead tex
 
 ### What is NOT solved (residual risk, be honest)
 - A public endpoint can be probed. Passphrase guessing is slow (scrypt + lockouts) but possible.
-- Behind a tunnel the real client IP is only known if the proxy supplies it. With
-  `GC_MCP_TRUST_PROXY=0` (default) there is deliberately NO per-IP limiter (a shared bucket
-  would let any stranger lock the owner out). Set `GC_MCP_TRUST_PROXY=1` only after verifying
-  the proxy's forwarded-for header cannot be forged by the caller.
+- Per-IP limiting is only meaningful when the real client IP is known. With `GC_MCP_TRUST_PROXY=0`
+  (default) there is deliberately NO per-IP limiter (a shared bucket would let any stranger lock
+  the owner out). Behind nginx set `GC_MCP_TRUST_PROXY=1` and make nginx OVERWRITE
+  `X-Forwarded-For` with `$remote_addr`; verify with a forged header (it must be ignored).
 - IP allowlisting (`GC_MCP_ALLOW_CIDRS`, applied to /mcp and /token only, never /authorize)
   needs the same verification. Anthropic documents TWO egress ranges:
   `160.79.104.0/21` and `153.61.208.0/20`; they promise notice before changes, not stability.
@@ -64,21 +70,38 @@ Anyone who gets past auth can read agent transcripts, mail subjects and bead tex
   working then breaking. **Treat Android voice + custom connector as unproven until tested.**
   Text chat with the connector is the reliable fallback; a Telegram voice bot is plan B.
 
-## 4. The hostname problem (decision needed)
+## 4. Reach: DNS at HostUp + your own nginx (decided)
 
-Port 443 on `clodcod.<tailnet>.ts.net` already carries the Slack webhook Funnel at `/`.
-Claude discovers OAuth metadata at host-root well-known paths, so serving gc-mcp under a
-sub-path (`--set-path=/gc-mcp`) breaks discovery. Therefore gc-mcp needs **its own hostname
-on 443**:
+No Cloudflare, no Funnel. Port 443 on its own hostname is required by Claude, so gc-mcp gets a
+dedicated subdomain whose DNS record (in HostUp) points at the nginx that already fronts other
+sites from this LAN (see gas-city-infra `doc/foxtrot-practice.md`, the same pattern).
+Deployment files, the nginx vhost generator, the DNS script and the ordered runbook live in
+`gas-city-infra` (`doc/gc-mcp-deployment.md`); this section is the app-side contract.
 
-| Option | Real client IP | Edge allowlist/rate-limit | Cost / catch |
-|---|---|---|---|
-| **A. Cloudflare Tunnel** on a dedicated hostname (recommended) | yes (`CF-Connecting-IP`, XFF) | yes (WAF: allow only the two Anthropic ranges on `/mcp` and `/token`) | needs a domain on Cloudflare + `cloudflared` |
-| B. Dedicated Tailscale node/hostname with Funnel on 443 | unverified | no | a second tailscaled (container/VM); Funnel may not forward the client IP |
-| C. Sub-path on the existing Funnel | n/a | n/a | **does not work** (discovery) |
+**How nginx reaches the app (three independent locks, all fail-closed):**
+1. `GC_MCP_BIND_HOST=<one private IP>`: validated at startup; `0.0.0.0`, `::`, public addresses
+   and hostnames are refused.
+2. `GC_MCP_PEER_ALLOW=<nginx host IP>`: the app drops every TCP connection from any other peer
+   before answering (even `/healthz`). Binding beyond loopback without it, or without
+   `GC_MCP_TRUST_PROXY>=1`, refuses to start.
+3. The host firewall and the systemd unit (`IPAddressAllow`) admit only the nginx host
+   (infra role).
 
-Do not choose by convenience: A is the only option that gives both a real client IP and an
-edge allowlist.
+**Real client addresses.** nginx is the public edge, so its `$remote_addr` is the genuine caller. It
+must set `X-Forwarded-For` to exactly `$remote_addr` (overwrite, never append), which makes
+`GC_MCP_TRUST_PROXY=1` safe: per-IP limits, consent lockouts and the optional app-level source gate
+(`GC_MCP_ALLOW_CIDRS`, Anthropic ranges) then work on real addresses. This resolves the shared-IP
+problem that a tunnel would have had.
+
+**What nginx must do** (the infra generator produces it): TLS on 443; allow only Anthropic's ranges
+`160.79.104.0/21` and `153.61.208.0/20` on `/mcp` and `/token` (plus optionally your own IP); proxy
+only the MCP/OAuth paths and 404 everything else (including `/register`, `/healthz`); rate limit;
+`proxy_buffering off` for streamable HTTP; small body cap. `/authorize` and `/consent` stay open
+(they are opened from your phone) but rate limited.
+
+**Still your call / unknown:** the exact subdomain; the nginx host's address, OS and who runs it;
+whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the GC3 LAN address
+(DHCP changes would break the pinned bind: fail loudly, not silently).
 
 ## 5. Prerequisites (human)
 
@@ -91,6 +114,11 @@ edge allowlist.
    GC_MCP_PUBLIC_URL=https://<hostname-on-443>
    GC_MCP_CITY=<city name from GET /v0/cities>
    GC_MCP_PEEK_ALLOW=mayor,gc-architect      # optional but recommended
+   # behind your LAN nginx (section 4):
+   GC_MCP_BIND_HOST=<GC3 private IP>
+   GC_MCP_PEER_ALLOW=<nginx host IP>
+   GC_MCP_TRUST_PROXY=1
+   GC_MCP_ALLOW_CIDRS='160.79.104.0/21,153.61.208.0/20'   # defence in depth behind nginx's own allowlist
    ```
 3. `npm ci && npm run build`.
 
@@ -122,9 +150,9 @@ DEMO_PASSPHRASE=... DEMO_CLIENT_ID=$(cat ~/.local/state/gc-mcp/client-id) node s
 - [ ] kill switch tested: `touch DISABLED` -> 503; remove -> works
 
 ## 9. Rollback
-`touch <state>/DISABLED` (instant), then stop the service and remove the tunnel/Funnel
-mapping (repeat the add command with `off`; never `tailscale serve reset`). To invalidate
-every login: `touch <state>/REVOKE_ALL`. Rotate the passphrase: new hash + restart.
+`touch <state>/DISABLED` (instant), then disable the nginx vhost (or delete the HostUp DNS record) and
+stop the service. To invalidate every login: `touch <state>/REVOKE_ALL`. Rotate the passphrase: new
+hash + restart.
 
 ## 10. Linux and macOS service files
 `deploy/gc-mcp-run.sh` + `deploy/gc-mcp.service` are a minimal systemd example. Production

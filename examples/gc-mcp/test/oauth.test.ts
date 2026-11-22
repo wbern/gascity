@@ -262,6 +262,22 @@ describe("owner controls and perimeter", () => {
   });
 });
 
+describe("peer pinning (the reverse proxy is the only allowed TCP peer)", () => {
+  it("drops connections from any other peer without answering", async () => {
+    const s = await boot({ peerAllow: ["10.9.9.9"] });
+    await expect(fetch(`${s.base}/healthz`)).rejects.toThrow();
+    await expect(fetch(`${s.base}/.well-known/oauth-authorization-server`)).rejects.toThrow();
+  });
+  it("serves the pinned peer normally", async () => {
+    const s = await boot({ peerAllow: ["127.0.0.1"] });
+    expect((await fetch(`${s.base}/healthz`)).status).toBe(200);
+  });
+  it("is off by default", async () => {
+    const s = await boot();
+    expect((await fetch(`${s.base}/healthz`)).status).toBe(200);
+  });
+});
+
 describe("audit log and state at rest", () => {
   it("records failures, token events and tool calls; never a token or passphrase", async () => {
     const s = await boot();
