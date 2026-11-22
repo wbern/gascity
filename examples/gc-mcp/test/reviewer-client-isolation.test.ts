@@ -83,6 +83,9 @@ describe("review: OAuth client identity through HTTP MCP",()=>{
   expect(page.next_cursor).toBeTypeOf("string");
   const stolen=await call(tb.token.access_token,{cursor:page.next_cursor});
   expect(stolen.error).toBe(true);
+  const continued=await call(ta.token.access_token,{cursor:page.next_cursor});
+  expect(continued.error).not.toBe(true);
+  expect(continued.page).toContain("ordinary words here");
  });
 });
 
