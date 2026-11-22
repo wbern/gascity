@@ -157,6 +157,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         if (tracked && (a.session || a.since)) return { text: "Use the send handle alone so its original target and boundary are preserved.", structured: { found: false, reason: "conflicting_boundary" } };
         const f = await target(d, who, tracked?.session ?? a.session);
         if ("say" in f) return f.say;
+        if (tracked && String(f.hit.id) !== tracked.session) return { text: "The original send target is unavailable. This handle cannot follow a replacement agent. Do not resend automatically.", structured: { found: false, reason: "handle_target_unavailable", complete: false, completion: "not_proven", handle: a.handle } };
         const hit = f.hit, label = clip(clean(labelOf(hit)), 60);
         const start = clock.now();
         const wait = Math.min(MAX_WAIT_S, Math.max(1, Math.floor(Number(a.max_seconds ?? 15)) || 15)) * 1000;

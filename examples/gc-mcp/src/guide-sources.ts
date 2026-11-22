@@ -33,7 +33,7 @@ export const GUIDE_SOURCES = {
   "reply": {
     "repository": "wbern/gascity",
     "path": "examples/gc-mcp/src/voice.ts",
-    "sha256": "ef14a68c201cbf712cdf5caa2fd3fa7af14b8d32bcdff5c4dc4b09864b413bc7"
+    "sha256": "e00a978298a2b60ec1e8cdbdea2c9abd621eeb82a264e09eacf496f6699543a6"
   },
   "agents": {
     "repository": "wbern/gascity",

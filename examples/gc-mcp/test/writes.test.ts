@@ -161,11 +161,19 @@ describe("WriteGate: send_to_session", () => {
       const retry = await g.submit(W, "mayor", "hi");
       expect(retry.structured).toMatchObject({ replayed: true, handle: r.structured.handle });
       expect(sup.posts()).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ result: "replayed", ok: false });
       expect(events).toContainEqual(expect.objectContaining({ result: `error:${status}`, ok: false }));
     }
     const down = gate({}, { ...supervisor(), fetchImpl: (async () => { throw new Error("connect refused"); }) as unknown as typeof fetch, calls: [], posts: () => [] });
     expect((await down.g.submit(W, "mayor", "hi")).structured).toMatchObject({ sent: false });
     expect(down.events.at(-1).result).toMatch(/^lookup_failed/);
+  });
+  it("in-flight duplicate failure replays preserve an unsuccessful audit outcome", async () => {
+    const { g, sup, events } = gate({}, supervisor(() => ({ status: 503, json: { detail: "uncertain" } })));
+    const results = await Promise.all([g.submit(W, "mayor", "one request"), g.submit(W, "mayor", "one request")]);
+    expect(sup.posts()).toHaveLength(1);
+    expect(results.every(r => r.structured.sent === false)).toBe(true);
+    expect(events.filter(e => e.result === "replayed")).toEqual([expect.objectContaining({ ok: false })]);
   });
   it("reports a nonrunning session without guessing delivery or queue state", async () => {
     const { g } = gate();

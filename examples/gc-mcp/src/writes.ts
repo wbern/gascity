@@ -214,11 +214,11 @@ export class WriteGate {
     const rkey = crypto.createHash("sha256").update([ctx.principal??ctx.client, kind, hit.id, intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
     for (const [k, v] of this.replays) if (now - v.at > windowMs) this.replays.delete(k);
     const seen = this.replays.get(rkey);
-    if (seen) { log("replayed", true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
+    if (seen) { log("replayed", seen.res.structured.sent === true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
     const pending = this.sessionPending.get(rkey);
     if (pending) {
       const result = await pending;
-      log("replayed", true, hit.id);
+      log("replayed", result.structured.sent === true, hit.id);
       return { text: result.text, structured: { ...result.structured, replayed: true } };
     }
     const attempt = (async (): Promise<WriteResult> => {

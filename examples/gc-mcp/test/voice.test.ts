@@ -17,21 +17,22 @@ const SESS: SessionRef[] = [
   { id: "gc2-wisp-sl", alias: "sleeper", template: "sleep", state: "asleep", running: false },
 ];
 
-function world(over: { transcripts?: Record<string, any[]>; detail?: Record<string, any>; pending?: Record<string, any>; onSleep?: (t: number) => void } = {}) {
+function world(over: { sessions?: SessionRef[]; transcripts?: Record<string, any[]>; detail?: Record<string, any>; pending?: Record<string, any>; onSleep?: (t: number) => void } = {}) {
   const clock = { t: T0, now() { return clock.t; }, async sleep(ms: number) { clock.t += ms; over.onSleep?.(clock.t); } };
   const calls: { method: string; path: string; query?: string; body?: any; headers: Record<string, string> }[] = [];
   const transcripts = over.transcripts ?? {};
+  const sessions = over.sessions ?? SESS;
   const fetchImpl = (async (url: string, init: RequestInit) => {
     const u = new URL(url), p = u.pathname, method = String(init?.method);
     calls.push({ method, path: p, query: u.search, body: init?.body ? JSON.parse(String(init.body)) : undefined, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v])) });
     if (method === "POST") return new Response(JSON.stringify({ request_id: "req-1", status: "accepted" }), { status: 202 });
-    if (p.endsWith("/sessions")) return new Response(JSON.stringify({ total: SESS.length, items: SESS }), { status: 200 });
+    if (p.endsWith("/sessions")) return new Response(JSON.stringify({ total: sessions.length, items: sessions }), { status: 200 });
     let m = /\/session\/([^/]+)\/transcript$/.exec(p);
     if (m) return new Response(JSON.stringify({ turns: transcripts[m[1]] ?? [] }), { status: 200 });
     m = /\/session\/([^/]+)\/pending$/.exec(p);
     if (m) return new Response(JSON.stringify({ supported: true, pending: over.pending?.[m[1]] ?? null }), { status: 200 });
     m = /\/session\/([^/]+)$/.exec(p);
-    if (m) return new Response(JSON.stringify({ ...(SESS.find((s) => s.id === m![1]) ?? {}), last_active: iso(clock.t), ...(over.detail?.[m[1]] ?? {}) }), { status: 200 });   // a live agent: last_active moves
+    if (m) return new Response(JSON.stringify({ ...(sessions.find((s) => s.id === m![1]) ?? {}), last_active: iso(clock.t), ...(over.detail?.[m[1]] ?? {}) }), { status: 200 });   // a live agent: last_active moves
     return new Response("{}", { status: 200 });
   }) as unknown as typeof fetch;
   const gc = new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl });
@@ -226,6 +227,20 @@ describe("session_state: working | idle | waiting for input", () => {
 });
 
 describe("wait_for_reply: bounded, since the send, never unbounded", () => {
+  it("refuses a disappeared handle target even if another alias exactly or partially matches its old ID", async () => {
+    for (const alias of ["gc2-wisp-s1", "gc2-wisp-s1-replacement"]) {
+      const sessions = [{ ...SESS[1] }];
+      const w = world({ sessions, transcripts: { replacement: [asst(T0 + 500, "Other agent private output.")] } });
+      const { gate, d } = w.mk();
+      const ack = await gate.submit(W, "steve", "one request");
+      sessions.splice(0, 1, { id: "replacement", alias, running: true, state: "active" });
+      const r = await w.tool(d, W, "wait_for_reply").handler({ handle: ack.structured.handle, max_seconds: 1 });
+      expect(r.structured).toMatchObject({ found: false, reason: "handle_target_unavailable" });
+      expect(w.calls.filter(c => c.path.endsWith("/transcript"))).toHaveLength(0);
+      expect(r.text).not.toContain("private output");
+    }
+  });
+
   it("never proves completion from an unchanged interim reply and active session", async () => {
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I will investigate and report back.")] } });
     const { d } = w.mk();
