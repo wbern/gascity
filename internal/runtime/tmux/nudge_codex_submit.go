@@ -72,11 +72,27 @@ func codexComposerName(state codexComposerState) string {
 	}
 }
 
+// Codex 0.170 fits goal_status_indicator_line and warning_labels independently.
+// Recognize complete source-defined labels, including count-only warnings, so
+// typing or resizing cannot turn a footer into apparent draft content.
+const (
+	codexStateFooterPattern = `(?:Pursuing goal(?: \([^()\r\n]+\))?|` +
+		`Goal (?:paused|stalled|hit usage limits) \(/goal resume\)|` +
+		`Goal (?:unmet|achieved) \([^()\r\n]+\)|Goal (?:abandoned|achieved)|` +
+		`Plan mode(?: \(shift\+tab to cycle\))?)`
+	codexWarningFooterPattern    = `⚠ [1-9][0-9]*(?: warnings? · (?:f2|/warnings) to view| · (?:f2|/warnings))?`
+	codexContextFooterPattern    = `(?:100|[0-9]{1,2})% context left`
+	codexIndicatorsFooterPattern = `(?:` + codexStateFooterPattern +
+		`(?: · ` + codexContextFooterPattern + `)?(?: · ` + codexWarningFooterPattern + `)?|` +
+		codexContextFooterPattern + `(?: · ` + codexWarningFooterPattern + `)?|` + codexWarningFooterPattern + `)`
+)
+
 var (
-	codexSGR           = regexp.MustCompile("\x1b\\[[0-9;]*m")
-	codexWarningFooter = regexp.MustCompile(`^⚠ [1-9][0-9]* warnings? · f2 to view$`)
-	codexCompactFooter = regexp.MustCompile(`^(?:← for agents +)?(?:Goal stalled \(/goal resume\) · )?⚠ [1-9][0-9]* · f2$`)
-	codexDimText       = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
+	codexSGR          = regexp.MustCompile("\x1b\\[[0-9;]*m")
+	codexStatusFooter = regexp.MustCompile(`^(?:← for agents(?: +| · ))?` +
+		codexIndicatorsFooterPattern + `$|^← for agents$`)
+	codexQueueFooter = regexp.MustCompile(`^tab to queue(?: message)?(?:(?: +| · )` + codexIndicatorsFooterPattern + `)?$`)
+	codexDimText     = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
 )
 
 // captureCodexComposer retains terminal styling to distinguish a dim input
@@ -145,7 +161,7 @@ func readCodexComposer(lines []string, message string) codexSubmitObservation {
 			return obs
 		}
 		for _, line := range lines[footer:end] {
-			if strings.HasPrefix(strings.TrimSpace(line), "tab to queue message") {
+			if codexQueueFooter.MatchString(strings.TrimSpace(line)) {
 				obs.queue, obs.busy = true, true
 			}
 		}
@@ -219,10 +235,10 @@ func codexRenderedDraftMatches(lines []string, message string) bool {
 }
 
 func codexFooterLine(line string) bool {
-	return strings.HasPrefix(line, "tab to queue message") ||
+	return codexQueueFooter.MatchString(line) ||
 		strings.HasPrefix(strings.ToLower(line), "gpt-") ||
 		strings.Contains(line, "% context left") || strings.Contains(line, "? for shortcuts") ||
-		codexWarningFooter.MatchString(line) || codexCompactFooter.MatchString(line)
+		codexStatusFooter.MatchString(line)
 }
 
 func codexDimPlaceholder(raw, content string) bool {
