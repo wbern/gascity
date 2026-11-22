@@ -52,6 +52,14 @@ sentence with `{found:true, allowed:false, reason, name}` in structuredContent (
 owner to change the list if you want that.") or `not_in_allow_list` ("... is not on the list of agents I may read. Ask the owner to add it."); it never blames "voice". `GC_MCP_READ_DENY_SESSIONS`
 defaults to the write deny list; set it (even to empty) to differ for reads. The briefing hides no agent or task unless an operator protected that session.
 
+Faithful to the Gas City API (not a lossy summary): the API's `tail` on a transcript counts compaction SEGMENTS, so the server asks for the last segment only and takes the last messages
+from it (a segment can be hundreds of KB: it is read with an 8 MB cap, and anything larger is reported as "too large", never as "Gas City is down"); `wait_for_reply` polls the small
+session record and reads the transcript only when something changed, at most three times per call; `latest_reply`, `read_more` and `wait_for_reply` send only the PAGE that was spoken (plus
+`total_chars`, `next_offset` and a `reply_id`), and `read_more` is pinned to that `reply_id` so an offset never lands in a different message. Lists are read across pages and the API's
+`total`, `partial` and `next_cursor` are passed through ("counted 200 of 900"; "at least 12 decisions"). Errors are told apart: not found, too large, timed out, Gas City not responding, refused.
+Derived values say so (`derived`, `source`): agent state, "working", flagged mail and the finished-task filter are heuristics and the briefing's `structuredContent.derived` says how each was worked
+out. Nothing names a person or a city in the code: `GC_MCP_OWNER_NAME` (optional) addresses the owner and `GC_MCP_CITY` is read from the environment or, when the supervisor runs exactly one city, from it.
+
 Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
 A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match
 (`steve` is `crm/steve`; `crm slash steve` works); if more than one fits, the tool asks ("I found crm slash steve and crm slash bob, which one?") and sends nothing.

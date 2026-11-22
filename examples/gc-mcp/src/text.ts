@@ -12,6 +12,17 @@ export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`
 /** Say a name aloud: "crm/steve" is read "crm slash steve". */
 export const speakName = (s: string) => s.replace(/\//g, " slash ");
 
+/** One honest sentence per kind of failure, never "unavailable" for everything. */
+export function gcErrorResult(e: GcError): ToolResult {
+  const detail = redactText(e.message).slice(0, 120);
+  const text = e.kind === "not_found" ? "Gas City has no such thing: it was not found."
+    : e.kind === "too_large" ? "That is too large to read in one go, so I did not read it."
+    : e.kind === "timeout" ? "Gas City took too long to answer, so I stopped waiting."
+    : e.kind === "unavailable" ? `Gas City is not responding right now${e.status ? ` (${e.status})` : ""}.`
+    : `Gas City refused that (${e.status}: ${detail}).`;
+  return { text, structured: { error: true, kind: e.kind, status: e.status } };
+}
+
 // Every handler goes through guard(): redaction + speakable error mapping.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function guard(fn: (a: any) => Promise<ToolResult>): (a: any) => Promise<ToolResult> {
@@ -20,9 +31,7 @@ export function guard(fn: (a: any) => Promise<ToolResult>): (a: any) => Promise<
       const r = await fn(args);
       return { text: redactText(r.text), structured: redactDeep(r.structured) };
     } catch (e) {
-      if (e instanceof GcError) {
-        return { text: `Gas City is unavailable right now (${e.status || "no response"}: ${redactText(e.message)}).`, structured: { error: true, status: e.status } };
-      }
+      if (e instanceof GcError) return gcErrorResult(e);
       throw e;
     }
   };

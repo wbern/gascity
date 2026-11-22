@@ -2,10 +2,10 @@
 // Only data the supervisor already provides (status, sessions, pending interactions, human gates, work titles, recent events); a source that cannot be
 // read is named in one clause and never guessed. Nothing here reads out an id: names are spoken the way people say them, titles are scrubbed.
 import { z } from "zod";
-import { SHA, UUID, WISP, ID_TOKEN, spokenName, type SessionRef } from "./sessions.js";
+import { SHA, UUID, WISP, ID_TOKEN, listPages, spokenName, type SessionRef } from "./sessions.js";
 export { spokenName };
 import { clean, clip, guard, type ToolResult } from "./text.js";
-import { deriveState, realClock, target } from "./voice.js";
+import { deriveState, realClock, stateSource, target } from "./voice.js";
 import { isReadDenied } from "./access.js";
 import type { Deps, ToolDef } from "./tools.js";
 import type { WriteCtx } from "./writes.js";
@@ -34,22 +34,25 @@ const itemsOf = (x: any): any[] => (Array.isArray(x?.items) ? x.items : []);
 /** What a decision is ABOUT, in words a person can hear: never the raw gate title ("Gate: human" means nothing). */
 const GENERIC_GATE = /^(human|timer|manual|decision|gate)?$|^[a-z]+:[a-z0-9-]+$/i;
 const firstSentence = (t: string) => t.split(/\n|\.\s|;\s|\s[—-]\s/)[0] ?? t;
-export function decisionQuestion(b: any): string {
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function decisionQuestion(b: any, ownerName?: string): string {
   const desc = String(b.description ?? "");
   const decision = /(?:^|\n)\s*Decision needed:\s*(.+)/i.exec(desc)?.[1];
   const reason = /(?:^|\n)\s*Reason:\s*(.+)/i.exec(desc)?.[1];
   const title = String(b.title ?? "").replace(/^gate:\s*/i, "").trim();
   const chosen = decision ?? (GENERIC_GATE.test(title) ? reason : title) ?? reason ?? "";
-  return spokenTitle(firstSentence(chosen).replace(/^William('s)?\s+/i, "your "), 56).replace(/[/_-]+/g, " ");   // scrub ids FIRST, then make it speakable (hyphens and slashes become spaces)
+  const toYou = ownerName ? firstSentence(chosen).replace(new RegExp(`^${esc(ownerName)}('s)?\\s+`, "i"), "your ") : firstSentence(chosen);
+  return spokenTitle(toYou, 56).replace(/[/_-]+/g, " ");   // scrub ids FIRST, then make it speakable (hyphens and slashes become spaces)
 }
 const blockedId = (b: any): string | undefined => /blocking\s+([A-Za-z0-9][A-Za-z0-9._-]{2,40})/i.exec(String(b.description ?? ""))?.[1];
-const OWNER_MAIL = /\b(decision needed|needs? (you|william|the owner)|for (william|the owner)|urgent|action required)\b/i;
 const AUTOMATED_MAIL = /^\s*(reminder\b|orphan-sweep|NOTICE:|auto)/i;
-/** Mail worth interrupting for: from the mayor or the owner, or marked for the owner; never the system's own reminders. */
-export function isFlaggedMail(m: any): boolean {
+/** Mail worth interrupting for (a HEURISTIC, reported as derived): from the mayor or the owner, or a subject that says it needs them; never the system's own reminders. */
+export function isFlaggedMail(m: any, ownerName?: string): boolean {
   const from = String(m.from ?? ""), subject = String(m.subject ?? "");
   if (AUTOMATED_MAIL.test(subject)) return false;
-  return /^(mayor|william|owner)\b/i.test(from) || OWNER_MAIL.test(subject);
+  const who = ownerName ? `${esc(ownerName)}|` : "";
+  return new RegExp(`^(mayor|owner${ownerName ? `|${esc(ownerName)}` : ""})\\b`, "i").test(from)
+    || new RegExp(`\\b(decision needed|needs? (you|${who}the owner)|for (${who}the owner)|urgent|action required)\\b`, "i").test(subject);
 }
 const AUTOMATED_TITLE = /^(order:|mol-|orphan-sweep|sling-|gate\b)/i;   // automation and gates are not "tasks"; a single token (an id or an agent identity such as rig/agent-2) is not a task title either
 const TASK_TYPES = new Set(["task", "bug", "feature", "story", "epic", "chore"]);
@@ -80,9 +83,9 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const read = async <T>(name: string, f: () => Promise<T>): Promise<T | undefined> => { try { return await f(); } catch { unavailable.push(name); return undefined; } };
         const [status, sess, pend, gates, events, mail, inprog] = await Promise.all([
           read("city status", () => gc.get("/status") as Promise<any>),
-          read("sessions", () => gc.get("/sessions", { limit: 200 }) as Promise<any>),
+          read("sessions", () => listPages<any>(gc, "/sessions")),
           read("agents waiting for input", () => gc.get("/pending") as Promise<any>),
-          read("decisions", () => gc.get("/beads", { type: "gate", status: "open", limit: 200 }) as Promise<any>),
+          read("decisions", () => listPages<any>(gc, "/beads", { type: "gate", status: "open" }, 3)),
           read("recent changes", () => gc.get("/events", { since, type: "bead.closed", limit: 100 }) as Promise<any>),
           read("mail", () => gc.get("/mail", { agent: d.mailAgent, status: "unread", limit: 50 }) as Promise<any>),
           read("work in progress", () => gc.get("/beads", { status: "in_progress", limit: 200 }) as Promise<any>),
@@ -122,7 +125,7 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const seen = new Set<string>(), asks: string[] = [];
         for (const b of humanGates) {
           if (asks.length >= 2) break;
-          let q = decisionQuestion(b);
+          let q = decisionQuestion(b, d.ownerName);
           if (!q) { const id = blockedId(b); const t = id ? await title(id, 45) : ""; q = t ? `the work on ${t}` : ""; }
           const key = q.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
           if (!q || seen.has(key)) continue;
@@ -133,7 +136,7 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
 
         // ---- mail: only what is for the owner; a big pile of notices is not news
         const mailItems = itemsOf(mail);
-        const flagged = mailItems.filter(isFlaggedMail);
+        const flagged = mailItems.filter((m: any) => isFlaggedMail(m, d.ownerName));
         const unread = typeof mail?.total === "number" ? mail.total : mailItems.length;
 
         // ---- what finished (tasks, not automation), by title
@@ -154,8 +157,9 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const needsFor = (nAsks: number) => attention.map((a) => {
           if (a.kind === "decision") {
             const list = a.items.slice(0, nAsks).join("; ");
-            return stale ? `${a.count} open decisions, but many look stale: the oldest is ${days(oldestMs)} old${list ? `. Newest: ${list}` : ""}`
-              : `${plural(a.count, "decision")}${list ? `, newest first: ${list}` : ""}`;
+            const atLeast = (gates as any)?.truncated ? "at least " : "";   // the API had more pages than were read: say so, never a short count as if it were the whole
+            return stale ? `${atLeast}${a.count} open decisions, but many look stale: the oldest is ${days(oldestMs)} old${list ? `. Newest: ${list}` : ""}`
+              : `${atLeast}${plural(a.count, "decision")}${list ? `, newest first: ${list}` : ""}`;
           }
           if (a.kind === "waiting_for_input") return `${plural(a.count, "agent")} waiting for input${a.items.length ? ` (${[...new Set(a.items)].slice(0, 2).join(", ")})` : ""}`;
           if (a.kind === "stuck") return `${a.count} stuck${a.items.length ? ` (${[...new Set(a.items)].slice(0, 2).join(", ")})` : ""}`;
@@ -190,7 +194,17 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
 
         return { text, structured: { counts, attention, busiest: shown.map((w) => ({ name: spokenName(w.s), title: w.title })), finished: { count: real.length, titles: finishedTitles.slice(0, 5), capped: closed.length >= 100 },
           mail: { unread: mail ? unread : undefined, flagged: flagged.length }, decisions: { open: humanGates.length, oldest_ms: oldestMs, stale }, unavailable, since_ms: windowMs,
-          first_briefing: last === undefined, untrusted: true } };
+          first_briefing: last === undefined, untrusted: true,
+          truncated: { sessions: !!(sess as any)?.truncated, decisions: !!(gates as any)?.truncated, finished: closed.length >= 100 },
+          partial: [sess, gates, mail].some((p: any) => p?.partial) || undefined,
+          // HOW each number was worked out, so nothing here passes for something the API said outright
+          derived: {
+            working: "an agent is counted as working when its activity is working or in-turn, or it holds an active bead, or an in-progress bead is assigned to it",
+            decisions: "open gate beads whose await_type is human, described from their Decision-needed or Reason line, else their title",
+            flagged_mail: "a heuristic: sender is the mayor or the owner, or the subject says it needs them; the system's own reminders are excluded",
+            finished: "bead.closed events, keeping task-like types with a multi-word title that is not automation (a heuristic filter)",
+            states: "sessions are classified by deriveState from program_status, turn, activity and state, in that order of trust",
+          } } };
       }),
     },
     {
@@ -219,7 +233,7 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
           : state === "stuck" ? `${name} looks stuck.`
           : state === "not running" ? `${name} is not running.`
           : state === "idle" ? `${name} is idle${title ? `; it last worked on ${title}` : ""}.` : `${name} is active, but I can't tell what it is doing.`;
-        return { text: clip(text, 280), structured: { found: true, name, state, working_on: title || undefined, waiting_for: waitingFor || undefined, untrusted: !!(title || waitingFor) } };
+        return { text: clip(text, 280), structured: { found: true, name, state, derived: true, source: stateSource(full, isWaiting), working_on: title || undefined, waiting_for: waitingFor || undefined, untrusted: !!(title || waitingFor) } };
       }),
     },
   ];

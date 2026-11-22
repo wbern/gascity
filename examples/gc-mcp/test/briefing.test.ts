@@ -34,7 +34,7 @@ function city(f: Fix = {}) {
   }) as unknown as typeof fetch;
   const clock = { t: T0, now() { return clock.t; }, async sleep(ms: number) { clock.t += ms; } };
   const gc = new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc3", fetchImpl });
-  const deps: Deps = { gc, mailAgent: "human", now: () => new Date(clock.t), clock, briefings: new Map(), defaultSession: "claude-william" };
+  const deps: Deps = { gc, mailAgent: "human", now: () => new Date(clock.t), clock, briefings: new Map(), defaultSession: "claude-william", ownerName: "William" };
   const tool = (name: string, who = R) => buildTools(deps, who).find((t) => t.name === name)!;
   return { deps, clock, seen, tool, brief: (who = R) => tool("briefing", who).handler({}) };
 }

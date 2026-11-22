@@ -42,13 +42,31 @@ export function resolveIn(items: SessionRef[], rawQuery: string): Resolution {
   return { kind: "none", query: q };
 }
 
+/** A list read across pages, with what the API said about completeness passed through (never a silently truncated count). */
+export interface Page<T> { items: T[]; total: number; partial: boolean; partial_errors: string[]; next_cursor?: string; truncated: boolean }
+export async function listPages<T = any>(gc: GcClient, path: string, query: Record<string, string | number | undefined> = {}, maxPages = 5, perPage = 200): Promise<Page<T>> {
+  const items: T[] = [];
+  let cursor: string | undefined, total: number | undefined, partial = false;
+  const errors: string[] = [];
+  for (let i = 0; i < maxPages; i++) {
+    const r: any = await gc.get(path, { ...query, limit: perPage, cursor });
+    items.push(...((r?.items ?? r?.beads ?? []) as T[]));
+    if (typeof r?.total === "number") total = r.total;
+    if (r?.partial) { partial = true; errors.push(...((r.partial_errors ?? []) as string[]).map(String)); }
+    cursor = r?.next_cursor || undefined;
+    if (!cursor) break;
+  }
+  const t = total ?? items.length;
+  return { items, total: t, partial, partial_errors: errors.slice(0, 5), next_cursor: cursor, truncated: !!cursor || t > items.length };
+}
+
 /** Resolve against the live session list. An empty query means the configured default session. */
 export async function resolveSession(gc: GcClient, query: string | undefined, defaultSession?: string): Promise<Resolution> {
   const q = (query ?? "").trim() || (defaultSession ?? "").trim();
   if (!q) return { kind: "nodefault" };
   if (!QUERY.test(q)) return { kind: "bad", query: q.slice(0, 40) };   // before any call: an unsafe name never leaves the process
-  const r = (await gc.get("/sessions", { limit: 200 })) as { items?: SessionRef[] };
-  return resolveIn(r.items ?? [], q);
+  const r = await listPages<SessionRef>(gc, "/sessions");          // every page (up to 1000 sessions), not just the first 200
+  return resolveIn(r.items, q);
 }
 
 /** The short question asked when more than one session fits: "I found crm slash steve and crm slash bob, which one?" */

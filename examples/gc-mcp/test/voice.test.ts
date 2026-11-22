@@ -19,11 +19,11 @@ const SESS: SessionRef[] = [
 
 function world(over: { transcripts?: Record<string, any[]>; detail?: Record<string, any>; pending?: Record<string, any>; onSleep?: (t: number) => void } = {}) {
   const clock = { t: T0, now() { return clock.t; }, async sleep(ms: number) { clock.t += ms; over.onSleep?.(clock.t); } };
-  const calls: { method: string; path: string; body?: any; headers: Record<string, string> }[] = [];
+  const calls: { method: string; path: string; query?: string; body?: any; headers: Record<string, string> }[] = [];
   const transcripts = over.transcripts ?? {};
   const fetchImpl = (async (url: string, init: RequestInit) => {
     const u = new URL(url), p = u.pathname, method = String(init?.method);
-    calls.push({ method, path: p, body: init?.body ? JSON.parse(String(init.body)) : undefined, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v])) });
+    calls.push({ method, path: p, query: u.search, body: init?.body ? JSON.parse(String(init.body)) : undefined, headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v])) });
     if (method === "POST") return new Response(JSON.stringify({ request_id: "req-1", status: "accepted" }), { status: 202 });
     if (p.endsWith("/sessions")) return new Response(JSON.stringify({ total: SESS.length, items: SESS }), { status: 200 });
     let m = /\/session\/([^/]+)\/transcript$/.exec(p);
@@ -31,7 +31,7 @@ function world(over: { transcripts?: Record<string, any[]>; detail?: Record<stri
     m = /\/session\/([^/]+)\/pending$/.exec(p);
     if (m) return new Response(JSON.stringify({ supported: true, pending: over.pending?.[m[1]] ?? null }), { status: 200 });
     m = /\/session\/([^/]+)$/.exec(p);
-    if (m) return new Response(JSON.stringify({ ...(SESS.find((s) => s.id === m![1]) ?? {}), ...(over.detail?.[m[1]] ?? {}) }), { status: 200 });
+    if (m) return new Response(JSON.stringify({ ...(SESS.find((s) => s.id === m![1]) ?? {}), last_active: iso(clock.t), ...(over.detail?.[m[1]] ?? {}) }), { status: 200 });   // a live agent: last_active moves
     return new Response("{}", { status: 200 });
   }) as unknown as typeof fetch;
   const gc = new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl });
@@ -229,10 +229,14 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     await gate.submit(W, undefined, "do something long");
     const before = w.calls.length;
     const r = await w.tool(d, W, "wait_for_reply").handler({});
-    expect(r.structured).toMatchObject({ complete: false, reply: "" });
+    expect(r.structured).toMatchObject({ complete: false, page: "" });
+    expect((r.structured as any).fetches).toBeLessThanOrEqual(3);                        // the transcript is read at most 3 times per wait
     expect(r.text).toMatch(/still working/);
     expect((r.structured as any).waited_ms).toBeLessThanOrEqual(15_000);
-    expect(w.calls.length - before).toBeLessThanOrEqual(Math.ceil(15_000 / POLL_MS) + 3);
+    const during = w.calls.slice(before);
+    expect(during.filter((c) => c.path.endsWith("/transcript")).length).toBeLessThanOrEqual(3);          // big reads: at most 3
+    expect(during.filter((c) => c.path.endsWith("/transcript")).every((c) => /[?&]tail=1(&|$)/.test(c.query ?? ""))).toBe(true);        // `tail` is compaction SEGMENTS in the API: always the last one, never 3 or 8 "messages"
+    expect(during.length).toBeLessThanOrEqual(Math.ceil(15_000 / POLL_MS) + 3 + 3);                       // cheap session reads every tick, plus the lookup and the 3 transcripts
   });
   it("max_seconds is clamped to 20 whatever the caller asks, and the tool schema refuses more", async () => {
     const w = world(); const { gate, d } = w.mk();
@@ -248,13 +252,13 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
   });
   it("a reply still growing at the deadline is returned as partial: still working, so far", async () => {
     let n = 0;
-    const w = world({ onSleep: (t) => { n++; w.transcripts["gc2-wisp-www"] = [asst(t - 100, "Working on it " + "step ".repeat(n))]; } });
+    const w = world({ detail: { "gc2-wisp-www": { activity: "working" } }, onSleep: (t) => { n++; w.transcripts["gc2-wisp-www"] = [asst(t - 100, "Working on it " + "step ".repeat(n))]; } });
     const { gate, d } = w.mk();
     await gate.submit(W, undefined, "go");
     const r = await w.tool(d, W, "wait_for_reply").handler({ max_seconds: 6 });
     expect(r.structured).toMatchObject({ complete: false });
     expect(r.text).toMatch(/still working\. So far/);
-    expect((r.structured as any).reply).toContain("Working on it");
+    expect((r.structured as any).page).toContain("Working on it");
   });
   it("an explicit marker from the send acknowledgement is honoured", async () => {
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "Reply after the marker.")] } });
@@ -275,10 +279,15 @@ describe("latest_reply and read_more: long replies in speakable pieces", () => {
     expect(first.text.length).toBeLessThanOrEqual(SPOKEN_MAX);
     expect(first.text).toContain("untrusted");
     expect(first.structured).toMatchObject({ found: true, done: false, offset: 0, untrusted: true });
-    expect((first.structured as any).reply.length).toBe(long.length);              // the full text is there
+    const fs0 = first.structured as any;
+    expect(fs0.reply).toBeUndefined();                                             // the whole reply is NOT re-sent on every call: only the page that was spoken
+    expect(fs0.page.length).toBeLessThanOrEqual(SPOKEN_MAX);
+    expect(fs0.total_chars).toBe(long.length);
+    expect(fs0.reply_id).toMatch(/^[0-9a-f]{12}$/);
     let offset = (first.structured as any).next_offset as number, pieces = [first.text], guard = 0;
     for (;;) {
-      const more = await w.tool(d, R, "read_more").handler({ offset });
+      const more = await w.tool(d, R, "read_more").handler({ offset, reply_id: fs0.reply_id });
+      expect((more.structured as any).reply).toBeUndefined();
       expect(more.text.length).toBeLessThanOrEqual(SPOKEN_MAX);
       if (/That was the end/.test(more.text)) break;
       pieces.push(more.text);

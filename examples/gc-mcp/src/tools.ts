@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { GcClient } from "./gc-client.js";
+import { TRANSCRIPT_MAX_BYTES, type GcClient } from "./gc-client.js";
 import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
-import { disambiguation, resolveSession, identifiers, labelOf, type SessionRef } from "./sessions.js";
+import { disambiguation, listPages, resolveSession, labelOf } from "./sessions.js";
 import { buildVoiceTools } from "./voice.js";
 import { buildBriefingTools } from "./briefing.js";
 import { readVerdict } from "./access.js";
@@ -22,6 +22,7 @@ export type { ToolResult };
 export interface Clock { now: () => number; sleep: (ms: number) => Promise<void> }
 export interface Deps {
   gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate;
+  ownerName?: string;           // GC_MCP_OWNER_NAME: how the owner is addressed in decisions ("your decision on ...") and whose mail counts as flagged; unset = nobody by name
   readDeny?: string[];          // sessions that may NOT be read (GC_MCP_READ_DENY_SESSIONS); unset = the write deny list, so nothing changes by default
   defaultSession?: string;      // GC_MCP_DEFAULT_SESSION: what "session" means when nobody says one (voice: nobody says session ids)
   markers?: SendMarkers;        // when each client last sent to each session, so wait_for_reply knows "since when"
@@ -72,16 +73,16 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       annotations: RO,
       handler: guard(async (a) => {
         const limit = a.limit ?? 5;
-        const r: any = await gc.get("/sessions", { state: a.state, limit: 200 });
-        const items: any[] = r.items ?? [];
+        const r = await listPages<any>(gc, "/sessions", { state: a.state });
+        const items = r.items;
         const by: Record<string, number> = {};
         for (const i of items) by[i.state] = (by[i.state] ?? 0) + 1;
         const recent = [...items].sort((x, y) => String(y.last_active).localeCompare(String(x.last_active))).slice(0, limit);
         const names = recent.map((i) => i.alias || i.template || i.id);
         const counts = Object.entries(by).map(([k, v]) => `${v} ${k}`).join(", ");
         return {
-          text: `${plural(r.total ?? items.length, "session")}: ${counts}. Most recent: ${names.join(", ")}.`,
-          structured: { total: r.total ?? items.length, by_state: by, recent: recent.map((i) => ({ id: i.id, name: i.alias || i.template, state: i.state, last_active: i.last_active, provider: i.provider })) },
+          text: `${r.truncated ? `${plural(r.total, "session")}, counted ${items.length} of them` : plural(r.total, "session")}: ${counts}. Most recent: ${names.join(", ")}.${r.partial ? " Some of the data was incomplete." : ""}`,
+          structured: { total: r.total, counted: items.length, truncated: r.truncated, partial: r.partial, partial_errors: r.partial_errors, next_cursor: r.next_cursor, by_state: by, recent: recent.map((i) => ({ id: i.id, name: i.alias || i.template, state: i.state, last_active: i.last_active, provider: i.provider })) },
         };
       }),
     },
@@ -100,7 +101,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const hit = res.hit;
         const v = readVerdict(d, who, hit);
         if (!v.ok) return { text: v.text, structured: v.structured };
-        const t: any = await gc.get(`/session/${encodeURIComponent(hit.id)}/transcript`, { format: "conversation", tail });
+        // The API's `tail` counts compaction SEGMENTS, not messages: ask for the last segment only and take the last N messages here.
+        const t: any = await gc.get(`/session/${encodeURIComponent(hit.id)}/transcript`, { format: "conversation", tail: 1 }, undefined, TRANSCRIPT_MAX_BYTES);
         const spoken = ((t.turns ?? []) as any[]).filter((x) => !/^\s*\[[A-Za-z_ -]{1,24}\]\s*$/.test(String(x.text ?? "")) && String(x.text ?? "").trim() !== "");
         const turns = spoken.slice(-tail).map((x) => ({ role: String(x.role).slice(0, 16), text: untrusted(x.text, 280), at: x.timestamp }));
         const text = turns.length
@@ -164,13 +166,14 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       inputShape: { since: z.string().max(8).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const since = toGoDuration(a.since ?? "30m");
-        const r: any = await gc.get("/events", { since, limit: 200 });
-        const items: any[] = r.items ?? [];
+        const r = await listPages<any>(gc, "/events", { since }, 3, 100);       // the API pages events at 100; up to 3 pages, and the REAL total is passed through
+        const items = r.items;
         const by: Record<string, number> = {};
         for (const e of items) by[e.type] = (by[e.type] ?? 0) + 1;
         const top = Object.entries(by).sort((x, y) => y[1] - x[1]).slice(0, 5);
-        const text = items.length ? `In the last ${a.since ?? "30m"}: ` + top.map(([k, v]) => `${v} ${k}`).join(", ") + "." : `Nothing new in the last ${a.since ?? "30m"}.`;
-        return { text, structured: { total: items.length, by_type: by } };
+        const scope = r.truncated ? `, from the newest ${items.length} of ${r.total} events` : "";
+        const text = items.length ? `In the last ${a.since ?? "30m"}${scope}: ` + top.map(([k, v]) => `${v} ${k}`).join(", ") + "." : `Nothing new in the last ${a.since ?? "30m"}.`;
+        return { text, structured: { total: r.total, counted: items.length, truncated: r.truncated, partial: r.partial, partial_errors: r.partial_errors, next_cursor: r.next_cursor, by_type: by } };
       }),
     },
     ...buildVoiceTools(d, who),

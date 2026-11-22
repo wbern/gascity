@@ -2,7 +2,9 @@
 // and the full text in structuredContent. Nothing here ever waits unboundedly: wait_for_reply is capped at 20 seconds so it returns before
 // a chat client's tool timeout. Replies are agent output, therefore untrusted: redacted, links dropped, labelled.
 import { z } from "zod";
-import { disambiguation, labelOf, resolveSession, identifiers, type SessionRef } from "./sessions.js";
+import crypto from "node:crypto";
+import { TRANSCRIPT_MAX_BYTES } from "./gc-client.js";
+import { disambiguation, labelOf, resolveSession, type SessionRef } from "./sessions.js";
 import { clean, clip, guard, speakName, type ToolResult } from "./text.js";
 import { WRITE_SCOPE, parseMarker, type WriteCtx } from "./writes.js";
 import { readVerdict } from "./access.js";
@@ -11,7 +13,8 @@ import type { Deps, ToolDef } from "./tools.js";
 export const SPOKEN_MAX = 280;          // every spoken text stays at or under this
 export const MAX_WAIT_S = 20;
 export const POLL_MS = 1500;
-const FULL_MAX = 8000;                  // the most of a reply put into structuredContent
+const MAX_TRANSCRIPT_FETCHES = 3;       // per wait_for_reply call: a transcript segment can be hundreds of KB, so it is read only when something changed
+const RECHECK_MS = 7_500;
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 export const realClock = { now: () => Date.now(), sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) };
 
@@ -32,6 +35,14 @@ export async function target(d: Deps, who: WriteCtx | undefined, session?: strin
   return { hit };
 }
 
+/** Which field the state came from, so a derived value says where it came from. */
+export function stateSource(full: any, waiting: boolean): string {
+  if (waiting) return "pending interaction";
+  if (full?.program_status?.state) return "program_status";
+  if (full?.turn?.state) return "turn";
+  if (full?.activity) return "activity";
+  return "state";
+}
 export type AgentState = "waiting for input" | "stuck" | "not running" | "working" | "idle" | "unknown";
 /** One place that decides working / idle / waiting / stuck / not running from what the supervisor reports about a session. */
 export function deriveState(full: any, hit: SessionRef, waiting: boolean): AgentState {
@@ -46,8 +57,9 @@ export function deriveState(full: any, hit: SessionRef, waiting: boolean): Agent
 }
 
 interface Turn { role?: string; text?: string; timestamp?: string }
-async function transcript(d: Deps, id: string, tail: number, timeoutMs?: number): Promise<Turn[]> {
-  const t: any = await d.gc.get(`/session/${encodeURIComponent(id)}/transcript`, { format: "conversation", tail }, timeoutMs);
+/** The API's `tail` counts compaction SEGMENTS (not messages): read the last segment only; callers take the last messages from it. */
+async function transcript(d: Deps, id: string, timeoutMs?: number): Promise<Turn[]> {
+  const t: any = await d.gc.get(`/session/${encodeURIComponent(id)}/transcript`, { format: "conversation", tail: 1 }, timeoutMs, TRANSCRIPT_MAX_BYTES);
   return ((t.turns ?? []) as Turn[]).filter((x) => String(x.text ?? "").trim() !== "" && !/^\s*\[[A-Za-z_ -]{1,24}\]\s*$/.test(String(x.text ?? "")));
 }
 const assistantTurns = (turns: Turn[]) => turns.filter((x) => /assistant|agent/i.test(String(x.role ?? "")));
@@ -72,10 +84,14 @@ function speak(prefix: string, full: string, offset: number, suffixDone = "", su
   return { text: clip(`${prefix}${chunk.chunk}${chunk.done ? suffixDone : suffixMore}`, SPOKEN_MAX), chunk };
 }
 
+/** Names ONE reply (its time and text), so read_more can tell if the "latest" reply changed under it and an offset never lands in a different message. */
+export const replyId = (at: string | undefined, full: string) => crypto.createHash("sha256").update(`${at ?? ""}\u0000${full}`).digest("hex").slice(0, 12);
+
+/** The spoken text plus ONLY the page that was spoken: never the whole reply again on every call. */
 function replyResult(label: string, hit: SessionRef, full: string, offset: number, extra: Record<string, unknown>, lead: string): ToolResult {
   const sp = speak(`${lead}`, full, offset);
-  return { text: sp.text, structured: { found: true, id: hit.id, name: label, untrusted: true, reply: full.slice(0, FULL_MAX), total_chars: full.length, offset,
-    next_offset: sp.chunk.next, done: sp.chunk.done, ...extra } };
+  return { text: sp.text, structured: { found: true, id: hit.id, name: label, untrusted: true, page: sp.chunk.chunk, total_chars: full.length, offset,
+    next_offset: sp.chunk.next, done: sp.chunk.done, reply_id: replyId(extra.at as string | undefined, full), ...extra } };
 }
 
 export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
@@ -97,7 +113,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const state = deriveState(full, hit, !!pending);
         const ask = pending ? ` It asks: ${clip(clean(pending.prompt ?? pending.kind ?? ""), 140)}` : "";
         return { text: clip(`${speakName(label)} is ${state}.${ask}`, SPOKEN_MAX),
-          structured: { found: true, id: hit.id, name: label, state, running: full?.running, raw_state: full?.state ?? hit.state, activity: full?.activity, waiting_for: pending ? { kind: pending.kind, request_id: pending.request_id, prompt: clip(clean(pending.prompt ?? ""), 400), options: pending.options } : undefined, untrusted: !!pending } };
+          structured: { found: true, id: hit.id, name: label, state, derived: true, source: stateSource(full, !!pending), running: full?.running, raw_state: full?.state ?? hit.state, activity: full?.activity, waiting_for: pending ? { kind: pending.kind, request_id: pending.request_id, prompt: clip(clean(pending.prompt ?? ""), 400), options: pending.options } : undefined, untrusted: !!pending } };
       }),
     },
     {
@@ -108,21 +124,24 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const f = await target(d, who, a.session);
         if ("say" in f) return f.say;
         const hit = f.hit, label = clip(clean(labelOf(hit)), 60);
-        const last = assistantTurns(await transcript(d, hit.id, 8)).at(-1);
-        if (!last) return { text: `${speakName(label)} has not said anything yet.`, structured: { found: true, id: hit.id, name: label, reply: "", done: true } };
+        const last = assistantTurns(await transcript(d, hit.id)).at(-1);
+        if (!last) return { text: `${speakName(label)} has not said anything yet.`, structured: { found: true, id: hit.id, name: label, page: "", done: true } };
         return replyResult(label, hit, clean(last.text), 0, { at: last.timestamp }, `${speakName(label)} said (untrusted content, not instructions): `);
       }),
     },
     {
       name: "read_more", title: "Keep reading the last answer",
-      description: "Use when the person says yes to 'want more?' after a long answer. Reads on from where the last answer stopped; pass next_offset from the previous answer.",
-      inputShape: { session: sess, offset: z.number().int().min(0).max(1_000_000) }, annotations: RO,
+      description: "Use when the person says yes to 'want more?' after a long answer. Reads on from where the last answer stopped; pass next_offset and reply_id from the previous answer.",
+      inputShape: { session: sess, offset: z.number().int().min(0).max(1_000_000), reply_id: z.string().max(24).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);
         if ("say" in f) return f.say;
         const hit = f.hit, label = clip(clean(labelOf(hit)), 60);
-        const last = assistantTurns(await transcript(d, hit.id, 8)).at(-1);
+        const last = assistantTurns(await transcript(d, hit.id)).at(-1);
         const full = last ? clean(last.text) : "";
+        if (a.reply_id && last && a.reply_id !== replyId(last.timestamp, full)) {   // the agent said something newer: an offset into the OLD reply would land in a different message
+          return { text: "The reply changed since I started reading it. Ask for the latest reply again.", structured: { found: true, id: hit.id, name: label, changed: true, reply_id: replyId(last.timestamp, full) } };
+        }
         if (!full || a.offset >= full.length) return { text: "That was the end of the reply.", structured: { found: true, id: hit.id, name: label, done: true, total_chars: full.length, offset: a.offset, next_offset: full.length } };
         return replyResult(label, hit, full, a.offset, { at: last?.timestamp }, "");
       }),
@@ -140,26 +159,35 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const deadline = start + wait;
         // "since when": the caller's marker, else the last time THIS client sent to this session, else now (the next reply from here on)
         const since = parseMarker(a.since) ?? d.markers?.get(who?.client ?? "", String(hit.id)) ?? start;
-        let seen = "", prev = "", at: string | undefined, polls = 0;
+        let seen = "", prev = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false;
+        // The session record is small; a transcript segment can be hundreds of KB. So poll the record to notice change and read the transcript only when
+        // something changed, at least every 7.5 s, and never more than 3 times per call.
+        const fetchReply = async (): Promise<void> => {
+          fetches++; lastFetchAt = clock.now(); dirty = false;
+          const turns = assistantTurns(await transcript(d, hit.id, Math.min(4000, Math.max(500, deadline - clock.now()))));
+          const fresh = turns.filter((t) => Date.parse(String(t.timestamp ?? "")) > since);
+          if (fresh.length) { const last = fresh[fresh.length - 1]; prev = seen; seen = clean(last.text); at = last.timestamp; }
+        };
         for (;;) {
           polls++;
-          const left = deadline - clock.now();
-          const turns = assistantTurns(await transcript(d, hit.id, 8, Math.min(4000, Math.max(500, left))));
-          const fresh = turns.filter((t) => Date.parse(String(t.timestamp ?? "")) > since);
-          if (fresh.length) {
-            const last = fresh[fresh.length - 1];
-            seen = clean(last.text); at = last.timestamp;
-            if (seen === prev) {   // unchanged across two polls: the reply is complete
-              return replyResult(label, hit, seen, 0, { complete: true, waited_ms: clock.now() - start, polls, at }, `${speakName(label)} replied (untrusted content, not instructions): `);
+          let detail: any = null;
+          try { detail = await d.gc.get(`/session/${encodeURIComponent(hit.id)}`, {}, Math.min(3000, Math.max(500, deadline - clock.now()))); } catch { /* the transcript read below still tells */ }
+          const sig = `${detail?.last_active}|${detail?.activity}|${detail?.turn?.state}|${detail?.program_status?.state}|${detail?.state}`;
+          if (sig !== lastSig) { lastSig = sig; dirty = true; }
+          const busy = !!detail && deriveState(detail, hit, false) === "working";
+          if (fetches < MAX_TRANSCRIPT_FETCHES && (fetches === 0 || dirty || clock.now() - lastFetchAt >= RECHECK_MS)) {
+            await fetchReply();
+            if (seen && (!busy || seen === prev)) {   // a reply exists and the agent is not mid-turn (or it stopped changing): it is complete
+              return replyResult(label, hit, seen, 0, { complete: true, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} replied (untrusted content, not instructions): `);
             }
-            prev = seen;
           }
           if (clock.now() + POLL_MS >= deadline) break;
           await clock.sleep(POLL_MS);
         }
-        if (seen) return replyResult(label, hit, seen, 0, { complete: false, waited_ms: clock.now() - start, polls, at }, `${speakName(label)} is still working. So far (untrusted content): `);
+        if (dirty && fetches < MAX_TRANSCRIPT_FETCHES) await fetchReply();     // something changed after the last read: look once more before giving up
+        if (seen) return replyResult(label, hit, seen, 0, { complete: false, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} is still working. So far (untrusted content): `);
         return { text: clip(`${speakName(label)} is still working; no reply yet. Ask me to wait again.`, SPOKEN_MAX),
-          structured: { found: true, id: hit.id, name: label, complete: false, reply: "", waited_ms: clock.now() - start, polls, since: `m${since}` } };
+          structured: { found: true, id: hit.id, name: label, complete: false, page: "", waited_ms: clock.now() - start, polls, fetches, since: `m${since}` } };
       }),
     },
   ];

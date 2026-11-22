@@ -96,16 +96,32 @@ describe("tools", () => {
   });
 
   it("whats_new groups events by type within the window", async () => {
-    const { t, calls } = tools({ "/events": F.events });
+    const { t, calls } = tools({ "/events": { ...F.events, next_cursor: undefined } });
     const r = await t.find((x) => x.name === "whats_new")!.handler({ since: "30m" });
     expect(r.text).toMatch(/2 bead\.closed/);
+    expect(r.structured).toMatchObject({ total: 3, counted: 3, truncated: false });
     expect(calls[0]).toContain("since=");
+  });
+  it("whats_new says 'N of M' when the API has more events than were read, and passes the real total through", async () => {
+    const { t } = tools({ "/events": { ...F.events, total: 1204, next_cursor: undefined } });
+    const r = await t.find((x) => x.name === "whats_new")!.handler({ since: "30m" });
+    expect(r.text).toMatch(/from the newest 3 of 1204 events/);
+    expect(r.structured).toMatchObject({ total: 1204, counted: 3, truncated: true });
+  });
+  it("list_sessions counts across pages and says how many it counted when there are more", async () => {
+    const { t } = tools({ "/sessions": F.sessions });
+    const r = await t.find((x) => x.name === "list_sessions")!.handler({});
+    expect(r.structured).toMatchObject({ total: 3, counted: 3, truncated: false });
+    const big = tools({ "/sessions": { total: 900, items: F.sessions.items } });
+    const r2 = await big.t.find((x) => x.name === "list_sessions")!.handler({});
+    expect(r2.text).toMatch(/900 sessions, counted 3 of them/);
+    expect(r2.structured).toMatchObject({ total: 900, counted: 3, truncated: true });
   });
 
   it("surfaces upstream failure as a speakable message, not a stack", async () => {
     const { t } = tools({ "/status": (() => { throw new GcError(503, "warming"); }) as never });
     const r = await t.find((x) => x.name === "city_status")!.handler({});
-    expect(r.text).toMatch(/unavailable|couldn't/i);
+    expect(r.text).toMatch(/not responding|couldn't/i);
   });
 });
 

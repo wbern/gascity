@@ -7,6 +7,7 @@ import { createApp, listen } from "./app.js";
 import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
 import { DEFAULT_WRITE_DENY, validatePatterns, type WriteConfig } from "./writes.js";
 import { validateExtraRedirects } from "./dcr.js";
+import { resolveCity } from "./city.js";
 import { resolveNetwork, resolveMcpPath, resolveIssuerPath } from "./netconfig.js";
 
 const port = Number(process.env.GC_MCP_PORT ?? 47811);
@@ -99,10 +100,16 @@ if (process.env.GC_MCP_READ_DENY_SESSIONS !== undefined) {
   console.error(`gc-mcp: read deny list: ${show(readDeny ?? writeList)}${readDeny === undefined ? " (same as write)" : ""}`);
 }
 
+const apiUrl = process.env.GC_MCP_API_URL ?? "http://127.0.0.1:8372";
+let city: string;
+try { city = await resolveCity(apiUrl, process.env.GC_MCP_CITY); } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+console.error(`gc-mcp: city: ${city}`);
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
-    gc: new GcClient({ baseUrl: process.env.GC_MCP_API_URL ?? "http://127.0.0.1:8372", city: process.env.GC_MCP_CITY ?? "gc2" }),
+    gc: new GcClient({ baseUrl: apiUrl, city }),
+    ownerName: (process.env.GC_MCP_OWNER_NAME ?? "").trim() || undefined,
     mailAgent: process.env.GC_MCP_MAIL_AGENT ?? "human",
     now: () => new Date(),
     peekAllow: list(process.env.GC_MCP_PEEK_ALLOW),
