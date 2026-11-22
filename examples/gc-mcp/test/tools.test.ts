@@ -164,3 +164,28 @@ describe("hardening", () => {
     expect(subj.length).toBeLessThanOrEqual(120);
   });
 });
+
+describe("the supervisor client is GET-only (review finding: nothing sits between gc-mcp and a mutating supervisor)", () => {
+  it("every tool, with every argument shape, only ever sends GET to the supervisor", async () => {
+    const seen: { method: string; url: string; redirect?: string }[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seen.push({ method: String(init?.method), url, redirect: init?.redirect });
+      const p = new URL(url).pathname;
+      const body = p.endsWith("/sessions") ? F.sessions : p.endsWith("/transcript") ? F.transcript : p.endsWith("/mail") ? F.mail : p.endsWith("/mail/count") ? { unread: 1 }
+        : p.endsWith("/beads/ready/summary") ? F.readySummary : p.includes("/bead/") ? F.bead : p.endsWith("/events") ? F.events : p.endsWith("/usage") ? F.usage : F.status;
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as unknown as typeof fetch;
+    const t = buildTools({ gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() });
+    const args: Record<string, unknown> = { city_status: {}, list_sessions: { limit: 3, state: "active" }, peek_session: { session: "gc-architect", tail: 2 },
+      mail_inbox: { limit: 2 }, ready_work: { limit: 2 }, bead_show: { id: "gcw-ti563" }, whats_new: { since: "1h" } };
+    for (const tool of t) await tool.handler(args[tool.name]);
+    expect(seen.length).toBeGreaterThan(7);
+    expect(new Set(seen.map((r) => r.method))).toEqual(new Set(["GET"]));
+    expect(seen.every((r) => r.redirect === "error")).toBe(true);
+    expect(seen.every((r) => r.url.startsWith("http://127.0.0.1:1/v0/city/gc2/"))).toBe(true);   // only the configured city, never another path
+  });
+  it("the client exposes no way to send another verb", () => {
+    const methods = Object.getOwnPropertyNames(GcClient.prototype).filter((n) => n !== "constructor");
+    expect(methods).toEqual(["get"]);
+  });
+});

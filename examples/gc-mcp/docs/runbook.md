@@ -99,41 +99,37 @@ only the MCP/OAuth paths and 404 everything else (including `/register`, `/healt
 `proxy_buffering off` for streamable HTTP; small body cap. `/authorize` and `/consent` stay open
 (they are opened from your phone) but rate limited.
 
-### 4.1 Public host and path (final naming: `https://mcp.gc.enmansbyra.se/gc3`)
+### 4.1 Public naming (final): one host per server, no path prefix
 
-William's final naming: host `mcp.gc.enmansbyra.se` (dedicated to Gas City MCP servers) and path `/gc3` for this city
-(`/gc2` is reserved for the Mac later and is not built). `GC_MCP_PUBLIC_URL=https://mcp.gc.enmansbyra.se/gc3` is the
-**OAuth issuer, the resource and the token audience**: one exact string. The MCP endpoint is that URL; the OAuth endpoints
-live under it (`/gc3/authorize`, `/gc3/token`, `/gc3/revoke`, `/gc3/consent`, and `/gc3/register` only if dynamic
-registration is switched on); metadata uses RFC 9728 / RFC 8414 **path insertion**
-(`/.well-known/oauth-protected-resource/gc3`, `/.well-known/oauth-authorization-server/gc3`). In this mode the app serves
-**nothing at the host root**. The prefix comes from the path of `GC_MCP_PUBLIC_URL`; it is validated at startup (plain
-segments only, no query/fragment/credentials, no dot segments, not a reserved OAuth/health root) and the process refuses
-to start otherwise. `GC_MCP_PATH` can override the MCP endpoint path (default: the issuer path, or `/mcp` when the issuer is
-the host root).
+Host `mcp.gc3.enmansbyra.se` (HostUp record name `mcp.gc3`), MCP endpoint exactly `/mcp`. The **issuer is the host root**
+(`https://mcp.gc3.enmansbyra.se`); the **resource and the RFC 8707 token audience are exactly
+`https://mcp.gc3.enmansbyra.se/mcp`** (the check is an exact string comparison, so `/`, `/mcp/` and look-alikes are refused).
+`GC_MCP_PUBLIC_URL=https://mcp.gc3.enmansbyra.se`; the endpoint path defaults to `/mcp`. A second city later gets its own
+host (`mcp.gc2...`): not built. nginx routes only the nine locations in `gas-city-infra` (`/mcp`, `/authorize`, `/token`,
+`/revoke`, `/consent`, the two protected-resource documents, the authorization-server document, and `/.well-known/openid-configuration`).
 
-**What Claude documents, and what it does not.** Claude's connector documentation says the protected-resource `resource`
-must equal the URL the user enters "including any path component"; that Claude finds the document through the
-`resource_metadata` pointer in the `401` or else probes `/.well-known/oauth-protected-resource/<your-mcp-path>`; and that
-the authorization server must serve its metadata "at its `/.well-known/` paths". A **path-bearing resource is documented. A
-path-bearing issuer is not mentioned either way.** RFC 8414 path insertion is standard and the reference client handles it
-(below), but Claude's own connector was not run.
+**Why no path prefix.** An independent review found, and I verified, two things. (1) The MCP SDK's all-in-one router builds its
+endpoints with `new URL('/authorize', base)`, which drops any path, and serves authorization-server metadata only at the host
+root; a path-bearing issuer therefore needs the SDK's handlers assembled by hand (I did that and proved it end to end in an
+earlier iteration; the app still supports it) but it leaves the host root unserved, which is the very place Claude falls back to.
+(2) Claude has **open, unresolved community reports** on path-based servers: anthropics/claude-ai-mcp **#878** (OAuth completes,
+then no authenticated call is ever sent, only for endpoint paths other than exactly `/mcp`; no maintainer response) and **#716**
+(when resource metadata 404s Claude falls back to `{issuer}/authorize`, ignoring the advertised endpoint; open, labelled `bug`).
+A root issuer with the endpoint at exactly `/mcp` avoids both: the fallback `/authorize` is the real endpoint, and the path is the
+one reported to work. These are third-party reports, not Anthropic statements.
 
-**What was verified (evidence: `docs/discovery-e2e.txt`).** The MCP TypeScript SDK's own OAuth client (the reference
-implementation of RFC 9728/8414 discovery) is given only `https://<host>:<port>/gc3` and finds everything itself through a
-real nginx container running the infra generator's config in front of the real app: `POST /gc3` answers 401 with
-`resource_metadata` at the path-inserted URL; the resource document's `resource` equals the typed URL; the authorization-server
-document is found at `/.well-known/oauth-authorization-server/gc3` and its `issuer` equals the URL it was found at; the full
-authorization-code flow with owner consent and PKCE completes; `tools/list` returns the 7 read-only tools; `tools/call`
-answers; `GET /gc3` is 405; every other path (`/`, `/authorize`, `/token`, `/mcp`, `/gc2`, root metadata...) is 404. It passes
-(29 checks) for `mcp.gc.enmansbyra.se` + `/gc3` and (29) for a nested `/mcp/gc3`. `scripts/discovery-e2e.mjs` reproduces it.
+**Documents served for robustness** (root-issuer mode): the protected-resource document at both `/.well-known/oauth-protected-resource/mcp`
+and the host-root `/.well-known/oauth-protected-resource` (same content), and the authorization-server document at both
+`/.well-known/oauth-authorization-server` and `/.well-known/openid-configuration` (same content, so a client probing OIDC discovery
+gets the same endpoints).
 
-**Fallback, tested.** If Claude's connector fails at discovery once deployed, use a dedicated host with the server at its
-root: `GC_MCP_PUBLIC_URL=https://gc3.mcp.gc.enmansbyra.se` (issuer at the host root, endpoints at `/authorize`, `/token`, ...,
-`GC_MCP_PATH=/`). The same end-to-end run passes for it (17 checks). It is a two-variable change in the infra role.
+**Verified** (evidence: `docs/discovery-e2e.txt`, reproduce with `scripts/discovery-e2e.mjs`): the MCP TypeScript SDK's own OAuth
+client, given only `https://mcp.gc3.enmansbyra.se:<port>/mcp`, discovers everything through a real nginx container running the
+infra generator's config in front of the real app and completes consent, tokens and a tool call; the root aliases answer; every
+other path (`/`, `/healthz`, `/register`, `/gc3`, `/gc2`, ...) is 404.
 
-**What was NOT verified.** Claude's own connector (it needs the live public URL), the TLS-terminating proxy and Claude's
-egress behaving in production as documented.
+**NOT verified.** Claude's own connector (it needs the live public URL), and the TLS-terminating proxy and Claude's egress behaving
+in production as documented. The reference client working is not proof that Claude works.
 
 **Still your call / unknown:** the exact subdomain; the nginx host's address, OS and who runs it;
 whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the GC3 LAN address
@@ -150,7 +146,6 @@ whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the
    GC_MCP_PUBLIC_URL=https://<hostname-on-443>
    GC_MCP_CITY=<city name from GET /v0/cities>
    GC_MCP_PEEK_ALLOW=mayor,gc-architect      # optional but recommended
-   # GC_MCP_PUBLIC_URL above is the issuer URL and may carry the path (https://mcp.gc.enmansbyra.se/gc3)
    # behind your LAN nginx (section 4):
    GC_MCP_BIND_HOST=<GC3 private IP>
    GC_MCP_PEER_ALLOW=<nginx host IP>

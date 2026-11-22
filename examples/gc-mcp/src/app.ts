@@ -132,6 +132,12 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const prm = { resource: resource.href, authorization_servers: [issuerStr], scopes_supported: [SCOPE], resource_name: "Gas City (read-only)" };
   app.use(`/.well-known/oauth-protected-resource${mcpPath === "/" ? "" : mcpPath}`, metadataHandler(prm));
   app.use(`/.well-known/oauth-authorization-server${issuerPath}`, metadataHandler(asMeta));
+  if (issuerPath === "") {
+    // Root-issuer mode: clients that fall back to the host root (Claude has open reports of this, e.g. anthropics/claude-ai-mcp #716)
+    // must find the same documents there, and the OIDC discovery path is answered with the same metadata.
+    if (mcpPath !== "/") app.use("/.well-known/oauth-protected-resource", metadataHandler(prm));
+    app.use("/.well-known/openid-configuration", metadataHandler(asMeta));
+  }
   app.use(oauthPath("authorize"), authorizationHandler({ provider, rateLimit: false }));
   app.use(oauthPath("token"), tokenHandler({ provider, rateLimit: false }));
   app.use(oauthPath("revoke"), revocationHandler({ provider, rateLimit: false }));

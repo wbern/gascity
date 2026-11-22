@@ -149,6 +149,32 @@ describe("authorization-code + PKCE flow", () => {
   });
 });
 
+describe("root issuer with the MCP endpoint at exactly /mcp (final shape: one host per server)", () => {
+  it("serves the protected-resource document at BOTH the path-inserted URL and the host root, with the same content", async () => {
+    const s = await boot();
+    const a = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp`)).json()) as any;
+    const b = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource`)).json()) as any;
+    expect(a.resource).toBe(`${s.base}/mcp`);
+    expect(b).toEqual(a);                                   // clients that fall back to the root see the same document
+    expect(a.authorization_servers).toEqual([`${s.base}/`]);
+  });
+  it("serves the authorization-server document at the RFC 8414 path and at the OIDC discovery path, identically", async () => {
+    const s = await boot();
+    const a = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server`)).json()) as any;
+    const b = (await (await fetch(`${s.base}/.well-known/openid-configuration`)).json()) as any;
+    expect(b).toEqual(a);
+    expect(a.issuer).toBe(`${s.base}/`);
+    expect(a.authorization_endpoint).toBe(`${s.base}/authorize`);   // so a client that falls back to {issuer}/authorize lands on the real endpoint
+    expect(a.token_endpoint).toBe(`${s.base}/token`);
+  });
+  it("audience is exactly the /mcp URL: the host root and look-alikes are refused", async () => {
+    const s = await boot();
+    for (const r of [`${s.base}/`, `${s.base}`, `${s.base}/mcp/`, `${s.base}/mcp2`, "https://evil.example/mcp"]) {
+      expect((await s.authorize(CID, "x".repeat(43), r)).status, r).toBe(400);
+    }
+  });
+});
+
 describe("MCP endpoint under a path prefix (issuer stays at the host root)", () => {
   const TEXT = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 
