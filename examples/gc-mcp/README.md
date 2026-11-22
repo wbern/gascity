@@ -41,11 +41,12 @@ sent). Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (
 sent or refused, is audited (client name, session, intent, length, an 80-character redacted preview, outcome); `WRITES_DISABLED` in the state dir turns writes off for the next
 request while reads keep working. `confirmWrite()` in `src/writes.ts` is the single place a later second factor (TOTP/push) slots in; it allows today.
 
-Voice-first read experience: `briefing` answers "how are my agents doing?" in ONE call as 3 to 5 short spoken sentences (400 characters at most): what needs the owner FIRST (open human
-decisions, agents waiting for input, stuck work), how many agents are working, idle or waiting, the busiest by what they work on (titles, never ids), unread mail, and what changed since the
-last briefing (per client, in memory; the first call looks back 12 hours). A source the supervisor cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers
-"what is steve working on?" in a sentence or two. The server sends `instructions` in the initialize result written for a spoken assistant, and every tool's title and description is plain
-spoken intent ("Ask how the agents are doing", "Say something to an agent").
+Voice-first read experience: `briefing` answers "how are my agents doing?" in ONE call as a calm morning briefing, at most 400 characters: what needs the owner FIRST (open human
+decisions described by their question, never a raw gate title, newest first, with "many look stale, the oldest is N days old" past ten; agents waiting for input; stuck work; mail from the
+mayor or marked for the owner), then who is working and on what (an agent in a turn, or holding a bead, is working; "nobody is working right now" when so), then what finished (real tasks by
+title, never automation), then mail only if useful (a pile of notices is "nothing flagged for you", never a count). Ids, hashes and agent paths are never spoken. A source the supervisor
+cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers "what is steve working on?" in a sentence or two. The server sends `instructions` in the
+initialize result written for a spoken assistant, and every tool's title and description is plain spoken intent ("Ask how the agents are doing", "Say something to an agent").
 
 Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
 A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match

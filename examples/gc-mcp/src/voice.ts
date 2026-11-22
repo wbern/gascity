@@ -45,7 +45,7 @@ export function deriveState(full: any, hit: SessionRef, waiting: boolean): Agent
   if (waiting || ps === "blocked") return "waiting for input";
   if (/strand|fail|error|crash|stuck|quarantin|dead/i.test(raw)) return "stuck";
   if (full?.running === false || hit.running === false || /asleep|closed|stopp|suspend|creating|drain/i.test(raw)) return "not running";
-  if (ps === "working" || full?.turn?.state === "running" || /work|busy|think|tool/i.test(String(full?.activity ?? ""))) return "working";
+  if (ps === "working" || full?.turn?.state === "running" || /work|busy|think|tool|turn/i.test(String(full?.activity ?? ""))) return "working";
   if (ps === "idle" || ps === "done" || ps === "error" || full?.turn?.state === "ended" || /idle|wait|ready/i.test(String(full?.activity ?? "")) || /active/i.test(raw)) return "idle";
   return "unknown";
 }

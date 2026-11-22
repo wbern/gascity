@@ -12,19 +12,21 @@ const T0 = 1_800_000_000_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 const R = { client: "ChatGPT (owner client)", scopes: ["gc:read"] };
 
-interface Fix { status?: any; sessions?: any[]; pending?: any[]; gates?: any[]; beads?: Record<string, string>; events?: any[]; detail?: Record<string, any>; fail?: string[]; seen?: { path: string; query: Record<string, string> }[] }
+interface Fix { status?: any; sessions?: any[]; pending?: any[]; gates?: any[]; beads?: Record<string, string>; events?: any[]; detail?: Record<string, any>; mail?: { items: any[]; total?: number }; inprogress?: any[]; fail?: string[]; seen?: { path: string; query: Record<string, string> }[] }
 const S = (id: string, over: any = {}) => ({ id, state: "active", running: true, last_active: iso(T0 - 60_000), ...over });
 function city(f: Fix = {}) {
   const seen: { path: string; query: Record<string, string> }[] = f.seen ?? [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     const u = new URL(url), p = u.pathname.replace(/^\/v0\/city\/[^/]+/, ""), q = Object.fromEntries(u.searchParams);
     seen.push({ path: p, query: q });
-    const key = p === "/status" ? "status" : p === "/sessions" ? "sessions" : p === "/pending" ? "pending" : p === "/beads" ? "gates" : p === "/events" ? "events" : p.startsWith("/bead/") ? "beads" : p.startsWith("/session/") ? "detail" : "other";
+    const key = p === "/status" ? "status" : p === "/sessions" ? "sessions" : p === "/pending" ? "pending" : p === "/beads" ? (q.type === "gate" ? "gates" : "inprogress") : p === "/events" ? "events" : p === "/mail" ? "mail" : p.startsWith("/bead/") ? "beads" : p.startsWith("/session/") ? "detail" : "other";
     if (f.fail?.includes(key)) return new Response(JSON.stringify({ detail: "down" }), { status: 503 });
     if (key === "status") return new Response(JSON.stringify(f.status ?? { name: "gc3", agents: { running: 8, total: 10, quarantined: 0 }, work: { in_progress: 3, ready: 5 }, mail: { unread: 3 } }), { status: 200 });
     if (key === "sessions") return new Response(JSON.stringify({ total: (f.sessions ?? []).length, items: f.sessions ?? [] }), { status: 200 });
     if (key === "pending") return new Response(JSON.stringify({ items: f.pending ?? [], total: (f.pending ?? []).length }), { status: 200 });
     if (key === "gates") return new Response(JSON.stringify({ items: f.gates ?? [], total: (f.gates ?? []).length }), { status: 200 });
+    if (key === "inprogress") return new Response(JSON.stringify({ items: f.inprogress ?? [], total: (f.inprogress ?? []).length }), { status: 200 });
+    if (key === "mail") return new Response(JSON.stringify({ items: f.mail?.items ?? [], total: f.mail?.total ?? (f.mail?.items ?? []).length }), { status: 200 });
     if (key === "events") return new Response(JSON.stringify({ items: f.events ?? [], total: (f.events ?? []).length }), { status: 200 });
     if (key === "beads") { const id = decodeURIComponent(p.slice("/bead/".length)); return f.beads?.[id] ? new Response(JSON.stringify({ id, title: f.beads[id], status: "in_progress" }), { status: 200 }) : new Response("{}", { status: 404 }); }
     if (key === "detail") { const m = /^\/session\/([^/]+)(\/pending)?$/.exec(p); if (m?.[2]) return new Response(JSON.stringify({ pending: null, supported: true }), { status: 200 }); const s = (f.sessions ?? []).find((x) => x.id === m?.[1]); return new Response(JSON.stringify({ ...(s ?? {}), ...(f.detail?.[m?.[1] ?? ""] ?? {}) }), { status: 200 }); }
@@ -36,6 +38,7 @@ function city(f: Fix = {}) {
   const tool = (name: string, who = R) => buildTools(deps, who).find((t) => t.name === name)!;
   return { deps, clock, seen, tool, brief: (who = R) => tool("briefing", who).handler({}) };
 }
+const closedEv = (title: string, type = "task") => ({ type: "bead.closed", payload: { bead: { title, issue_type: type, status: "closed" } } });
 const FIXTURE: Fix = {
   sessions: [
     S("gc2-wisp-s1", { template: "crm/steve", activity: "working", active_bead: "gcw-a111", last_active: iso(T0 - 10_000) }),
@@ -49,41 +52,48 @@ const FIXTURE: Fix = {
   ],
   pending: [{ kind: "question", request_id: "q-1", session_id: "gc2-wisp-q1" }],
   gates: [
-    { id: "gcw-g001", title: "Pick the database for gcw-ti563", await_type: "human", status: "open", issue_type: "gate" },
-    { id: "gcw-g002", title: "Wait for CI on PR 12", await_type: "gh:run", status: "open", issue_type: "gate" },
-    { id: "gcw-g003", title: "Approve the production deploy", await_type: "human", status: "open", issue_type: "gate" },
+    { id: "gcw-g001", title: "Gate: Pick the database for gcw-ti563", await_type: "human", status: "open", issue_type: "gate", created_at: iso(T0 - 3_600_000) },
+    { id: "gcw-g002", title: "Wait for CI on PR 12", await_type: "gh:run", status: "open", issue_type: "gate", created_at: iso(T0 - 7_200_000) },
+    { id: "gcw-g003", title: "Approve the production deploy", await_type: "human", status: "open", issue_type: "gate", created_at: iso(T0 - 7_200_000) },
   ],
   beads: { "gcw-a111": "Fix the login redirect (gcw-a111)", "gci-b222": "Renew the certificate for mcp.gc3", "gcw-c333": "Write the quarterly plan" },
   status: { name: "gc3", agents: { running: 7, total: 9, quarantined: 1 }, work: { in_progress: 3, ready: 5 }, mail: { unread: 3 } },
-  events: [{ type: "bead.closed" }, { type: "bead.closed" }, { type: "bead.created" }, { type: "session.woke" }, { type: "mail.sent" }],
+  mail: { items: [{ from: "gc-architect", subject: "Re: Assigned thing", created_at: iso(T0) }, { from: "devops", subject: "FYI done", created_at: iso(T0) }, { from: "crm/steve", subject: "hello", created_at: iso(T0) }], total: 3 },
+  events: [closedEv("Fix the flaky login test"), closedEv("Update the pricing page"), closedEv("order:gc3-merged-pr-open-bead"), closedEv("crm/gastown.ux-reviewer-2")],
 };
 const sentences = (t: string) => t.split(/(?<=[.!?])\s+/).filter(Boolean);
 const ID_LIKE = /\b[a-z0-9]+-wisp-[a-z0-9]+\b|\b(?:gc[a-z0-9]{0,3}|[a-z]{2,4})-(?=[a-z0-9]*\d)[a-z0-9]{4,12}\b|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i;
 
+const CALM: Fix = { ...FIXTURE, pending: [], sessions: FIXTURE.sessions!.filter((s) => s.state !== "stranded" && s.id !== "gc2-wisp-q1"), status: { ...FIXTURE.status, agents: { running: 7, total: 9, quarantined: 0 } } };
+
 describe("briefing: how are my agents doing, in one call", () => {
-  it("counts working, idle and waiting; names the busiest by what they work on; says what needs the owner FIRST", async () => {
-    const c = city(FIXTURE);
-    const r = await c.brief();
-    expect(r.structured).toMatchObject({ counts: { working: 3, idle: 2, waiting: 1, stuck: 1, not_running: 1 } });
+  it("says what needs the owner first, then who is working and on what, then what finished, then mail", async () => {
+    const r = await city(CALM).brief();
+    expect(r.structured).toMatchObject({ counts: { working: 3, idle: 2, waiting: 0, stuck: 0, not_running: 1 } });
     expect(r.text.startsWith("Needs you:")).toBe(true);
-    expect(r.text).toMatch(/3 working, 2 idle/);
-    expect(r.text).toMatch(/1 waiting/);
+    expect(r.text).toMatch(/3 agents are working: crm steve on Fix the login redirect, devops on Renew the certificate for mcp.gc3 and mayor on Write the quarterly plan\./);
+    expect(r.text).toMatch(/In the last 12 hours, 2 tasks finished, including Fix the flaky login test and Update the pricing page\./);
     expect(r.text).toContain("3 unread mail");
-    // busiest: most recently active first, by bead TITLE, names spoken naturally
-    expect(r.text).toMatch(/crm steve.*login redirect/);
-    expect(r.text).toMatch(/devops.*certificate/);
-    expect(r.text.indexOf("login redirect")).toBeLessThan(r.text.indexOf("certificate"));
+    const order = ["Needs you:", "agents are working", "tasks finished", "unread mail"].map((k) => r.text.indexOf(k));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(r.text).not.toMatch(/\bidle\b/);                      // a count of idle agents is not news
     expect((r.structured as any).busiest.map((b: any) => b.name)).toEqual(["crm steve", "devops", "mayor"]);
   });
-  it("attention items are ordered: decisions for the owner, then agents waiting for input, then failed or stuck work", async () => {
-    const r = await city(FIXTURE).brief();
+  it("attention items are ordered: decisions for the owner, then agents waiting for input, then failed or stuck work, then mail for the owner", async () => {
+    const f = { ...FIXTURE, mail: { items: [{ from: "mayor", subject: "Plan review needs you", created_at: iso(T0) }, { from: "human", subject: "Reminder — human gate still open: crm-r296os" }], total: 2 } };
+    const r = await city(f).brief();
     const att = (r.structured as any).attention as { kind: string; count: number }[];
-    expect(att.map((a) => a.kind)).toEqual(["decision", "waiting_for_input", "stuck"]);
+    expect(att.map((a) => a.kind)).toEqual(["decision", "waiting_for_input", "stuck", "mail"]);
     expect(att[0].count).toBe(2);                                  // only the HUMAN gates; the CI gate is not the owner's
-    expect(r.text).toMatch(/Needs you: 2 decisions/);
-    expect(r.text.indexOf("decision")).toBeLessThan(r.text.indexOf("waiting for input"));
-    expect(r.text).toMatch(/Pick the database/);
-    expect(r.text).not.toMatch(/Wait for CI/);
+    expect(att[3].count).toBe(1);                                  // the system's own reminder is not mail for the owner
+    expect(r.text).toMatch(/Needs you: 2 decisions, newest first: /);
+    const t = r.text;
+    expect([t.indexOf("decision"), t.indexOf("waiting for input"), t.indexOf("stuck"), t.indexOf("mail about")].every((i, k, a) => i >= 0 && (k === 0 || i > a[k - 1]))).toBe(true);
+    expect(t).toMatch(/Pick the database/);
+    expect(t).not.toMatch(/Wait for CI/);
+    expect(t).toMatch(/mail about Plan review needs you from mayor/);
+    expect(t).not.toMatch(/Reminder/);
   });
   it("when nothing needs the owner it says so, plainly", async () => {
     const c = city({ ...FIXTURE, pending: [], gates: [], sessions: FIXTURE.sessions!.filter((s) => s.state !== "stranded"), status: { ...FIXTURE.status, agents: { running: 7, total: 9, quarantined: 0 } } });
@@ -99,31 +109,31 @@ describe("briefing: how are my agents doing, in one call", () => {
     expect(sentences(r.text).length).toBeLessThanOrEqual(5);
     const many = Array.from({ length: 60 }, (_, i) => S(`gc2-wisp-b${i}`, { template: `rig-with-a-long-name/agent-number-${i}`, activity: "working", active_bead: `gcw-z${i}00`, last_active: iso(T0 - i * 1000) }));
     const beads = Object.fromEntries(many.map((m, i) => [m.active_bead, `A very long title about task number ${i} that goes on and on and on and on and on and on and on`]));
-    const gates = Array.from({ length: 30 }, (_, i) => ({ id: `gcw-h${i}00`, title: `Decision number ${i} with an unreasonably long description of what is being asked of you today`, await_type: "human", status: "open" }));
+    const gates = Array.from({ length: 30 }, (_, i) => ({ id: `gcw-h${i}00`, title: `Decision number ${i} with an unreasonably long description of what is being asked of you today`, await_type: "human", status: "open", created_at: iso(T0 - i * 60_000) }));
     const big = await city({ ...FIXTURE, sessions: many, beads, gates, pending: many.slice(0, 10).map((m) => ({ kind: "question", request_id: "x", session_id: m.id })) }).brief();
     expect(big.text.length).toBeLessThanOrEqual(400);
     expect(sentences(big.text).length).toBeLessThanOrEqual(5);
     expect(big.text.startsWith("Needs you:")).toBe(true);           // attention survives truncation
   });
-  it("never reads out session ids, bead ids or uuids, and speaks names naturally", async () => {
-    const c = city({ ...FIXTURE, sessions: [...FIXTURE.sessions!, S("gc2-wisp-n1", { activity: "working", active_bead: "gcw-d444" })], beads: { ...FIXTURE.beads, "gcw-d444": "Do 3f2a9c1e-1b2c-4d5e-8f90-a1b2c3d4e5f6 and gcw-ti563 things" } });
+  it("never reads out session ids, bead ids, uuids, hashes or raw agent paths, and speaks names naturally", async () => {
+    const c = city({ ...FIXTURE, sessions: [...FIXTURE.sessions!, S("gc2-wisp-n1", { activity: "working", active_bead: "gcw-d444" }), S("gc2-wisp-h1", { alias: "slay-chat-v9-1bb9b9ad248e802cb4674560cb3840aea007f749", activity: "in-turn" })], beads: { ...FIXTURE.beads, "gcw-d444": "Do 3f2a9c1e-1b2c-4d5e-8f90-a1b2c3d4e5f6 and gcw-ti563 things at bf8c4fa" } });
     const r = await c.brief();
     expect(r.text).not.toMatch(ID_LIKE);
-    expect(r.text).not.toMatch(/gc2-wisp|gcw-|gci-|\//);
+    expect(r.text).not.toMatch(/gc2-wisp|gcw-|gci-|\/|[0-9a-f]{10,}|bf8c4fa|…/);
     expect(r.text).toContain("crm steve");
     expect(r.text).not.toContain("crm/steve");
-    expect(r.text).toMatch(/an unnamed agent|unnamed/);              // a session with no name is not announced by its id
   });
-  it("what changed since the last briefing: first call looks back 12 hours, later calls look back to the previous briefing, per client", async () => {
+  it("what changed: first call looks back 12 hours, later calls back to the previous briefing, per client; closed beads are asked for by type", async () => {
     const c = city(FIXTURE);
     await c.brief();
-    expect(c.seen.find((s) => s.path === "/events")!.query.since).toBe("12h");
+    const first = c.seen.find((s) => s.path === "/events")!;
+    expect(first.query.since).toBe("12h");
+    expect(first.query.type).toBe("bead.closed");
     c.seen.length = 0;
     c.clock.t += 2 * 3_600_000;
     const second = await c.brief();
     expect(c.seen.find((s) => s.path === "/events")!.query.since).toBe("120m");
-    expect(second.text).toMatch(/Since your last briefing 2 hours ago/);
-    expect(second.text).toMatch(/2 beads closed/);
+    expect(second.text).toMatch(/Since your last briefing 2 hours ago, 2 tasks finished/);
     c.seen.length = 0;
     await c.brief({ client: "Claude (owner client)", scopes: ["gc:read"] });      // another client has its own memory
     expect(c.seen.find((s) => s.path === "/events")!.query.since).toBe("12h");
@@ -133,12 +143,11 @@ describe("briefing: how are my agents doing, in one call", () => {
     const r = await city({ ...FIXTURE, fail: ["gates"] }).brief();
     expect(r.text).toMatch(/couldn't read the decisions/);
     expect((r.structured as any).unavailable).toEqual(["decisions"]);
-    expect(r.text).toMatch(/3 working/);                                   // sessions still counted
+    expect(r.text).toMatch(/3 agents are working/);                          // sessions still said
     expect(r.text).not.toMatch(/Pick the database/);                         // and no decision is made up
     const two = await city({ ...FIXTURE, fail: ["sessions", "events"] }).brief();
-    expect((two.structured as any).unavailable.sort()).toEqual(["recent changes", "sessions"]);
+    expect((two.structured as any).unavailable).toEqual(["sessions", "recent changes"]);
     expect(two.text).toMatch(/couldn't read the sessions and the recent changes/);
-    expect(two.text).toContain("3 unread mail");                           // status still answers
     expect(two.text.length).toBeLessThanOrEqual(400);
     const none = await city({ fail: ["status", "sessions", "pending", "gates", "events"] }).brief();
     expect(none.text.length).toBeLessThanOrEqual(400);
@@ -149,6 +158,91 @@ describe("briefing: how are my agents doing, in one call", () => {
     const t = city(FIXTURE).tool("briefing");
     expect((t.annotations as any).readOnlyHint).toBe(true);
     for (const shape of Object.values(t.inputShape)) expect((shape as any).safeParse(undefined).success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- today's noisy shape from the LIVE supervisor (49 identical "Gate: human", 3016 unread, closed-bead noise)
+describe("briefing on a noisy real-world city: calm, not alarming", () => {
+  const day = 86_400_000;
+  const reasons = ["Branch temp/listing-inventory-flash-s4 (PR #2759) is checked out in live attached tmux session list", "UX review needs the admin_faser Statsig gate open for the Demo AB tenant so Admin shows Affärssteg",
+    "Bead already satisfied on origin/main; polecats cannot close work beads. Close it"];
+  const noisyGates = [
+    ...Array.from({ length: 46 }, (_, i) => ({ id: `crm-g${i}xxxx`, title: "Gate: human", await_type: "human", status: "open", created_at: iso(T0 - 600_000 - (i % 3) * 60_000 - i * day / 4), description: `Ad-hoc gate blocking crm-b${i}yyyy\n\nReason: ${reasons[i % 3]}` })),
+    { id: "crm-gz1", title: "Gate: William decision on verified-phone permit boundary", await_type: "human", status: "open", created_at: iso(T0 - 5_000), description: "" },
+    { id: "crm-gz2", title: "Operational preview admission for PR2237", await_type: "human", status: "open", created_at: iso(T0 - 9_000), description: "Decision needed: approve the preview for the pricing change" },
+    { id: "crm-gz3", title: "Gate: human", await_type: "human", status: "open", created_at: iso(T0 - 99 * day), description: "no reason line at all" },
+    { id: "crm-gz4", title: "Gate: gh:run 40926139417", await_type: "gh:run", status: "open", created_at: iso(T0 - 1_000) },
+  ];
+  const noisyMail = { items: Array.from({ length: 50 }, () => ({ from: "human", subject: "Reminder — human gate still open: crm-r296os" })), total: 3016 };
+  const noisyEvents = [...Array.from({ length: 90 }, (_, i) => closedEv(`order:gc3-job-${i}`)), ...Array.from({ length: 5 }, () => closedEv("crm/gastown.ux-reviewer-2")), closedEv("Align contact detail groups and comments"), closedEv("Fix the flaky login test"), closedEv("Update the pricing page"),
+    closedEv("sling-crm-fzws1h"), closedEv("Judge every segment against the ADRs", "step"), closedEv("orphan-sweep: reset 1 orphaned beads"), closedEv("mol-polecat-work cleanup step")];
+  const noisy: Fix = { ...FIXTURE, gates: noisyGates, mail: noisyMail, events: noisyEvents, pending: [], sessions: FIXTURE.sessions!.filter((s) => s.state !== "stranded"), status: { name: "gc2", agents: { running: 22, total: 188, quarantined: 0 }, work: { in_progress: 97, ready: 1394 }, mail: { unread: 3016 } } };
+
+  it("never reads a raw gate title: each decision is described by its question, deduplicated, newest first, at most two named", async () => {
+    const r = await city(noisy).brief();
+    expect(r.text).not.toMatch(/Gate:|Gate human|gate: human/i);
+    expect(r.text).not.toMatch(/Ad-hoc|blocking|crm-/);
+    expect(r.text).toMatch(/Needs you: 49 open decisions, but many look stale: the oldest is 99 days old\. Newest: /);
+    const newest = /Newest: ([^.]*)\./.exec(r.text)![1].split("; ");
+    expect(newest.length).toBe(2);
+    expect(newest[0]).toMatch(/^your decision on verified phone permit boundary/i);       // the newest gate has a real title: used (Gate: and William removed)
+    expect(newest[1]).toMatch(/approve the preview/);                                          // an explicit "Decision needed:" line beats the title
+    expect(new Set(newest).size).toBe(2);
+    expect((r.structured as any).decisions).toMatchObject({ open: 49, stale: true });
+  });
+  it("describes a generic 'Gate: human' by its Reason line, and falls back to the blocked bead's title", async () => {
+    const only = (gates: any[], beads: Record<string, string> = {}) => city({ ...noisy, gates, beads: { ...noisy.beads, ...beads } }).brief();
+    const a = await only(noisyGates.filter((g) => String(g.id).startsWith("crm-g") && g.id === "crm-g0xxxx"));
+    expect(a.text).toMatch(/Needs you: 1 decision, newest first: Branch temp listing inventory flash s4 is checked out/);
+    expect(a.text).not.toMatch(/stale/);
+    const b = await only([{ id: "g1", title: "Gate: human", await_type: "human", status: "open", created_at: iso(T0), description: "Ad-hoc gate blocking crm-qq1zz" }], { "crm-qq1zz": "Ship the pricing page" });
+    expect(b.text).toMatch(/the work on Ship the pricing page/);
+  });
+  it("the stale warning appears only past ten, with the age of the OLDEST; ten or fewer are just counted", async () => {
+    const some = (n: number) => noisyGates.slice(0, n).map((g, i) => ({ ...g, created_at: iso(T0 - i * 3_600_000) }));
+    const ten = await city({ ...noisy, gates: some(10) }).brief();
+    expect(ten.text).toMatch(/Needs you: 10 decisions, newest first:/);
+    expect(ten.text).not.toMatch(/stale/);
+    const eleven = await city({ ...noisy, gates: some(11) }).brief();
+    expect(eleven.text).toMatch(/11 open decisions, but many look stale: the oldest is 10 hours old/);
+  });
+  it("does not headline a pile of notices: no number, and nothing 'flagged' from the system's own reminders", async () => {
+    const r = await city(noisy).brief();
+    expect(r.text).not.toMatch(/3016|3,016|unread mail/);
+    expect((r.structured as any).mail).toMatchObject({ unread: 3016, flagged: 0 });
+    const quiet = await city({ ...noisy, gates: [], events: [], sessions: [S("gc2-wisp-w1", { alias: "claude-william", activity: "idle" })] }).brief();
+    expect(quiet.text).toMatch(/A lot of unread notices, nothing flagged for you\./);
+  });
+  it("says 'N tasks finished' counting only real tasks, naming at most two by title, never automation or agent identities", async () => {
+    const r = await city(noisy).brief();
+    expect(r.text).toMatch(/In the last 12 hours, 3 tasks finished, including Align contact detail groups and comments/);   // the count is real tasks only; how many get named depends on the 400-character budget
+    expect(r.text).not.toMatch(/order:|sling|ux.?reviewer|195|other change/);
+    const roomy = await city({ ...CALM, events: noisyEvents }).brief();                      // with room, two are named
+    expect(roomy.text).toMatch(/3 tasks finished, including Align contact detail groups and comments and Fix the flaky login test\./);
+    const none = await city({ ...noisy, events: [closedEv("order:x"), closedEv("crm/gastown.furiosa")] }).brief();
+    expect(none.text).toMatch(/nothing finished/);
+  });
+  it("an agent in a turn, or holding a bead, is working, never idle; and 'nobody' is said plainly", async () => {
+    const holds = await city({ ...noisy, sessions: [S("gc2-wisp-a1", { alias: "crm/steve", activity: "idle", active_bead: "gcw-a111" }), S("gc2-wisp-a2", { alias: "gc-architect", activity: "in-turn" }),
+      S("gc2-wisp-a3", { alias: "devops", activity: "idle" }), S("gc2-wisp-a4", { alias: "marketer" })], inprogress: [{ assignee: "devops", title: "Renew the certificate", updated_at: iso(T0) }] }).brief();
+    expect(holds.text).toMatch(/3 agents are working: crm steve on Fix the login redirect.*devops on Renew the certificate|3 agents are working: devops on Renew the certificate.*crm steve on Fix the login redirect/);
+    expect((holds.structured as any).counts).toMatchObject({ working: 3, idle: 1 });
+    const nobody = await city({ ...noisy, sessions: [S("gc2-wisp-a3", { alias: "devops", activity: "idle" }), S("gc2-wisp-a4", { alias: "marketer" })] }).brief();
+    expect(nobody.text).toContain("Nobody is working right now.");
+  });
+  it("stays within 400 characters, in the order needs, working, finished, with no ellipsis characters and no ids", async () => {
+    const r = await city(noisy).brief();
+    expect(r.text.length).toBeLessThanOrEqual(400);
+    expect(r.text).not.toContain("…");
+    expect(r.text).not.toMatch(ID_LIKE);
+    expect(sentences(r.text).length).toBeLessThanOrEqual(5);
+    const i = ["Needs you:", "working", "finished"].map((k) => r.text.indexOf(k));
+    expect(i.every((x) => x >= 0) && i[0] < i[1] && i[1] < i[2]).toBe(true);
+  });
+  it("mail for the owner (from the mayor or marked for them) is said first, ahead of any count", async () => {
+    const r = await city({ ...noisy, mail: { items: [...noisyMail.items.slice(0, 5), { from: "mayor", subject: "Budget sign-off", created_at: iso(T0) }], total: 3016 } }).brief();
+    expect(r.text).toMatch(/Needs you:.*mail about Budget sign-off from mayor/);
+    expect(r.text).not.toMatch(/notices/);
   });
 });
 
