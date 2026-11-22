@@ -48,3 +48,21 @@ export function resolveNetwork(env: Record<string, string | undefined>): Network
   }
   return { bindHost, peerAllow, trustProxy };
 }
+
+// ---- the public path of the MCP endpoint ---------------------------------------------------
+// The MCP endpoint may live under a path prefix (e.g. /mcp) so one public host can front several
+// MCP servers. The OAuth endpoints stay at the host root (issuer = host root): Claude documents
+// path-bearing RESOURCES (/.well-known/oauth-protected-resource/<path>) but is silent on issuers
+// with a path, so the issuer is deliberately kept at the root.
+const RESERVED_ROOTS = new Set(["authorize", "token", "register", "revoke", "consent", "healthz", ".well-known"]);
+const SEGMENT = /^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$/;
+
+export function resolveMcpPath(env: Record<string, string | undefined>): string {
+  const p = env.GC_MCP_PATH ?? "/mcp";
+  if (p === "/") return "/";
+  const segments = p.split("/");
+  const bad = !p.startsWith("/") || p.endsWith("/") || segments.length < 2 || segments.slice(1).some((s) => !SEGMENT.test(s) || s === "..");
+  if (bad) throw new Error(`GC_MCP_PATH must be "/" or a plain absolute path like /mcp or /mcp/gc (no trailing slash, query, dots-only or empty segments), got ${JSON.stringify(p)}`);
+  if (RESERVED_ROOTS.has(segments[1])) throw new Error(`GC_MCP_PATH must not start with a reserved OAuth/health path (${segments[1]}), got ${JSON.stringify(p)}`);
+  return p;
+}

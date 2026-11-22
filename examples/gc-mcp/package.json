@@ -21,6 +21,7 @@
     "@types/node": "^26.6.6",
     "openapi-typescript": "^7.13.0",
     "typescript": "^5.9.3",
+    "undici": "^8.13.1",
     "vitest": "^5.1.1"
   }
 }

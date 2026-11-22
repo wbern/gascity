@@ -34,6 +34,8 @@ async function boot(over: Partial<AppOpts> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-"));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  const mcpPath = over.mcpPath ?? "/mcp";
+  const res = `${base}${mcpPath}`;
   const t = { clock: Date.now() };
   const { app, provider } = createApp({
     deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() },
@@ -44,7 +46,7 @@ async function boot(over: Partial<AppOpts> = {}) {
   const srv = await listen(app, port);
   cleanups.push(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const H = (xff?: string) => (xff ? { "x-forwarded-for": xff } : {});
-  const authorize = (cid = CID, challenge = "x".repeat(43), resource = `${base}/mcp`, redirect = CB, xff?: string) => {
+  const authorize = (cid = CID, challenge = "x".repeat(43), resource = res, redirect = CB, xff?: string) => {
     const u = new URL(`${base}/authorize`);
     Object.entries({ response_type: "code", client_id: cid, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state: "st8", scope: "gc:read", resource }).forEach(([k, v]) => u.searchParams.set(k, v));
     return fetch(u, { redirect: "manual", headers: H(xff) });
@@ -62,15 +64,15 @@ async function boot(over: Partial<AppOpts> = {}) {
   };
   const token = (code: string, verifier: string, extra: Record<string, string> = {}) =>
     fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "authorization_code", client_id: CID, code, code_verifier: verifier, redirect_uri: CB, resource: `${base}/mcp`, ...extra }) });
+      body: new URLSearchParams({ grant_type: "authorization_code", client_id: CID, code, code_verifier: verifier, redirect_uri: CB, resource: res, ...extra }) });
   const refresh = (rt: string) => fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", client_id: CID, refresh_token: rt, resource: `${base}/mcp` }) });
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: CID, refresh_token: rt, resource: res }) });
   const getCode = (c: Response) => new URL(c.headers.get("location")!).searchParams.get("code")!;
-  const mcpCall = (tok: string | null, xff?: string) => fetch(`${base}/mcp`, { method: "POST",
+  const mcpCall = (tok: string | null, xff?: string) => fetch(res, { method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(tok ? { authorization: `Bearer ${tok}` } : {}), ...H(xff) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
   const login = async () => { const { verifier, c } = await flow(); return (await (await token(getCode(c), verifier)).json()) as { access_token: string; refresh_token: string }; };
-  return { base, dir, t, provider, authorize, consent, ridOf, flow, token, refresh, getCode, mcpCall, login };
+  return { base, res, mcpPath, dir, t, provider, authorize, consent, ridOf, flow, token, refresh, getCode, mcpCall, login };
 }
 
 describe("discovery and static client", () => {
@@ -143,6 +145,56 @@ describe("authorization-code + PKCE flow", () => {
     const csp = a.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("form-action 'self' https://claude.ai");
     expect(a.headers.get("x-frame-options")).toBe("DENY");
+  });
+});
+
+describe("MCP endpoint under a path prefix (issuer stays at the host root)", () => {
+  const TEXT = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+
+  it("serves the protected-resource document at the path-inserted URL and points the 401 at it", async () => {
+    const s = await boot({ mcpPath: "/mcp/gc" });
+    const pr = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp/gc`)).json()) as any;
+    expect(pr.resource).toBe(`${s.base}/mcp/gc`);
+    expect(pr.authorization_servers).toEqual([`${s.base}/`]);       // issuer = host root, never the path
+    const r = await s.mcpCall(null);
+    expect(r.status).toBe(401);
+    expect(r.headers.get("www-authenticate")).toContain(`resource_metadata="${s.base}/.well-known/oauth-protected-resource/mcp/gc"`);
+    expect((await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp`)).status).toBe(404);   // no accidental /mcp alias
+    const as = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server`)).json()) as any;
+    expect(as.issuer).toBe(`${s.base}/`);
+    expect(as.authorization_endpoint).toBe(`${s.base}/authorize`);
+  });
+
+  it("runs the full flow with a real MCP client against the prefixed URL, and the old /mcp path is gone", async () => {
+    const s = await boot({ mcpPath: "/mcp/gc" });
+    const tok = await s.login();
+    const client = new Client({ name: "t", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
+    expect((await client.listTools()).tools).toHaveLength(7);
+    await client.close();
+    expect((await fetch(`${s.base}/mcp`, { method: "POST", headers: { ...TEXT, authorization: `Bearer ${tok.access_token}` }, body: "{}" })).status).toBe(404);
+  });
+
+  it("binds the token audience to the prefixed resource, so the unprefixed resource is refused", async () => {
+    const s = await boot({ mcpPath: "/mcp/gc" });
+    const a = await s.authorize(CID, "x".repeat(43), `${s.base}/mcp`);
+    expect(a.status).toBe(400);   // invalid_target
+  });
+
+  it("supports the MCP endpoint at the host root", async () => {
+    const s = await boot({ mcpPath: "/" });
+    const pr = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource`)).json()) as any;
+    expect(pr.resource).toBe(`${s.base}/`);
+    const tok = await s.login();
+    const r = await fetch(`${s.base}/`, { method: "POST", headers: { ...TEXT, authorization: `Bearer ${tok.access_token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    expect(r.status).toBe(200);
+    expect((await fetch(`${s.base}/authorize`, { redirect: "manual" })).status).toBe(400);   // OAuth routes still answer (missing params), they are not shadowed by the root MCP path
+  });
+
+  it("applies the source gate to the prefixed MCP path as well as /token", async () => {
+    const s = await boot({ mcpPath: "/mcp/gc", trustProxy: 1, allowCidrs: ["203.0.113.0/24"] });
+    expect((await s.mcpCall(null, "198.51.100.7")).status).toBe(403);
+    expect((await s.mcpCall(null, "203.0.113.9")).status).toBe(401);
   });
 });
 

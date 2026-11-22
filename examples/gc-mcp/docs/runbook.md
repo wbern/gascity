@@ -99,6 +99,45 @@ only the MCP/OAuth paths and 404 everything else (including `/register`, `/healt
 `proxy_buffering off` for streamable HTTP; small body cap. `/authorize` and `/consent` stay open
 (they are opened from your phone) but rate limited.
 
+### 4.1 Public host and path (decided: `gc3.enmansbyra.se`, MCP at `/mcp`)
+
+The MCP endpoint is `https://gc3.enmansbyra.se/mcp` (`GC_MCP_PUBLIC_URL=https://gc3.enmansbyra.se`,
+`GC_MCP_PATH=/mcp`). The prefix lets the same host and nginx front other MCP servers later
+(`/mcp/<name>`, each with its own upstream and well-known routes, attached through one nginx include).
+Both values are one-line changes; the fallbacks are `gc3-mcp.enmansbyra.se` and `GC_MCP_PATH=/`.
+
+**What is on the host root and what is under the prefix.** Only the MCP endpoint and its protected-resource
+document carry the prefix (`/mcp`, `/.well-known/oauth-protected-resource/mcp`). The OAuth **issuer stays
+at the host root** (`/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/revoke`,
+`/consent`). `GC_MCP_PATH` is refused if it would start with one of those reserved roots.
+
+**Why the issuer has no path.** Claude's connector documentation says a protected-resource `resource` must
+equal the URL the user enters "including any path component", that Claude locates the document through the
+`resource_metadata` pointer in the `401` or else probes `/.well-known/oauth-protected-resource/<your-mcp-path>`
+first, and that the authorization server must serve its metadata "at its `/.well-known/` paths". It says
+**nothing** about an issuer that itself has a path (RFC 8414 path insertion). A path-bearing resource is
+therefore documented; a path-bearing issuer is not, so it is not used.
+
+**What was verified (evidence: `docs/discovery-e2e.txt`).** The MCP TypeScript SDK's own OAuth client (the reference
+implementation of RFC 9728/8414 discovery) is given only `https://<host>:<port><prefix>` and finds everything
+itself, through a real nginx container running the infra generator's config in front of the real app:
+`POST /mcp` answers 401 with `resource_metadata` at the path-inserted URL; the resource document's `resource`
+equals the typed URL; the authorization server is the host root; the full authorization-code flow with owner
+consent and PKCE completes; `tools/list` returns the 7 read-only tools; `tools/call` answers; every other path
+(`/register`, `/healthz`, `/admin`, `/mcp/`, `/mcp-other`) is 404. It passes for `gc3.enmansbyra.se` + `/mcp`,
+for the dedicated-host fallback `gc3-mcp.enmansbyra.se` + `/`, and for a nested `/mcp/gc`.
+`scripts/discovery-e2e.mjs` reproduces it.
+
+**What was NOT verified.** Claude's own connector was not run: that needs the public URL, which does not exist
+yet. The evidence is the reference client plus Claude's documentation. If Claude's connector fails at
+discovery once deployed, the one-line fallback is a dedicated host with the MCP at its root, which is tested.
+Also unproven: whether the TLS-terminating proxy or Claude's egress range behave as documented in production.
+
+**One limit of a shared host.** gc-mcp's authorization server mints tokens only for gc-mcp's own resource. A
+second MCP server on the same host that needs OAuth would need its own authorization server; giving it a
+path-bearing issuer (`/mcp/<name>`) falls in the same undocumented-by-Claude area, so prefer a separate hostname
+for it, or an unauthenticated/static-header design. Co-hosting is solved at the routing layer, not at the identity layer.
+
 **Still your call / unknown:** the exact subdomain; the nginx host's address, OS and who runs it;
 whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the GC3 LAN address
 (DHCP changes would break the pinned bind: fail loudly, not silently).
@@ -114,6 +153,7 @@ whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the
    GC_MCP_PUBLIC_URL=https://<hostname-on-443>
    GC_MCP_CITY=<city name from GET /v0/cities>
    GC_MCP_PEEK_ALLOW=mayor,gc-architect      # optional but recommended
+   GC_MCP_PATH=/mcp                           # public path of the MCP endpoint (issuer stays at the host root)
    # behind your LAN nginx (section 4):
    GC_MCP_BIND_HOST=<GC3 private IP>
    GC_MCP_PEER_ALLOW=<nginx host IP>

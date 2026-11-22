@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
-import { resolveNetwork } from "./netconfig.js";
+import { resolveNetwork, resolveMcpPath } from "./netconfig.js";
 
 const port = Number(process.env.GC_MCP_PORT ?? 47811);
 const ownerHash = process.env.GC_MCP_OWNER_HASH;
@@ -12,8 +12,8 @@ if (!ownerHash?.startsWith("scrypt1$")) {
   console.error("GC_MCP_OWNER_HASH is required (create one with: node scripts/hash-passphrase.mjs)");
   process.exit(2);
 }
-let net;
-try { net = resolveNetwork(process.env); } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+let net, mcpPath;
+try { net = resolveNetwork(process.env); mcpPath = resolveMcpPath(process.env); } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
 const stateDir = process.env.GC_MCP_STATE_DIR ?? path.join(os.homedir(), ".local/state/gc-mcp");
 fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
@@ -46,6 +46,7 @@ const { app } = createApp({
   auditFile: path.join(stateDir, "audit.jsonl"),
   trustProxy: net.trustProxy,
   peerAllow: net.peerAllow,
+  mcpPath,
   allowCidrs: list(process.env.GC_MCP_ALLOW_CIDRS),
   extraHosts: list(process.env.GC_MCP_EXTRA_HOSTS),
 });

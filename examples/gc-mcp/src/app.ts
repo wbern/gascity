@@ -26,6 +26,7 @@ export interface AppOpts {
   allowCidrs?: string[];       // restrict /mcp and /token to these sources (requires trustProxy >= 1)
   extraHosts?: string[];       // extra accepted Host names (publicUrl host + loopback are always accepted)
   peerAllow?: string[];        // exact TCP peer addresses allowed to connect at all (the reverse proxy); others are dropped
+  mcpPath?: string;            // public path of the MCP endpoint (default /mcp); OAuth endpoints stay at the host root
   now?: () => number;
 }
 
@@ -35,7 +36,9 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   if (o.allowCidrs?.length && trust < 1) throw new Error("allowCidrs requires trustProxy >= 1: without it every caller looks like the proxy");
   const cidrs = (o.allowCidrs ?? []).map(parseCidr);
   const base = o.publicUrl.href.replace(/\/$/, "");
-  const resource = new URL(`${base}/mcp`);
+  const mcpPath = o.mcpPath ?? "/mcp";
+  const resource = new URL(`${base}${mcpPath === "/" ? "/" : mcpPath}`);
+  const isMcp = (p: string) => p === mcpPath;
   const audit = new AuditLog(o.auditFile ?? null);
   const provider = new OwnerApprovalProvider({
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, allowDcr: o.allowDcr, stateFile: o.stateFile, now,
@@ -84,7 +87,7 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
 
   // audit every failed request to the security-relevant paths
   app.use((req, res, next) => {
-    if (/^\/(mcp|token|authorize|register|consent|revoke)/.test(req.path)) {
+    if (isMcp(req.path) || /^\/(token|authorize|register|consent|revoke)/.test(req.path)) {
       res.on("finish", () => { if (res.statusCode >= 400) audit.write({ kind: "auth", ok: false, note: `${req.method} ${req.path} -> ${res.statusCode} ip=${req.ip}` }); });
     }
     next();
@@ -98,8 +101,8 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   // server-to-server endpoints may be pinned to Anthropic's egress ranges; browser-driven
   // /authorize and /consent must NOT be (they come from the owner's phone).
   if (cidrs.length) {
-    app.use(["/mcp", "/token"], (req, res, next) => {
-      if (!inAnyCidr(req.ip, cidrs)) { res.status(403).type("text/plain").send("forbidden"); return; }
+    app.use((req, res, next) => {
+      if ((isMcp(req.path) || req.path === "/token") && !inAnyCidr(req.ip, cidrs)) { res.status(403).type("text/plain").send("forbidden"); return; }
       next();
     });
   }
@@ -128,7 +131,7 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
     expectedResource: resource,
   });
 
-  app.all("/mcp", (req, res, next) => {
+  app.all(mcpPath, (req, res, next) => {
     if (req.method !== "POST") { res.status(405).set("allow", "POST").send("method not allowed"); return; }
     next();
   }, bearer, express.json({ limit: "64kb" }), async (req, res) => {

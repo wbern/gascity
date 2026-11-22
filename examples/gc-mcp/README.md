@@ -20,5 +20,5 @@ files; per-client rate limit; rotated, redacted audit log. No write tools exist.
     DEMO_PASSPHRASE=... DEMO_CLIENT_ID=... node scripts/oauth-demo.mjs http://127.0.0.1:47811
 
 Env uses `GC_MCP_*` names on purpose: agent sessions export `GC_CITY` as a path.
-Security model, residual risks, hostname decision and phone setup: `docs/runbook.md`. Samples: `docs/oauth-demo.txt`,
+Security model, residual risks, hostname decision and phone setup: `docs/runbook.md`. Samples: `docs/oauth-demo.txt`, `docs/discovery-e2e.txt` (path-prefixed OAuth discovery through a real nginx),
 `docs/recorded-run.txt` (scrubbed).

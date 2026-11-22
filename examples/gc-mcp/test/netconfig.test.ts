@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveNetwork, isPrivateOrLoopback } from "../src/netconfig.js";
+import { resolveNetwork, isPrivateOrLoopback, resolveMcpPath } from "../src/netconfig.js";
 
 describe("isPrivateOrLoopback", () => {
   it("accepts loopback, RFC1918 and tailnet/CGNAT addresses", () => {
@@ -38,5 +38,18 @@ describe("resolveNetwork", () => {
   });
   it("rejects a malformed trust-proxy hop count", () => {
     for (const bad of ["-1", "abc", "1.5", "9"]) expect(() => resolveNetwork({ GC_MCP_TRUST_PROXY: bad }), bad).toThrow(/GC_MCP_TRUST_PROXY/);
+  });
+});
+
+describe("resolveMcpPath", () => {
+  it("defaults to /mcp and accepts a prefix, a nested prefix, or the root", () => {
+    expect(resolveMcpPath({})).toBe("/mcp");
+    expect(resolveMcpPath({ GC_MCP_PATH: "/mcp/gc" })).toBe("/mcp/gc");
+    expect(resolveMcpPath({ GC_MCP_PATH: "/" })).toBe("/");
+  });
+  it("refuses anything that could shadow an OAuth endpoint, add a query, or break routing", () => {
+    for (const bad of ["mcp", "/mcp/", "//x", "/a b", "/a?x=1", "/a#b", "/..", "/a/../b", "/authorize", "/token", "/register", "/revoke", "/consent", "/healthz", "/.well-known", "/.well-known/x", "/mcp\n"]) {
+      expect(() => resolveMcpPath({ GC_MCP_PATH: bad }), JSON.stringify(bad)).toThrow(/GC_MCP_PATH/);
+    }
   });
 });
