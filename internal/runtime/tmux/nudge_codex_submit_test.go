@@ -19,6 +19,12 @@ func TestCodexComposerReadsExactInjection(t *testing.T) {
 		state   codexComposerState
 		queue   bool
 	}{
+		{"compact goal navigation footer", []string{"› reminder", "", "GPT-6.1-Sol low", "← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2"}, "reminder", codexComposerOwned, false},
+		{"compact warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "⚠ 2 · f2"}, "reminder", codexComposerOwned, false},
+		{"styled empty compact goal footer", []string{"\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything", "\x1b[0m ", "  GPT-6.1-Sol low · workspace", "\x1b[39m  \x1b[1m←\x1b[0m for agents          \x1b[38;5;5mGoal stalled (/goal resume)\x1b[39m · ⚠ \x1b[38;2;196;167;103m2\x1b[39m · \x1b[1mf2"}, "reminder", codexComposerEmpty, false},
+		{"compact footer-like human suffix without separator", []string{"› reminder", "  ← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2"}, "reminder", codexComposerUnknown, false},
+		{"compact footer inside human draft", []string{"› reminder", "  ← for agents          Goal stalled (/goal resume) · ⚠ 2 · f2", "  human addition", "", "GPT-6.1-Sol low"}, "reminder", codexComposerOther, false},
+		{"compact-like human suffix", []string{"› reminder", "", "  ← for agents please review · ⚠ 2 · f2"}, "reminder", codexComposerOther, false},
 		{"agent navigation with warning footer", []string{"› reminder", "", "GPT-6.1-Sol low", "← for agents · ? for shortcuts     ⚠ 3 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
 		{"inline warning footer", []string{"› reminder", "", "GPT-6.1-Sol low · ⚠ 2 warnings · f2 to view"}, "reminder", codexComposerOwned, false},
 		{"styled wrapped warning footer", []string{"› reminder", "", "  \x1b[38;2;246;226;183mGPT-6.1-Sol low\x1b[39m · workspace", "\x1b[39m    ⚠ \x1b[38;2;196;167;103m2 warnings\x1b[39m · \x1b[1mf2\x1b[0m to view"}, "reminder", codexComposerOwned, false},

@@ -75,6 +75,7 @@ func codexComposerName(state codexComposerState) string {
 var (
 	codexSGR           = regexp.MustCompile("\x1b\\[[0-9;]*m")
 	codexWarningFooter = regexp.MustCompile(`^⚠ [1-9][0-9]* warnings? · f2 to view$`)
+	codexCompactFooter = regexp.MustCompile(`^(?:← for agents +)?(?:Goal stalled \(/goal resume\) · )?⚠ [1-9][0-9]* · f2$`)
 	codexDimText       = regexp.MustCompile("\x1b\\[2m([^\x1b]*)(?:\x1b\\[(?:0|22)m|$)")
 )
 
@@ -221,7 +222,7 @@ func codexFooterLine(line string) bool {
 	return strings.HasPrefix(line, "tab to queue message") ||
 		strings.HasPrefix(strings.ToLower(line), "gpt-") ||
 		strings.Contains(line, "% context left") || strings.Contains(line, "? for shortcuts") ||
-		codexWarningFooter.MatchString(line)
+		codexWarningFooter.MatchString(line) || codexCompactFooter.MatchString(line)
 }
 
 func codexDimPlaceholder(raw, content string) bool {
