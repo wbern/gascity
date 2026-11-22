@@ -343,7 +343,7 @@ async function boot(over: Partial<AppOpts> = {}) {
   const base = `http://127.0.0.1:${port}`;
   const res = `${base}/mcp`;
   const sup = supervisor();
-  const { app } = createApp({
+  const { app, provider } = createApp({
     deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl: sup.fetchImpl }), mailAgent: "human", now: () => new Date() },
     publicUrl: new URL(base), ownerHash: HASH, staticClientId: CLAUDE, chatgpt: { clientId: GPT, redirectUris: [GPT_CB] },
     stateFile: path.join(dir, "state.json"), auditFile: path.join(dir, "audit.jsonl"), controlDir: dir, ...over,
@@ -377,7 +377,7 @@ async function boot(over: Partial<AppOpts> = {}) {
   const tools = async (tok: string) => ((await rpc(tok, "tools/list")).result.tools as any[]);
   const call = async (tok: string, name: string, args: unknown) => rpc(tok, "tools/call", { name, arguments: args });
   const audit = () => fs.readFileSync(path.join(dir, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  return { base, dir, sup, login, tools, call, rpc, audit };
+  return { base, dir, sup, login, tools, call, rpc, audit, provider, res };
 }
 const WRITE_NAMES = ["respond_to_session", "send_to_session"];
 // the MCP SDK answers an unknown tool with either a JSON-RPC error or a result flagged isError: both mean "not callable"
@@ -492,5 +492,70 @@ describe("writes ON: scope gating end to end", () => {
     const t = (await r.json()) as { access_token: string; scope: string };
     expect(t.scope).toBe("gc:read");
     expect((await s.tools(t.access_token)).map((x) => x.name)).not.toContain("send_to_session");
+  });
+});
+
+describe("the 401 challenge asks for the scopes the server can grant (Claude's connector has no scope field)", () => {
+  const challenge = async (s: Awaited<ReturnType<typeof boot>>, auth?: string) => {
+    const r = await fetch(`${s.base}/mcp`, { method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) }, body: "{}" });
+    return { status: r.status, header: r.headers.get("www-authenticate") ?? "" };
+  };
+  it("writes ON: a request with no token, a bad token and a malformed header are all challenged with scope=\"gc:read gc:write\" and still point at the resource metadata", async () => {
+    const s = await boot({ writes: { enabled: true } });
+    for (const auth of [undefined, "Bearer not-a-real-token", "Basic abc"]) {
+      const c = await challenge(s, auth);
+      expect(c.status, String(auth)).toBe(401);
+      expect(c.header).toContain('scope="gc:read gc:write"');
+      expect(c.header).not.toMatch(/scope="gc:read"/);
+      expect(c.header).toContain(`resource_metadata="${s.base}/.well-known/oauth-protected-resource/mcp"`);
+    }
+    const prm = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp`)).json()) as any;
+    expect(prm.scopes_supported).toEqual(["gc:read", "gc:write"]);   // the metadata asks for the same set
+  });
+  it("writes OFF: the challenge stays gc:read", async () => {
+    const s = await boot();
+    const c = await challenge(s);
+    expect(c.status).toBe(401);
+    expect(c.header).toContain('scope="gc:read"');
+    expect(c.header).not.toContain("gc:write");
+    expect(((await (await fetch(`${s.base}/.well-known/oauth-protected-resource/mcp`)).json()) as any).scopes_supported).toEqual(["gc:read"]);
+  });
+  it("a gc:read-only token still READS and still cannot write; a token WITHOUT gc:read is refused even if it holds gc:write", async () => {
+    const s = await boot({ writes: { enabled: true } });
+    const ro = (await s.login(CLAUDE, CB, "gc:read")).token.access_token;
+    expect((await s.call(ro, "city_status", {})).result.content[0].text).toMatch(/agents running/);       // reads work
+    expect(failed(await s.call(ro, "send_to_session", { session: "mayor", text: "hi" }))).toBe(true);     // writes do not
+    expect(s.sup.posts().length).toBe(0);
+    const writeOnly = (s.provider as any).issue(CLAUDE, ["gc:write"], "fam-test") as { access_token: string };
+    const r = await fetch(`${s.base}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${writeOnly.access_token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    expect(r.status).toBe(403);
+    expect(r.headers.get("www-authenticate")).toContain("insufficient_scope");
+    expect(s.sup.posts().length).toBe(0);
+  });
+  it("a token granted both scopes (what Claude now asks for from the challenge) can read and write", async () => {
+    const s = await boot({ writes: { enabled: true } });
+    const scope = /scope="([^"]+)"/.exec((await challenge(s)).header)![1];     // a client that follows the challenge verbatim
+    const tok = (await s.login(CLAUDE, CB, scope)).token;
+    expect(tok.scope).toBe("gc:read gc:write");
+    expect((await s.call(tok.access_token, "send_to_session", { session: "mayor", text: "hello" })).result.structuredContent).toMatchObject({ sent: true });
+  });
+});
+
+describe("the consent page says plainly what is being granted", () => {
+  it("read only: says so and that nothing can be sent", async () => {
+    const s = await boot({ writes: { enabled: true } });
+    const { html } = await s.login(CLAUDE, CB, "gc:read");
+    expect(html).toContain("<b>read-only</b>");
+    expect(html).toContain("cannot send anything");
+    expect(html).not.toContain("READ AND WRITE");
+  });
+  it("read and write: says READ AND WRITE and that it can send messages to your agents", async () => {
+    const s = await boot({ writes: { enabled: true } });
+    const { html } = await s.login(CLAUDE, CB, "gc:read gc:write");
+    expect(html).toContain("<b>READ AND WRITE</b>");
+    expect(html).toContain("send messages to your agents");
+    expect(html).toContain("never stop, kill, reset");
+    expect(html).toContain("Scopes granted: <code>gc:read gc:write</code>");
   });
 });

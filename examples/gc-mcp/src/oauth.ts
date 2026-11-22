@@ -237,9 +237,9 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
 <body style="font:16px system-ui;max-width:28em;margin:2em auto;padding:0 1em">
 <h2>Approve Gas City access?</h2>
 ${scopes.includes(WRITE_SCOPE)
-  ? `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>READ AND WRITE</b> access: it can read Gas City status, sessions, mail subjects and beads, <b>and send messages to agents</b> (never stop, kill, reset, delete or change configuration).</p>
+  ? `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>READ AND WRITE</b> access: it can read Gas City status, sessions, mail subjects and beads, <b>and send messages to your agents</b> (never stop, kill, reset, delete or change configuration).</p>
 <p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`
-  : `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+  : `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads; it cannot send anything.</p>
 <p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`}
 <p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from <b>${esc(name.replace(/ \(owner client\)$/, ""))}</b>.</p>
 <form method=post action="${esc(this.o.consentPath ?? "/consent")}">

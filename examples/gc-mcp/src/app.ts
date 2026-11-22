@@ -188,10 +188,25 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
     expectedResource: resource,
   });
 
+  // The bearer layer REQUIRES only gc:read (a read-only token keeps working for reads; the write gate refuses writes). But clients take the scopes
+  // they request from the WWW-Authenticate challenge (MCP spec: challenge scope, else scopes_supported) and Claude's connector has no scope field,
+  // so when writes are enabled the challenge must ASK for everything the server can grant. The SDK builds the scope text from requiredScopes, so the
+  // header is rewritten on the way out instead of raising requiredScopes. Writes off: nothing is rewritten and the challenge stays gc:read.
+  const askScopes = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!writesOn) { next(); return; }
+    const want = provider.supportedScopes().join(" ");
+    const setHeader = res.setHeader.bind(res);
+    res.setHeader = ((name: string, value: unknown) => {
+      if (typeof value === "string" && name.toLowerCase() === "www-authenticate") value = value.replace(/\bscope="[^"]*"/, `scope="${want}"`);
+      return setHeader(name, value as string);
+    }) as typeof res.setHeader;
+    next();
+  };
+
   app.all(mcpPath, (req, res, next) => {
     if (req.method !== "POST") { res.status(405).set("allow", "POST").send("method not allowed"); return; }
     next();
-  }, bearer, express.json({ limit: "64kb" }), async (req, res) => {
+  }, askScopes, bearer, express.json({ limit: "64kb" }), async (req, res) => {
     const client = req.auth?.clientId ?? "?";
     if (!callLimiter.hit(client)) { res.status(429).json({ error: "rate_limited" }); return; }
     const mcp = createMcpServer(deps, (c) => audit.write({ kind: "tool", client: crypto.createHash("sha256").update(client).digest("hex").slice(0, 8), app: provider.clientName(client), tool: c.tool, args: c.args, ok: c.ok, ms: c.ms, chars: c.chars }),
