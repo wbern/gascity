@@ -213,9 +213,17 @@ config, hold, bead or generic POST path (fixed operation table, tested).
 
 **The new risk, plainly.** A stolen token, or anyone with the owner passphrase, can now instruct agents, and agents can act on their own repos and PRs. There is no per-action approval page
 (by decision); a second factor is a later feature with a hook ready (`confirmWrite`). Mitigations that are in place: a separate scope the client must ask for and the owner sees on the consent
-page; the default deny list and optional allow list; sessions a person is attached to are refused; 20 writes a minute; 4000-character plain text; every attempt audited with the client's name; the
+page; the default deny list (other people's sessions: `zachris-*`, `elsakert-*`; the owner's own session is the target) and optional allow list; sessions a person is attached to are refused (the default session is exempt); 20 writes a minute; 4000-character plain text; every attempt audited with the client's name; the
 `WRITES_DISABLED` kill switch (`touch /var/lib/gc-mcp/WRITES_DISABLED`; reads keep working), plus `DISABLED` and `REVOKE_ALL`. Untrusted-content labels stay on every read tool, but prompt injection through
 what the assistant reads remains an accepted risk: it can now ask an agent to do something.
 
 **Connecting with write access.** Claude: the connector requests the scopes the server advertises; if it only granted gc:read, remove and re-add the connector after enabling writes.
 ChatGPT: in the connector form tick `gc:write` under the default scopes once the server advertises it. The consent page lists the granted scopes: `gc:read gc:write` means read AND write.
+
+### Voice loop (vibe coding by voice)
+
+Set `GC_MCP_DEFAULT_SESSION=claude-william` (or whichever session is yours): every tool then works with no session argument, because nobody says session ids. A spoken name ("steve",
+"the mayor", "crm slash steve") is resolved against the live session list: exact first, then a unique partial match; if it is ambiguous the tool asks which one and sends nothing.
+The loop is `send_to_session` (returns at once with an acknowledgement and a marker), `wait_for_reply` (at most 20 seconds, so it returns before a chat client's tool timeout; call it again to keep waiting),
+`session_state` (working, idle, waiting for input), `latest_reply` and `read_more` for long replies. A retried identical send within 60 seconds is acknowledged, not sent twice.
+Not verified: how ChatGPT voice mode treats tool latency and the acknowledgement; whether the transcript's assistant turns arrive in the shape the tests model; the 1.5 s poll interval against a busy supervisor.

@@ -34,10 +34,19 @@ Write control (Phase 4, `GC_MCP_WRITES_ENABLED=1`): `send_to_session(session, te
 `respond_to_session(session, action, text?, request_id?)`, implemented with the supervisor's `submit-session` and `respond-session` operations (the blessed way, not
 tmux). The client can send ONLY those two operations (a fixed table in `gc-client.ts`; tests pin that stop, kill, reset, close, config, beads and any other path cannot be
 sent). Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (the consent page lists the scopes); write tools carry no `readOnlyHint` and are listed only to a
-`gc:write` token; text <= 4000 plain characters; 20 writes/minute; the session must exist; a default deny list (`*-william`, `claude-william`, `zachris-*`, `elsakert-*`, replaced by
-`GC_MCP_WRITE_DENY_SESSIONS`), an optional `GC_MCP_WRITE_ALLOW_SESSIONS`, and sessions with a person attached are refused unless `GC_MCP_WRITE_ALLOW_ATTACHED=1`; every attempt,
+`gc:write` token; text <= 4000 plain characters; 20 writes/minute; the session must exist; a default deny list of OTHER PEOPLE's sessions only (`zachris-*`, `elsakert-*`; the owner's own session is the target; replaced by
+`GC_MCP_WRITE_DENY_SESSIONS`), an optional `GC_MCP_WRITE_ALLOW_SESSIONS`, and sessions with a person attached are refused unless `GC_MCP_WRITE_ALLOW_ATTACHED=1` (the default session is exempt); every attempt,
 sent or refused, is audited (client name, session, intent, length, an 80-character redacted preview, outcome); `WRITES_DISABLED` in the state dir turns writes off for the next
 request while reads keep working. `confirmWrite()` in `src/writes.ts` is the single place a later second factor (TOTP/push) slots in; it allows today.
+
+Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
+A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match
+(`steve` is `crm/steve`; `crm slash steve` works); if more than one fits, the tool asks ("I found crm slash steve and crm slash bob, which one?") and sends nothing.
+Read tools for the loop (all spoken text <= 280 characters, full text in structuredContent, replies redacted, links dropped and labelled untrusted): `session_state`
+(working | idle | waiting for input | not running), `latest_reply`, `read_more(offset)` for the rest of a long reply, and `wait_for_reply(max_seconds <= 20, default 15)`, which polls the
+transcript for the first reply after our own send (the send acknowledgement carries a marker) and always returns inside 20 seconds ("still working" or the reply so far).
+A repeated identical send within 60 seconds from the same client returns the first acknowledgement instead of sending twice (voice clients retry); each real send has its own
+idempotency key. A gc:write token may read the replies of sessions it may write to; a read-only token only reads the default session and `GC_MCP_PEEK_ALLOW`.
 
 Env uses `GC_MCP_*` names on purpose: agent sessions export `GC_CITY` as a path.
 Security model, residual risks, hostname decision and phone setup: `docs/runbook.md`. Samples: `docs/oauth-demo.txt`, `docs/discovery-e2e.txt` (path-prefixed OAuth discovery through a real nginx),

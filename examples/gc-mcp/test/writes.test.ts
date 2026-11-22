@@ -120,7 +120,7 @@ describe("WriteGate: send_to_session", () => {
   });
   it("resolves by alias, id, template or session name, case-insensitively, but sends to the canonical id", async () => {
     const { g, sup } = gate();
-    for (const q of ["MAYOR", "gc2-wisp-ccc"]) await g.submit(W, q, "hello");
+    for (const q of ["MAYOR", "gc2-wisp-ccc"]) await g.submit(W, q, `hello via ${q}`);   // different texts: an identical resend would be deduplicated
     expect(sup.posts().map((p) => p.path)).toEqual(["/v0/city/gc2/session/gc2-wisp-ccc/submit", "/v0/city/gc2/session/gc2-wisp-ccc/submit"]);
   });
   it("a session that does not exist is never written to", async () => {
@@ -130,10 +130,13 @@ describe("WriteGate: send_to_session", () => {
     expect(sup.posts().length).toBe(0);
     expect(events[0]).toMatchObject({ result: "no_such_session", ok: false });
   });
-  it("malformed session names never reach the API at all", async () => {
+  it("a name with unsafe characters is refused before any call; anything else is only ever MATCHED against the live list, never put in a URL", async () => {
     const { g, sup } = gate();
-    for (const q of ["../kill", "a/b", "x y", "", "a".repeat(200)]) expect((await g.submit(W, q, "hello")).structured).toMatchObject({ sent: false, reason: "bad_session_name" });
+    for (const q of ["a;b", "x`y", "a\"b", "$(id)", "a\nb", "a".repeat(200)]) expect((await g.submit(W, q, "hello")).structured, q).toMatchObject({ sent: false, reason: "bad_session_name" });
     expect(sup.calls.length).toBe(0);
+    for (const q of ["../kill", "a/b", "x y"]) expect((await g.submit(W, q, "hello")).structured, q).toMatchObject({ sent: false, reason: "no_such_session" });
+    expect(sup.posts().length).toBe(0);                                     // nothing was ever sent to a made-up path
+    expect((await g.submit(W, "", "hello")).structured).toMatchObject({ sent: false, reason: "no_session_given" });   // no default configured
   });
   it("text: 1..4000 characters of plain text; whitespace-only, control characters and 4001 are refused; 4000 and newlines are fine", async () => {
     const { g, sup } = gate();
@@ -182,22 +185,23 @@ describe("WriteGate: respond_to_session", () => {
     for (const action of ["Allow", "allow now", "a".repeat(40), "../kill", "", "1x"]) expect((await g.respond(W, "mayor", action)).structured, action).toMatchObject({ sent: false, reason: "bad_action" });
     expect((await g.respond(W, "mayor", "allow", undefined, "bad id!")).structured).toMatchObject({ reason: "bad_request_id" });
     expect((await g.respond(W, "mayor", "allow", "x".repeat(MAX_WRITE_TEXT + 1))).structured).toMatchObject({ reason: "bad_text" });
-    expect((await g.respond(W, "claude-william", "allow")).structured).toMatchObject({ reason: "denied_session" });
+    expect((await g.respond(W, "zachris-dev", "allow")).structured).toMatchObject({ reason: "denied_session" });
     expect(sup.posts().length).toBe(0);
   });
 });
 
 describe("WriteGate: deny and allow lists", () => {
-  it("the built-in deny list protects other people's and the owner's own terminals", async () => {
-    expect(DEFAULT_WRITE_DENY).toEqual(["*-william", "claude-william", "zachris-*", "elsakert-*"]);
+  it("the built-in deny list protects OTHER PEOPLE's sessions only; the owner's own session is the target", async () => {
+    expect(DEFAULT_WRITE_DENY).toEqual(["zachris-*", "elsakert-*"]);
     const { g, sup, events } = gate();
-    for (const s of ["claude-william", "mayor-william", "zachris-dev", "elsakert-ops"]) {
+    for (const s of ["zachris-dev", "elsakert-ops"]) {
       const r = await g.submit(W, s, "hi");
       expect(r.structured, s).toMatchObject({ sent: false, reason: "denied_session" });
       expect(r.text).toContain("do-not-write");
     }
     expect(sup.posts().length).toBe(0);
-    expect(events.map((e) => e.result)).toEqual(Array(4).fill("denied_session"));
+    expect(events.map((e) => e.result)).toEqual(["denied_session", "denied_session"]);
+    for (const s of ["claude-william", "mayor-william"]) expect((await g.submit(W, s, `hi ${s}`)).structured, s).toMatchObject({ sent: true });   // no longer blocked
   });
   it("matches ANY identifier of the session: id, alias, template, session name (so an alias cannot dodge the list)", async () => {
     const { g, sup } = gate({ deny: ["gas-city-infra/deployer", "gc2-wisp-ddd"] });
@@ -208,10 +212,10 @@ describe("WriteGate: deny and allow lists", () => {
   it("GC_MCP_WRITE_DENY_SESSIONS replaces the defaults", async () => {
     const { g } = gate({ deny: ["mayor"] });
     expect((await g.submit(W, "mayor", "hi")).structured).toMatchObject({ reason: "denied_session" });
-    expect((await g.submit(W, "claude-william", "hi")).structured).toMatchObject({ sent: true });   // the replaced list no longer names it
+    expect((await g.submit(W, "zachris-dev", "hi")).structured).toMatchObject({ sent: true });   // the replaced list no longer names it
   });
   it("an allow list restricts writes to matching sessions, and deny still wins over allow", async () => {
-    const { g, sup } = gate({ allow: ["gc-architect", "mayor-*"] });
+    const { g, sup } = gate({ allow: ["gc-architect", "mayor-*"], deny: ["*-william"] });
     expect((await g.submit(W, "gc-architect", "hi")).structured).toMatchObject({ sent: true });
     expect((await g.submit(W, "devops", "hi")).structured).toMatchObject({ reason: "not_in_allow_list" });
     expect((await g.submit(W, "mayor-william", "hi")).structured).toMatchObject({ reason: "denied_session" });   // allowed by mayor-*, denied by *-william
@@ -262,13 +266,13 @@ describe("WriteGate: scope, kill switch, rate limit, second-factor hook", () => 
     fs.unlinkSync(path.join(dir, "WRITES_DISABLED"));
     expect((await g.submit(W, "mayor", "hi")).structured).toMatchObject({ sent: true });
   });
-  it("rate limit: 20 a minute by default, then refused until the window passes; refused calls make no API call", async () => {
+  it("rate limit: 20 a minute by default, then refused until the window passes; a refused call sends nothing", async () => {
     const t = { now: 1_000_000 };
     const { g, sup } = gate({}, supervisor(), () => t.now);
     for (let i = 0; i < 20; i++) expect((await g.submit(W, "mayor", `m${i}`)).structured.sent).toBe(true);
-    const callsBefore = sup.calls.length;
+    const postsBefore = sup.posts().length;
     expect((await g.submit(W, "mayor", "one too many")).structured).toMatchObject({ sent: false, reason: "rate_limited" });
-    expect(sup.calls.length).toBe(callsBefore);
+    expect(sup.posts().length).toBe(postsBefore);   // refused: nothing was sent
     t.now += 61_000;
     expect((await g.submit(W, "mayor", "later")).structured.sent).toBe(true);
   });
@@ -296,7 +300,7 @@ describe("WriteGate: audit", () => {
     const secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
     await g.submit(W, "gc-architect", `please use ${secret} and then ` + "y".repeat(500), "follow_up");
     await g.submit(R, "mayor", "no scope");
-    await g.submit(W, "claude-william", "denied");
+    await g.submit(W, "zachris-dev", "denied");
     await g.submit(W, "ghost", "missing");
     expect(events.length).toBe(4);
     for (const e of events) expect(e).toMatchObject({ kind: "write", app: expect.any(String), session: expect.any(String), length: expect.any(Number), result: expect.any(String), ok: expect.any(Boolean) });
@@ -450,7 +454,7 @@ describe("writes ON: scope gating end to end", () => {
     const tok = (await s.login(CLAUDE, CB, "gc:read gc:write")).token.access_token;
     const long = await s.call(tok, "send_to_session", { session: "mayor", text: "x".repeat(MAX_WRITE_TEXT + 1) });
     expect(failed(long)).toBe(true);
-    const denied = await s.call(tok, "send_to_session", { session: "claude-william", text: "hi" });
+    const denied = await s.call(tok, "send_to_session", { session: "zachris-dev", text: "hi" });
     expect(denied.result.structuredContent).toMatchObject({ sent: false, reason: "denied_session" });
     expect(s.sup.posts().length).toBe(0);
   });

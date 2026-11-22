@@ -1,31 +1,33 @@
 // Phase 4: write control. Two operations only (submit a message to a session, respond to a pending interaction), each behind the same rails:
-// a separate OAuth scope, an explicit enable flag, a kill-switch file, a default-deny list for other people's and the owner's own terminals,
-// a rate limit, a size cap, and an audit line for EVERY attempt (sent or refused). Nothing destructive exists here: no stop, kill, reset,
-// close, config, hold release or bead edit, and gc-client.ts cannot send them (WRITE_OPS is a fixed table).
+// a separate OAuth scope, an explicit enable flag, a kill-switch file, a default-deny list for other people's sessions, a rate limit, a size
+// cap, a resend guard, and an audit line for EVERY attempt (sent or refused). Nothing destructive exists here: no stop, kill, reset, close,
+// config, hold release or bead edit, and gc-client.ts cannot send them (WRITE_OPS is a fixed table).
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { GcClient, GcError } from "./gc-client.js";
 import { RateLimiter, WRITE_SCOPE } from "./oauth.js";
 import { redactText } from "./redact.js";
+import { disambiguation, identifiers, labelOf, resolveSession, type SessionRef } from "./sessions.js";
+import { clip, speakName } from "./text.js";
 import type { AuditEvent } from "./audit.js";
 
 export { WRITE_SCOPE };
 export const MAX_WRITE_TEXT = 4000;
 export const INTENTS = ["default", "follow_up", "interrupt_now"] as const;
 export type Intent = (typeof INTENTS)[number];
-/** Sessions that belong to other people or to the owner's own interactive terminals. Replaced (not extended) by GC_MCP_WRITE_DENY_SESSIONS. */
-export const DEFAULT_WRITE_DENY = ["*-william", "claude-william", "zachris-*", "elsakert-*"];
-const PATTERN = /^[A-Za-z0-9._:/*-]{1,128}$/;   // "/" because templates look like rig/agent
-const SESSION_QUERY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** Sessions that belong to OTHER PEOPLE. The owner's own session is the target, so it is not here. Replaced (not extended) by GC_MCP_WRITE_DENY_SESSIONS. */
+export const DEFAULT_WRITE_DENY = ["zachris-*", "elsakert-*"];
+export const REPLAY_WINDOW_MS = 60_000;
+const PATTERN = /^[A-Za-z0-9._:/*-]{1,128}$/;
 const ACTION = /^[a-z][a-z0-9_-]{0,31}$/;
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
-const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
 
 /** Glob with `*` only, anchored, case-insensitive. Patterns are validated, so nothing here can be a regex. */
 export function globMatch(pattern: string, value: string): boolean {
-  const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.*+?^${}()|[\]\\:-]/g, "\\$&")).join(".*") + "$", "i");
+  const re = new RegExp("^" + pattern.split("*").map((p) => p.replace(/[.*+?^${}()|[\]\\:/-]/g, "\\$&")).join(".*") + "$", "i");
   return re.test(value);
 }
 export function validatePatterns(list: string[], what: string): string[] {
@@ -43,13 +45,24 @@ export async function confirmWrite(_ctx: ConfirmCtx): Promise<Confirmation> {
   return { allow: true };
 }
 
+/** When each client last sent to each session, so wait_for_reply knows "since when". In memory: a restart forgets it, which only means "from now". */
+export class SendMarkers {
+  private m = new Map<string, number>();
+  set(client: string, sessionId: string, ms: number) { this.m.set(`${client}|${sessionId}`, ms); if (this.m.size > 500) this.m.delete(this.m.keys().next().value as string); }
+  get(client: string, sessionId: string): number | undefined { return this.m.get(`${client}|${sessionId}`); }
+}
+export const markerOf = (ms: number) => `m${ms}`;
+export const parseMarker = (s?: string): number | undefined => (s && /^m\d{10,16}$/.test(s) ? Number(s.slice(1)) : undefined);
+
 export interface WriteConfig {
   enabled: boolean;
   deny?: string[];            // default DEFAULT_WRITE_DENY
   allow?: string[];           // optional: when set, ONLY these (and never a denied one)
-  allowAttached?: boolean;    // default false: a session a person is attached to (their live terminal) is refused
+  allowAttached?: boolean;    // default false: a session a person is attached to is refused (the default session is exempt: it IS the owner's target)
   perMinute?: number;         // default 20
   controlDir?: string;        // holds WRITES_DISABLED
+  defaultSession?: string;    // what an omitted `session` means
+  replayWindowMs?: number;    // default 60 s
   confirm?: (ctx: ConfirmCtx) => Promise<Confirmation>;
 }
 export interface WriteCtx { client: string; scopes: string[] }
@@ -59,10 +72,13 @@ export class WriteGate {
   private limiter: RateLimiter;
   private deny: string[];
   private allow?: string[];
-  constructor(private gc: GcClient, private cfg: WriteConfig, private audit: (e: AuditEvent) => void, nowMs: () => number = Date.now) {
+  private replays = new Map<string, { at: number; res: WriteResult }>();
+  readonly markers: SendMarkers;
+  constructor(private gc: GcClient, private cfg: WriteConfig, private audit: (e: AuditEvent) => void, private nowMs: () => number = Date.now, markers?: SendMarkers) {
     this.deny = validatePatterns(cfg.deny ?? DEFAULT_WRITE_DENY, "write deny list");
     this.allow = cfg.allow?.length ? validatePatterns(cfg.allow, "write allow list") : undefined;
     this.limiter = new RateLimiter(cfg.perMinute ?? 20, 60_000, nowMs);
+    this.markers = markers ?? new SendMarkers();
   }
 
   /** Writes are on: enabled by config and the WRITES_DISABLED kill switch is absent. Reads are never affected by it. */
@@ -72,34 +88,39 @@ export class WriteGate {
     return !(f && fs.existsSync(f));
   }
 
-  submit(ctx: WriteCtx, session: string, text: string, intent: Intent = "default"): Promise<WriteResult> {
-    return this.run(ctx, "submit", session, text, intent, async (id) => {
-      const key = crypto.randomUUID();
+  /** The deny and allow lists (deny always wins). Used by writes, and by the voice read tools to decide what a gc:write holder may read. */
+  permits(hit: SessionRef): { ok: true } | { ok: false; reason: "denied_session" | "not_in_allow_list" } {
+    const names = identifiers(hit);
+    if (names.some((n) => this.deny.some((p) => globMatch(p, n)))) return { ok: false, reason: "denied_session" };
+    if (this.allow && !names.some((n) => this.allow!.some((p) => globMatch(p, n)))) return { ok: false, reason: "not_in_allow_list" };
+    return { ok: true };
+  }
+
+  submit(ctx: WriteCtx, session: string | undefined, text: string, intent: Intent = "default"): Promise<WriteResult> {
+    return this.run(ctx, "submit", session, text, intent, async (id, key) => {
       const r = (await this.gc.write("submit", id, { message: text, intent }, key)) as Record<string, unknown>;
-      return { key, r };
+      return r;
     });
   }
 
-  respond(ctx: WriteCtx, session: string, action: string, text?: string, requestId?: string): Promise<WriteResult> {
-    return this.run(ctx, "respond", session, text ?? action, undefined, async (id) => {
-      const key = crypto.randomUUID();
+  respond(ctx: WriteCtx, session: string | undefined, action: string, text?: string, requestId?: string): Promise<WriteResult> {
+    return this.run(ctx, "respond", session, text ?? action, undefined, async (id, key) => {
       const body: Record<string, unknown> = { action };
       if (text) body.text = text;
       if (requestId) body.request_id = requestId;
-      const r = (await this.gc.write("respond", id, body, key)) as Record<string, unknown>;
-      return { key, r };
+      return (await this.gc.write("respond", id, body, key)) as Record<string, unknown>;
     }, { action, text, requestId });
   }
 
-  private async run(ctx: WriteCtx, kind: "submit" | "respond", query: string, preview: string, intent: Intent | undefined,
-    send: (id: string) => Promise<{ key: string; r: Record<string, unknown> }>, extra?: { action: string; text?: string; requestId?: string }): Promise<WriteResult> {
+  private async run(ctx: WriteCtx, kind: "submit" | "respond", query: string | undefined, preview: string, intent: Intent | undefined,
+    send: (id: string, key: string) => Promise<Record<string, unknown>>, extra?: { action: string; text?: string; requestId?: string }): Promise<WriteResult> {
     const text = kind === "submit" ? preview : (extra?.text ?? "");
     const length = text.length;
+    const asked = (query ?? "").trim() || (this.cfg.defaultSession ?? "");
     const log = (result: string, ok: boolean, session: string) => this.audit({ kind: "write", app: ctx.client, session: clip(session, 64), intent: intent ?? extra?.action, length, preview, result, ok });
-    const refuse = (result: string, say: string, session = query): WriteResult => { log(result, false, session); return { text: say, structured: { sent: false, reason: result } }; };
+    const refuse = (result: string, say: string, session = asked, more: Record<string, unknown> = {}): WriteResult => { log(result, false, session); return { text: say, structured: { sent: false, reason: result, ...more } }; };
 
     // 1. input shape (the tool schema already limits these; this is the second wall)
-    if (!SESSION_QUERY.test(query)) return refuse("bad_session_name", "That is not a valid session name.");
     if (kind === "submit") {
       if (!text.trim() || text.length > MAX_WRITE_TEXT || CONTROL.test(text)) return refuse("bad_text", `The message must be 1 to ${MAX_WRITE_TEXT} characters of plain text.`);
       if (!INTENTS.includes(intent as Intent)) return refuse("bad_intent", "The intent must be default, follow_up or interrupt_now.");
@@ -111,42 +132,56 @@ export class WriteGate {
     // 2. scope, enable flag and kill switch
     if (!ctx.scopes.includes(WRITE_SCOPE)) return refuse("no_write_scope", "This connection only has read access. Reconnect and grant the gc:write scope to send messages.");
     if (!this.active) return refuse("writes_disabled", "Writes are switched off by the owner.");
-    // 3. rate limit (before any API call)
-    if (!this.limiter.hit("writes")) return refuse("rate_limited", "Too many messages sent in the last minute. Try again shortly.");
-    // 4. the session must exist, per the API
-    let hit: any;
-    try {
-      const r: any = await this.gc.get("/sessions", { limit: 200 });
-      const q = query.toLowerCase();
-      hit = (r.items ?? []).find((i: any) => [i.id, i.alias, i.session_name, i.template].some((x) => x && String(x).toLowerCase() === q));
-    } catch (e) {
-      return refuse(`lookup_failed:${e instanceof GcError ? e.status : "error"}`, "Gas City could not be reached to find that session, so nothing was sent.");
-    }
-    if (!hit || !SESSION_QUERY.test(String(hit.id))) return refuse("no_such_session", `No session matches "${clip(redactText(query), 40)}", so nothing was sent.`);
-    const names = [hit.id, hit.alias, hit.session_name, hit.template, hit.agent_name].filter((x) => x).map(String);
-    const label = clip(redactText(String(hit.alias || hit.template || hit.id)), 60);
-    // 5. deny / allow lists and attached terminals (deny always wins)
-    if (names.some((n) => this.deny.some((p) => globMatch(p, n)))) return refuse("denied_session", `${label} is on the do-not-write list, so nothing was sent.`, hit.id);
-    if (this.allow && !names.some((n) => this.allow!.some((p) => globMatch(p, n)))) return refuse("not_in_allow_list", `${label} is not on the write allow list, so nothing was sent.`, hit.id);
-    if (hit.attached === true && !this.cfg.allowAttached) return refuse("session_attached", `A person is attached to ${label} right now, so nothing was sent.`, hit.id);
-    // 6. the second-factor hook (allow today)
+    // 3. which session: a spoken name resolved against the live list; ambiguity or no match means NOTHING is sent
+    let res;
+    try { res = await resolveSession(this.gc, query, this.cfg.defaultSession); }
+    catch (e) { return refuse(`lookup_failed:${e instanceof GcError ? e.status : "error"}`, "Gas City could not be reached to find that session, so nothing was sent."); }
+    if (res.kind === "nodefault") return refuse("no_session_given", "Which session? No default session is set, so nothing was sent.", "");
+    if (res.kind === "bad") return refuse("bad_session_name", "That is not a valid session name, so nothing was sent.", res.query);
+    if (res.kind === "none") return refuse("no_such_session", `No session matches "${clip(redactText(res.query), 40)}", so nothing was sent.`, res.query);
+    if (res.kind === "many") return refuse("ambiguous_session", `${disambiguation(res.hits)} Nothing was sent.`, asked, { candidates: res.hits.slice(0, 6).map((h) => labelOf(h)) });
+    const hit = res.hit;
+    if (!SESSION_ID.test(String(hit.id))) return refuse("no_such_session", "That session has an id I cannot use, so nothing was sent.", asked);
+    const label = clip(redactText(labelOf(hit)), 60);
+    const isDefault = !!this.cfg.defaultSession && identifiers(hit).some((n) => n.toLowerCase() === this.cfg.defaultSession!.trim().toLowerCase());
+    // 4. deny / allow lists (deny wins) and attached terminals
+    const perm = this.permits(hit);
+    if (!perm.ok) return refuse(perm.reason, perm.reason === "denied_session" ? `${label} is on the do-not-write list, so nothing was sent.` : `${label} is not on the write allow list, so nothing was sent.`, hit.id);
+    if (hit.attached === true && !this.cfg.allowAttached && !isDefault) return refuse("session_attached", `A person is attached to ${label} right now, so nothing was sent.`, hit.id);
+    // 5. a repeated identical send within the window (voice clients retry) returns the first acknowledgement instead of sending twice
+    const now = this.nowMs();
+    const windowMs = this.cfg.replayWindowMs ?? REPLAY_WINDOW_MS;
+    const rkey = crypto.createHash("sha256").update([ctx.client, kind, hit.id, intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
+    for (const [k, v] of this.replays) if (now - v.at > windowMs) this.replays.delete(k);
+    const seen = this.replays.get(rkey);
+    if (seen) { log("replayed", true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
+    // 6. rate limit (a replay or a refusal above never spends it)
+    if (!this.limiter.hit("writes")) return refuse("rate_limited", "Too many messages sent in the last minute. Try again shortly.", hit.id);
+    // 7. the second-factor hook (allow today)
     const c = await (this.cfg.confirm ?? confirmWrite)({ client: ctx.client, session: String(hit.id), kind, intent, length });
     if (!c.allow) return refuse("confirmation_refused", `The owner confirmation was not given${c.reason ? ` (${clip(redactText(c.reason), 60)})` : ""}, so nothing was sent.`, hit.id);
-    // 7. send
+    // 8. send: a fresh idempotency key per call, and a marker so wait_for_reply knows "since when"
+    const key = crypto.randomUUID();
+    const sentAt = this.nowMs();
+    this.markers.set(ctx.client, String(hit.id), sentAt);
     try {
-      const { key, r } = await send(String(hit.id));
+      const r = await send(String(hit.id), key);
       log("sent", true, hit.id);
       const queued = hit.running === false ? " It is not running, so the message is queued." : "";
+      const said = speakName(label);   // "crm/steve" is spoken "crm slash steve"
       const say = kind === "submit"
-        ? (intent === "interrupt_now" ? `Interrupted ${label} and sent your message.` : `Sent to ${label}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued
-        : `Answered ${label} with "${clip(redactText(extra!.action), 32)}".`;
-      return { text: say, structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
-        request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
+        ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Ask me to wait for its reply."
+        : `Answered ${said} with "${clip(redactText(extra!.action), 32)}".`;
+      const out: WriteResult = { text: clip(say, 280), structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
+        marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };
+      this.replays.set(rkey, { at: now, res: out });
+      if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value as string);
+      return out;
     } catch (e) {
       const status = e instanceof GcError ? e.status : 0;
       log(`error:${status || "no_response"}`, false, hit.id);
       const why = e instanceof GcError ? clip(redactText(e.message), 80) : "unexpected error";
-      return { text: `Gas City refused or could not take that for ${label} (${status || "no response"}: ${why}). Nothing was sent.`, structured: { sent: false, reason: "error", status } };
+      return { text: clip(`Gas City refused or could not take that for ${label} (${status || "no response"}: ${why}). Nothing was sent.`, 280), structured: { sent: false, reason: "error", status } };
     }
   }
 }

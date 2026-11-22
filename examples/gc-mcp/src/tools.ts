@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { GcClient, GcError } from "./gc-client.js";
-import { redactDeep, redactText } from "./redact.js";
-import { INTENTS, MAX_WRITE_TEXT, WRITE_SCOPE, type WriteCtx, type WriteGate } from "./writes.js";
+import type { GcClient } from "./gc-client.js";
+import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
+import { disambiguation, resolveSession, identifiers, labelOf, type SessionRef } from "./sessions.js";
+import { buildVoiceTools } from "./voice.js";
+import { INTENTS, MAX_WRITE_TEXT, WRITE_SCOPE, type SendMarkers, type WriteCtx, type WriteGate } from "./writes.js";
 
-export interface ToolResult { text: string; structured: Record<string, unknown> }
 export interface ToolDef {
   name: string;
   title: string;
@@ -15,31 +16,23 @@ export interface ToolDef {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler: (args: any) => Promise<ToolResult>;
 }
-export interface Deps { gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate }
+export type { ToolResult };
+export interface Clock { now: () => number; sleep: (ms: number) => Promise<void> }
+export interface Deps {
+  gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate;
+  defaultSession?: string;      // GC_MCP_DEFAULT_SESSION: what "session" means when nobody says one (voice: nobody says session ids)
+  markers?: SendMarkers;        // when each client last sent to each session, so wait_for_reply knows "since when"
+  clock?: Clock;                // tests inject a fake clock; production uses Date.now and setTimeout
+}
+
+/** True when `hit` is the configured default session (the owner's chosen target: readable and writable by default). */
+export function isDefaultSession(d: Deps, hit: SessionRef): boolean {
+  const q = (d.defaultSession ?? "").trim().toLowerCase();
+  return !!q && identifiers(hit).some((x) => x.toLowerCase() === q);
+}
 
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
-// Free text from transcripts/mail/beads is attacker-influenceable: redact FIRST (a clipped
-// secret can fall under a pattern threshold), drop links, collapse whitespace, then clip.
-const untrusted = (s: unknown, n: number) =>
-  clip(redactText(String(s ?? "")).replace(/https?:\/\/\S+/gi, "[link]").replace(/\s+/g, " ").trim(), n);
-const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
-
-// Every handler goes through guard(): redaction + speakable error mapping.
-function guard(fn: (a: any) => Promise<ToolResult>): ToolDef["handler"] {
-  return async (args) => {
-    try {
-      const r = await fn(args);
-      return { text: redactText(r.text), structured: redactDeep(r.structured) };
-    } catch (e) {
-      if (e instanceof GcError) {
-        return { text: `Gas City is unavailable right now (${e.status || "no response"}: ${redactText(e.message)}).`, structured: { error: true, status: e.status } };
-      }
-      throw e;
-    }
-  };
-}
 
 function toGoDuration(s: string): string {
   const m = /^(\d+)\s*([smhd])$/.exec(s.trim());
@@ -95,16 +88,18 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
     },
     {
       name: "peek_session", title: "Peek at a session",
-      description: "Read the last few messages of one agent session, by alias, session id or template name.",
-      inputShape: { session: z.string().min(1).max(128), tail: z.number().int().min(1).max(6).optional() },
+      description: "Read the last few messages of one agent session. Say a name ('steve', 'the mayor'); leave it out for the default session.",
+      inputShape: { session: z.string().min(1).max(128).optional(), tail: z.number().int().min(1).max(6).optional() },
       annotations: RO,
       handler: guard(async (a) => {
         const tail = a.tail ?? 3;
-        const r: any = await gc.get("/sessions", { limit: 200 });
-        const q = String(a.session).toLowerCase();
-        const hit = (r.items ?? []).find((i: any) => [i.id, i.alias, i.session_name, i.template].some((x) => x && String(x).toLowerCase() === q));
-        if (!hit) return { text: `No session matches "${untrusted(a.session, 40)}".`, structured: { found: false } };
-        if (d.peekAllow && !d.peekAllow.some((x) => [hit.id, hit.alias, hit.template].includes(x))) {
+        const res = await resolveSession(gc, a.session, d.defaultSession);
+        if (res.kind === "nodefault") return { text: "Which session? No default session is set.", structured: { found: false, reason: "no_session" } };
+        if (res.kind === "bad") return { text: "That is not a valid session name.", structured: { found: false, reason: "bad_name" } };
+        if (res.kind === "none") return { text: `No session matches "${untrusted(res.query, 40)}".`, structured: { found: false } };
+        if (res.kind === "many") return { text: disambiguation(res.hits), structured: { found: false, ambiguous: true, candidates: res.hits.slice(0, 6).map((h) => labelOf(h)) } };
+        const hit = res.hit;
+        if (d.peekAllow && !d.peekAllow.some((x) => [hit.id, hit.alias, hit.template].includes(x)) && !isDefaultSession(d, hit)) {
           return { text: "That session is not allowed to be read by voice.", structured: { found: true, allowed: false } };
         }
         const t: any = await gc.get(`/session/${encodeURIComponent(hit.id)}/transcript`, { format: "conversation", tail });
@@ -180,6 +175,7 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
         return { text, structured: { total: items.length, by_type: by } };
       }),
     },
+    ...buildVoiceTools(d, who),
   ];
   // Write tools: listed only for a token that holds gc:write, only while writes are enabled and not switched off (WRITES_DISABLED).
   // The handlers re-check everything, so a stale listing cannot send anything.
@@ -189,17 +185,17 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const writeTools: ToolDef[] = [
     {
       name: "send_to_session", title: "Send a message to an agent session", isWrite: true,
-      description: "Send a text message to one agent session, like typing into its terminal. intent: default, follow_up (queue it after the current turn) or interrupt_now (interrupt the current turn first). Cannot stop, kill, reset or change anything else.",
-      inputShape: { session: z.string().min(1).max(128), text: z.string().min(1).max(MAX_WRITE_TEXT), intent: z.enum(INTENTS).optional() },
+      description: "Send a text message to one agent session, like typing into its terminal. Say a name ('steve', 'the mayor'); leave session out for the default session. It returns at once with an acknowledgement; use wait_for_reply to hear the answer. intent: default, follow_up (queue it after the current turn) or interrupt_now (interrupt the current turn first). Cannot stop, kill, reset or change anything else.",
+      inputShape: { session: z.string().min(1).max(128).optional(), text: z.string().min(1).max(MAX_WRITE_TEXT), intent: z.enum(INTENTS).optional() },
       annotations: WRITE_ANN,
-      handler: async (a) => gate.submit(who, String(a.session), String(a.text), a.intent ?? "default"),
+      handler: async (a) => gate.submit(who, a.session === undefined ? undefined : String(a.session), String(a.text), a.intent ?? "default"),
     },
     {
       name: "respond_to_session", title: "Answer a waiting agent session", isWrite: true,
       description: "Answer an agent session that is waiting on you (a pending question or permission request): a short action word such as allow or deny, optional reply text, optional request id.",
-      inputShape: { session: z.string().min(1).max(128), action: z.string().min(1).max(32), text: z.string().max(MAX_WRITE_TEXT).optional(), request_id: z.string().max(128).optional() },
+      inputShape: { session: z.string().min(1).max(128).optional(), action: z.string().min(1).max(32), text: z.string().max(MAX_WRITE_TEXT).optional(), request_id: z.string().max(128).optional() },
       annotations: WRITE_ANN,
-      handler: async (a) => gate.respond(who, String(a.session), String(a.action), a.text === undefined ? undefined : String(a.text), a.request_id === undefined ? undefined : String(a.request_id)),
+      handler: async (a) => gate.respond(who, a.session === undefined ? undefined : String(a.session), String(a.action), a.text === undefined ? undefined : String(a.text), a.request_id === undefined ? undefined : String(a.request_id)),
     },
   ];
   return [...reads, ...writeTools];

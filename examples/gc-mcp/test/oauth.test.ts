@@ -108,7 +108,7 @@ describe("authorization-code + PKCE flow", () => {
     const tok = (await (await s.token(s.getCode(c), verifier)).json()) as { access_token: string };
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${s.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(11);   // 7 read tools + the 4 voice-loop read tools; no write tool without gc:write
     const r = await client.callTool({ name: "city_status", arguments: {} });
     expect((r.content as { text: string }[])[0].text).toMatch(/23 of 40 agents running/);
     await client.close();
@@ -197,7 +197,7 @@ describe("MCP endpoint under a path prefix (issuer stays at the host root)", () 
     const tok = await s.login();
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(11);   // 7 read tools + the 4 voice-loop read tools; no write tool without gc:write
     await client.close();
     expect((await fetch(`${s.base}/mcp`, { method: "POST", headers: { ...TEXT, authorization: `Bearer ${tok.access_token}` }, body: "{}" })).status).toBe(404);
   });
@@ -266,7 +266,7 @@ describe("issuer AND resource under one path prefix (final naming: https://host/
     const tok = await s.login();
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(11);   // 7 read tools + the 4 voice-loop read tools; no write tool without gc:write
     await client.close();
   });
 

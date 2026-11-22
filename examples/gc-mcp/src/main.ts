@@ -67,6 +67,11 @@ if (process.env.GC_MCP_WRITES_ENABLED === "1") {
   console.error(`gc-mcp: WRITES ENABLED (send_to_session, respond_to_session; scope gc:write). Kill switch: ${path.join(stateDir, "WRITES_DISABLED")}`);
 }
 
+// What an omitted `session` means (voice: nobody says session ids). Empty = no default: tools then ask "which session?".
+const defaultSession = (process.env.GC_MCP_DEFAULT_SESSION ?? "").trim() || undefined;
+if (defaultSession && !/^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,127}$/.test(defaultSession)) { console.error("gc-mcp: GC_MCP_DEFAULT_SESSION must be a plain session name"); process.exit(2); }
+if (defaultSession) console.error(`gc-mcp: default session: ${defaultSession}`);
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
@@ -74,6 +79,7 @@ const { app } = createApp({
     mailAgent: process.env.GC_MCP_MAIL_AGENT ?? "human",
     now: () => new Date(),
     peekAllow: list(process.env.GC_MCP_PEEK_ALLOW),
+    defaultSession,
   },
   publicUrl: new URL(publicUrlRaw),
   ownerHash,

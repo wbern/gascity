@@ -13,7 +13,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./server.js";
 import { OwnerApprovalProvider, RateLimiter, SCOPE, type ChatgptClientSpec } from "./oauth.js";
-import { WriteGate, type WriteConfig } from "./writes.js";
+import { SendMarkers, WriteGate, type WriteConfig } from "./writes.js";
 import { AuditLog } from "./audit.js";
 import { parseCidr, inAnyCidr } from "./cidr.js";
 import type { Deps } from "./tools.js";
@@ -53,7 +53,10 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const securityPaths = new Set([mcpPath, ...["authorize", "token", "revoke", "register", "consent"].map(oauthPath)]);
   const audit = new AuditLog(o.auditFile ?? null);
   const writesOn = !!o.writes?.enabled;
-  const deps = writesOn ? { ...o.deps, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir }, (e) => audit.write(e), now) } : o.deps;
+  const markers = o.deps.markers ?? new SendMarkers();
+  const deps = writesOn
+    ? { ...o.deps, markers, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
+    : { ...o.deps, markers };
   const provider = new OwnerApprovalProvider({
     writesEnabled: writesOn,
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, chatgpt: o.chatgpt, allowDcr: o.allowDcr, stateFile: o.stateFile, now,

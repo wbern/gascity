@@ -45,17 +45,17 @@ export class GcClient {
     return this.send("POST", url, payload, { "content-type": "application/json", "x-gc-request": "gc-mcp", "idempotency-key": idempotencyKey });
   }
 
-  async get<T = unknown>(path: string, query: Record<string, string | number | undefined> = {}): Promise<T> {
+  async get<T = unknown>(path: string, query: Record<string, string | number | undefined> = {}, timeoutMs?: number): Promise<T> {
     const u = new URL(`${this.o.baseUrl}/v0/city/${encodeURIComponent(this.o.city)}${path}`);
     for (const [k, v] of Object.entries(query)) if (v !== undefined) u.searchParams.set(k, String(v));
-    return (await this.send("GET", u.toString())) as T;
+    return (await this.send("GET", u.toString(), undefined, {}, timeoutMs)) as T;
   }
 
-  private async send(method: "GET" | "POST", url: string, body?: string, extra: Record<string, string> = {}): Promise<unknown> {
+  private async send(method: "GET" | "POST", url: string, body?: string, extra: Record<string, string> = {}, timeoutMs?: number): Promise<unknown> {
     const f = this.o.fetchImpl ?? fetch;
     const max = this.o.maxBytes ?? 2_000_000;
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 8000);
+    const timer = setTimeout(() => ctl.abort(), timeoutMs ?? this.o.timeoutMs ?? 8000);
     try {
       // redirect:"error": a loopback API has no business redirecting us anywhere.
       const res = await f(url, { method, headers: { accept: "application/json", ...extra }, body, signal: ctl.signal, redirect: "error" });

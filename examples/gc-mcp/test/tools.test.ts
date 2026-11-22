@@ -28,7 +28,7 @@ describe("tools", () => {
   it("every tool is read-only annotated", () => {
     const { t } = tools({});
     expect(t.map((x) => x.name).sort()).toEqual(
-      ["bead_show", "city_status", "list_sessions", "mail_inbox", "peek_session", "ready_work", "whats_new"],
+      ["bead_show", "city_status", "latest_reply", "list_sessions", "mail_inbox", "peek_session", "read_more", "ready_work", "session_state", "wait_for_reply", "whats_new"],
     );
     for (const x of t) expect(x.annotations.readOnlyHint).toBe(true);
   });
@@ -131,10 +131,11 @@ describe("voice quality", () => {
 
 
 describe("hardening", () => {
-  it("peek_session needs an exact id/alias match, not a template suffix", async () => {
+  it("peek_session resolves a unique spoken partial name, refuses an ambiguous one and an unknown one (see sessions.test.ts)", async () => {
     const { t } = tools({ "/sessions": F.sessions, "/transcript": F.transcript });
-    const r = await t.find((x) => x.name === "peek_session")!.handler({ session: "architect" });
-    expect(r.text).toMatch(/no session/i);
+    const peek = t.find((x) => x.name === "peek_session")!;
+    expect((await peek.handler({ session: "architect" })).text).toMatch(/gc-architect, last/);   // unique suffix of gas-city-wbern/architect
+    expect((await peek.handler({ session: "nobody-here" })).text).toMatch(/no session/i);
   });
   it("peek_session honours an allowlist", async () => {
     const { t, calls } = tools({ "/sessions": F.sessions, "/transcript": F.transcript }, { peekAllow: ["mayor"] });
@@ -175,9 +176,11 @@ describe("the supervisor client: reads are GET-only, the only mutations are the 
         : p.endsWith("/beads/ready/summary") ? F.readySummary : p.includes("/bead/") ? F.bead : p.endsWith("/events") ? F.events : p.endsWith("/usage") ? F.usage : F.status;
       return new Response(JSON.stringify(body), { status: 200 });
     }) as unknown as typeof fetch;
-    const t = buildTools({ gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() });
+    const clock = { t: 0, now() { return this.t; }, sleep: async (ms: number) => { clock.t += ms; } };
+    const t = buildTools({ gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date(), defaultSession: "gc-architect", clock });
     const args: Record<string, unknown> = { city_status: {}, list_sessions: { limit: 3, state: "active" }, peek_session: { session: "gc-architect", tail: 2 },
-      mail_inbox: { limit: 2 }, ready_work: { limit: 2 }, bead_show: { id: "gcw-ti563" }, whats_new: { since: "1h" } };
+      mail_inbox: { limit: 2 }, ready_work: { limit: 2 }, bead_show: { id: "gcw-ti563" }, whats_new: { since: "1h" },
+      session_state: {}, latest_reply: {}, read_more: { offset: 0 }, wait_for_reply: { max_seconds: 2 } };
     for (const tool of t) await tool.handler(args[tool.name]);
     expect(seen.length).toBeGreaterThan(7);
     expect(new Set(seen.map((r) => r.method))).toEqual(new Set(["GET"]));
