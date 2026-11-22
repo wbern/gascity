@@ -2946,12 +2946,12 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 			}
 			r.Status = StatusWarning
 			r.Message = "managed dolt-config.yaml not found"
-			r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+			r.FixHint = "run gc start (or gc dolt restart; agent sessions cannot, ask an operator) to regenerate"
 			return r
 		}
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("read dolt-config.yaml: %v", err)
-		r.FixHint = "run gc start (or gc dolt restart) to regenerate"
+		r.FixHint = "run gc start (or gc dolt restart; agent sessions cannot, ask an operator) to regenerate"
 		return r
 	}
 

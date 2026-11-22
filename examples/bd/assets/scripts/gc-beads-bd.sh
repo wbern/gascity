@@ -4840,7 +4840,9 @@ else
         _de_min=""
         for _de_path in "$@"; do
             [ -n "$_de_path" ] && [ -e "$_de_path" ] || continue
-            _de_kb=$(df -Pk -- "$_de_path" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}')
+            # Anchor on the Capacity column from the right (the first "NN%" field), so a
+            # device or mount name containing spaces cannot shift Available.
+            _de_kb=$(df -Pk -- "$_de_path" 2>/dev/null | awk 'NR==2 { for (i = NF; i > 2; i--) if ($i ~ /^[0-9]+%$/ && $(i-1) ~ /^[0-9]+$/) { print $(i-1); exit } }')
             [ -n "$_de_kb" ] || continue
             _de_bytes=$((_de_kb * 1024))
             if [ -z "$_de_min" ] || [ "$_de_bytes" -lt "$_de_min" ]; then
@@ -4867,6 +4869,20 @@ else
             return 1
         fi
         return 0
+    }
+
+fi
+
+fsync_stall_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-fsync-stall.sh"
+if [ -r "$fsync_stall_helper" ]; then
+    . "$fsync_stall_helper"
+else
+    # Focused shell harnesses can run gc-beads-bd without sibling assets. The
+    # production helper is the only copy of the detector, so say that the
+    # guard is missing rather than silently dropping it.
+    recovery_should_skip_due_to_fsync_stall() {
+        echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside gc-beads-bd" >&2
+        return 1
     }
 fi
 

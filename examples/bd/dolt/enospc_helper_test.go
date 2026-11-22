@@ -28,11 +28,19 @@ func enospcImplementations(t *testing.T) map[string]string {
 	}
 	text := string(src)
 	const startMarker = "    # Some focused shell harnesses execute gc-beads-bd's prelude"
-	const endMarker = "\nfi\n\n# op_recover stops the dolt server"
 	i := strings.Index(text, startMarker)
-	j := strings.Index(text, endMarker)
-	if i < 0 || j < i {
+	if i < 0 {
 		t.Fatalf("could not locate the inline fallback detector in gc-beads-bd.sh")
+	}
+	// The first column-0 "fi" after the marker closes the if/else around the fallback.
+	// Anything that follows (the fsync-stall helper, op_recover) must not be captured.
+	k := strings.Index(text[i:], "\nfi\n")
+	if k < 0 {
+		t.Fatalf("could not find the end of the inline fallback detector")
+	}
+	j := i + k
+	if strings.Contains(text[i:j], "fsync_stall") {
+		t.Fatalf("fallback extraction swallowed unrelated code")
 	}
 	fallback := filepath.Join(t.TempDir(), "fallback-enospc.sh")
 	if err := os.WriteFile(fallback, []byte("#!/bin/sh\n"+text[i:j]+"\n"), 0o644); err != nil {
@@ -45,10 +53,19 @@ func enospcImplementations(t *testing.T) map[string]string {
 // fails when availKB is negative.
 func fakeDF(t *testing.T, availKB int64) string {
 	t.Helper()
+	return fakeDFDevice(t, "fake", availKB)
+}
+
+// fakeDFDevice is fakeDF with a chosen device name (which may contain spaces) and a
+// mount point containing a space, to prove the parser anchors on the Capacity column.
+func fakeDFDevice(t *testing.T, device string, availKB int64) string {
+	t.Helper()
 	dir := t.TempDir()
 	body := "#!/bin/sh\nexit 1\n"
 	if availKB >= 0 {
-		body = fmt.Sprintf("#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfake 99999999 1 %d 1%% /\\n'\n", availKB)
+		// A heredoc, not printf: printf would swallow the "%" of the Capacity column,
+		// and real df -Pk output must be reproduced exactly for the parser under test.
+		body = fmt.Sprintf("#!/bin/sh\ncat <<'EOF'\nFilesystem 1024-blocks Used Available Capacity Mounted on\n%s 99999999 1 %d 1%% /mnt/a b\nEOF\n", device, availKB)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "df"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake df: %v", err)
@@ -127,5 +144,35 @@ func TestEnospcDetectorRequiresTheDiskToStillBeShort(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestEnospcDetectorParsesDfWithSpacesInNames: a device or mount name containing
+// spaces must not shift the Available column into Used.
+func TestEnospcDetectorParsesDfWithSpacesInNames(t *testing.T) {
+	for impl, source := range enospcImplementations(t) {
+		t.Run(impl, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "dolt.log")
+			if err := os.WriteFile(logPath, []byte(enospcLine), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run := func(availKB int64) string {
+				cmd := exec.Command("sh", "-c", `. "$1"; recovery_should_skip_due_to_enospc; echo "rc=$?"`, "sh", source)
+				cmd.Env = append(filteredEnv("PATH"),
+					"PATH="+fakeDFDevice(t, "my weird dev", availKB)+string(os.PathListSeparator)+os.Getenv("PATH"),
+					"LOG_FILE="+logPath)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("detector failed: %v\n%s", err, out)
+				}
+				return string(out)
+			}
+			if out := run(10 * gibKB); !strings.Contains(out, "rc=1") || !strings.Contains(out, "stale") {
+				t.Fatalf("10 GiB free on a spaced device name must read as recovered:\n%s", out)
+			}
+			if out := run(100 * 1024); !strings.Contains(out, "rc=0") {
+				t.Fatalf("100 MiB free on a spaced device name must keep the refusal:\n%s", out)
+			}
+		})
 	}
 }

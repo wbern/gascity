@@ -16,7 +16,10 @@
 # --force`). So when ENOSPC lines are present, free space on the Dolt volume is
 # checked too, and recovery proceeds once it is at least
 # GC_DOLT_ENOSPC_CLEAR_FREE_BYTES (default 2 GiB, the warn floor). If free space
-# cannot be measured the conservative refusal stands.
+# cannot be measured the conservative refusal stands. Only block space on the Dolt
+# data/log volumes is considered: inode exhaustion, quotas, or a full backup-remote
+# volume are NOT detected, and an operator facing those can raise
+# GC_DOLT_ENOSPC_CLEAR_FREE_BYTES above the free space to keep the refusal.
 #
 # Returns 1 (false) when no ENOSPC signature is found in the recent log tail, when
 # the disk has recovered, or when LOG_FILE is unset or unreadable.
@@ -28,7 +31,9 @@ _dolt_enospc_free_bytes() {
     _de_min=""
     for _de_path in "$@"; do
         [ -n "$_de_path" ] && [ -e "$_de_path" ] || continue
-        _de_kb=$(df -Pk -- "$_de_path" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}')
+        # Anchor on the Capacity column from the right (the first "NN%" field), so a
+        # device or mount name containing spaces cannot shift Available.
+        _de_kb=$(df -Pk -- "$_de_path" 2>/dev/null | awk 'NR==2 { for (i = NF; i > 2; i--) if ($i ~ /^[0-9]+%$/ && $(i-1) ~ /^[0-9]+$/) { print $(i-1); exit } }')
         [ -n "$_de_kb" ] || continue
         _de_bytes=$((_de_kb * 1024))
         if [ -z "$_de_min" ] || [ "$_de_bytes" -lt "$_de_min" ]; then
