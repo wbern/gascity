@@ -310,13 +310,13 @@ describe("who may READ a reply: default session, peek allowlist, or a gc:write h
     const { d } = w.mk({}, { peekAllow: ["mayor"] });
     expect((await w.tool(d, R, "latest_reply").handler({})).text).toContain("mine");                       // the default session
     expect((await w.tool(d, R, "latest_reply").handler({ session: "mayor" })).text).toContain("mayor's");  // on the allowlist
-    expect((await w.tool(d, R, "latest_reply").handler({ session: "steve" })).text).toMatch(/not allowed to be read/);
+    expect((await w.tool(d, R, "latest_reply").handler({ session: "steve" })).text).toMatch(/not on my read list/);
   });
   it("a gc:write token may read what it may write to (steve), but never another person's session", async () => {
     const w = world({ transcripts: { "gc2-wisp-s1": [asst(T0, "steve's")], "gc2-wisp-zz": [asst(T0, "zachris private")] } });
     const { d } = w.mk({}, { peekAllow: ["mayor"] });
     expect((await w.tool(d, W, "latest_reply").handler({ session: "steve" })).text).toContain("steve's");
-    expect((await w.tool(d, W, "latest_reply").handler({ session: "zachris-dev" })).text).toMatch(/not allowed to be read/);
+    expect((await w.tool(d, W, "latest_reply").handler({ session: "zachris-dev" })).text).toMatch(/protected list/);
   });
   it("ambiguity and unknown names are spoken as a question and read nothing", async () => {
     const w = world(); const { d } = w.mk();

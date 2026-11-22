@@ -58,3 +58,17 @@ export function disambiguation(hits: SessionRef[]): string {
   const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
   return `I found ${list}${more}, which one?`;
 }
+
+// ---- speaking a session: never by id
+export const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+export const WISP = /\b[a-z0-9]+-wisp-[a-z0-9]+\b/gi;
+export const SHA = /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/gi;
+export const ID_TOKEN = /\b(?:gc[a-z0-9]{0,3}|[a-z]{2,4})-(?=[a-z0-9]*\d)[a-z0-9]{4,12}\b/gi;
+const looksLikeId = (s: string) => { UUID.lastIndex = WISP.lastIndex = ID_TOKEN.lastIndex = 0; return UUID.test(s) || WISP.test(s) || ID_TOKEN.test(s); };
+
+/** "crm/steve" is said "crm steve"; a session with no name of its own is never announced by its id. */
+export function spokenName(s: SessionRef): string {
+  const label = String(s.alias || s.template || s.agent_name || "").replace(/[0-9a-f]{10,}/gi, "").trim();
+  if (!label || looksLikeId(label)) return "an unnamed agent";
+  return clip(label.replace(/[/_.-]+/g, " ").replace(/\s+/g, " ").trim(), 40);
+}

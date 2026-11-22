@@ -88,6 +88,10 @@ export class WriteGate {
     return !(f && fs.existsSync(f));
   }
 
+  /** The write deny list (also the default for reads) and the allow-list test alone, for the read check. */
+  get denyList(): string[] { return this.deny; }
+  allowListOk(hit: SessionRef): boolean { return !this.allow || identifiers(hit).some((n) => this.allow!.some((p) => globMatch(p, n))); }
+
   /** The deny and allow lists (deny always wins). Used by writes, and by the voice read tools to decide what a gc:write holder may read. */
   permits(hit: SessionRef): { ok: true } | { ok: false; reason: "denied_session" | "not_in_allow_list" } {
     const names = identifiers(hit);

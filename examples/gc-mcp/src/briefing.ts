@@ -2,9 +2,11 @@
 // Only data the supervisor already provides (status, sessions, pending interactions, human gates, work titles, recent events); a source that cannot be
 // read is named in one clause and never guessed. Nothing here reads out an id: names are spoken the way people say them, titles are scrubbed.
 import { z } from "zod";
-import type { SessionRef } from "./sessions.js";
+import { SHA, UUID, WISP, ID_TOKEN, spokenName, type SessionRef } from "./sessions.js";
+export { spokenName };
 import { clean, clip, guard, type ToolResult } from "./text.js";
 import { deriveState, realClock, target } from "./voice.js";
+import { isReadDenied } from "./access.js";
 import type { Deps, ToolDef } from "./tools.js";
 import type { WriteCtx } from "./writes.js";
 
@@ -13,23 +15,11 @@ const FIRST_WINDOW_MS = 12 * 3_600_000;
 const MAX_WINDOW_MS = 7 * 86_400_000;
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 
-const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
-const WISP = /\b[a-z0-9]+-wisp-[a-z0-9]+\b/gi;
-const SHA = /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/gi;
-const ID_TOKEN = /\b(?:gc[a-z0-9]{0,3}|[a-z]{2,4})-(?=[a-z0-9]*\d)[a-z0-9]{4,12}\b/gi;
-const looksLikeId = (s: string) => { UUID.lastIndex = WISP.lastIndex = ID_TOKEN.lastIndex = 0; return UUID.test(s) || WISP.test(s) || ID_TOKEN.test(s); };
-
 /** Spoken form of a title from beads, mail or agents: untrusted text, redacted, with ids and links removed. */
 export function spokenTitle(raw: unknown, max: number): string {
   let s = clean(raw).replace(UUID, "").replace(WISP, "").replace(ID_TOKEN, "").replace(SHA, "").replace(/\([^)]*\)|\[[^\]]*\]/g, "").replace(/#(\d+)/g, "$1").replace(/\s@\s?/g, " ").replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
   if (s.length > max) { const cut = s.slice(0, max + 1); s = cut.slice(0, Math.max(cut.lastIndexOf(" "), Math.floor(max * 0.6))); }   // a word boundary, never a mid-word "…" (it is read aloud)
   return s.replace(/[\s,;:(-]+$/g, "").replace(/(?:\s+(?:for|on|of|to|and|with|in|at|by|the|a|an|is|are))+$/i, "").trim();
-}
-/** "crm/steve" is said "crm steve"; a session with no name of its own is never announced by its id. */
-export function spokenName(s: SessionRef): string {
-  const label = String(s.alias || s.template || s.agent_name || "").replace(/[0-9a-f]{10,}/gi, "").trim();
-  if (!label || looksLikeId(label)) return "an unnamed agent";
-  return clip(label.replace(/[/_.-]+/g, " ").replace(/\s+/g, " ").trim(), 40);
 }
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const andList = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
@@ -117,12 +107,12 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
           if (st === "waiting for input") { counts.waiting++; waiting.push(s); }
           else if (st === "stuck") { counts.stuck++; stuck.push(s); }
           else if (st === "not running") counts.not_running++;
-          else if (st === "working" || s.active_bead || heldTitle) { counts.working++; working.push({ s, title: heldTitle ?? "" }); }
+          else if (st === "working" || s.active_bead || heldTitle) { counts.working++; working.push({ s, title: isReadDenied(d, s) ? "" : (heldTitle ?? "") }); }   // a protected session may be named as busy, but what it works on is not ours to say
           else counts.idle++;
         }
         for (const id of waitingIds) if (!sessions.some((s) => s.id === id)) { counts.waiting++; waiting.push({ id }); }
         working.sort((a, b) => String(b.s.last_active).localeCompare(String(a.s.last_active)));
-        await Promise.all(working.slice(0, 8).map(async (w) => { if (!w.title && w.s.active_bead) w.title = await title(String(w.s.active_bead), 45); }));
+        await Promise.all(working.slice(0, 8).map(async (w) => { if (!w.title && w.s.active_bead && !isReadDenied(d, w.s)) w.title = await title(String(w.s.active_bead), 45); }));
         // name the ones whose work we can SAY first (a name alone tells nothing), most recently active first within each group
         const shown = [...working].sort((a, b) => Number(!!b.title) - Number(!!a.title)).slice(0, 3);
 

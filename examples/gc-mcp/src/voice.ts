@@ -5,6 +5,7 @@ import { z } from "zod";
 import { disambiguation, labelOf, resolveSession, identifiers, type SessionRef } from "./sessions.js";
 import { clean, clip, guard, speakName, type ToolResult } from "./text.js";
 import { WRITE_SCOPE, parseMarker, type WriteCtx } from "./writes.js";
+import { readVerdict } from "./access.js";
 import type { Deps, ToolDef } from "./tools.js";
 
 export const SPOKEN_MAX = 280;          // every spoken text stays at or under this
@@ -29,11 +30,9 @@ export async function target(d: Deps, who: WriteCtx | undefined, session?: strin
   if (res.kind === "none") return { say: { text: clip(`No session matches "${clean(res.query).slice(0, 40)}".`, SPOKEN_MAX), structured: { found: false } } };
   if (res.kind === "many") return { say: { text: clip(disambiguation(res.hits), SPOKEN_MAX), structured: { found: false, ambiguous: true, candidates: res.hits.slice(0, 6).map(labelOf) } } };
   const hit = res.hit;
-  // Readable when: no peek allowlist is set, or it lists the session, or it is the default session, or the token holds gc:write
-  // and the write gate would let it write there (you may read the answer of an agent you may instruct).
-  const peekOk = !d.peekAllow || d.peekAllow.some((x) => [hit.id, hit.alias, hit.template].includes(x));
-  const writeOk = !!who?.scopes.includes(WRITE_SCOPE) && !!d.writes?.active && d.writes.permits(hit).ok;
-  if (!peekOk && !isDefault(d, hit) && !writeOk) return { say: { text: "That session is not allowed to be read by voice.", structured: { found: true, allowed: false } } };
+  // Who may read what is decided in access.ts, which also says WHY when the answer is no (protected list, read list, scope, writes off).
+  const v = readVerdict(d, who, hit);
+  if (!v.ok) return { say: { text: v.text, structured: v.structured } };
   return { hit };
 }
 

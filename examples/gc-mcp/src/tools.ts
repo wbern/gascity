@@ -4,6 +4,7 @@ import { clip, guard, plural, untrusted, type ToolResult } from "./text.js";
 import { disambiguation, resolveSession, identifiers, labelOf, type SessionRef } from "./sessions.js";
 import { buildVoiceTools } from "./voice.js";
 import { buildBriefingTools } from "./briefing.js";
+import { readVerdict } from "./access.js";
 import { INTENTS, MAX_WRITE_TEXT, WRITE_SCOPE, type SendMarkers, type WriteCtx, type WriteGate } from "./writes.js";
 
 export interface ToolDef {
@@ -21,6 +22,7 @@ export type { ToolResult };
 export interface Clock { now: () => number; sleep: (ms: number) => Promise<void> }
 export interface Deps {
   gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate;
+  readDeny?: string[];          // sessions that may NOT be read (GC_MCP_READ_DENY_SESSIONS); unset = the write deny list, so nothing changes by default
   defaultSession?: string;      // GC_MCP_DEFAULT_SESSION: what "session" means when nobody says one (voice: nobody says session ids)
   markers?: SendMarkers;        // when each client last sent to each session, so wait_for_reply knows "since when"
   briefings?: Map<string, number>;   // per client: when it last asked for a briefing (in memory; a restart forgets it, which only widens the next window)
@@ -102,9 +104,8 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
         if (res.kind === "none") return { text: `No session matches "${untrusted(res.query, 40)}".`, structured: { found: false } };
         if (res.kind === "many") return { text: disambiguation(res.hits), structured: { found: false, ambiguous: true, candidates: res.hits.slice(0, 6).map((h) => labelOf(h)) } };
         const hit = res.hit;
-        if (d.peekAllow && !d.peekAllow.some((x) => [hit.id, hit.alias, hit.template].includes(x)) && !isDefaultSession(d, hit)) {
-          return { text: "That session is not allowed to be read by voice.", structured: { found: true, allowed: false } };
-        }
+        const v = readVerdict(d, who, hit);
+        if (!v.ok) return { text: v.text, structured: v.structured };
         const t: any = await gc.get(`/session/${encodeURIComponent(hit.id)}/transcript`, { format: "conversation", tail });
         const spoken = ((t.turns ?? []) as any[]).filter((x) => !/^\s*\[[A-Za-z_ -]{1,24}\]\s*$/.test(String(x.text ?? "")) && String(x.text ?? "").trim() !== "");
         const turns = spoken.slice(-tail).map((x) => ({ role: String(x.role).slice(0, 16), text: untrusted(x.text, 280), at: x.timestamp }));

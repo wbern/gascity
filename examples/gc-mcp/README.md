@@ -48,6 +48,12 @@ title, never automation), then mail only if useful (a pile of notices is "nothin
 cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers "what is steve working on?" in a sentence or two. The server sends `instructions` in the
 initialize result written for a spoken assistant, and every tool's title and description is plain spoken intent ("Ask how the agents are doing", "Say something to an agent").
 
+Who may be READ is decided in one place (`src/access.ts`) and a refusal always says why, in one speakable sentence, with `{found:true, allowed:false, reason, name}` in structuredContent:
+`denied_session` (on the protected list: "zachris gemini 2 belongs to someone else, so it is on the protected list and I will not read or write it. Ask the owner to change the list if you want
+that."), `no_scope` (not on the read list; reconnect with gc:write or ask the owner), `writes_disabled`, `not_in_allow_list`. It never blames "voice". The READ deny list
+`GC_MCP_READ_DENY_SESSIONS` defaults to the write deny list (nothing changes); set it (even to empty) to open reads of colleagues' sessions while writes stay blocked. The briefing may say a
+protected agent is busy but never says what it works on.
+
 Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
 A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match
 (`steve` is `crm/steve`; `crm slash steve` works); if more than one fits, the tool asks ("I found crm slash steve and crm slash bob, which one?") and sends nothing.

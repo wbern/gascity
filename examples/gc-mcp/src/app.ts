@@ -25,6 +25,7 @@ export interface AppOpts {
   staticClientId?: string;     // the owner's own OAuth client id (recommended)
   allowDcr?: boolean;          // dynamic client registration: OFF unless explicitly enabled
   dcr?: { extraRedirects?: string[]; openRedirects?: boolean; maxClients?: number; perHour?: number; ttlDays?: number };   // registration policy (see src/dcr.ts)
+  readDeny?: string[];         // sessions that may NOT be read (default: the write deny list, so nothing changes); [] opens reads of colleagues' sessions while writes stay blocked
   writes?: WriteConfig;        // Phase 4 write tools (send_to_session, respond_to_session): absent or enabled:false = read-only server, gc:write not advertised
   chatgpt?: ChatgptClientSpec; // optional second STATIC client for ChatGPT (exact https://chatgpt.com/ redirects; empty = cannot authorize)
   stateFile?: string;
@@ -54,11 +55,12 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const securityPaths = new Set([mcpPath, ...["authorize", "token", "revoke", "register", "consent"].map(oauthPath)]);
   const audit = new AuditLog(o.auditFile ?? null);
   const writesOn = !!o.writes?.enabled;
+  const readDeny = o.readDeny ?? o.writes?.deny ?? o.deps.readDeny;   // unset everywhere = the built-in deny list (access.ts)
   const markers = o.deps.markers ?? new SendMarkers();
   const briefings = o.deps.briefings ?? new Map<string, number>();
   const deps = writesOn
-    ? { ...o.deps, markers, briefings, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
-    : { ...o.deps, markers, briefings };
+    ? { ...o.deps, readDeny, markers, briefings, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
+    : { ...o.deps, readDeny, markers, briefings };
   const provider = new OwnerApprovalProvider({
     writesEnabled: writesOn,
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, chatgpt: o.chatgpt, allowDcr: o.allowDcr, stateFile: o.stateFile, now,

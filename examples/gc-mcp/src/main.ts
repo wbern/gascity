@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
 import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
-import { validatePatterns, type WriteConfig } from "./writes.js";
+import { DEFAULT_WRITE_DENY, validatePatterns, type WriteConfig } from "./writes.js";
 import { validateExtraRedirects } from "./dcr.js";
 import { resolveNetwork, resolveMcpPath, resolveIssuerPath } from "./netconfig.js";
 
@@ -85,6 +85,20 @@ if (process.env.GC_MCP_ALLOW_DCR === "1") {
   if (dcr.openRedirects) console.error("gc-mcp: WARNING GC_MCP_DCR_OPEN_REDIRECTS=1: ANY https redirect URI may register. This is UNSAFE; registered clients are read-only while it is on.");
 }
 
+// Who may NOT be read. Unset = the same list as the write deny list (so nothing changes); an explicit value, even an empty one, replaces it FOR READS ONLY:
+// GC_MCP_READ_DENY_SESSIONS= (empty) opens reads of colleagues' sessions while writes stay blocked by GC_MCP_WRITE_DENY_SESSIONS.
+let readDeny: string[] | undefined;
+if (process.env.GC_MCP_READ_DENY_SESSIONS !== undefined) {
+  try { readDeny = validatePatterns((process.env.GC_MCP_READ_DENY_SESSIONS).split(",").map((s) => s.trim()).filter(Boolean), "GC_MCP_READ_DENY_SESSIONS"); }
+  catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+}
+{
+  const writeList = writes?.deny ?? DEFAULT_WRITE_DENY;
+  const show = (l: string[]) => (l.length ? l.join(",") : "(none)");
+  console.error(`gc-mcp: write deny list: ${show(writeList)}`);   // ctl status reads these two lines (patterns only, nothing secret)
+  console.error(`gc-mcp: read deny list: ${show(readDeny ?? writeList)}${readDeny === undefined ? " (same as write)" : ""}`);
+}
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
@@ -98,6 +112,7 @@ const { app } = createApp({
   ownerHash,
   staticClientId,
   chatgpt,
+  readDeny,
   writes,
   allowDcr: process.env.GC_MCP_ALLOW_DCR === "1",
   dcr,
