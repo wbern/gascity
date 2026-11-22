@@ -13,6 +13,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./server.js";
 import { OwnerApprovalProvider, RateLimiter, SCOPE, type ChatgptClientSpec } from "./oauth.js";
+import { WriteGate, type WriteConfig } from "./writes.js";
 import { AuditLog } from "./audit.js";
 import { parseCidr, inAnyCidr } from "./cidr.js";
 import type { Deps } from "./tools.js";
@@ -23,6 +24,7 @@ export interface AppOpts {
   ownerHash: string;
   staticClientId?: string;     // the owner's own OAuth client id (recommended)
   allowDcr?: boolean;          // dynamic client registration: OFF unless explicitly enabled
+  writes?: WriteConfig;        // Phase 4 write tools (send_to_session, respond_to_session): absent or enabled:false = read-only server, gc:write not advertised
   chatgpt?: ChatgptClientSpec; // optional second STATIC client for ChatGPT (exact https://chatgpt.com/ redirects; empty = cannot authorize)
   stateFile?: string;
   controlDir?: string;         // holds the DISABLED and REVOKE_ALL flag files
@@ -50,7 +52,10 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const isMcp = (p: string) => p === mcpPath;
   const securityPaths = new Set([mcpPath, ...["authorize", "token", "revoke", "register", "consent"].map(oauthPath)]);
   const audit = new AuditLog(o.auditFile ?? null);
+  const writesOn = !!o.writes?.enabled;
+  const deps = writesOn ? { ...o.deps, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir }, (e) => audit.write(e), now) } : o.deps;
   const provider = new OwnerApprovalProvider({
+    writesEnabled: writesOn,
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, chatgpt: o.chatgpt, allowDcr: o.allowDcr, stateFile: o.stateFile, now,
     consentPath: oauthPath("consent"),
     onEvent: (note, ok, app) => audit.write({ kind: "auth", ok, note, app }),
@@ -123,14 +128,14 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   // Metadata follows RFC 8414 / RFC 9728 path insertion; nothing is served at the host root in path mode.
   const ep = (name: string) => `${origin}${oauthPath(name)}`;
   const asMeta = {
-    ...createOAuthMetadata({ provider, issuerUrl: new URL(issuerStr), baseUrl: new URL(issuerStr), scopesSupported: [SCOPE] }),
+    ...createOAuthMetadata({ provider, issuerUrl: new URL(issuerStr), baseUrl: new URL(issuerStr), scopesSupported: provider.supportedScopes() }),
     issuer: issuerStr,
     authorization_endpoint: ep("authorize"),
     token_endpoint: ep("token"),
     revocation_endpoint: ep("revoke"),
     registration_endpoint: provider.clientsStore.registerClient ? ep("register") : undefined,
   };
-  const prm = { resource: resource.href, authorization_servers: [issuerStr], scopes_supported: [SCOPE], resource_name: "Gas City (read-only)" };
+  const prm = { resource: resource.href, authorization_servers: [issuerStr], scopes_supported: provider.supportedScopes(), resource_name: writesOn ? "Gas City" : "Gas City (read-only)" };
   app.use(`/.well-known/oauth-protected-resource${mcpPath === "/" ? "" : mcpPath}`, metadataHandler(prm));
   app.use(`/.well-known/oauth-authorization-server${issuerPath}`, metadataHandler(asMeta));
   if (issuerPath === "") {
@@ -186,7 +191,8 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   }, bearer, express.json({ limit: "64kb" }), async (req, res) => {
     const client = req.auth?.clientId ?? "?";
     if (!callLimiter.hit(client)) { res.status(429).json({ error: "rate_limited" }); return; }
-    const mcp = createMcpServer(o.deps, (c) => audit.write({ kind: "tool", client: crypto.createHash("sha256").update(client).digest("hex").slice(0, 8), app: provider.clientName(client), tool: c.tool, args: c.args, ok: c.ok, ms: c.ms, chars: c.chars }));
+    const mcp = createMcpServer(deps, (c) => audit.write({ kind: "tool", client: crypto.createHash("sha256").update(client).digest("hex").slice(0, 8), app: provider.clientName(client), tool: c.tool, args: c.args, ok: c.ok, ms: c.ms, chars: c.chars }),
+      { client: provider.clientName(client) ?? "unknown client", scopes: req.auth?.scopes ?? [] });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { void transport.close(); void mcp.close(); });
     try {

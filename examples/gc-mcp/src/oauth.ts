@@ -17,6 +17,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 export const SCOPE = "gc:read";
+export const WRITE_SCOPE = "gc:write";   // Phase 4: only grantable when the server runs with writes enabled
 export const CLAUDE_CALLBACKS = ["https://claude.ai/api/mcp/auth_callback", "https://claude.com/api/mcp/auth_callback"];
 export const CLAUDE_NAME = "Claude (owner client)";
 export const CHATGPT_NAME = "ChatGPT (owner client)";
@@ -91,7 +92,7 @@ interface Persisted {
   refresh: Record<string, { clientId: string; scopes: string[]; exp: number; fam: string }>;
   used: Record<string, { fam: string; exp: number }>; // rotated-out refresh hashes (reuse detection)
 }
-interface PendingAuth { client: OAuthClientInformationFull; params: AuthorizationParams; exp: number; fails: number }
+interface PendingAuth { client: OAuthClientInformationFull; params: AuthorizationParams; scopes: string[]; exp: number; fails: number }
 interface CodeRec { clientId: string; challenge: string; redirectUri: string; scopes: string[]; exp: number }
 interface AccessRec { clientId: string; scopes: string[]; exp: number; fam: string }
 
@@ -100,6 +101,7 @@ export interface ProviderOpts {
   ownerHash: string;             // scrypt1$... from hashPassphrase
   staticClientId?: string;       // the owner's own OAuth client (recommended)
   chatgpt?: ChatgptClientSpec;   // optional second static client for ChatGPT; absent = disabled
+  writesEnabled?: boolean;       // Phase 4: gc:write can be requested and granted; OFF by default (tokens stay gc:read)
   consentPath?: string;          // where the consent form posts (default /consent; follows the issuer path)
   allowDcr?: boolean;            // OFF by default
   redirectAllow?: string[];      // exact redirect URIs accepted (default: Claude callbacks)
@@ -154,12 +156,16 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     return typeof secret === "string" && secret.length > 0 && secret.length <= 512 && verifyPassphrase(secret, this.o.chatgpt!.secretHash!);
   }
 
+  /** Scopes this server can grant: gc:read always, gc:write only when writes are enabled. */
+  supportedScopes(): string[] { return this.o.writesEnabled ? [SCOPE, WRITE_SCOPE] : [SCOPE]; }
+  private scopeString(): string { return this.supportedScopes().join(" "); }
+
   private chatgptClient(): OAuthClientInformationFull | undefined {
     const c = this.o.chatgpt;
     if (!c) return undefined;
     // NOT the SDK's client_secret field: the SDK compares that as plain text. The secret is verified by verifyClientSecret().
     return { client_id: c.clientId, redirect_uris: c.redirectUris, token_endpoint_auth_method: c.secretHash ? "client_secret_post" : "none",
-      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CHATGPT_NAME, scope: SCOPE } as OAuthClientInformationFull;
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CHATGPT_NAME, scope: this.scopeString() } as OAuthClientInformationFull;
   }
 
   private save() {
@@ -173,7 +179,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
   private staticClient(): OAuthClientInformationFull | undefined {
     if (!this.o.staticClientId) return undefined;
     return { client_id: this.o.staticClientId, redirect_uris: this.allow, token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CLAUDE_NAME, scope: SCOPE } as OAuthClientInformationFull;
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: CLAUDE_NAME, scope: this.scopeString() } as OAuthClientInformationFull;
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -213,7 +219,11 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     for (const [k, v] of this.pending) if (v.exp < this.now()) this.pending.delete(k);
     if (this.pending.size >= 50) { res.status(503).type("text/plain").send("busy"); return; }
     const rid = rand(24);
-    this.pending.set(rid, { client, params, exp: this.now() + PENDING_TTL_MS, fails: 0 });
+    // Granted = gc:read always; gc:write only when the client ASKED for it and writes are enabled. Anything else requested is ignored.
+    // Only the owner's two STATIC clients can ever hold gc:write (a dynamically registered client never can).
+    const isStatic = client.client_id === this.o.staticClientId || client.client_id === this.o.chatgpt?.clientId;
+    const scopes = [SCOPE, ...(this.o.writesEnabled && isStatic && (params.scopes ?? []).includes(WRITE_SCOPE) ? [WRITE_SCOPE] : [])];
+    this.pending.set(rid, { client, params, scopes, exp: this.now() + PENDING_TTL_MS, fails: 0 });
     this.emit("authorize page served", true, client.client_id);
     const redirect = esc(params.redirectUri);
     // form-action must include the callback origins: Chrome applies it to the post-submit redirect too.
@@ -226,7 +236,11 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
       .send(`<!doctype html><meta name=viewport content="width=device-width"><title>Approve Gas City access</title>
 <body style="font:16px system-ui;max-width:28em;margin:2em auto;padding:0 1em">
 <h2>Approve Gas City access?</h2>
-<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+${scopes.includes(WRITE_SCOPE)
+  ? `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>READ AND WRITE</b> access: it can read Gas City status, sessions, mail subjects and beads, <b>and send messages to agents</b> (never stop, kill, reset, delete or change configuration).</p>
+<p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`
+  : `<p>An application (<b>${esc(name)}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
+<p>Scopes granted: <code>${esc(scopes.join(" "))}</code></p>`}
 <p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from <b>${esc(name.replace(/ \(owner client\)$/, ""))}</b>.</p>
 <form method=post action="${esc(this.o.consentPath ?? "/consent")}">
 <input type=hidden name=rid value="${esc(rid)}">
@@ -257,7 +271,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
     }
     this.pending.delete(rid); // single use
     const code = rand(32);
-    this.codes.set(sha(code), { clientId: p.client.client_id, challenge: p.params.codeChallenge, redirectUri: p.params.redirectUri, scopes: [SCOPE], exp: this.now() + CODE_TTL_MS });
+    this.codes.set(sha(code), { clientId: p.client.client_id, challenge: p.params.codeChallenge, redirectUri: p.params.redirectUri, scopes: p.scopes, exp: this.now() + CODE_TTL_MS });
     this.emit("consent approved, code issued", true, p.client.client_id);
     return { status: 302, redirect: back({ code }) };
   }

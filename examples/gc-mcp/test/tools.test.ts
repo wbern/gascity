@@ -165,7 +165,7 @@ describe("hardening", () => {
   });
 });
 
-describe("the supervisor client is GET-only (review finding: nothing sits between gc-mcp and a mutating supervisor)", () => {
+describe("the supervisor client: reads are GET-only, the only mutations are the fixed write operations (see writes.test.ts)", () => {
   it("every tool, with every argument shape, only ever sends GET to the supervisor", async () => {
     const seen: { method: string; url: string; redirect?: string }[] = [];
     const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -184,8 +184,8 @@ describe("the supervisor client is GET-only (review finding: nothing sits betwee
     expect(seen.every((r) => r.redirect === "error")).toBe(true);
     expect(seen.every((r) => r.url.startsWith("http://127.0.0.1:1/v0/city/gc2/"))).toBe(true);   // only the configured city, never another path
   });
-  it("the client exposes no way to send another verb", () => {
-    const methods = Object.getOwnPropertyNames(GcClient.prototype).filter((n) => n !== "constructor");
-    expect(methods).toEqual(["get"]);
+  it("the client exposes no generic way to send another verb: get, the fixed-operation write, and one private transport", () => {
+    const methods = Object.getOwnPropertyNames(GcClient.prototype).filter((n) => n !== "constructor").sort();
+    expect(methods).toEqual(["get", "send", "write"]);
   });
 });

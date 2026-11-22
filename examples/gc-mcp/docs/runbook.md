@@ -204,3 +204,18 @@ Two steps, because ChatGPT's redirect URI is per connection and only exists afte
 Not verified against a live ChatGPT: whether it sends `client_secret_post` or HTTP Basic (only post is accepted), the exact redirect URI
 shape, and whether it works with a public client. Failed secret attempts are limited per source address; behind a proxy that hides callers
 (`GC_MCP_TRUST_PROXY=0`, or a source-NATting firewall) that bucket is shared, so wrong secrets can lock ChatGPT out for five minutes.
+
+## Phase 4: write control (optional, OFF by default)
+
+**What it is.** With `GC_MCP_WRITES_ENABLED=1` a client holding the `gc:write` scope can message agents: `send_to_session` (like typing into the session's terminal, via the
+supervisor's `submit-session`) and `respond_to_session` (answer a waiting agent, via `respond-session`). Nothing else mutates: the client has no stop, kill, reset, delete, close,
+config, hold, bead or generic POST path (fixed operation table, tested).
+
+**The new risk, plainly.** A stolen token, or anyone with the owner passphrase, can now instruct agents, and agents can act on their own repos and PRs. There is no per-action approval page
+(by decision); a second factor is a later feature with a hook ready (`confirmWrite`). Mitigations that are in place: a separate scope the client must ask for and the owner sees on the consent
+page; the default deny list and optional allow list; sessions a person is attached to are refused; 20 writes a minute; 4000-character plain text; every attempt audited with the client's name; the
+`WRITES_DISABLED` kill switch (`touch /var/lib/gc-mcp/WRITES_DISABLED`; reads keep working), plus `DISABLED` and `REVOKE_ALL`. Untrusted-content labels stay on every read tool, but prompt injection through
+what the assistant reads remains an accepted risk: it can now ask an agent to do something.
+
+**Connecting with write access.** Claude: the connector requests the scopes the server advertises; if it only granted gc:read, remove and re-add the connector after enabling writes.
+ChatGPT: in the connector form tick `gc:write` under the default scopes once the server advertises it. The consent page lists the granted scopes: `gc:read gc:write` means read AND write.

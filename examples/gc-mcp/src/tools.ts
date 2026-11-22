@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { GcClient, GcError } from "./gc-client.js";
 import { redactDeep, redactText } from "./redact.js";
+import { INTENTS, MAX_WRITE_TEXT, WRITE_SCOPE, type WriteCtx, type WriteGate } from "./writes.js";
 
 export interface ToolResult { text: string; structured: Record<string, unknown> }
 export interface ToolDef {
@@ -8,11 +9,13 @@ export interface ToolDef {
   title: string;
   description: string;
   inputShape: z.ZodRawShape;
-  annotations: { readOnlyHint: true; destructiveHint: false; openWorldHint: false };
+  // Read tools say readOnlyHint. Write tools deliberately OMIT it (the MCP default is "not read-only") so clients treat them as writes.
+  annotations: { readOnlyHint: true; destructiveHint: false; openWorldHint: false } | { destructiveHint: false; openWorldHint: false; idempotentHint: false };
+  isWrite?: true;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler: (args: any) => Promise<ToolResult>;
 }
-export interface Deps { gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[] }
+export interface Deps { gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate }
 
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -45,9 +48,9 @@ function toGoDuration(s: string): string {
   return m[2] === "d" ? `${n * 24}h` : `${n}${m[2]}`;
 }
 
-export function buildTools(d: Deps): ToolDef[] {
+export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
   const { gc } = d;
-  return [
+  const reads: ToolDef[] = [
     {
       name: "city_status", title: "City status",
       description: "One-sentence health of Gas City: agents running, work, unread mail, spend today.",
@@ -178,4 +181,26 @@ export function buildTools(d: Deps): ToolDef[] {
       }),
     },
   ];
+  // Write tools: listed only for a token that holds gc:write, only while writes are enabled and not switched off (WRITES_DISABLED).
+  // The handlers re-check everything, so a stale listing cannot send anything.
+  if (!d.writes?.active || !who || !who.scopes.includes(WRITE_SCOPE)) return reads;
+  const gate = d.writes;
+  const WRITE_ANN = { destructiveHint: false, openWorldHint: false, idempotentHint: false } as const;
+  const writeTools: ToolDef[] = [
+    {
+      name: "send_to_session", title: "Send a message to an agent session", isWrite: true,
+      description: "Send a text message to one agent session, like typing into its terminal. intent: default, follow_up (queue it after the current turn) or interrupt_now (interrupt the current turn first). Cannot stop, kill, reset or change anything else.",
+      inputShape: { session: z.string().min(1).max(128), text: z.string().min(1).max(MAX_WRITE_TEXT), intent: z.enum(INTENTS).optional() },
+      annotations: WRITE_ANN,
+      handler: async (a) => gate.submit(who, String(a.session), String(a.text), a.intent ?? "default"),
+    },
+    {
+      name: "respond_to_session", title: "Answer a waiting agent session", isWrite: true,
+      description: "Answer an agent session that is waiting on you (a pending question or permission request): a short action word such as allow or deny, optional reply text, optional request id.",
+      inputShape: { session: z.string().min(1).max(128), action: z.string().min(1).max(32), text: z.string().max(MAX_WRITE_TEXT).optional(), request_id: z.string().max(128).optional() },
+      annotations: WRITE_ANN,
+      handler: async (a) => gate.respond(who, String(a.session), String(a.action), a.text === undefined ? undefined : String(a.text), a.request_id === undefined ? undefined : String(a.request_id)),
+    },
+  ];
+  return [...reads, ...writeTools];
 }

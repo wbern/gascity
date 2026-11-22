@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
 import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
+import { validatePatterns, type WriteConfig } from "./writes.js";
 import { resolveNetwork, resolveMcpPath, resolveIssuerPath } from "./netconfig.js";
 
 const port = Number(process.env.GC_MCP_PORT ?? 47811);
@@ -51,6 +52,21 @@ if (process.env.GC_MCP_CHATGPT_ENABLED === "1") {
   console.error(`gc-mcp: ChatGPT client enabled (${chatgpt.redirectUris.length} redirect URI(s), ${secretHash ? "confidential" : "public"})` + (chatgpt.redirectUris.length ? "" : ": it cannot authorize until GC_MCP_CHATGPT_REDIRECTS is set"));
 }
 
+// Phase 4 write control: OFF unless GC_MCP_WRITES_ENABLED=1. Deny list defaults to the built-in one (other people's and the owner's own
+// terminals) and is REPLACED, not extended, by GC_MCP_WRITE_DENY_SESSIONS; GC_MCP_WRITE_ALLOW_SESSIONS optionally restricts writes to a list.
+// A session a person is attached to is refused unless GC_MCP_WRITE_ALLOW_ATTACHED=1. The WRITES_DISABLED file in the state dir switches writes off.
+let writes: WriteConfig | undefined;
+if (process.env.GC_MCP_WRITES_ENABLED === "1") {
+  const csv = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
+  try {
+    const deny = csv(process.env.GC_MCP_WRITE_DENY_SESSIONS), allow = csv(process.env.GC_MCP_WRITE_ALLOW_SESSIONS);
+    if (deny) validatePatterns(deny, "GC_MCP_WRITE_DENY_SESSIONS");
+    if (allow) validatePatterns(allow, "GC_MCP_WRITE_ALLOW_SESSIONS");
+    writes = { enabled: true, deny, allow, allowAttached: process.env.GC_MCP_WRITE_ALLOW_ATTACHED === "1", controlDir: stateDir };
+  } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
+  console.error(`gc-mcp: WRITES ENABLED (send_to_session, respond_to_session; scope gc:write). Kill switch: ${path.join(stateDir, "WRITES_DISABLED")}`);
+}
+
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
@@ -63,6 +79,7 @@ const { app } = createApp({
   ownerHash,
   staticClientId,
   chatgpt,
+  writes,
   allowDcr: process.env.GC_MCP_ALLOW_DCR === "1",
   stateFile: path.join(stateDir, "oauth-state.json"),
   controlDir: stateDir,

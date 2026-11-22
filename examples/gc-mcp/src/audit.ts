@@ -3,7 +3,7 @@ import path from "node:path";
 import { redactText } from "./redact.js";
 
 export interface AuditEvent {
-  kind: "tool" | "auth";
+  kind: "tool" | "auth" | "write";
   client?: string;
   app?: string;      // OAuth client display name (Claude / ChatGPT), never a secret
   tool?: string;
@@ -12,6 +12,12 @@ export interface AuditEvent {
   ms?: number;
   chars?: number;
   note?: string;
+  // write events (Phase 4): who, where, what kind, how long, a short redacted preview, and the outcome
+  session?: string;
+  intent?: string;
+  length?: number;
+  preview?: string;
+  result?: string;
 }
 
 // Append-only JSONL, size-rotated (keeps .1 .2 .3). Arguments and notes are redacted and
@@ -33,7 +39,9 @@ export class AuditLog {
     this.rotate();
     const line = JSON.stringify({ ts: this.now().toISOString(), ...e,
       args: e.args === undefined ? undefined : redactText(JSON.stringify(e.args)).slice(0, 300),
-      note: e.note ? redactText(e.note).slice(0, 200) : undefined });
+      note: e.note ? redactText(e.note).slice(0, 200) : undefined,
+      // redact BEFORE clipping (a clipped secret can fall under a pattern threshold), one line, first 80 characters only
+      preview: e.preview ? redactText(e.preview).replace(/\s+/g, " ").trim().slice(0, 80) : undefined });
     fs.appendFileSync(this.file, line + "\n", { mode: 0o600 });
   }
 }
