@@ -7,7 +7,7 @@ const spec = JSON.parse(fs.readFileSync(new URL('../../../internal/api/openapi.j
 const calls: URL[] = [];
 const gc = new GcClient({baseUrl:'http://127.0.0.1:1',city:'c',fetchImpl: (async (u: string, init: RequestInit) => {
   expect(init.method).toBe('GET'); calls.push(new URL(u));
-  return new Response(JSON.stringify({items:[{id:'b1',title:'hello',secret:'sensitive',description:'x'.repeat(9000)}],total:42,next_cursor:'upstream-next',partial:true}));
+  return new Response(JSON.stringify({items:[{id:'b1',title:'hello',secret:'sensitive',description:'\"\\'.repeat(4500)}],total:42,next_cursor:'upstream-next',partial:true}));
 }) as typeof fetch});
 const deps={gc,mailAgent:'human',now:()=>new Date()};
 const tools = (client='alice') => buildTools(deps, {client,scopes:['gc:read']});
