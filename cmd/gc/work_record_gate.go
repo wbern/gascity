@@ -353,6 +353,7 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
 		}
+		workrecord.RecordViolations(dirs.cityPath, workrecord.DoorCLI, bead, enforce, violations)
 		if enforce && len(violations) > 0 {
 			block = true
 		}
