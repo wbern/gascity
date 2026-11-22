@@ -19,9 +19,9 @@ const GUIDE:Record<Topic,{sources:Source[];rules:string[]}>={
   'A message stored, an input accepted, an agent receipt and completed work are separate evidence. Active state or unchanged text does not prove completion. The current wait tool complete flag is a reply heuristic, not proof of task completion.',
   'Use existing authorization; do not invent a new approval ceremony. Preserve human holds, drafts, task ownership and the configured review/deployment path.',
  ]},
- roles:{sources:['principles','claim','dispatch'],rules:[
+ roles:{sources:['principles','claim','dispatch','agents'],rules:[
   'Named agents can retain a stable collaboration identity; workers and reviewers may belong to pools that claim scoped routed work. A pool is a configured target, not one specific session.',
-  'A pool with no running member can be healthy when no admitted work demands one. Agent names do not establish purpose, persistence, authority or current custody.',
+  'The installed directory contract identifies a configured on-demand pool target when pool equals name; pool members have a different name. A pool with no running member can be healthy when no admitted work demands one. Agent names do not establish purpose, persistence, authority or current custody.',
   'Discover live names and reported pool membership here, then current tasks with what_is_working_on and bead_show. Purpose or lifecycle not reported by the installed view stays unknown; ask the existing coordinator for missing role-specific standards.',
  ]},
  work:{sources:['worker','claim','dispatch'],rules:[
@@ -57,7 +57,7 @@ async function observeAgents(d:Deps,who:WriteCtx|undefined,query?:string):Promis
  const allowed=selected.filter(a=>readVerdict(d,who,a).ok);
  return {untrusted:true,complete:true,total:r.total,shown:Math.min(3,allowed.length),omitted:Math.max(0,allowed.length-3),agents:allowed.slice(0,3).map(a=>({
   name:untrusted(a.name,48),pool:typeof a.pool==='string'?untrusted(a.pool,48):undefined,
-  membership:a.pool?'pool_member':'not_reported',purpose:'unknown',persistence:'unknown',
+  membership:typeof a.pool==='string'&&a.pool?(a.pool===a.name?'pool_target':'pool_member'):'not_reported',purpose:'unknown',persistence:'unknown',
   state:untrusted(a.state,32),running:typeof a.running==='boolean'?a.running:undefined,
  }))};
 }

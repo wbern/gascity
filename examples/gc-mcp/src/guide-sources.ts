@@ -34,5 +34,10 @@ export const GUIDE_SOURCES = {
     "repository": "wbern/gascity",
     "path": "examples/gc-mcp/src/voice.ts",
     "sha256": "938fecb5ab4b795b761d8eb82f74622648704892979b306b566fbf4f52d1b5bd"
+  },
+  "agents": {
+    "repository": "wbern/gascity",
+    "path": "internal/api/openapi.json",
+    "sha256": "a5c23b4c6db59219da82dd6aea46bafde20788fec20b20461b8f380965a734e0"
   }
 } as const;
