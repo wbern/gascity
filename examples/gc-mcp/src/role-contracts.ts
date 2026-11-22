@@ -13,3 +13,9 @@ export function publicRole(contract:NonNullable<ReturnType<typeof roleFor>>){ret
  verified_host:ROLE_PROFILE.host,verified_city:ROLE_PROFILE.city,profile:ROLE_PROFILE.id,version:ROLE_PROFILE.version,verified_at:ROLE_PROFILE.verified_at,
  scope:'default role standards snapshot; current assignment and existing human authority are separate',
 };}
+
+export function publicRoleCatalog(contracts:NonNullable<ReturnType<typeof roleFor>>[]){return {
+ profile:ROLE_PROFILE.id,version:ROLE_PROFILE.version,verified_at:ROLE_PROFILE.verified_at,total:contracts.length,
+ contracts:contracts.slice(0,6).map(c=>({id:c.id,purpose:c.purpose,target:c.identity.pool??c.identity.agent})),
+ omitted:Math.max(0,contracts.length-6),
+};}

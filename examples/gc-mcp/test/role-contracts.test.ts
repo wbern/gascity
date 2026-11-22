@@ -47,6 +47,11 @@ describe('verified role contracts',()=>{
   expect((r.structured.observation as any).agents[0]).toMatchObject({purpose:'Scoped implementation worker',membership:'not_reported',persistence:'unknown'});
   expect((r.structured.role_contract as any).id).toBe('gc-implementation-worker');expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(4096);
  });
+ it('makes registered roles discoverable without knowing an agent name first',async()=>{
+  const r=await guide([{name:'crm/steve',pack_derived:true},{name:'crm/architect',pack_derived:true},{name:'gas-city-infra/devops',pack_derived:true},{name:'crm/gastown.reviewer',pool:'crm/gastown.reviewer',pack:'gastown',pack_derived:true},{name:'gas-city-wbern/pool.worker-default-codex',pack:'pool',pack_derived:true}],'gc3-2026-11-22').handler({topic:'roles'});
+  expect(r.structured.role_catalog).toBeDefined();expect((r.structured.role_catalog as any).contracts).toHaveLength(5);expect((r.structured.role_catalog as any).contracts).toContainEqual({id:'crm-code-review',purpose:'Exact-head read-only CRM review',target:'crm/gastown.reviewer'});
+  expect((r.structured.observation as any).role_catalog).toBeUndefined();expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(4096);
+ });
  it('does not infer a role from a familiar name when configuration identity does not match',async()=>{
   const r=await guide([{name:'crm/steve',pack_derived:false,role:'developer'}],'gc3-2026-11-22').handler({topic:'roles',agent:'steve'});
   expect((r.structured.observation as any).agents[0].purpose).toBe('unknown');expect((r.structured as any).role_contract).toBeUndefined();

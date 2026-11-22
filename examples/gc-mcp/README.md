@@ -202,3 +202,8 @@ before deploying an enabled profile; drift requires review and regeneration.
 The runtime reads only the compiled snapshot and public agent directory, with no
 local prompt/config file access. Add new contracts through the same verified,
 reviewed path; unmatched identities remain explicitly unknown.
+
+With the profile enabled, `city_guide` roles without a name first returns a
+bounded catalogue of verified role purposes and configured targets, so names need
+not be known beforehand. Query one target to read its standards/provenance. Only
+contracts matching currently observed allowed identities enter that catalogue.
