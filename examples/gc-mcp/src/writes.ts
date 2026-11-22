@@ -245,7 +245,7 @@ export class WriteGate {
         const queued = hit.running === false ? " The session is not running; delivery is not confirmed." : "";
         const said = speakName(label);   // "crm/steve" is spoken "crm slash steve"
         const say = kind === "submit"
-          ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Ask me to wait for its reply."
+          ? (intent === "interrupt_now" ? `Interrupted ${said} and sent your message.` : `Sent to ${said}${intent === "follow_up" ? " as a follow-up" : ""}.`) + queued + " Completion is not yet verified."
           : `Answered ${said} with "${clip(redactText(extra!.action), 32)}".`;
         const out: WriteResult = { text: clip(say, 280), structured: { sent: true, session: hit.id, name: label, ...(kind === "submit" ? { intent } : { action: extra!.action }),
           handle, completion: "not_proven", marker: markerOf(sentAt), request_id: typeof r.request_id === "string" ? r.request_id : undefined, idempotency_key: key, status: typeof r.status === "string" ? r.status : "accepted" } };

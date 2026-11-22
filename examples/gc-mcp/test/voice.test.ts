@@ -143,6 +143,7 @@ describe("send_to_session: default session, resolution and no send on doubt", ()
     const w = world(); const { gate } = w.mk();
     const r = await gate.submit(W, "steve", "hi");
     expect(r.text.length).toBeLessThanOrEqual(SPOKEN_MAX);
+    expect(r.text).not.toMatch(/ask me to wait/i);
     expect((r.structured as any).marker).toBe(`m${T0}`);
     expect(w.markers.get(W.client, "gc2-wisp-s1")).toBe(T0);
   });

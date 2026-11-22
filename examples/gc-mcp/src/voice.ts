@@ -132,16 +132,17 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
     },
     {
       name: "read_more", title: "Keep reading the last answer",
-      description: "Use when the person says yes to 'want more?' after a long answer. Reads on from where the last answer stopped; pass next_offset and reply_id from the previous answer.",
+      description: "Use when the person says yes to 'want more?' after a long answer. Reads the selected reply, even if newer output exists; pass next_offset and reply_id from the previous answer. Without reply_id it reads the newest reply.",
       inputShape: { session: sess, offset: z.number().int().min(0).max(1_000_000), reply_id: z.string().max(24).optional() }, annotations: RO,
       handler: guard(async (a) => {
         const f = await target(d, who, a.session);
         if ("say" in f) return f.say;
         const hit = f.hit, label = clip(clean(labelOf(hit)), 60);
-        const last = assistantTurns(await transcript(d, hit.id)).at(-1);
+        const turns = assistantTurns(await transcript(d, hit.id));
+        const last = a.reply_id ? turns.find(t => replyId(t.timestamp, clean(t.text)) === a.reply_id) : turns.at(-1);
         const full = last ? clean(last.text) : "";
-        if (a.reply_id && last && a.reply_id !== replyId(last.timestamp, full)) {   // the agent said something newer: an offset into the OLD reply would land in a different message
-          return { text: "The reply changed since I started reading it. Ask for the latest reply again.", structured: { found: true, id: hit.id, name: label, changed: true, reply_id: replyId(last.timestamp, full) } };
+        if (a.reply_id && !last) {   // Never apply a selected reply's offset to a newer message, or pretend missing history is its end.
+          return { text: "The selected reply changed or is no longer available in the transcript. Check the latest reply before choosing a new reply to read.", structured: { found: true, id: hit.id, name: label, changed: true, reason: "reply_unavailable", reply_id: a.reply_id } };
         }
         if (!full || a.offset >= full.length) return { text: "That was the end of the reply.", structured: { found: true, id: hit.id, name: label, done: true, total_chars: full.length, offset: a.offset, next_offset: full.length } };
         return replyResult(label, hit, full, a.offset, { at: last?.timestamp }, "");

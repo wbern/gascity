@@ -186,6 +186,11 @@ removes the fingerprint, `reply_cursor_unavailable` reports unknown continuity;
 check the latest output before explicitly resetting the cursor. This is not a
 causal completion signal or a guarantee of history beyond the available segment. Handles currently live in bounded process memory
 (maximum 500); restart or eviction returns unknown, never permission to resend.
+`read_more(reply_id, offset)` continues that selected reply anywhere in the
+available segment, even when newer replies exist. Without `reply_id` it retains
+the legacy newest-reply default. Missing/edited/compacted selected replies return
+`reply_unavailable`; offsets are never applied to another reply, and missing
+history is never reported as the end of a reply.
 Transcript output is a **temporal candidate**, not causal attribution or task
 completion: `complete:false`, `completion:not_proven`, and `reply_available`
 are explicit. Active/idle state and unchanged text never prove completion.
