@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --no-file-parallelism",
     "start": "node dist/main.js",
-    "gen:guide": "node scripts/gen-guide-sources.mjs"
+    "gen:guide": "node scripts/gen-guide-sources.mjs",
+    "gen:role-contracts": "node scripts/gen-role-contracts.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

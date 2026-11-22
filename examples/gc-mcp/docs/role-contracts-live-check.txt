@@ -1,0 +1,6 @@
+{"at":"2026-11-22T22:57:25.542Z","stage":"source-only; no deployment","profile":"gc3-2026-11-22"}
+{"agent":"crm/steve","contract":"crm-developer","bytes":3125,"full_template_match":false,"verified_clauses":3,"target_kind":"agent"}
+{"agent":"crm/architect","contract":"crm-architecture","bytes":3178,"full_template_match":false,"verified_clauses":3,"target_kind":"agent"}
+{"agent":"gas-city-infra/devops","contract":"infra-operations","bytes":3231,"full_template_match":false,"verified_clauses":3,"target_kind":"agent"}
+{"agent":"crm/gastown.reviewer","contract":"crm-code-review","bytes":3392,"full_template_match":true,"verified_clauses":4,"target_kind":"pool"}
+{"agent":"gas-city-wbern/pool.worker-default-codex","contract":"gc-implementation-worker","bytes":3308,"full_template_match":true,"verified_clauses":3,"target_kind":"agent"}

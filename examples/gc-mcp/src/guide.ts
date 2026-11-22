@@ -1,14 +1,15 @@
 // Curated operational standards are trusted, versioned product guidance. Observed agent data is not.
 // No runtime filesystem access, private prompt projection, guessed role assignment or free-form path.
 import {z} from 'zod';
+import {roleFor,publicRole} from './role-contracts.js';
 import {GUIDE_SOURCES} from './guide-sources.js';
 import {GcError} from './gc-client.js';
 import {resolveIn,resolveSession} from './sessions.js';
 import {readVerdict} from './access.js';
-import {untrusted} from './text.js';
+import {clip,untrusted} from './text.js';
 import type {Deps,ToolDef} from './tools.js';
 import type {WriteCtx} from './writes.js';
-export const GUIDE_VERSION='2026-11-22.1';
+export const GUIDE_VERSION='2026-11-22.2';
 const TOPICS=['overview','roles','work','communication','operations','capabilities'] as const;
 type Topic=typeof TOPICS[number];
 type Source=keyof typeof GUIDE_SOURCES;
@@ -53,11 +54,17 @@ async function observeAgents(d:Deps,who:WriteCtx|undefined,query?:string):Promis
  if(!Array.isArray(r.items)||r.partial||r.next_cursor||r.total!==items.length)return {untrusted:true,complete:false,reason:'incomplete_agents'};
  const all:(Record<string,unknown>&{id:string;alias:string;template?:string})[]=items.filter(a=>typeof a.name==='string').map(a=>({...a,id:String(a.name),alias:String(a.name),template:typeof a.pool==='string'?a.pool:undefined}));
  let selected=all;
- if(query){const found=resolveIn(all,query);if(found.kind!=='one')return {untrusted:true,complete:true,found:false,reason:found.kind};selected=all.filter(a=>a.id===found.hit.id);}
+ let poolTarget=false;
+ if(query&&all.some(a=>a.pool===query)){poolTarget=true;selected=all.filter(a=>a.pool===query);}
+ else if(query){const found=resolveIn(all,query);if(found.kind!=='one')return {untrusted:true,complete:true,found:false,reason:found.kind};selected=all.filter(a=>a.id===found.hit.id);}
  const allowed=selected.filter(a=>readVerdict(d,who,a).ok);
- return {untrusted:true,complete:true,total:r.total,shown:Math.min(3,allowed.length),omitted:Math.max(0,allowed.length-3),agents:allowed.slice(0,3).map(a=>({
+ const contracts=allowed.map(a=>roleFor(d.guideProfile,a)).filter(c=>c!==undefined);
+ const unique=new Map(contracts.map(c=>[c.id,c]));
+ const contract=query&&unique.size===1&&contracts.length===allowed.length?publicRole([...unique.values()][0]):undefined;
+ const limit=contract?1:3;
+ return {untrusted:true,complete:true,target_kind:poolTarget?'pool':'agent',role_contract:contract,total:r.total,shown:Math.min(limit,allowed.length),omitted:Math.max(0,allowed.length-limit),agents:allowed.slice(0,limit).map(a=>({
   name:untrusted(a.name,48),pool:typeof a.pool==='string'?untrusted(a.pool,48):undefined,
-  membership:typeof a.pool==='string'&&a.pool?(a.pool===a.name?'pool_target':'pool_member'):'not_reported',purpose:'unknown',persistence:'unknown',
+  membership:typeof a.pool==='string'&&a.pool?(a.pool===a.name?'pool_target':'pool_member'):'not_reported',purpose:roleFor(d.guideProfile,a)?.purpose??'unknown',role_contract_id:roleFor(d.guideProfile,a)?.id,persistence:'unknown',
   state:untrusted(a.state,32),running:typeof a.running==='boolean'?a.running:undefined,
  }))};
 }
@@ -82,10 +89,13 @@ export function buildGuideTools(d:Deps,who?:WriteCtx):ToolDef[]{return [{
   const g=GUIDE[topic];let observation:Record<string,unknown>|undefined;
   try{if(topic==='roles')observation=await observeAgents(d,who,a.agent);if(topic==='capabilities')observation=await observeCapabilities(d,who,a.agent);}
   catch(e){if(!(e instanceof GcError))throw e;observation={checked:false,reason:e.kind,status:e.status};}
+  const {role_contract,...observed}=observation??{};
   // The public source digests are protocol metadata, not credentials. Redact/label observations
   // before returning them; do not run static digests through the credential-shaped-text filter.
-  return {text:'Use the guide to check current ownership, roles and evidence before acting. Accepted input is not completed work; unknown roles and completion signals stay explicit.',
-   structured:{version:GUIDE_VERSION,topic,origin:'curated_operating_guide',rules:g.rules,provenance:g.sources.map(s=>GUIDE_SOURCES[s]),
-    observation:observation?{untrusted:true,...observation,observed_at:d.now().toISOString()}:undefined}};
+  const contract=role_contract as ReturnType<typeof publicRole>|undefined;
+  const text=contract?clip(`Verified default role snapshot: ${contract.purpose}. ${contract.standards[0]} Current assignment is separate.`,280):'Use the guide to check current ownership, roles and evidence before acting. Accepted input is not completed work; unknown roles and completion signals stay explicit.';
+  return {text,
+   structured:{version:GUIDE_VERSION,topic,origin:'curated_operating_guide',rules:g.rules,role_contract,provenance:g.sources.map(s=>GUIDE_SOURCES[s]),
+    observation:observation?{untrusted:true,...observed,observed_at:d.now().toISOString()}:undefined}};
  },
 }];}

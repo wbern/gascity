@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { resolveGuideProfile } from "./role-contracts.js";
 import { GcClient } from "./gc-client.js";
 import { createApp, listen } from "./app.js";
 import { validateChatgptRedirects, type ChatgptClientSpec } from "./oauth.js";
@@ -104,11 +105,14 @@ const apiUrl = process.env.GC_MCP_API_URL ?? "http://127.0.0.1:8372";
 let city: string;
 try { city = await resolveCity(apiUrl, process.env.GC_MCP_CITY); } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
 console.error(`gc-mcp: city: ${city}`);
+let guideProfile: string | undefined;
+try { guideProfile = resolveGuideProfile(process.env.GC_MCP_GUIDE_PROFILE, city, os.hostname().split(".")[0]); } catch (e) { console.error(`gc-mcp: ${(e as Error).message}`); process.exit(2); }
 
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 const { app } = createApp({
   deps: {
     gc: new GcClient({ baseUrl: apiUrl, city }),
+    guideProfile,
     ownerName: (process.env.GC_MCP_OWNER_NAME ?? "").trim() || undefined,
     mailAgent: process.env.GC_MCP_MAIL_AGENT ?? "human",
     now: () => new Date(),

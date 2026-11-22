@@ -169,3 +169,36 @@ never authorizes resending the original message.
 Until reliable reply tracking is shipped, the existing wait tool `complete` flag
 is a reply heuristic and must not be treated as proof the requested work finished.
 The first-contact guide names that limitation explicitly.
+
+### Verified role standards snapshots
+
+`GC_MCP_GUIDE_PROFILE=gc3-2026-11-22` explicitly enables the included standards
+snapshot for clodcod's `gc2` city. It is off by default; an unknown profile or a
+wrong host/city stops startup. No write authority is added or restricted.
+`city_guide` roles then returns a verified default-role purpose and bounded
+standards for matched configured identities: CRM developer, CRM architecture,
+infra operations, CRM code-review pool and the registered implementation profile. A familiar name alone is insufficient;
+configuration-derived identity and expected pool/pack metadata must match. A pool
+query describes the configured target without choosing a member for a send.
+
+The trusted curated `role_contract` is separate from untrusted observations.
+It includes immutable tracked-source revisions/digests, installed-template digest,
+verification time, host/city and the precise verification scope. Three installed
+named-agent templates differ from their tracked source: only selected clauses
+verified in both are summarized, explicitly not the full effective instructions.
+The reviewer template matched exactly. Current assignment, later human authority,
+private additions and lifecycle policy are not inferred from a default contract.
+
+The author/operator verifies this snapshot with fixed declared inputs only:
+
+    npm run gen:role-contracts -- --infra-root <existing-infra-task-tree> --city-root <city>
+    npm run gen:role-contracts -- --infra-root <existing-infra-task-tree> --city-root <city> --check
+
+The verifier reads only selected public fields from `gc config explain`, checks
+complete installed agent identities and verifies curated clauses against known
+tracked/installed templates. It emits summaries and hashes, never raw prompts,
+verification anchors, environment fields or private additions. Recheck immediately
+before deploying an enabled profile; drift requires review and regeneration.
+The runtime reads only the compiled snapshot and public agent directory, with no
+local prompt/config file access. Add new contracts through the same verified,
+reviewed path; unmatched identities remain explicitly unknown.

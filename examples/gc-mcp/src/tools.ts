@@ -25,6 +25,7 @@ export type { ToolResult };
 export interface Clock { now: () => number; sleep: (ms: number) => Promise<void> }
 export interface Deps {
   gc: GcClient; mailAgent: string; now: () => Date; peekAllow?: string[]; writes?: WriteGate;
+  guideProfile?: string;      // Explicit operator-selected, verified role standards snapshot.
   ownerName?: string;           // GC_MCP_OWNER_NAME: how the owner is addressed in decisions ("your decision on ...") and whose mail counts as flagged; unset = nobody by name
   readDeny?: string[];          // sessions that may NOT be read (GC_MCP_READ_DENY_SESSIONS); unset = the write deny list, so nothing changes by default
   defaultSession?: string;      // GC_MCP_DEFAULT_SESSION: what "session" means when nobody says one (voice: nobody says session ids)
