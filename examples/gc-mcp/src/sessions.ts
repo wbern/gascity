@@ -23,7 +23,8 @@ export type Resolution =
   | { kind: "many"; hits: SessionRef[] }
   | { kind: "none"; query: string }
   | { kind: "bad"; query: string }
-  | { kind: "nodefault" };
+  | { kind: "nodefault" }
+  | { kind: "incomplete"; query: string };
 
 export function resolveIn(items: SessionRef[], rawQuery: string): Resolution {
   const q = rawQuery.trim();
@@ -66,6 +67,7 @@ export async function resolveSession(gc: GcClient, query: string | undefined, de
   if (!q) return { kind: "nodefault" };
   if (!QUERY.test(q)) return { kind: "bad", query: q.slice(0, 40) };   // before any call: an unsafe name never leaves the process
   const r = await listPages<SessionRef>(gc, "/sessions");          // every page (up to 1000 sessions), not just the first 200
+  if (r.partial || r.truncated) return { kind: "incomplete", query: q };
   return resolveIn(r.items, q);
 }
 

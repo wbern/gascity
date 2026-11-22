@@ -184,6 +184,7 @@ export class WriteGate {
     let res;
     try { res = await resolveSession(this.gc, query, this.cfg.defaultSession); }
     catch (e) { return refuse(`lookup_failed:${e instanceof GcError ? e.status : "error"}`, "Gas City could not be reached to find that session, so nothing was sent."); }
+    if (res.kind === "incomplete") return refuse("incomplete_sessions", "The session list is incomplete, so I cannot safely choose an agent. Nothing was sent.");
     if (res.kind === "nodefault") return refuse("no_session_given", "Which session? No default session is set, so nothing was sent.", "");
     if (res.kind === "bad") return refuse("bad_session_name", "That is not a valid session name, so nothing was sent.", res.query);
     if (res.kind === "none") return refuse("no_such_session", `No session matches "${clip(redactText(res.query), 40)}", so nothing was sent.`, res.query);

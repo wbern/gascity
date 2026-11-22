@@ -132,3 +132,10 @@ within 60 seconds returns the cached result. A lost response is reported as
 protection does not survive server restart or the replay window, and the API does
 not offer durable idempotency for every action. No production mutations were used
 in author validation; live deployment and verification remain with crm/steve.
+
+Session-name resolution requires a complete list. If the supervisor reports
+partial data, an unread next page, or a total larger than the fetched rows,
+spoken session reads and submit/respond return `incomplete_sessions`. A visible
+unique name is insufficient: an unseen session may have the same name.
+The HTTP regressions cover two DCR clients with the same display name through
+PKCE, OAuth and MCP, including cursor and send-marker isolation.

@@ -97,6 +97,7 @@ export function buildTools(d: Deps, who?: WriteCtx): ToolDef[] {
       handler: guard(async (a) => {
         const tail = a.tail ?? 3;
         const res = await resolveSession(gc, a.session, d.defaultSession);
+        if (res.kind === "incomplete") return { text: "The session list is incomplete, so I cannot safely choose an agent.", structured: { found: false, reason: "incomplete_sessions" } };
         if (res.kind === "nodefault") return { text: "Which session? No default session is set.", structured: { found: false, reason: "no_session" } };
         if (res.kind === "bad") return { text: "That is not a valid session name.", structured: { found: false, reason: "bad_name" } };
         if (res.kind === "none") return { text: `No session matches "${untrusted(res.query, 40)}".`, structured: { found: false } };

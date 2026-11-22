@@ -24,6 +24,7 @@ export type Found = { hit: SessionRef } | { say: ToolResult };
 /** Resolve a spoken name (or the default) and check that this token may READ it. */
 export async function target(d: Deps, who: WriteCtx | undefined, session?: string): Promise<Found> {
   const res = await resolveSession(d.gc, session, d.defaultSession);
+  if (res.kind === "incomplete") return { say: { text: "The session list is incomplete, so I cannot safely choose an agent.", structured: { found: false, reason: "incomplete_sessions" } } };
   if (res.kind === "nodefault") return { say: { text: "Which session? No default session is set.", structured: { found: false, reason: "no_session" } } };
   if (res.kind === "bad") return { say: { text: "That is not a valid session name.", structured: { found: false, reason: "bad_name" } } };
   if (res.kind === "none") return { say: { text: clip(`No session matches "${clean(res.query).slice(0, 40)}".`, SPOKEN_MAX), structured: { found: false } } };
