@@ -119,14 +119,26 @@ func TestEnospcDetectorRequiresTheDiskToStillBeShort(t *testing.T) {
 		{"evidence and disk still short", enospcLine, 100 * 1024, nil, true, ""},
 		{"evidence but disk recovered (stale)", enospcLine, 10 * gibKB, nil, false, "stale"},
 		{"evidence and free space cannot be measured", enospcLine, -1, nil, true, ""},
-		{"threshold override above free space keeps the refusal", enospcLine, 3 * gibKB,
-			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=4294967296"}, true, ""},
-		{"threshold override below free space clears it", enospcLine, 3 * gibKB,
-			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=1073741824"}, false, "stale"},
-		{"junk threshold falls back to 2 GiB", enospcLine, 3 * gibKB,
-			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=abc"}, false, "stale"},
-		{"junk threshold still refuses below 2 GiB", enospcLine, gibKB,
-			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=abc"}, true, ""},
+		{
+			"threshold override above free space keeps the refusal", enospcLine, 3 * gibKB,
+			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=4294967296"},
+			true, "",
+		},
+		{
+			"threshold override below free space clears it", enospcLine, 3 * gibKB,
+			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=1073741824"},
+			false, "stale",
+		},
+		{
+			"junk threshold falls back to 2 GiB", enospcLine, 3 * gibKB,
+			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=abc"},
+			false, "stale",
+		},
+		{
+			"junk threshold still refuses below 2 GiB", enospcLine, gibKB,
+			[]string{"GC_DOLT_ENOSPC_CLEAR_FREE_BYTES=abc"},
+			true, "",
+		},
 		{"evidence older than the 1000-line tail is ignored", enospcLine + filler, 100, nil, false, ""},
 	}
 	for impl, source := range enospcImplementations(t) {

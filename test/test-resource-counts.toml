@@ -1529,6 +1529,11 @@ resource = "subprocess"
 calls = 4
 
 [[count]]
+path = "examples/bd/dolt/enospc_helper_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "examples/bd/dolt/health_order_test.go"
 resource = "subprocess"
 calls = 2
@@ -1597,6 +1602,11 @@ calls = 6
 path = "examples/bd/dolt/runtime_bounded_test.go"
 resource = "subprocess"
 calls = 5
+
+[[count]]
+path = "examples/bd/dolt/session_guard_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "examples/bd/dolt/sql_test.go"
