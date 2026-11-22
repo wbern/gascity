@@ -17,10 +17,6 @@ export const realClock = { now: () => Date.now(), sleep: (ms: number) => new Pro
 
 export type Found = { hit: SessionRef } | { say: ToolResult };
 
-function isDefault(d: Deps, hit: SessionRef): boolean {
-  const q = (d.defaultSession ?? "").trim().toLowerCase();
-  return !!q && identifiers(hit).some((x) => x.toLowerCase() === q);
-}
 
 /** Resolve a spoken name (or the default) and check that this token may READ it. */
 export async function target(d: Deps, who: WriteCtx | undefined, session?: string): Promise<Found> {

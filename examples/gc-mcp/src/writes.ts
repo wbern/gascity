@@ -16,8 +16,8 @@ export { WRITE_SCOPE };
 export const MAX_WRITE_TEXT = 4000;
 export const INTENTS = ["default", "follow_up", "interrupt_now"] as const;
 export type Intent = (typeof INTENTS)[number];
-/** Sessions that belong to OTHER PEOPLE. The owner's own session is the target, so it is not here. Replaced (not extended) by GC_MCP_WRITE_DENY_SESSIONS. */
-export const DEFAULT_WRITE_DENY = ["zachris-*", "elsakert-*"];
+/** NO session is protected by default: the server has no opinion about whose agent is whose (gc3 is the owner's machine). An operator may set a list. */
+export const DEFAULT_WRITE_DENY: string[] = [];
 export const REPLAY_WINDOW_MS = 60_000;
 const PATTERN = /^[A-Za-z0-9._:/*-]{1,128}$/;
 const ACTION = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -56,9 +56,9 @@ export const parseMarker = (s?: string): number | undefined => (s && /^m\d{10,16
 
 export interface WriteConfig {
   enabled: boolean;
-  deny?: string[];            // default DEFAULT_WRITE_DENY
+  deny?: string[];            // optional operator list; default none
   allow?: string[];           // optional: when set, ONLY these (and never a denied one)
-  allowAttached?: boolean;    // default false: a session a person is attached to is refused (the default session is exempt: it IS the owner's target)
+  allowAttached?: boolean;    // default TRUE: every session is treated the same; false refuses a session a person is attached to (optional operator setting)
   perMinute?: number;         // default 20
   controlDir?: string;        // holds WRITES_DISABLED
   defaultSession?: string;    // what an omitted `session` means
@@ -147,11 +147,10 @@ export class WriteGate {
     const hit = res.hit;
     if (!SESSION_ID.test(String(hit.id))) return refuse("no_such_session", "That session has an id I cannot use, so nothing was sent.", asked);
     const label = clip(redactText(labelOf(hit)), 60);
-    const isDefault = !!this.cfg.defaultSession && identifiers(hit).some((n) => n.toLowerCase() === this.cfg.defaultSession!.trim().toLowerCase());
     // 4. deny / allow lists (deny wins) and attached terminals
     const perm = this.permits(hit);
     if (!perm.ok) return refuse(perm.reason, perm.reason === "denied_session" ? `${label} is on the do-not-write list, so nothing was sent.` : `${label} is not on the write allow list, so nothing was sent.`, hit.id);
-    if (hit.attached === true && !this.cfg.allowAttached && !isDefault) return refuse("session_attached", `A person is attached to ${label} right now, so nothing was sent.`, hit.id);
+    if (hit.attached === true && this.cfg.allowAttached === false) return refuse("session_attached", `A person is attached to ${label} right now, so nothing was sent.`, hit.id);
     // 5. a repeated identical send within the window (voice clients retry) returns the first acknowledgement instead of sending twice
     const now = this.nowMs();
     const windowMs = this.cfg.replayWindowMs ?? REPLAY_WINDOW_MS;

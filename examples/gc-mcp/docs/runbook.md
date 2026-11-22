@@ -145,7 +145,7 @@ whether public 80/443 reach it (the Foxtrot site suggests yes); stability of the
    GC_MCP_OWNER_HASH='scrypt1$...'
    GC_MCP_PUBLIC_URL=https://<hostname-on-443>
    GC_MCP_CITY=<city name from GET /v0/cities>
-   GC_MCP_PEEK_ALLOW=mayor,gc-architect      # optional but recommended
+   # GC_MCP_PEEK_ALLOW=mayor,gc-architect    # OPTIONAL: restrict which sessions may be read (unset = gc:read reads any session)
    # behind your LAN nginx (section 4):
    GC_MCP_BIND_HOST=<GC3 private IP>
    GC_MCP_PEER_ALLOW=<nginx host IP>
@@ -213,7 +213,7 @@ config, hold, bead or generic POST path (fixed operation table, tested).
 
 **The new risk, plainly.** A stolen token, or anyone with the owner passphrase, can now instruct agents, and agents can act on their own repos and PRs. There is no per-action approval page
 (by decision); a second factor is a later feature with a hook ready (`confirmWrite`). Mitigations that are in place: a separate scope the client must ask for and the owner sees on the consent
-page; the default deny list (other people's sessions: `zachris-*`, `elsakert-*`; the owner's own session is the target) and optional allow list; sessions a person is attached to are refused (the default session is exempt); 20 writes a minute; 4000-character plain text; every attempt audited with the client's name; the
+page; no session is protected by default (gc3 is the owner's machine); optional operator deny and allow lists; attached sessions are treated like any other unless `GC_MCP_WRITE_ALLOW_ATTACHED=0`; 20 writes a minute; 4000-character plain text; every attempt audited with the client's name; the
 `WRITES_DISABLED` kill switch (`touch /var/lib/gc-mcp/WRITES_DISABLED`; reads keep working), plus `DISABLED` and `REVOKE_ALL`. Untrusted-content labels stay on every read tool, but prompt injection through
 what the assistant reads remains an accepted risk: it can now ask an agent to do something.
 

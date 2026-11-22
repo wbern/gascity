@@ -29,12 +29,6 @@ export interface Deps {
   clock?: Clock;                // tests inject a fake clock; production uses Date.now and setTimeout
 }
 
-/** True when `hit` is the configured default session (the owner's chosen target: readable and writable by default). */
-export function isDefaultSession(d: Deps, hit: SessionRef): boolean {
-  const q = (d.defaultSession ?? "").trim().toLowerCase();
-  return !!q && identifiers(hit).some((x) => x.toLowerCase() === q);
-}
-
 const RO = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 

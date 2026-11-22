@@ -140,7 +140,7 @@ describe("hardening", () => {
   it("peek_session honours an allowlist", async () => {
     const { t, calls } = tools({ "/sessions": F.sessions, "/transcript": F.transcript }, { peekAllow: ["mayor"] });
     const r = await t.find((x) => x.name === "peek_session")!.handler({ session: "gc-architect" });
-    expect(r.text).toMatch(/not on my read list|no session/i);
+    expect(r.text).toMatch(/not on the list of agents I may read|no session/i);
     expect(calls.some((c) => c.includes("/transcript"))).toBe(false);
   });
   it("redacts BEFORE clipping so a secret cannot be cut below the pattern threshold", async () => {

@@ -36,8 +36,7 @@ Write control (Phase 4, `GC_MCP_WRITES_ENABLED=1`): `send_to_session(session, te
 `respond_to_session(session, action, text?, request_id?)`, implemented with the supervisor's `submit-session` and `respond-session` operations (the blessed way, not
 tmux). The client can send ONLY those two operations (a fixed table in `gc-client.ts`; tests pin that stop, kill, reset, close, config, beads and any other path cannot be
 sent). Rails: tokens hold `gc:read` only unless the client asks for `gc:write` (the consent page lists the scopes); write tools carry no `readOnlyHint` and are listed only to a
-`gc:write` token; text <= 4000 plain characters; 20 writes/minute; the session must exist; a default deny list of OTHER PEOPLE's sessions only (`zachris-*`, `elsakert-*`; the owner's own session is the target; replaced by
-`GC_MCP_WRITE_DENY_SESSIONS`), an optional `GC_MCP_WRITE_ALLOW_SESSIONS`, and sessions with a person attached are refused unless `GC_MCP_WRITE_ALLOW_ATTACHED=1` (the default session is exempt); every attempt,
+`gc:write` token; text <= 4000 plain characters; 20 writes/minute; the session must exist; NO session is denied by default (gc3 is the owner's machine: `gc:write` sends to any session, `gc:read` reads any session, and a session a person is attached to is treated like any other). The lists are OPTIONAL operator settings, empty by default: `GC_MCP_WRITE_DENY_SESSIONS`, `GC_MCP_WRITE_ALLOW_SESSIONS`, `GC_MCP_READ_DENY_SESSIONS`, `GC_MCP_PEEK_ALLOW`, and `GC_MCP_WRITE_ALLOW_ATTACHED=0` to refuse attached sessions; every attempt,
 sent or refused, is audited (client name, session, intent, length, an 80-character redacted preview, outcome); `WRITES_DISABLED` in the state dir turns writes off for the next
 request while reads keep working. `confirmWrite()` in `src/writes.ts` is the single place a later second factor (TOTP/push) slots in; it allows today.
 
@@ -48,11 +47,10 @@ title, never automation), then mail only if useful (a pile of notices is "nothin
 cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers "what is steve working on?" in a sentence or two. The server sends `instructions` in the
 initialize result written for a spoken assistant, and every tool's title and description is plain spoken intent ("Ask how the agents are doing", "Say something to an agent").
 
-Who may be READ is decided in one place (`src/access.ts`) and a refusal always says why, in one speakable sentence, with `{found:true, allowed:false, reason, name}` in structuredContent:
-`denied_session` (on the protected list: "zachris gemini 2 belongs to someone else, so it is on the protected list and I will not read or write it. Ask the owner to change the list if you want
-that."), `no_scope` (not on the read list; reconnect with gc:write or ask the owner), `writes_disabled`, `not_in_allow_list`. It never blames "voice". The READ deny list
-`GC_MCP_READ_DENY_SESSIONS` defaults to the write deny list (nothing changes); set it (even to empty) to open reads of colleagues' sessions while writes stay blocked. The briefing may say a
-protected agent is busy but never says what it works on.
+Reading is by scope only: `gc:read` reads ANY session, and nothing is protected by default. If an operator DOES configure a list and it refuses a read, the answer says why in one speakable
+sentence with `{found:true, allowed:false, reason, name}` in structuredContent (`src/access.ts`): `denied_session` ("zachris gemini 2 is on the protected list, so I will not read or write it. Ask the
+owner to change the list if you want that.") or `not_in_allow_list` ("... is not on the list of agents I may read. Ask the owner to add it."); it never blames "voice". `GC_MCP_READ_DENY_SESSIONS`
+defaults to the write deny list; set it (even to empty) to differ for reads. The briefing hides no agent or task unless an operator protected that session.
 
 Voice loop (vibe coding by voice): `GC_MCP_DEFAULT_SESSION` (for example `claude-william`) is what an omitted `session` means on EVERY tool, because nobody says session ids aloud.
 A spoken name is resolved against the live session list (`src/sessions.ts`): exact match first, then a unique case-insensitive prefix, suffix or contains match
@@ -61,7 +59,7 @@ Read tools for the loop (all spoken text <= 280 characters, full text in structu
 (working | idle | waiting for input | not running), `latest_reply`, `read_more(offset)` for the rest of a long reply, and `wait_for_reply(max_seconds <= 20, default 15)`, which polls the
 transcript for the first reply after our own send (the send acknowledgement carries a marker) and always returns inside 20 seconds ("still working" or the reply so far).
 A repeated identical send within 60 seconds from the same client returns the first acknowledgement instead of sending twice (voice clients retry); each real send has its own
-idempotency key. A gc:write token may read the replies of sessions it may write to; a read-only token only reads the default session and `GC_MCP_PEEK_ALLOW`.
+idempotency key. Any `gc:read` token reads any session's replies (the default session only fills in an omitted name).
 
 Simple connect (optional, `GC_MCP_ALLOW_DCR=1`): the server accepts dynamic client registration (RFC 7591), so Claude or ChatGPT needs only the server URL, then you type the owner
 passphrase: no client id, no redirect URI to copy. A registration is accepted ONLY if every redirect URI is an exact, canonical Claude callback, ChatGPT connector callback

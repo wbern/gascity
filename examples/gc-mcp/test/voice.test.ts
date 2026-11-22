@@ -121,17 +121,22 @@ describe("send_to_session: default session, resolution and no send on doubt", ()
     expect(w.posts().length).toBe(0);
     expect(w.events.map((e) => e.result)).toEqual(["ambiguous_session", "no_such_session"]);
   });
-  it("the deny list no longer blocks the owner's own session but still blocks other people's, even by partial name", async () => {
+  it("nothing is denied by default (every session is the owner's); an operator's deny list still blocks, even by partial name", async () => {
     const w = world(); const { gate } = w.mk();
-    expect((await gate.submit(W, "claude-william", "hi")).structured).toMatchObject({ sent: true });
-    expect((await gate.submit(W, "zachris", "hi")).structured).toMatchObject({ sent: false, reason: "denied_session" });   // resolves to zachris-dev, then denied
-    expect((await gate.submit(W, "zachris-dev", "hi")).structured).toMatchObject({ sent: false, reason: "denied_session" });
-    expect(w.posts().length).toBe(1);
+    for (const name of ["claude-william", "zachris", "zachris-dev"]) expect((await gate.submit(W, name, `hi ${name}`)).structured, name).toMatchObject({ sent: true });
+    expect(w.posts().length).toBe(3);
+    const w2 = world(); const { gate: g2 } = w2.mk({ deny: ["zachris-*"] });
+    expect((await g2.submit(W, "claude-william", "hi")).structured).toMatchObject({ sent: true });
+    expect((await g2.submit(W, "zachris", "hi")).structured).toMatchObject({ sent: false, reason: "denied_session" });   // resolves to zachris-dev, then denied
+    expect(w2.posts().length).toBe(1);
   });
-  it("a session with a person attached is refused, except the owner's configured default session", async () => {
+  it("a session a person is attached to is written like any other by default; the optional setting refuses it, for every session alike", async () => {
     const w = world(); const { gate } = w.mk();
-    expect((await gate.submit(W, "attached-one", "hi")).structured).toMatchObject({ reason: "session_attached" });
-    expect((await gate.submit(W, undefined, "hi")).structured).toMatchObject({ sent: true });   // claude-william is attached in the fixture: it IS the target
+    expect((await gate.submit(W, "attached-one", "hi")).structured).toMatchObject({ sent: true });
+    expect((await gate.submit(W, undefined, "hi")).structured).toMatchObject({ sent: true });
+    const w2 = world(); const { gate: g2 } = w2.mk({ allowAttached: false });
+    expect((await g2.submit(W, "attached-one", "hi")).structured).toMatchObject({ reason: "session_attached" });
+    expect((await g2.submit(W, undefined, "hi")).structured).toMatchObject({ reason: "session_attached" });   // no special case for the default session (claude-william is attached in the fixture)
   });
   it("the acknowledgement is speakable (<= 280 chars) and carries a marker for wait_for_reply", async () => {
     const w = world(); const { gate } = w.mk();
@@ -304,19 +309,20 @@ describe("latest_reply and read_more: long replies in speakable pieces", () => {
   });
 });
 
-describe("who may READ a reply: default session, peek allowlist, or a gc:write holder where writes are permitted", () => {
-  it("with a peek allowlist: the default session and listed sessions are readable, others are not for a read-only token", async () => {
-    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0, "mine")], "gc2-wisp-s1": [asst(T0, "steve's")], "gc2-wisp-m1": [asst(T0, "mayor's")] } });
-    const { d } = w.mk({}, { peekAllow: ["mayor"] });
-    expect((await w.tool(d, R, "latest_reply").handler({})).text).toContain("mine");                       // the default session
-    expect((await w.tool(d, R, "latest_reply").handler({ session: "mayor" })).text).toContain("mayor's");  // on the allowlist
-    expect((await w.tool(d, R, "latest_reply").handler({ session: "steve" })).text).toMatch(/not on my read list/);
+describe("who may READ a reply: gc:read reads any session; an optional peek list restricts", () => {
+  it("by default a read-only token reads any session, the default session needs no special rule", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0, "mine")], "gc2-wisp-s1": [asst(T0, "steve's")], "gc2-wisp-zz": [asst(T0, "zachris private")] } });
+    const { d } = w.mk();
+    for (const [session, text] of [[undefined, "mine"], ["steve", "steve's"], ["zachris-dev", "zachris private"]] as const) {
+      expect((await w.tool(d, R, "latest_reply").handler({ session })).text, String(session)).toContain(text);
+    }
   });
-  it("a gc:write token may read what it may write to (steve), but never another person's session", async () => {
-    const w = world({ transcripts: { "gc2-wisp-s1": [asst(T0, "steve's")], "gc2-wisp-zz": [asst(T0, "zachris private")] } });
+  it("with an OPTIONAL peek list: listed sessions are readable, others get the clear reason, for every token", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0, "mine")], "gc2-wisp-m1": [asst(T0, "mayor's")] } });
     const { d } = w.mk({}, { peekAllow: ["mayor"] });
-    expect((await w.tool(d, W, "latest_reply").handler({ session: "steve" })).text).toContain("steve's");
-    expect((await w.tool(d, W, "latest_reply").handler({ session: "zachris-dev" })).text).toMatch(/protected list/);
+    expect((await w.tool(d, R, "latest_reply").handler({ session: "mayor" })).text).toContain("mayor's");
+    for (const who of [R, W]) expect((await w.tool(d, who, "latest_reply").handler({ session: "steve" })).structured).toMatchObject({ allowed: false, reason: "not_in_allow_list" });
+    expect((await w.tool(d, R, "latest_reply").handler({})).structured).toMatchObject({ reason: "not_in_allow_list" });   // the default session is just a session: it only fills in an omitted name
   });
   it("ambiguity and unknown names are spoken as a question and read nothing", async () => {
     const w = world(); const { d } = w.mk();
