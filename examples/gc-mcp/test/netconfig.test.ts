@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveNetwork, isPrivateOrLoopback, resolveMcpPath } from "../src/netconfig.js";
+import { resolveNetwork, isPrivateOrLoopback, resolveMcpPath, resolveIssuerPath } from "../src/netconfig.js";
 
 describe("isPrivateOrLoopback", () => {
   it("accepts loopback, RFC1918 and tailnet/CGNAT addresses", () => {
@@ -51,5 +51,28 @@ describe("resolveMcpPath", () => {
     for (const bad of ["mcp", "/mcp/", "//x", "/a b", "/a?x=1", "/a#b", "/..", "/a/../b", "/authorize", "/token", "/register", "/revoke", "/consent", "/healthz", "/.well-known", "/.well-known/x", "/mcp\n"]) {
       expect(() => resolveMcpPath({ GC_MCP_PATH: bad }), JSON.stringify(bad)).toThrow(/GC_MCP_PATH/);
     }
+  });
+});
+
+describe("resolveIssuerPath", () => {
+  it("accepts the host root and a plain path prefix, and returns the issuer path", () => {
+    expect(resolveIssuerPath("https://mcp.gc.enmansbyra.se")).toBe("");
+    expect(resolveIssuerPath("https://mcp.gc.enmansbyra.se/")).toBe("");
+    expect(resolveIssuerPath("https://mcp.gc.enmansbyra.se/gc3")).toBe("/gc3");
+    expect(resolveIssuerPath("https://h.example.se/mcp/gc3")).toBe("/mcp/gc3");
+    expect(resolveIssuerPath("http://127.0.0.1:47811")).toBe("");
+    expect(resolveIssuerPath("http://localhost:8/gc3")).toBe("/gc3");
+  });
+  it("refuses anything that would make the issuer ambiguous or unsafe", () => {
+    for (const bad of ["http://example.se/gc3", "ftp://example.se/gc3", "https://example.se/gc3/", "https://example.se/gc3?x=1", "https://example.se/gc3#f",
+                       "https://u:p@example.se/gc3", "https://example.se/authorize", "https://example.se/token/x", "https://example.se/.well-known/x",
+                       "https://example.se/healthz", "https://example.se/a%20b", "https://example.se/a/../b", "not a url", ""]) {
+      expect(() => resolveIssuerPath(bad), JSON.stringify(bad)).toThrow(/GC_MCP_PUBLIC_URL/);
+    }
+  });
+  it("lets the MCP path default to the issuer path", () => {
+    expect(resolveMcpPath({}, "/gc3")).toBe("/gc3");
+    expect(resolveMcpPath({}, "/mcp")).toBe("/mcp");
+    expect(resolveMcpPath({ GC_MCP_PATH: "/" }, "/gc3")).toBe("/");
   });
 });

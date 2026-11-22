@@ -75,6 +75,7 @@ export interface ProviderOpts {
   resource: URL;                 // canonical audience of this MCP server
   ownerHash: string;             // scrypt1$... from hashPassphrase
   staticClientId?: string;       // the owner's own OAuth client (recommended)
+  consentPath?: string;          // where the consent form posts (default /consent; follows the issuer path)
   allowDcr?: boolean;            // OFF by default
   redirectAllow?: string[];      // exact redirect URIs accepted (default: Claude callbacks)
   maxClients?: number;
@@ -167,7 +168,7 @@ export class OwnerApprovalProvider implements OAuthServerProvider {
 <h2>Approve Gas City access?</h2>
 <p>An application (<b>${esc(client.client_name ?? "unnamed")}</b>, unverified name) wants <b>read-only</b> access to Gas City status, sessions, mail subjects and beads.</p>
 <p>It will be sent back to:<br><code>${redirect}</code><br>Only approve if you just started this from Claude.</p>
-<form method=post action="/consent">
+<form method=post action="${esc(this.o.consentPath ?? "/consent")}">
 <input type=hidden name=rid value="${esc(rid)}">
 <p><label>Owner passphrase<br><input type=password name=passphrase autocomplete=current-password autofocus style="width:100%;font-size:1em"></label></p>
 <button name=decision value=approve>Approve</button> <button name=decision value=deny>Deny</button>

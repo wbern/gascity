@@ -30,16 +30,17 @@ async function freePort() {
   return new Promise<number>((res) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => res(p)); }); });
 }
 
-async function boot(over: Partial<AppOpts> = {}) {
+async function boot(opts: Partial<AppOpts> & { issuerPath?: string } = {}) {
+  const { issuerPath: ip = "", ...over } = opts;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-"));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const mcpPath = over.mcpPath ?? "/mcp";
+  const mcpPath = over.mcpPath ?? (ip || "/mcp");
   const res = `${base}${mcpPath}`;
   const t = { clock: Date.now() };
   const { app, provider } = createApp({
     deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() },
-    publicUrl: new URL(base), ownerHash: HASH, staticClientId: CID,
+    publicUrl: new URL(base + ip), ownerHash: HASH, staticClientId: CID,
     stateFile: path.join(dir, "state.json"), auditFile: path.join(dir, "audit.jsonl"), controlDir: dir,
     callsPerMinute: 5, now: () => t.clock, ...over,
   });
@@ -47,13 +48,13 @@ async function boot(over: Partial<AppOpts> = {}) {
   cleanups.push(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const H = (xff?: string) => (xff ? { "x-forwarded-for": xff } : {});
   const authorize = (cid = CID, challenge = "x".repeat(43), resource = res, redirect = CB, xff?: string) => {
-    const u = new URL(`${base}/authorize`);
+    const u = new URL(`${base}${ip}/authorize`);
     Object.entries({ response_type: "code", client_id: cid, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state: "st8", scope: "gc:read", resource }).forEach(([k, v]) => u.searchParams.set(k, v));
     return fetch(u, { redirect: "manual", headers: H(xff) });
   };
   const ridOf = (html: string) => /name=rid value="([^"]+)"/.exec(html)![1];
   const consent = (rid: string, passphrase: string, decision = "approve", xff?: string) =>
-    fetch(`${base}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...H(xff) }, body: new URLSearchParams({ rid, passphrase, decision }) });
+    fetch(`${base}${ip}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...H(xff) }, body: new URLSearchParams({ rid, passphrase, decision }) });
   const flow = async (passphrase = PASS) => {
     const verifier = b64u(crypto.randomBytes(32));
     const challenge = b64u(crypto.createHash("sha256").update(verifier).digest());
@@ -63,16 +64,16 @@ async function boot(over: Partial<AppOpts> = {}) {
     return { verifier, c };
   };
   const token = (code: string, verifier: string, extra: Record<string, string> = {}) =>
-    fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    fetch(`${base}${ip}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "authorization_code", client_id: CID, code, code_verifier: verifier, redirect_uri: CB, resource: res, ...extra }) });
-  const refresh = (rt: string) => fetch(`${base}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+  const refresh = (rt: string) => fetch(`${base}${ip}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "refresh_token", client_id: CID, refresh_token: rt, resource: res }) });
   const getCode = (c: Response) => new URL(c.headers.get("location")!).searchParams.get("code")!;
   const mcpCall = (tok: string | null, xff?: string) => fetch(res, { method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(tok ? { authorization: `Bearer ${tok}` } : {}), ...H(xff) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
   const login = async () => { const { verifier, c } = await flow(); return (await (await token(getCode(c), verifier)).json()) as { access_token: string; refresh_token: string }; };
-  return { base, res, mcpPath, dir, t, provider, authorize, consent, ridOf, flow, token, refresh, getCode, mcpCall, login };
+  return { base, ip, res, mcpPath, dir, t, provider, authorize, consent, ridOf, flow, token, refresh, getCode, mcpCall, login };
 }
 
 describe("discovery and static client", () => {
@@ -195,6 +196,93 @@ describe("MCP endpoint under a path prefix (issuer stays at the host root)", () 
     const s = await boot({ mcpPath: "/mcp/gc", trustProxy: 1, allowCidrs: ["203.0.113.0/24"] });
     expect((await s.mcpCall(null, "198.51.100.7")).status).toBe(403);
     expect((await s.mcpCall(null, "203.0.113.9")).status).toBe(401);
+  });
+});
+
+describe("issuer AND resource under one path prefix (final naming: https://host/gc3)", () => {
+  const TEXT = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+
+  it("serves path-inserted metadata and keeps every OAuth endpoint under the prefix", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    const prm = (await (await fetch(`${s.base}/.well-known/oauth-protected-resource/gc3`)).json()) as any;
+    expect(prm.resource).toBe(`${s.base}/gc3`);
+    expect(prm.authorization_servers).toEqual([`${s.base}/gc3`]);
+    const as = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server/gc3`)).json()) as any;
+    expect(as.issuer).toBe(`${s.base}/gc3`);
+    expect(as.authorization_endpoint).toBe(`${s.base}/gc3/authorize`);
+    expect(as.token_endpoint).toBe(`${s.base}/gc3/token`);
+    expect(as.revocation_endpoint).toBe(`${s.base}/gc3/revoke`);
+    expect(as.registration_endpoint).toBeUndefined();
+    expect(as.code_challenge_methods_supported).toEqual(["S256"]);
+  });
+
+  it("serves NOTHING at the host root: no root metadata, no root OAuth endpoints, no old /mcp", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    for (const p of ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
+                     "/authorize", "/token", "/revoke", "/consent", "/register", "/mcp", "/gc3/register", "/gc3/nothing"]) {
+      const r = await fetch(`${s.base}${p}`, { method: p === "/token" || p === "/consent" || p === "/mcp" ? "POST" : "GET", redirect: "manual" });
+      expect(r.status, p).toBe(404);
+    }
+  });
+
+  it("answers 401 with a resource_metadata pointer at the path-inserted URL and 405 to a GET", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    const r = await s.mcpCall(null);
+    expect(r.status).toBe(401);
+    expect(r.headers.get("www-authenticate")).toContain(`resource_metadata="${s.base}/.well-known/oauth-protected-resource/gc3"`);
+    expect((await fetch(s.res)).status).toBe(405);
+  });
+
+  it("runs the full flow: consent form posts back under the prefix, tokens work, a real MCP client lists the tools", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    const a = await s.authorize();
+    expect(await a.text()).toContain('action="/gc3/consent"');
+    const tok = await s.login();
+    const client = new Client({ name: "t", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
+    expect((await client.listTools()).tools).toHaveLength(7);
+    await client.close();
+  });
+
+  it("binds the audience to the prefixed resource: any other resource is refused", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    expect((await s.authorize(CID, "x".repeat(43), `${s.base}/mcp`)).status).toBe(400);
+    expect((await s.authorize(CID, "x".repeat(43), `${s.base}/`)).status).toBe(400);
+  });
+
+  it("applies the source gate to /gc3 and /gc3/token but never to /gc3/authorize", async () => {
+    const s = await boot({ issuerPath: "/gc3", trustProxy: 1, allowCidrs: ["203.0.113.0/24"] });
+    expect((await s.mcpCall(null, "198.51.100.7")).status).toBe(403);
+    expect((await s.mcpCall(null, "203.0.113.9")).status).toBe(401);
+    const t = await fetch(`${s.base}/gc3/token`, { method: "POST", headers: { "x-forwarded-for": "198.51.100.7", "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=authorization_code" });
+    expect(t.status).toBe(403);
+    expect((await s.authorize(CID, "x".repeat(43), s.res, CB, "198.51.100.7")).status).toBe(200);
+  });
+
+  it("with dynamic registration enabled, /register also lives under the prefix only", async () => {
+    const s = await boot({ issuerPath: "/gc3", allowDcr: true });
+    const as = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server/gc3`)).json()) as any;
+    expect(as.registration_endpoint).toBe(`${s.base}/gc3/register`);
+    expect((await fetch(`${s.base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(404);
+    expect((await fetch(`${s.base}/gc3/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://evil.example/cb"] }) })).status).toBe(400);
+  });
+
+  it("failed requests to the prefixed security paths are audited", async () => {
+    const s = await boot({ issuerPath: "/gc3" });
+    await s.mcpCall("garbage");
+    await s.consent("nope", "wrong-passphrase-value");
+    const log = fs.readFileSync(path.join(s.dir, "audit.jsonl"), "utf8");
+    expect(log).toContain("/gc3 -> 401");
+    expect(log).toContain("/gc3/consent -> 400");
+  });
+
+  it("the root-path variant of the same design (prefix /) keeps OAuth at the root", async () => {
+    const s = await boot({ issuerPath: "", mcpPath: "/" });
+    const as = (await (await fetch(`${s.base}/.well-known/oauth-authorization-server`)).json()) as any;
+    expect(as.authorization_endpoint).toBe(`${s.base}/authorize`);
+    const tok = await s.login();
+    const r = await fetch(`${s.base}/`, { method: "POST", headers: { ...TEXT, authorization: `Bearer ${tok.access_token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    expect(r.status).toBe(200);
   });
 });
 

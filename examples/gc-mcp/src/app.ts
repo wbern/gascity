@@ -3,7 +3,12 @@ import crypto from "node:crypto";
 import path from "node:path";
 import express from "express";
 import type http from "node:http";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { createOAuthMetadata, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { authorizationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/authorize.js";
+import { tokenHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/token.js";
+import { revocationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/revoke.js";
+import { clientRegistrationHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/register.js";
+import { metadataHandler } from "@modelcontextprotocol/sdk/server/auth/handlers/metadata.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./server.js";
@@ -14,7 +19,7 @@ import type { Deps } from "./tools.js";
 
 export interface AppOpts {
   deps: Deps;
-  publicUrl: URL;              // externally visible base URL (issuer); resource = <publicUrl>/mcp
+  publicUrl: URL;              // externally visible ISSUER URL; may carry a path (https://host/gc3). OAuth endpoints live under it
   ownerHash: string;
   staticClientId?: string;     // the owner's own OAuth client id (recommended)
   allowDcr?: boolean;          // dynamic client registration: OFF unless explicitly enabled
@@ -26,7 +31,7 @@ export interface AppOpts {
   allowCidrs?: string[];       // restrict /mcp and /token to these sources (requires trustProxy >= 1)
   extraHosts?: string[];       // extra accepted Host names (publicUrl host + loopback are always accepted)
   peerAllow?: string[];        // exact TCP peer addresses allowed to connect at all (the reverse proxy); others are dropped
-  mcpPath?: string;            // public path of the MCP endpoint (default /mcp); OAuth endpoints stay at the host root
+  mcpPath?: string;            // public path of the MCP endpoint (default: the issuer's path, or /mcp when the issuer is the host root)
   now?: () => number;
 }
 
@@ -35,13 +40,18 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const trust = o.trustProxy ?? 0;
   if (o.allowCidrs?.length && trust < 1) throw new Error("allowCidrs requires trustProxy >= 1: without it every caller looks like the proxy");
   const cidrs = (o.allowCidrs ?? []).map(parseCidr);
-  const base = o.publicUrl.href.replace(/\/$/, "");
-  const mcpPath = o.mcpPath ?? "/mcp";
-  const resource = new URL(`${base}${mcpPath === "/" ? "/" : mcpPath}`);
+  const origin = o.publicUrl.origin;
+  const issuerPath = o.publicUrl.pathname.replace(/\/$/, "");           // "" when the issuer is the host root
+  const issuerStr = issuerPath ? `${origin}${issuerPath}` : `${origin}/`;  // exactly what clients derive metadata URLs from
+  const mcpPath = o.mcpPath ?? (issuerPath || "/mcp");
+  const resource = new URL(mcpPath === "/" ? `${origin}/` : `${origin}${mcpPath}`);
+  const oauthPath = (name: string) => `${issuerPath}/${name}`;
   const isMcp = (p: string) => p === mcpPath;
+  const securityPaths = new Set([mcpPath, ...["authorize", "token", "revoke", "register", "consent"].map(oauthPath)]);
   const audit = new AuditLog(o.auditFile ?? null);
   const provider = new OwnerApprovalProvider({
     resource, ownerHash: o.ownerHash, staticClientId: o.staticClientId, allowDcr: o.allowDcr, stateFile: o.stateFile, now,
+    consentPath: oauthPath("consent"),
     onEvent: (note, ok) => audit.write({ kind: "auth", ok, note }),
   });
   const callLimiter = new RateLimiter(o.callsPerMinute ?? 30, 60_000, now);
@@ -87,7 +97,7 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
 
   // audit every failed request to the security-relevant paths
   app.use((req, res, next) => {
-    if (isMcp(req.path) || /^\/(token|authorize|register|consent|revoke)/.test(req.path)) {
+    if (securityPaths.has(req.path)) {
       res.on("finish", () => { if (res.statusCode >= 400) audit.write({ kind: "auth", ok: false, note: `${req.method} ${req.path} -> ${res.statusCode} ip=${req.ip}` }); });
     }
     next();
@@ -102,21 +112,34 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   // /authorize and /consent must NOT be (they come from the owner's phone).
   if (cidrs.length) {
     app.use((req, res, next) => {
-      if ((isMcp(req.path) || req.path === "/token") && !inAnyCidr(req.ip, cidrs)) { res.status(403).type("text/plain").send("forbidden"); return; }
+      if ((isMcp(req.path) || req.path === oauthPath("token") || req.path === oauthPath("revoke")) && !inAnyCidr(req.ip, cidrs)) { res.status(403).type("text/plain").send("forbidden"); return; }
       next();
     });
   }
 
-  app.use(mcpAuthRouter({
-    provider, issuerUrl: new URL(base), baseUrl: new URL(base), resourceServerUrl: resource,
-    scopesSupported: [SCOPE], resourceName: "Gas City (read-only)",
-    authorizationOptions: { rateLimit: false },
-    tokenOptions: { rateLimit: false },
-    revocationOptions: { rateLimit: false },
-    clientRegistrationOptions: { rateLimit: false, clientSecretExpirySeconds: 0 },
-  }));
+  // OAuth 2.1 authorization server, assembled from the SDK's own handlers and mounted UNDER the issuer path.
+  // (The SDK's all-in-one router assumes the host root, so it cannot serve https://host/gc3 as an issuer.)
+  // Metadata follows RFC 8414 / RFC 9728 path insertion; nothing is served at the host root in path mode.
+  const ep = (name: string) => `${origin}${oauthPath(name)}`;
+  const asMeta = {
+    ...createOAuthMetadata({ provider, issuerUrl: new URL(issuerStr), baseUrl: new URL(issuerStr), scopesSupported: [SCOPE] }),
+    issuer: issuerStr,
+    authorization_endpoint: ep("authorize"),
+    token_endpoint: ep("token"),
+    revocation_endpoint: ep("revoke"),
+    registration_endpoint: provider.clientsStore.registerClient ? ep("register") : undefined,
+  };
+  const prm = { resource: resource.href, authorization_servers: [issuerStr], scopes_supported: [SCOPE], resource_name: "Gas City (read-only)" };
+  app.use(`/.well-known/oauth-protected-resource${mcpPath === "/" ? "" : mcpPath}`, metadataHandler(prm));
+  app.use(`/.well-known/oauth-authorization-server${issuerPath}`, metadataHandler(asMeta));
+  app.use(oauthPath("authorize"), authorizationHandler({ provider, rateLimit: false }));
+  app.use(oauthPath("token"), tokenHandler({ provider, rateLimit: false }));
+  app.use(oauthPath("revoke"), revocationHandler({ provider, rateLimit: false }));
+  if (provider.clientsStore.registerClient) {
+    app.use(oauthPath("register"), clientRegistrationHandler({ clientsStore: provider.clientsStore, clientSecretExpirySeconds: 0, rateLimit: false }));
+  }
 
-  app.post("/consent", express.urlencoded({ extended: false, limit: "4kb" }), (req, res) => {
+  app.post(oauthPath("consent"), express.urlencoded({ extended: false, limit: "4kb" }), (req, res) => {
     const b = req.body as Record<string, string>;
     const r = provider.consent(String(b.rid ?? ""), String(b.passphrase ?? ""), String(b.decision ?? ""), req.ip ?? "?");
     res.set({ "cache-control": "no-store", "x-frame-options": "DENY" });

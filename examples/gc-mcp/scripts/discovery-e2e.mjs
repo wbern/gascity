@@ -1,6 +1,6 @@
 // End-to-end OAuth DISCOVERY proof for a path-prefixed public URL (gcw-ti563).
 //
-//   npm run build && node scripts/discovery-e2e.mjs --generator <gas-city-infra>/scripts/gc-mcp-nginx-vhost.py [--prefix /mcp] [--host gc3.enmansbyra.se]
+//   npm run build && node scripts/discovery-e2e.mjs --generator <gas-city-infra>/scripts/gc-mcp-nginx-vhost.py [--prefix /gc3] [--host mcp.gc.enmansbyra.se]
 //
 // Starts the REAL gc-mcp app and a REAL nginx container (config from the infra generator), then lets the
 // MCP TypeScript SDK's own OAuth client (the reference implementation of RFC 9728 / 8414 discovery) connect
@@ -24,7 +24,7 @@ import { GcClient } from "../dist/gc-client.js";
 import { hashPassphrase } from "../dist/oauth.js";
 
 const arg = (name, dflt) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : dflt; };
-const GENERATOR = arg("generator"); const PREFIX = arg("prefix", "/mcp"); const HOST = arg("host", "gc3.enmansbyra.se");
+const GENERATOR = arg("generator"); const PREFIX = arg("prefix", "/gc3"); const HOST = arg("host", "mcp.gc.enmansbyra.se");
 if (!GENERATOR) { console.error("--generator <path to gc-mcp-nginx-vhost.py> is required"); process.exit(2); }
 const IMAGE = "nginx:stable-alpine", PASS = "e2e-" + crypto.randomBytes(9).toString("hex"), CLIENT_ID = crypto.randomBytes(18).toString("base64url");
 const CALLBACK = "https://claude.ai/api/mcp/auth_callback";
@@ -35,7 +35,9 @@ const step = (ok, what, detail = "") => { if (!ok) failed++; lines.push(`${ok ? 
 
 const [UP, TLS, HTTP] = [await freePort(), await freePort(), await freePort()];
 const publicBase = `https://${HOST}:${TLS}`;
-const serverUrl = publicBase + (PREFIX === "/" ? "/" : PREFIX);
+const UNDER = PREFIX === "/" ? "" : PREFIX;                          // "" at the host root
+const serverUrl = publicBase + (PREFIX === "/" ? "/" : PREFIX);     // resource == issuer URL in path mode
+const issuerUrl = PREFIX === "/" ? `${publicBase}/` : `${publicBase}${PREFIX}`;
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-e2e-")); fs.mkdirSync(path.join(tmp, "logs"));
 const container = `gcmcp-e2e-${TLS}`;
 let srv;
@@ -49,7 +51,7 @@ try {
   };
   const { app } = createApp({
     deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc3", fetchImpl: fake }), mailAgent: "human", now: () => new Date() },
-    publicUrl: new URL(publicBase), mcpPath: PREFIX, ownerHash: hashPassphrase(PASS), staticClientId: CLIENT_ID,
+    publicUrl: new URL(issuerUrl), ...(PREFIX === "/" ? { mcpPath: "/" } : {}), ownerHash: hashPassphrase(PASS), staticClientId: CLIENT_ID,
     trustProxy: 1, peerAllow: ["127.0.0.1"], callsPerMinute: 1000,
   });
   srv = await listen(app, UP, "127.0.0.1");
@@ -83,15 +85,16 @@ try {
   // a. an unauthenticated call is answered 401 with a pointer to the path-inserted metadata document
   const unauth = await fetchFn(serverUrl, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" });
   const challenge = unauth.headers.get("www-authenticate") ?? "";
-  const expectPrm = `${publicBase}/.well-known/oauth-protected-resource${PREFIX === "/" ? "" : PREFIX}`;
+  const expectPrm = `${publicBase}/.well-known/oauth-protected-resource${UNDER}`;
   step(unauth.status === 401 && challenge.includes(`resource_metadata="${expectPrm}"`), "401 carries resource_metadata at the path-inserted URL", challenge.slice(0, 150));
 
   // b. the reference client discovers resource + authorization server from nothing but the URL
   const info = await discoverOAuthServerInfo(serverUrl, { fetchFn });
   step(String(info.resourceMetadata?.resource) === serverUrl, "protected-resource document: resource equals the exact URL the user types", String(info.resourceMetadata?.resource));
-  step(String(info.authorizationServerUrl).replace(/\/$/, "") === publicBase, "authorization server is the host root, not a path", String(info.authorizationServerUrl));
-  step(info.authorizationServerMetadata?.authorization_endpoint === `${publicBase}/authorize` && info.authorizationServerMetadata?.token_endpoint === `${publicBase}/token`
-    && !info.authorizationServerMetadata?.registration_endpoint, "AS metadata: /authorize and /token at the root, no registration endpoint");
+  step(String(info.authorizationServerUrl) === issuerUrl, `issuer == the exact public URL (${PREFIX === "/" ? "host root" : "WITH the path prefix"})`, String(info.authorizationServerUrl));
+  step(info.authorizationServerMetadata?.issuer === issuerUrl, "AS metadata document: issuer matches the URL it was discovered at (RFC 8414)", String(info.authorizationServerMetadata?.issuer));
+  step(info.authorizationServerMetadata?.authorization_endpoint === `${publicBase}${UNDER}/authorize` && info.authorizationServerMetadata?.token_endpoint === `${publicBase}${UNDER}/token`
+    && !info.authorizationServerMetadata?.registration_endpoint, "AS metadata: authorize/token live under the prefix, no registration endpoint");
 
   // c. the full authorization-code flow: client -> owner consent in the browser -> code -> tokens
   const first = await auth(provider, { serverUrl, fetchFn });
@@ -99,7 +102,7 @@ try {
   const page = await (await fetchFn(store.authUrl)).text();
   const rid = /name=rid value="([^"]+)"/.exec(page)?.[1];
   step(!!rid && page.includes("claude.ai/api/mcp/auth_callback"), "consent page is served through nginx and shows the redirect target");
-  const consent = await fetchFn(`${publicBase}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, passphrase: PASS, decision: "approve" }) });
+  const consent = await fetchFn(`${publicBase}${UNDER}/consent`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, passphrase: PASS, decision: "approve" }) });
   const location = new URL(consent.headers.get("location") ?? "http://none/");
   step(consent.status === 302 && location.origin + location.pathname === CALLBACK && !!location.searchParams.get("code"), "owner passphrase approves and the callback carries a code");
   const second = await auth(provider, { serverUrl, authorizationCode: location.searchParams.get("code"), fetchFn });
@@ -119,9 +122,10 @@ try {
   step(getResp.status === 405 && (getResp.headers.get("allow") ?? "").includes("POST"), "GET on the MCP URL answers 405 with Allow: POST (no GET stream)", `${getResp.status} ${getResp.headers.get("allow")}`);
 
   // e. nothing else is public on this host
-  const probes = ["/register", "/healthz", "/admin", "/.well-known/openid-configuration", ...(PREFIX === "/" ? [] : [PREFIX + "/", "/mcp-other"])];
+  const probes = [`${UNDER}/register`, `${UNDER}/healthz`, "/healthz", "/admin", "/.well-known/openid-configuration", ...(PREFIX === "/" ? [] : [
+    `${PREFIX}/`, `${PREFIX}/nothing`, "/authorize", "/token", "/revoke", "/consent", "/mcp", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource", "/gc2", "/gc2/authorize"])];
   for (const p of probes) { const r = await fetchFn(publicBase + p, { method: "GET" }); step(r.status === 404 || r.status === 403, `GET ${p} is not served`, String(r.status)); }
-  if (PREFIX !== "/mcp") { const r = await fetchFn(`${publicBase}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }); step(r.status === 404, "the unprefixed /mcp does not exist", String(r.status)); }
+  if (PREFIX !== "/") { const r = await fetchFn(`${publicBase}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "grant_type=authorization_code" }); step(r.status === 404, "POST /token at the host root is not served", String(r.status)); }
 
   // f. what nginx actually served, in order: the real discovery sequence
   spawnSync("docker", ["exec", container, "sh", "-c", "sleep 0.2"]);

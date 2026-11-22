@@ -57,12 +57,36 @@ export function resolveNetwork(env: Record<string, string | undefined>): Network
 const RESERVED_ROOTS = new Set(["authorize", "token", "register", "revoke", "consent", "healthz", ".well-known"]);
 const SEGMENT = /^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$/;
 
-export function resolveMcpPath(env: Record<string, string | undefined>): string {
-  const p = env.GC_MCP_PATH ?? "/mcp";
-  if (p === "/") return "/";
+function checkPath(p: string, label: string): void {
   const segments = p.split("/");
   const bad = !p.startsWith("/") || p.endsWith("/") || segments.length < 2 || segments.slice(1).some((s) => !SEGMENT.test(s) || s === "..");
-  if (bad) throw new Error(`GC_MCP_PATH must be "/" or a plain absolute path like /mcp or /mcp/gc (no trailing slash, query, dots-only or empty segments), got ${JSON.stringify(p)}`);
-  if (RESERVED_ROOTS.has(segments[1])) throw new Error(`GC_MCP_PATH must not start with a reserved OAuth/health path (${segments[1]}), got ${JSON.stringify(p)}`);
+  if (bad) throw new Error(`${label} must be a plain absolute path like /gc3 or /mcp/gc3 (no trailing slash, query, dots-only or empty segments), got ${JSON.stringify(p)}`);
+  if (RESERVED_ROOTS.has(segments[1])) throw new Error(`${label} must not start with a reserved OAuth/health path (${segments[1]}), got ${JSON.stringify(p)}`);
+}
+
+/** The MCP endpoint path. Defaults to `dflt` (the issuer's path, or /mcp when the issuer is the host root). */
+export function resolveMcpPath(env: Record<string, string | undefined>, dflt = "/mcp"): string {
+  const p = env.GC_MCP_PATH ?? dflt;
+  if (p === "/") return "/";
+  checkPath(p, "GC_MCP_PATH");
   return p;
+}
+
+/**
+ * The issuer path taken from GC_MCP_PUBLIC_URL: "" for the host root, "/gc3" for https://host/gc3. The OAuth
+ * endpoints, the consent form and the RFC 8414 / 9728 metadata paths are all derived from it, so a typo here
+ * must refuse to start rather than quietly serve something else.
+ */
+export function resolveIssuerPath(raw: string): string {
+  // The URL parser silently normalises dot segments (/a/../b becomes /b): reject them in the RAW text instead.
+  if (/\/\.{1,2}(\/|$|[?#])/.test(raw)) throw new Error(`GC_MCP_PUBLIC_URL must not contain dot segments, got ${JSON.stringify(raw)}`);
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error(`GC_MCP_PUBLIC_URL is not a URL: ${JSON.stringify(raw)}`); }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) throw new Error(`GC_MCP_PUBLIC_URL must be https (http only for loopback), got ${JSON.stringify(raw)}`);
+  if (u.username || u.password || u.search || u.hash) throw new Error(`GC_MCP_PUBLIC_URL must not carry credentials, a query or a fragment, got ${JSON.stringify(raw)}`);
+  if (u.pathname === "/" || u.pathname === "") return "";
+  try { checkPath(u.pathname, "GC_MCP_PUBLIC_URL path"); } catch (e) { throw new Error(`GC_MCP_PUBLIC_URL invalid: ${(e as Error).message}`); }
+  if (u.pathname !== decodeURI(u.pathname) || /%/.test(u.pathname)) throw new Error(`GC_MCP_PUBLIC_URL path must not be percent-encoded, got ${JSON.stringify(raw)}`);
+  return u.pathname;
 }

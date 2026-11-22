@@ -1,12 +1,14 @@
-# OAuth discovery end-to-end evidence (reference MCP client -> real nginx -> real gc-mcp), 3 configurations.
+# OAuth discovery end-to-end evidence (reference MCP client -> real nginx -> real gc-mcp).
+# Final naming: host mcp.gc.enmansbyra.se, path /gc3 (issuer, resource and audience all https://<host>/gc3). Fallback (host root) and a nested prefix are included.
 # Reproduce: npm run build && node scripts/discovery-e2e.mjs --generator <infra>/scripts/gc-mcp-nginx-vhost.py --host <h> --prefix <p>
-# Ports vary per run. NOT proven here: Claude's own connector (see docs/runbook.md for its documented behaviour).
+# Ports vary per run. NOT proven here: Claude's own connector (its documentation is silent on path-bearing issuers).
 
-# discovery e2e: host=gc3.enmansbyra.se prefix=/mcp (public URL https://gc3.enmansbyra.se:35123/mcp)
-PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://gc3.enmansbyra.se:35123/.w
-PASS  protected-resource document: resource equals the exact URL the user types  -> https://gc3.enmansbyra.se:35123/mcp
-PASS  authorization server is the host root, not a path  -> https://gc3.enmansbyra.se:35123/
-PASS  AS metadata: /authorize and /token at the root, no registration endpoint
+# discovery e2e: host=mcp.gc.enmansbyra.se prefix=/gc3 (public URL https://mcp.gc.enmansbyra.se:43289/gc3)
+PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://mcp.gc.enmansbyra.se:43289
+PASS  protected-resource document: resource equals the exact URL the user types  -> https://mcp.gc.enmansbyra.se:43289/gc3
+PASS  issuer == the exact public URL (WITH the path prefix)  -> https://mcp.gc.enmansbyra.se:43289/gc3
+PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://mcp.gc.enmansbyra.se:43289/gc3
+PASS  AS metadata: authorize/token live under the prefix, no registration endpoint
 PASS  client starts the flow and asks for a browser redirect
 PASS  consent page is served through nginx and shows the redirect target
 PASS  owner passphrase approves and the callback carries a code
@@ -14,46 +16,69 @@ PASS  token exchange succeeds (PKCE, audience-bound to the prefixed resource)
 PASS  tools/list over the prefixed URL returns 7 read-only tools
 PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in progress, 12 ready; 3 unread mail. 
 PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
-PASS  GET /register is not served  -> 404
+PASS  GET /gc3/register is not served  -> 404
+PASS  GET /gc3/healthz is not served  -> 404
 PASS  GET /healthz is not served  -> 404
 PASS  GET /admin is not served  -> 404
 PASS  GET /.well-known/openid-configuration is not served  -> 404
-PASS  GET /mcp/ is not served  -> 404
-PASS  GET /mcp-other is not served  -> 404
+PASS  GET /gc3/ is not served  -> 404
+PASS  GET /gc3/nothing is not served  -> 404
+PASS  GET /authorize is not served  -> 404
+PASS  GET /token is not served  -> 404
+PASS  GET /revoke is not served  -> 404
+PASS  GET /consent is not served  -> 404
+PASS  GET /mcp is not served  -> 404
+PASS  GET /.well-known/oauth-authorization-server is not served  -> 404
+PASS  GET /.well-known/oauth-protected-resource is not served  -> 404
+PASS  GET /gc2 is not served  -> 404
+PASS  GET /gc2/authorize is not served  -> 404
+PASS  POST /token at the host root is not served  -> 404
 
 nginx access log (method path status), in order:
-  POST /mcp 401
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /authorize 200
-  POST /consent 302
-  GET /.well-known/oauth-protected-resource/mcp 200
-  GET /.well-known/oauth-authorization-server 200
-  POST /token 200
-  POST /mcp 200
-  POST /mcp 202
-  GET /mcp 405
-  POST /mcp 200
-  POST /mcp 200
-  GET /mcp 405
-  GET /register 404
+  POST /gc3 401
+  GET /.well-known/oauth-protected-resource/gc3 200
+  GET /.well-known/oauth-authorization-server/gc3 200
+  GET /.well-known/oauth-protected-resource/gc3 200
+  GET /.well-known/oauth-authorization-server/gc3 200
+  GET /gc3/authorize 200
+  POST /gc3/consent 302
+  GET /.well-known/oauth-protected-resource/gc3 200
+  GET /.well-known/oauth-authorization-server/gc3 200
+  POST /gc3/token 200
+  POST /gc3 200
+  POST /gc3 202
+  GET /gc3 405
+  POST /gc3 200
+  POST /gc3 200
+  GET /gc3 405
+  GET /gc3/register 404
+  GET /gc3/healthz 404
   GET /healthz 404
   GET /admin 404
   GET /.well-known/openid-configuration 404
-  GET /mcp/ 404
-  GET /mcp-other 404
+  GET /gc3/ 404
+  GET /gc3/nothing 404
+  GET /authorize 404
+  GET /token 404
+  GET /revoke 404
+  GET /consent 404
+  GET /mcp 404
+  GET /.well-known/oauth-authorization-server 404
+  GET /.well-known/oauth-protected-resource 404
+  GET /gc2 404
+  GET /gc2/authorize 404
+  POST /token 404
 
 RESULT: PASS
 
 -----
 
-# discovery e2e: host=gc3-mcp.enmansbyra.se prefix=/ (public URL https://gc3-mcp.enmansbyra.se:40313/)
-PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://gc3-mcp.enmansbyra.se:4031
-PASS  protected-resource document: resource equals the exact URL the user types  -> https://gc3-mcp.enmansbyra.se:40313/
-PASS  authorization server is the host root, not a path  -> https://gc3-mcp.enmansbyra.se:40313/
-PASS  AS metadata: /authorize and /token at the root, no registration endpoint
+# discovery e2e: host=gc3.mcp.gc.enmansbyra.se prefix=/ (public URL https://gc3.mcp.gc.enmansbyra.se:46303/)
+PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://gc3.mcp.gc.enmansbyra.se:4
+PASS  protected-resource document: resource equals the exact URL the user types  -> https://gc3.mcp.gc.enmansbyra.se:46303/
+PASS  issuer == the exact public URL (host root)  -> https://gc3.mcp.gc.enmansbyra.se:46303/
+PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://gc3.mcp.gc.enmansbyra.se:46303/
+PASS  AS metadata: authorize/token live under the prefix, no registration endpoint
 PASS  client starts the flow and asks for a browser redirect
 PASS  consent page is served through nginx and shows the redirect target
 PASS  owner passphrase approves and the callback carries a code
@@ -63,9 +88,9 @@ PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in prog
 PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
 PASS  GET /register is not served  -> 404
 PASS  GET /healthz is not served  -> 404
+PASS  GET /healthz is not served  -> 404
 PASS  GET /admin is not served  -> 404
 PASS  GET /.well-known/openid-configuration is not served  -> 404
-PASS  the unprefixed /mcp does not exist  -> 404
 
 nginx access log (method path status), in order:
   POST / 401
@@ -86,19 +111,20 @@ nginx access log (method path status), in order:
   GET / 405
   GET /register 404
   GET /healthz 404
+  GET /healthz 404
   GET /admin 404
   GET /.well-known/openid-configuration 404
-  POST /mcp 404
 
 RESULT: PASS
 
 -----
 
-# discovery e2e: host=gc3.enmansbyra.se prefix=/mcp/gc (public URL https://gc3.enmansbyra.se:38333/mcp/gc)
-PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://gc3.enmansbyra.se:38333/.w
-PASS  protected-resource document: resource equals the exact URL the user types  -> https://gc3.enmansbyra.se:38333/mcp/gc
-PASS  authorization server is the host root, not a path  -> https://gc3.enmansbyra.se:38333/
-PASS  AS metadata: /authorize and /token at the root, no registration endpoint
+# discovery e2e: host=mcp.gc.enmansbyra.se prefix=/mcp/gc3 (public URL https://mcp.gc.enmansbyra.se:46563/mcp/gc3)
+PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://mcp.gc.enmansbyra.se:46563
+PASS  protected-resource document: resource equals the exact URL the user types  -> https://mcp.gc.enmansbyra.se:46563/mcp/gc3
+PASS  issuer == the exact public URL (WITH the path prefix)  -> https://mcp.gc.enmansbyra.se:46563/mcp/gc3
+PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://mcp.gc.enmansbyra.se:46563/mcp/gc3
+PASS  AS metadata: authorize/token live under the prefix, no registration endpoint
 PASS  client starts the flow and asks for a browser redirect
 PASS  consent page is served through nginx and shows the redirect target
 PASS  owner passphrase approves and the callback carries a code
@@ -106,38 +132,58 @@ PASS  token exchange succeeds (PKCE, audience-bound to the prefixed resource)
 PASS  tools/list over the prefixed URL returns 7 read-only tools
 PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in progress, 12 ready; 3 unread mail. 
 PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
-PASS  GET /register is not served  -> 404
+PASS  GET /mcp/gc3/register is not served  -> 404
+PASS  GET /mcp/gc3/healthz is not served  -> 404
 PASS  GET /healthz is not served  -> 404
 PASS  GET /admin is not served  -> 404
 PASS  GET /.well-known/openid-configuration is not served  -> 404
-PASS  GET /mcp/gc/ is not served  -> 404
-PASS  GET /mcp-other is not served  -> 404
-PASS  the unprefixed /mcp does not exist  -> 404
+PASS  GET /mcp/gc3/ is not served  -> 404
+PASS  GET /mcp/gc3/nothing is not served  -> 404
+PASS  GET /authorize is not served  -> 404
+PASS  GET /token is not served  -> 404
+PASS  GET /revoke is not served  -> 404
+PASS  GET /consent is not served  -> 404
+PASS  GET /mcp is not served  -> 404
+PASS  GET /.well-known/oauth-authorization-server is not served  -> 404
+PASS  GET /.well-known/oauth-protected-resource is not served  -> 404
+PASS  GET /gc2 is not served  -> 404
+PASS  GET /gc2/authorize is not served  -> 404
+PASS  POST /token at the host root is not served  -> 404
 
 nginx access log (method path status), in order:
-  POST /mcp/gc 401
-  GET /.well-known/oauth-protected-resource/mcp/gc 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /.well-known/oauth-protected-resource/mcp/gc 200
-  GET /.well-known/oauth-authorization-server 200
-  GET /authorize 200
-  POST /consent 302
-  GET /.well-known/oauth-protected-resource/mcp/gc 200
-  GET /.well-known/oauth-authorization-server 200
-  POST /token 200
-  POST /mcp/gc 200
-  POST /mcp/gc 202
-  GET /mcp/gc 405
-  POST /mcp/gc 200
-  POST /mcp/gc 200
-  GET /mcp/gc 405
-  GET /register 404
+  POST /mcp/gc3 401
+  GET /.well-known/oauth-protected-resource/mcp/gc3 200
+  GET /.well-known/oauth-authorization-server/mcp/gc3 200
+  GET /.well-known/oauth-protected-resource/mcp/gc3 200
+  GET /.well-known/oauth-authorization-server/mcp/gc3 200
+  GET /mcp/gc3/authorize 200
+  POST /mcp/gc3/consent 302
+  GET /.well-known/oauth-protected-resource/mcp/gc3 200
+  GET /.well-known/oauth-authorization-server/mcp/gc3 200
+  POST /mcp/gc3/token 200
+  POST /mcp/gc3 200
+  POST /mcp/gc3 202
+  GET /mcp/gc3 405
+  POST /mcp/gc3 200
+  POST /mcp/gc3 200
+  GET /mcp/gc3 405
+  GET /mcp/gc3/register 404
+  GET /mcp/gc3/healthz 404
   GET /healthz 404
   GET /admin 404
   GET /.well-known/openid-configuration 404
-  GET /mcp/gc/ 404
-  GET /mcp-other 404
-  POST /mcp 404
+  GET /mcp/gc3/ 404
+  GET /mcp/gc3/nothing 404
+  GET /authorize 404
+  GET /token 404
+  GET /revoke 404
+  GET /consent 404
+  GET /mcp 404
+  GET /.well-known/oauth-authorization-server 404
+  GET /.well-known/oauth-protected-resource 404
+  GET /gc2 404
+  GET /gc2/authorize 404
+  POST /token 404
 
 RESULT: PASS
 
