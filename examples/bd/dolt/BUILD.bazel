@@ -118,6 +118,7 @@ go_test(
         "doctor_test.go",
         "dog_exec_scripts_test.go",
         "dog_prompt_test.go",
+        "enospc_helper_test.go",
         "health_order_test.go",
         "health_test.go",
         "journal_recovery_runbook_test.go",
@@ -134,6 +135,7 @@ go_test(
         "restart_test.go",
         "runtime_bounded_test.go",
         "runtime_listener_test.go",
+        "session_guard_test.go",
         "sql_test.go",
         "stale_db_close_reason_real_bd_test.go",
         "stale_db_formula_test.go",
@@ -148,7 +150,9 @@ go_test(
     ) + [
         "//:engdocs_dolt_maintenance",
         "//:go.mod",
+        "//examples/bd:assets/scripts/dolt-enospc.sh",
         "//examples/bd:assets/scripts/dolt-fsync-stall.sh",
+        "//examples/bd:assets/scripts/gc-beads-bd.sh",
         "//internal/bootstrap/packs/core:pack_files",
     ] + select({
         "//:gotags_integration": [

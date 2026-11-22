@@ -100,7 +100,7 @@ city's Dolt server without its agents, migrate, then start the city:
 
 ```bash
 cd ~/my-city
-gc dolt restart                                # Dolt only; no agents yet
+gc dolt restart                                # Dolt only; no agents yet (operator shell: agent sessions refuse)
 gc dolt status                                 # Dolt server: running (managed, …)
 gc bd --city ~/my-city migrate schema          # the city's own database
 gc bd --rig my-project migrate schema          # repeat for each rig

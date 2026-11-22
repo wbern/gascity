@@ -481,7 +481,8 @@ squash with a generational GC only, which reclaims little or no disk space.
    step 4. How depends on who runs it:
 
    - **That city's Gas City–managed server**: `gc stop` stopped it, and
-     `gc bd` does not start it. Run `gc dolt restart` in that city;
+     `gc bd` does not start it. Run `gc dolt restart` in that city from an
+     operator shell (agent sessions refuse unless `GC_DOLT_ALLOW_SESSION_CONTROL=1`);
      `gc dolt start` cannot find a stopped server's port. Do not run
      `gc start` before step 6: it also restarts the city's agents and orders.
    - **That city's bd-owned proxied store**: start nothing. bd starts the

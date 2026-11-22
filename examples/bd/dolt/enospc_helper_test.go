@@ -176,3 +176,21 @@ func TestEnospcDetectorParsesDfWithSpacesInNames(t *testing.T) {
 		})
 	}
 }
+
+// TestGcBeadsBdKeepsTheFsyncStallGuardWired pins what a careless edit of the inline
+// ENOSPC fallback once deleted: gc-beads-bd.sh must still source/define
+// recovery_should_skip_due_to_fsync_stall for its two callers (op_recover and the
+// provider-owned retire path), or recovery silently restarts Dolt into a stalled disk.
+func TestGcBeadsBdKeepsTheFsyncStallGuardWired(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), "..", "assets", "scripts", "gc-beads-bd.sh"))
+	if err != nil {
+		t.Fatalf("read gc-beads-bd.sh: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "fsync_stall_helper=") {
+		t.Fatalf("gc-beads-bd.sh no longer sources the fsync-stall helper")
+	}
+	if n := strings.Count(text, "recovery_should_skip_due_to_fsync_stall"); n < 3 {
+		t.Fatalf("expected the fsync-stall guard definition plus two callers, found %d references", n)
+	}
+}
