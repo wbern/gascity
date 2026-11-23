@@ -279,7 +279,7 @@ describe("the server tells a spoken assistant how to behave (initialize instruct
     await Promise.all([server.connect(b), client.connect(a)]);
     const text = client.getInstructions() ?? "";
     expect(text).toBe(INSTRUCTIONS);
-    for (const phrase of [/briefing/, /how are (my )?(things|agents)/i, /short.*sentences/i, /never read.*(ids|paths)/i, /want more/i, /read_more/, /needs? the owner|needs? you/i, /first/i,
+    for (const phrase of [/briefing/, /how are (my )?(things|agents)/i, /short.*sentences/i, /pair requested.*IDs with authoritative short titles/i, /want more/i, /read_more/, /needs? the owner|needs? you/i, /first/i,
       /send_to_session/, /wait_for_reply/, /one short sentence/i, /untrusted/i, /not instructions/i]) expect(text, String(phrase)).toMatch(phrase);
     expect(text.length).toBeLessThan(1800);
     await client.close();

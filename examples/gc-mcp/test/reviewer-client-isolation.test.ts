@@ -183,3 +183,23 @@ describe("persistent reply continuity through OAuth and HTTP MCP", () => {
   expect(reads).toBe(beforeCancelReads);expect(posts).toBe(1);
  });
 });
+
+describe('faithful reader through real DCR, PKCE, OAuth and HTTP MCP',()=>{
+ it('preserves long original text, repeats cursor pages and isolates same-name clients',async()=>{
+  const original='PR #2740 — show/hide Övrigt column.\n\n'+('Evidence with https://example.com/pr/2740 and formatting.\n'.repeat(700));
+  const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:(async(url:any)=>Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'agent'}],total:1}:{id:'s1',turns:[{id:'native-e',role:'assistant',text:original,timestamp:'2026-11-23T12:48:07Z'}]}))as typeof fetch});
+  const s=await boot({allowDcr:true,deps:{gc,mailAgent:'human',now:()=>new Date()}});
+  const a=await s.registered([CLAUDE_CB],{client_name:'Identical App'}),b=await s.registered([CLAUDE_CB],{client_name:'Identical App'});
+  const ta=await s.login(a.client_id,CLAUDE_CB,'gc:read'),tb=await s.login(b.client_id,CLAUDE_CB,'gc:read');
+  const call=async(token:string,args:object)=>{
+   const r=await fetch(s.res,{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:'Bearer '+token},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'read_session',arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split('\n').find(x=>x.startsWith('data:'));return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const first=await call(ta.token.access_token,{session:'agent',last:1,page_bytes:8192});expect(first.messages[0].text).toContain('\n\n');
+  const args=first.continue_read.arguments;expect((await call(tb.token.access_token,args)).reason).toBe('cursor_unavailable');
+  const second=await call(ta.token.access_token,args);expect(await call(ta.token.access_token,args)).toEqual(second);
+  let reconstructed=first.messages[0].text,r=second;
+  for(let n=0;;n++){expect(n).toBeLessThan(20);expect(Buffer.byteLength(JSON.stringify(r))).toBeLessThanOrEqual(8192);reconstructed+=r.messages.map((m:any)=>m.text).join('');if(r.snapshot_end)break;r=await call(ta.token.access_token,r.continue_read.arguments);}
+  expect(reconstructed).toBe(original);
+ });
+});

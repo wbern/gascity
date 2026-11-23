@@ -73,9 +73,38 @@ export class GcClient {
       // redirect:"error": a loopback API has no business redirecting us anywhere.
       const res = await f(url, { method, headers: { accept: "application/json", ...extra }, body, signal: ctl.signal, redirect: "error" });
       const declared = Number(res.headers.get("content-length") ?? 0);
-      if (declared > max) throw new GcError(0, "response too large", "too_large");
-      const text = await res.text();
-      if (text.length > max) throw new GcError(0, "response too large", "too_large");
+      if (declared > max) {
+        ctl.abort(); void res.body?.cancel().catch(() => {});
+        throw new GcError(0, "response too large", "too_large");
+      }
+      // Bound actual UTF-8 bytes while reading, including chunked responses. A
+      // stalled body must obey the same deadline/cancellation as the fetch.
+      let text = "", received = 0;
+      const reader = res.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        const cancelBody = () => { void reader.cancel().catch(() => {}); };
+        ctl.signal.addEventListener("abort", cancelBody, { once: true });
+        if (ctl.signal.aborted) cancelBody();
+        try {
+          for (;;) {
+            if (ctl.signal.aborted) throw new DOMException("aborted", "AbortError");
+            const { done, value } = await reader.read();
+            if (ctl.signal.aborted) throw new DOMException("aborted", "AbortError");
+            if (done) break;
+            received += value.byteLength;
+            if (received > max) {
+              ctl.abort();
+              throw new GcError(0, "response too large", "too_large");
+            }
+            text += decoder.decode(value, { stream: true });
+          }
+          text += decoder.decode();
+        } finally {
+          ctl.signal.removeEventListener("abort", cancelBody);
+          reader.releaseLock();
+        }
+      }
       if (!res.ok) {
         let detail = res.statusText;
         try { detail = (JSON.parse(text) as { detail?: string }).detail ?? detail; } catch { /* keep */ }

@@ -94,7 +94,7 @@ export const replyId = (at: string | undefined, full: string) => crypto.createHa
 function replyResult(label: string, hit: SessionRef, full: string, offset: number, extra: Record<string, unknown>, lead: string): ToolResult {
   const sp = speak(`${lead}`, full, offset);
   return { text: sp.text, structured: { found: true, id: hit.id, name: label, untrusted: true, page: sp.chunk.chunk, total_chars: full.length, offset,
-    next_offset: sp.chunk.next, done: sp.chunk.done, reply_id: replyId(extra.at as string | undefined, full), ...extra } };
+    next_offset: sp.chunk.next, done: sp.chunk.done, reply_id: replyId(extra.at as string | undefined, full), read_original: { tool: "read_session", arguments: { session: hit.id, reply_id: replyId(extra.at as string | undefined, full) } }, ...extra } };
 }
 
 export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
@@ -116,7 +116,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
         const state = deriveState(full, hit, !!pending);
         const ask = pending ? ` It asks: ${clip(clean(pending.prompt ?? pending.kind ?? ""), 140)}` : "";
         return { text: clip(`${speakName(label)} is ${state}.${ask}`, SPOKEN_MAX),
-          structured: { found: true, id: hit.id, name: label, state, derived: true, source: stateSource(full, !!pending), running: full?.running, raw_state: full?.state ?? hit.state, activity: full?.activity, waiting_for: pending ? { kind: pending.kind, request_id: pending.request_id, prompt: clip(clean(pending.prompt ?? ""), 400), options: pending.options } : undefined, untrusted: !!pending } };
+          structured: { found: true, id: hit.id, name: label, state, derived: true, source: stateSource(full, !!pending), read_at: d.now().toISOString(), lifecycle: { state: full?.state ?? hit.state, running: full?.running ?? hit.running }, last_active: full?.last_active ?? hit.last_active, running: full?.running, raw_state: full?.state ?? hit.state, activity: full?.activity, waiting_for: pending ? { kind: pending.kind, request_id: pending.request_id, prompt: clip(clean(pending.prompt ?? ""), 400), options: pending.options } : undefined, untrusted: !!pending } };
       }),
     },
     {
@@ -152,7 +152,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
     },
     {
       name: "wait_for_reply", title: "Wait for the agent's answer",
-      description: "Use after a send with its handle. Waits 15 seconds (max 20). Pass received reply_id as after_reply_id for new output; retry lost responses unchanged. Candidates never prove task completion. cancel_wait:true with a handle stops only this tracking wait, including pending reads, never agent work. Continue within the agreed budget without resending.",
+      description: "Use after a send with its handle. Waits 15 seconds (max 20). Use returned continue_wait arguments to seek NEW output; retry the original arguments only after a lost response. Candidates never prove task completion. cancel_wait:true with a handle stops only this tracking wait, including pending reads, never agent work. Continue within the agreed budget without resending.",
       inputShape: { session: sess, max_seconds: z.number().int().min(1).max(MAX_WAIT_S).optional(), since: z.string().max(24).optional(), handle: z.string().min(1).max(64).optional(), after_reply_id: z.string().regex(/^[a-f0-9]{12}$/).optional(), cancel_wait: z.boolean().optional() }, annotations: RO,
       handler: guard(async (a) => {
         const start = clock.now();
@@ -238,7 +238,10 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
               const stoppedAfterTranscript = trackingStatus(); if (stoppedAfterTranscript) return stoppedAfterTranscript;
               if (clock.now() >= deadline) break;
               if (seen) {   // Transcript text proves only that output exists, never task completion.
-                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", agent_observation: blocker, handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
+                const continuation = { tool: "wait_for_reply", arguments: tracked
+                  ? { handle: a.handle, after_reply_id: replyId(at, seen), max_seconds: wait / 1000 }
+                  : { session: hit.id, since: `m${since}`, after_reply_id: replyId(at, seen), max_seconds: wait / 1000 } };
+                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", continue_wait: continuation, agent_observation: blocker, handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
               }
             }
             if (blocker) return {

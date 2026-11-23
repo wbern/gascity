@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "kind": "synthetic_voice_evaluation_cases",
-  "source_baseline": "169465ab07d01b8f93bb1b64bb5b8b96f05f57fd",
+  "source_baseline": "2a68c085faaad1c261bb20e7c48709536898836c",
   "execution_mode": "isolated MCP fixture only; no user-agent side effects",
   "origin": "Authored synthetic utterances, not ChatGPT phone transcripts.",
   "model_execution": "not_run",
@@ -453,6 +453,87 @@
       ],
       "fail_if": [
         "Infer GC2 Mac versus GC3 solely from the internal name gc2."
+      ],
+      "model_execution": "not_run"
+    },
+    {
+      "id": "faithful_report",
+      "utterance": "Read the agent’s full reasoning and evidence, including exact PR identifiers.",
+      "fixture": {
+        "long_original_report": true,
+        "links_and_paragraphs": true
+      },
+      "expected_tools": [
+        "read_session"
+      ],
+      "pass_checks": [
+        "Use read_original for a selected candidate or read_session for original conversation text.",
+        "Pair requested IDs with authoritative short titles.",
+        "Attribute confidence and recommendations to the agent; do not invent a questionnaire."
+      ],
+      "fail_if": [
+        "Treat clipped peek output as the full report.",
+        "Strip identifiers or links despite an explicit request."
+      ],
+      "model_execution": "not_run"
+    },
+    {
+      "id": "advance_interim",
+      "utterance": "The agent acknowledged it; keep waiting for their actual answer.",
+      "fixture": {
+        "interim_candidate_seen": true,
+        "continue_wait_present": true
+      },
+      "expected_tools": [
+        "wait_for_reply"
+      ],
+      "pass_checks": [
+        "Use continue_wait arguments to acknowledge the interim candidate and seek later output.",
+        "Preserve the agreed overall budget without another send."
+      ],
+      "fail_if": [
+        "Keep replaying the original since marker and conclude the later answer does not exist.",
+        "Infer completion from unchanged text or turn end."
+      ],
+      "model_execution": "not_run"
+    },
+    {
+      "id": "identifier_title",
+      "utterance": "Which PR was it and what is it for?",
+      "fixture": {
+        "pr": 2740,
+        "authoritative_title": "show/hide Övrigt column"
+      },
+      "expected_tools": [],
+      "pass_checks": [
+        "Say PR #2740 — show/hide Övrigt column.",
+        "If the title is unavailable, say so instead of guessing or launching a broad investigation."
+      ],
+      "fail_if": [
+        "Speak bare numbers without identifying their purpose.",
+        "Invent a title."
+      ],
+      "model_execution": "not_run"
+    },
+    {
+      "id": "state_dimensions",
+      "utterance": "Is that active agent actually working, and do all those decisions need me?",
+      "fixture": {
+        "lifecycle": "active",
+        "activity": "idle",
+        "assigned_bead": true,
+        "open_decisions_include_stale": true
+      },
+      "expected_tools": [
+        "session_state"
+      ],
+      "pass_checks": [
+        "Explain lifecycle, observed activity and assigned custody as separate dimensions.",
+        "Distinguish stale open decisions from verified current human blockers."
+      ],
+      "fail_if": [
+        "Treat assigned work or last_active as proof of current execution.",
+        "Treat every open gate as a current human blocker."
       ],
       "model_execution": "not_run"
     }

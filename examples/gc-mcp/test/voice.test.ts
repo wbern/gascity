@@ -568,3 +568,14 @@ describe("every voice-loop tool: read-only, optional session, speakable", () => 
     }
   });
 });
+
+ it("returns executable continuation arguments that advance past an interim response without another send",async()=>{
+  const w=world({transcripts:{"gc2-wisp-www":[asst(T0+1,"I'll inspect the PR.")]}});const {gate,d}=w.mk();
+  const sent=await gate.submit(W,undefined,"Read the PR purpose");const wait=w.tool(d,W,"wait_for_reply");
+  const first=await wait.handler({handle:sent.structured.handle,max_seconds:1});
+  expect(first.structured.continue_wait).toMatchObject({tool:"wait_for_reply",arguments:{handle:sent.structured.handle,after_reply_id:first.structured.reply_id,max_seconds:1}});
+  w.transcripts["gc2-wisp-www"].push(asst(T0+2,"PR #2740 — show/hide Övrigt column."));
+  const final=await wait.handler((first.structured.continue_wait as any).arguments);
+  expect(final.structured.page).toContain("PR #2740");expect(final.structured.complete).toBe(false);expect(w.posts()).toHaveLength(1);
+  expect(first.structured.read_original).toMatchObject({tool:"read_session",arguments:{session:"gc2-wisp-www",reply_id:first.structured.reply_id}});
+ });

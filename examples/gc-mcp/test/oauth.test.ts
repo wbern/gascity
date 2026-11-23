@@ -108,7 +108,7 @@ describe("authorization-code + PKCE flow", () => {
     const tok = (await (await s.token(s.getCode(c), verifier)).json()) as { access_token: string };
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${s.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(16);   // 7 read tools + 4 voice-loop + briefing + what_is_working_on; no write tool without gc:write
+    expect((await client.listTools()).tools).toHaveLength(17);   // Includes faithful transcript reader; no write tool without gc:write
     const orientation=await client.callTool({name:'city_guide',arguments:{topic:'overview'}});
     expect(orientation.structuredContent).toMatchObject({origin:'curated_operating_guide',topic:'overview'});
     expect(Buffer.byteLength(JSON.stringify(orientation.structuredContent))).toBeLessThanOrEqual(4096);
@@ -200,7 +200,7 @@ describe("MCP endpoint under a path prefix (issuer stays at the host root)", () 
     const tok = await s.login();
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(16);   // 7 read tools + 4 voice-loop + briefing + what_is_working_on; no write tool without gc:write
+    expect((await client.listTools()).tools).toHaveLength(17);   // Includes faithful transcript reader; no write tool without gc:write
     await client.close();
     expect((await fetch(`${s.base}/mcp`, { method: "POST", headers: { ...TEXT, authorization: `Bearer ${tok.access_token}` }, body: "{}" })).status).toBe(404);
   });
@@ -269,7 +269,7 @@ describe("issuer AND resource under one path prefix (final naming: https://host/
     const tok = await s.login();
     const client = new Client({ name: "t", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${tok.access_token}` } } }));
-    expect((await client.listTools()).tools).toHaveLength(16);   // 7 read tools + 4 voice-loop + briefing + what_is_working_on; no write tool without gc:write
+    expect((await client.listTools()).tools).toHaveLength(17);   // Includes faithful transcript reader; no write tool without gc:write
     await client.close();
   });
 

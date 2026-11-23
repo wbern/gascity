@@ -5,7 +5,7 @@
 Fork-owned. MCP server (Streamable HTTP, stateless) in front of the
 loopback Gas City supervisor API, protected by OAuth 2.1. Tools: `city_status`,
 `list_sessions`, `peek_session`, `mail_inbox`, `ready_work`, `bead_show`,
-`whats_new` — all `readOnlyHint`, spoken-length answers plus structuredContent,
+`whats_new`, `read_session` — all `readOnlyHint`, spoken-length answers plus structuredContent,
 every string passed through `src/redact.ts`.
 Optional writes (OFF by default): `GC_MCP_WRITES_ENABLED=1` adds seven WRITE tools (session input, mail send/reply/mark-read, bead creation and routing), behind the separate
 scope `gc:write` (see "Write control" below). Without it the server is read-only exactly as before.
@@ -42,7 +42,7 @@ request while reads keep working. `confirmWrite()` in `src/writes.ts` is the sin
 Voice-first read experience: `briefing` answers "how are my agents doing?" in ONE call as a calm morning briefing, at most 400 characters: what needs the owner FIRST (open human
 decisions described by their question, never a raw gate title, newest first, with "many look stale, the oldest is N days old" past ten; agents waiting for input; stuck work; mail from the
 mayor or marked for the owner), then who is working and on what (an agent in a turn, or holding a bead, is working; "nobody is working right now" when so), then what finished (real tasks by
-title, never automation), then mail only if useful (a pile of notices is "nothing flagged for you", never a count). Ids, hashes and agent paths are never spoken. A source the supervisor
+title, never automation), then mail only if useful (a pile of notices is "nothing flagged for you", never a count). Default briefings omit bare identifiers; when requested, pair IDs with an authoritative short title and speak them. A source the supervisor
 cannot give is named in one clause, never guessed. `what_is_working_on(session?)` answers "what is steve working on?" in a sentence or two. The server sends `instructions` in the
 initialize result written for a spoken assistant, and every tool's title and description is plain spoken intent ("Ask how the agents are doing", "Say something to an agent").
 
@@ -54,7 +54,7 @@ defaults to the write deny list; set it (even to empty) to differ for reads. The
 Faithful to the Gas City API (not a lossy summary): the API's `tail` on a transcript counts compaction SEGMENTS, so the server asks for the last segment only and takes the last messages
 from it (a segment can be hundreds of KB: it is read with an 8 MB cap, and anything larger is reported as "too large", never as "Gas City is down"); `wait_for_reply` polls the small
 session record and reads the transcript only when something changed, at most three times per call; `latest_reply`, `read_more` and `wait_for_reply` send only the PAGE that was spoken (plus
-`total_chars`, `next_offset` and a `reply_id`), and `read_more` is pinned to that `reply_id` so an offset never lands in a different message. Lists are read across pages and the API's
+`total_chars`, `next_offset` and a `reply_id`); `read_session` retrieves larger original passages independently of spoken length, and `read_more` is pinned to that `reply_id` so an offset never lands in a different message. Lists are read across pages and the API's
 `total`, `partial` and `next_cursor` are passed through ("counted 200 of 900"; "at least 12 decisions"). Errors are told apart: not found, too large, timed out, Gas City not responding, refused.
 Derived values say so (`derived`, `source`): agent state, "working", flagged mail and the finished-task filter are heuristics and the briefing's `structuredContent.derived` says how each was worked
 out. Nothing names a person or a city in the code: `GC_MCP_OWNER_NAME` (optional) addresses the owner and `GC_MCP_CITY` is read from the environment or, when the supervisor runs exactly one city, from it.
@@ -330,3 +330,80 @@ and carries that concurrent observation separately. No new supervisor read or
 mutation is added; absence of a program report stays unknown. Early return
 does not cancel the handle or agent work, prove a request-specific failure,
 or prevent a later authorized wait after the blocker is resolved.
+
+### Faithful transcript reading and explicit continuation
+
+`read_session` is the detailed reading path. `peek_session` is explicitly a
+clipped, whitespace-normalized preview. `latest_reply`, `read_more` and candidate
+wait results expose `read_original` arguments selecting that reply, even when a
+newer reply exists. A changed/compacted selected reply reports unavailable, never
+a silent substitution. Agent confidence remains quoted agent text, not a new
+confidence field or a synthesized report. Pair requested PR/gate/bead/epic IDs
+with an authoritative short title; say the title is unavailable when unknown.
+
+The reader defaults to the last ten conversation entries (`last:1` for the latest
+message), with 16 KiB **structured-content** pages. `page_bytes` may select 8 or
+32 KiB for measurement or client needs. These are application budgets, not MCP
+or proven phone-client limits; JSON-RPC framing and the short text introduction
+are additional bytes. Messages remain whole when they fit. An oversized message
+is split on Unicode-safe boundaries, with UTF-16 string offsets, `message_end`
+and executable `continue_read` arguments. Message end describes only that projected text; `completion:not_proven` remains explicit. Preserve the retrieved page in context
+when speaking it over several turns; its end is independent of spoken length.
+Paragraphs, lists, code, links and text remain as the **conversation API** emitted
+them, except credential redaction before splitting. This projection is not
+byte-for-byte provider-native frames: the core may transform tool blocks and
+omit thinking. Explicit raw/structured API reads remain separately discoverable
+through `gc_api_list_operations` and `gc_api_read`.
+
+Cursor pages refer to an immutable redacted snapshot, so transcript growth or
+compaction cannot change the next passage or a cursor retry. `snapshot_end` means
+the selected window ended, not that the whole conversation ended or work
+completed. `history.omitted_in_segment` counts entries before the selected window;
+`older_read` starts a fresh observed snapshot before a native entry reference.
+Missing native IDs, expired history and uncertain source coverage remain explicit.
+New reads/older reads are fresh observations; only continuation within a snapshot
+is pinned. `source_entry_id`, timestamp, session identity and terminal argv connect
+the passage to `gc session logs SESSION --tail 0` (or `--json` / `--follow`) on the
+connector host. The terminal command opens the current GC session view, not an archived provider-generation snapshot; history can rotate or disappear. Oversized/secret-looking native IDs may be absent/redacted in
+public metadata; opaque `entry_ref` retains the server-side history cursor.
+
+Snapshots expire for access after five minutes without renewal (pruned on the next reader call), are private to the actual
+OAuth client ID, and disappear on restart. Only redacted text is cached, never
+persisted. Each dependency context retains at most 16 snapshots / 16 MB of
+serialized snapshot entries, excluding in-flight transport buffers; each snapshot
+has at most 2048 continuation positions. Eviction/expiry requests a fresh read
+explicitly. Every continuation rechecks current read policy and the exact session;
+an alias replacement cannot return another agent's output. Initial retrieval is
+still one compaction segment with the existing 8 MB transport cap. No unbounded
+history scan, background task, notification or new mutation is introduced.
+
+A candidate wait result supplies `continue_wait`: those arguments acknowledge
+the received candidate and seek later output. Repeating the original wait is a
+lost-response retry and deliberately replays the original candidate. Neither
+path resends. Acceptance, notification, receipt, observed output, turn ending
+and verified task success are distinct evidence; an unchanged reply never
+proves completion. The existing aggregate deadline/cancellation contract stays.
+
+Research informing this boundary: [Slack history](https://docs.slack.dev/reference/methods/conversations.history/)
+preserves identifiable messages and history cursors; [Kubernetes API concepts](https://kubernetes.io/docs/reference/using-api/api-concepts/)
+separate snapshot continuation and expired-history handling; [MCP tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)
+support structured results/resources, but list pagination does not paginate an
+arbitrary tool result. Resource links/streams/mobile behavior are not assumed.
+Tests measure 8/16/32 KiB reconstruction and calls, OAuth isolation, mutation of
+source history, TTL/eviction, access revocation and retry fidelity. A phone/model
+trial remains separate evidence and is not claimed by deterministic tests.
+
+Run `npm run bench:reading` to reproduce synthetic call/byte comparisons (not
+phone/model latency evidence). On the included fixtures, a 4,560-byte report
+requires 15 legacy voice calls versus one faithful read at all three budgets.
+A 32,960-byte report takes 161 legacy voice calls versus 5/3/2 faithful calls
+at 8/16/32 KiB; a 20,800-byte Unicode report takes 71 versus 4/2/1. These support
+16 KiB as a measured middle default while retaining both alternatives for actual
+client trials. Cursor continuations perform an access lookup, not another full
+transcript fetch.
+
+The loopback transport also enforces actual byte limits while consuming chunked
+responses, before buffering the remainder. Unicode is decoded incrementally.
+Deadline/cancellation cancels a body that stalls after headers, not only the
+initial fetch. Declared-size refusal and observed-byte overflow cancel the body
+and remain `too_large`, distinct from deadline/availability errors.
