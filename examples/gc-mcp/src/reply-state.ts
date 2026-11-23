@@ -11,6 +11,7 @@ const record = z.object({
   since: z.number().int().nonnegative(),
   expiresAt: z.number().int().positive(),
   firstReplyId: z.string().regex(/^[a-f0-9]{12}$/).optional(),
+  cancelledAt: z.number().int().nonnegative().optional(),
 }).strict();
 const snapshot = z.object({ version: z.literal(1), handles: z.array(record).max(500) }).strict();
 type Entry = z.infer<typeof record>;
@@ -21,6 +22,7 @@ export class SendMarkers {
   private handles = new Map<string, Entry>();
   private m = new Map<string, { ms: number; expiresAt: number }>();
   private failed = false;
+  private cancelListeners = new Map<string, Set<() => void>>();
   private now: () => number;
   private ttlMs: number;
   private maxHandles: number;
@@ -51,9 +53,32 @@ export class SendMarkers {
     this.healthy();
     if (this.o.file) {
       try { savePrivateJson(this.o.file, { version: 1, handles: [...next.values()] }); }
-      catch (e) { this.failed = true; throw e; }
+      catch (e) { this.failed = true; for (const h of [...this.cancelListeners.keys()]) this.notifyCancellation(h); throw e; }
     }
+    const previous = this.handles;
     this.handles = next;
+    for (const [h, old] of previous) if (!next.has(h) || (old.cancelledAt === undefined && next.get(h)?.cancelledAt !== undefined)) this.notifyCancellation(h);
+  }
+  private notifyCancellation(handle: string) {
+    const listeners = this.cancelListeners.get(handle);
+    this.cancelListeners.delete(handle);
+    for (const listener of listeners ?? []) { try { listener(); } catch { /* other waits must also be notified */ } }
+  }
+  watchCancellation(client: string, handle: string, listener: () => void): () => void {
+    const entry = this.resolve(client, handle);
+    if (!entry || entry.cancelledAt !== undefined) { listener(); return () => {}; }
+    const listeners = this.cancelListeners.get(handle) ?? new Set<() => void>();
+    if (listeners.size >= 16) throw new ReplyStateError("Too many concurrent waits for this handle");
+    listeners.add(listener); this.cancelListeners.set(handle, listeners);
+    return () => { listeners.delete(listener); if (!listeners.size && this.cancelListeners.get(handle) === listeners) this.cancelListeners.delete(handle); };
+  }
+  cancelWait(client: string, handle: string): boolean {
+    this.prune();
+    const entry = this.handles.get(handle);
+    if (!entry || entry.client !== client) return false;
+    if (entry.cancelledAt !== undefined) return true;
+    const next = new Map(this.handles); next.set(handle, record.parse({ ...entry, cancelledAt: this.now() }));
+    this.save(next); return true;
   }
   private prune() {
     this.healthy();
@@ -76,7 +101,7 @@ export class SendMarkers {
   resolve(client: string, handle: string) {
     this.prune();
     const entry = this.handles.get(handle);
-    return entry?.client === client ? { session: entry.session, since: entry.since, firstReplyId: entry.firstReplyId } : undefined;
+    return entry?.client === client ? { session: entry.session, since: entry.since, firstReplyId: entry.firstReplyId, cancelledAt: entry.cancelledAt } : undefined;
   }
   pinFirstReply(client: string, handle: string, id: string): string | undefined {
     this.prune();

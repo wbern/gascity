@@ -1,5 +1,6 @@
 import { it, expect } from "vitest";
 import { GcClient } from "../src/gc-client.js";
+import { SendMarkers } from "../src/writes.js";
 import { buildTools } from "../src/tools.js";
 
 it("includes paged lookup in one wait deadline and aborts the outstanding read before returning", async () => {
@@ -72,3 +73,32 @@ it("carries the remaining budget through lookup, polling and a streaming transcr
   expect(bodyActive).toBe(false);
   expect(paths).toEqual(["/v0/city/gc2/sessions", "/v0/city/gc2/session/s1", "/v0/city/gc2/session/s1/transcript"]);
 }, 4000);
+
+for(const phase of ["lookup","transcript"]) it("cancels tracking and aborts an active "+phase+" read without a supervisor mutation",async()=>{
+ let entered!:()=>void,active=false,aborted=false;
+ const started=new Promise<void>(r=>{entered=r;});
+ const markers=new SendMarkers(),handle=markers.create("owner","s1",Date.now()-1000);
+ const methods:string[]=[];
+ const fetchImpl=(async(url:string,init:RequestInit)=>{
+  methods.push(String(init.method));
+  const p=new URL(url).pathname;
+  if(phase==="transcript"&&!p.endsWith("/transcript"))return new Response(JSON.stringify(p.endsWith("/sessions")?{total:1,items:[{id:"s1",alias:"agent",state:"active"}]}:{id:"s1",state:"active"}));
+  active=true;
+  if(phase==="lookup")return await new Promise<Response>((_resolve,reject)=>{
+   init.signal!.addEventListener("abort",()=>{active=false;aborted=true;reject(new DOMException("aborted","AbortError"));},{once:true});entered();
+  });
+  const body=new ReadableStream({start(controller){
+   controller.enqueue(new TextEncoder().encode('{"turns":['));
+   init.signal!.addEventListener("abort",()=>{active=false;aborted=true;controller.error(new DOMException("aborted","AbortError"));},{once:true});entered();
+  }});return new Response(body);
+ })as typeof fetch;
+ const gc=new GcClient({baseUrl:"http://127.0.0.1:1",city:"test",fetchImpl});
+ const tool=buildTools({gc,markers,mailAgent:"human",now:()=>new Date()},{client:"owner",scopes:["gc:read"]}).find(t=>t.name==="wait_for_reply")!;
+ const before=performance.now(),pending=tool.handler({handle,max_seconds:2});await started;
+ const cancel=await tool.handler({handle,cancel_wait:true});
+ expect(cancel.structured).toMatchObject({reason:"wait_cancelled",tracking_only:true,agent_interrupted:false});
+ const result=await pending;
+ expect(result.structured).toMatchObject({reason:"wait_cancelled",completion:"not_proven",reply_available:false});
+ expect(active).toBe(false);expect(aborted).toBe(true);expect(performance.now()-before).toBeLessThan(1000);
+ expect(methods.every(m=>m==="GET")).toBe(true);
+},4000);

@@ -132,10 +132,11 @@ describe("persistent reply continuity through OAuth and HTTP MCP", () => {
   const clock={t:sent+5000,now(){return this.t;},async sleep(ms:number){this.t+=ms;}};
   let pendingJournal:string|undefined;
   const sendJournalFile=path.join(dir,"send-journal.json");
-  let posts=0,turns=[{role:"assistant",text:"Original candidate.",timestamp:new Date(sent+1000).toISOString()}];
+  let posts=0,reads=0,turns=[{role:"assistant",text:"Original candidate.",timestamp:new Date(sent+1000).toISOString()}];
   const fetchImpl=(async(url:string,init:RequestInit)=>{
    const p=new URL(url).pathname;
    if(init.method==="POST"){posts++;pendingJournal=fs.readFileSync(sendJournalFile,"utf8");return new Response(JSON.stringify({status:"accepted"}));}
+   reads++;
    const body=p.endsWith("/sessions")?{total:1,items:[{id:"s1",alias:"agent",state:"active",running:true}]}
     :p.endsWith("/transcript")?{turns}:{id:"s1",state:"active"};
    return new Response(JSON.stringify(body));
@@ -170,5 +171,15 @@ describe("persistent reply continuity through OAuth and HTTP MCP", () => {
   const compacted=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
   expect(compacted).toMatchObject({reply_available:false,reason:"reply_candidate_unavailable",complete:false});
   expect(posts).toBe(1);
+  const readOnlyOwner=await second.login(a.client_id,CLAUDE_CB,"gc:read");
+  const beforeCancelReads=reads;
+  const cancelled=await call(second.res,readOnlyOwner.token.access_token,"wait_for_reply",{handle:ack.handle,cancel_wait:true});
+  expect(cancelled).toMatchObject({reason:"wait_cancelled",tracking_only:true,agent_interrupted:false});
+  expect(reads).toBe(beforeCancelReads);
+  await second.stop();
+  const third=await boot(opts),thirdLogin=await third.login(a.client_id,CLAUDE_CB,"gc:read");
+  const afterRestart=await call(third.res,thirdLogin.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(afterRestart).toMatchObject({reason:"wait_cancelled",reply_available:false,complete:false});
+  expect(reads).toBe(beforeCancelReads);expect(posts).toBe(1);
  });
 });

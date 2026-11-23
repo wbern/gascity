@@ -52,19 +52,22 @@ export class GcClient {
     return this.send("POST", url, payload, { "content-type": "application/json", "x-gc-request": "gc-mcp", "idempotency-key": idempotencyKey });
   }
 
-  async get<T = unknown>(path: string, query: Record<string, string | number | boolean | string[] | undefined> = {}, timeoutMs?: number, maxBytes?: number): Promise<T> {
+  async get<T = unknown>(path: string, query: Record<string, string | number | boolean | string[] | undefined> = {}, timeoutMs?: number, maxBytes?: number, signal?: AbortSignal): Promise<T> {
     const u = new URL(`${this.o.baseUrl}/v0/city/${encodeURIComponent(this.o.city)}${path}`);
     for (const [k, v] of Object.entries(query)) if (v !== undefined) {
       if (Array.isArray(v)) for (const item of v) u.searchParams.append(k, item);
       else u.searchParams.set(k, String(v));
     }
-    return (await this.send("GET", u.toString(), undefined, {}, timeoutMs, maxBytes)) as T;
+    return (await this.send("GET", u.toString(), undefined, {}, timeoutMs, maxBytes, signal)) as T;
   }
 
-  private async send(method: "GET" | "POST", url: string, body?: string, extra: Record<string, string> = {}, timeoutMs?: number, maxBytesOverride?: number): Promise<unknown> {
+  private async send(method: "GET" | "POST", url: string, body?: string, extra: Record<string, string> = {}, timeoutMs?: number, maxBytesOverride?: number, signal?: AbortSignal): Promise<unknown> {
     const f = this.o.fetchImpl ?? fetch;
     const max = maxBytesOverride ?? this.o.maxBytes ?? 2_000_000;
     const ctl = new AbortController();
+    const abort = () => ctl.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) ctl.abort();
     const timer = setTimeout(() => ctl.abort(), timeoutMs ?? this.o.timeoutMs ?? 8000);
     try {
       // redirect:"error": a loopback API has no business redirecting us anywhere.
@@ -84,6 +87,7 @@ export class GcClient {
       throw (e as Error).name === "AbortError" ? new GcError(0, "timed out", "timeout") : new GcError(0, (e as Error).message, "unavailable");
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
     }
   }
 }

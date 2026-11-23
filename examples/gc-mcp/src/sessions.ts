@@ -45,12 +45,12 @@ export function resolveIn(items: SessionRef[], rawQuery: string): Resolution {
 
 /** A list read across pages, with what the API said about completeness passed through (never a silently truncated count). */
 export interface Page<T> { items: T[]; total: number; partial: boolean; partial_errors: string[]; next_cursor?: string; truncated: boolean }
-export async function listPages<T = any>(gc: GcClient, path: string, query: Record<string, string | number | undefined> = {}, maxPages = 5, perPage = 200, readBudgetMs?: () => number): Promise<Page<T>> {
+export async function listPages<T = any>(gc: GcClient, path: string, query: Record<string, string | number | undefined> = {}, maxPages = 5, perPage = 200, readBudgetMs?: () => number, readSignal?: AbortSignal): Promise<Page<T>> {
   const items: T[] = [];
   let cursor: string | undefined, total: number | undefined, partial = false;
   const errors: string[] = [];
   for (let i = 0; i < maxPages; i++) {
-    const r: any = await gc.get(path, { ...query, limit: perPage, cursor }, readBudgetMs?.());
+    const r: any = await gc.get(path, { ...query, limit: perPage, cursor }, readBudgetMs?.(), undefined, readSignal);
     items.push(...((r?.items ?? r?.beads ?? []) as T[]));
     if (typeof r?.total === "number") total = r.total;
     if (r?.partial) { partial = true; errors.push(...((r.partial_errors ?? []) as string[]).map(String)); }
@@ -62,11 +62,11 @@ export async function listPages<T = any>(gc: GcClient, path: string, query: Reco
 }
 
 /** Resolve against the live session list. An empty query means the configured default session. */
-export async function resolveSession(gc: GcClient, query: string | undefined, defaultSession?: string, readBudgetMs?: () => number): Promise<Resolution> {
+export async function resolveSession(gc: GcClient, query: string | undefined, defaultSession?: string, readBudgetMs?: () => number, readSignal?: AbortSignal): Promise<Resolution> {
   const q = (query ?? "").trim() || (defaultSession ?? "").trim();
   if (!q) return { kind: "nodefault" };
   if (!QUERY.test(q)) return { kind: "bad", query: q.slice(0, 40) };   // before any call: an unsafe name never leaves the process
-  const r = await listPages<SessionRef>(gc, "/sessions", {}, 5, 200, readBudgetMs);          // every page (up to 1000 sessions), not just the first 200
+  const r = await listPages<SessionRef>(gc, "/sessions", {}, 5, 200, readBudgetMs, readSignal);          // every page (up to 1000 sessions), not just the first 200
   if (r.partial || r.truncated) return { kind: "incomplete", query: q };
   return resolveIn(r.items, q);
 }

@@ -87,3 +87,14 @@ it("does not POST or retry when handle persistence fails before submission", asy
   expect(retry.structured).toMatchObject({ error: true, kind: "reply_state_unavailable", automatic_retry: false });
   expect(posts).toBe(0);
 });
+
+it("restores tracking cancellation without renewing expiry or affecting sibling handles", () => {
+ const f=fixture(),first=new SendMarkers({file:f.file,now:f.now,ttlMs:1000});
+ const a=first.create("owner","s1",f.now()),b=first.create("owner","s2",f.now());
+ f.advance(900);expect(first.cancelWait("other",a)).toBe(false);
+ expect(first.cancelWait("owner",a)).toBe(true);
+ const restored=new SendMarkers({file:f.file,now:f.now,ttlMs:1000});
+ expect(restored.resolve("owner",a)?.cancelledAt).toBe(f.now());
+ expect(restored.resolve("owner",b)?.cancelledAt).toBeUndefined();
+ f.advance(101);expect(restored.resolve("owner",a)).toBeUndefined();
+});

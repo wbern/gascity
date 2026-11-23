@@ -228,6 +228,53 @@ describe("session_state: working | idle | waiting for input", () => {
 });
 
 describe("wait_for_reply: bounded, since the send, never unbounded", () => {
+  it("cancels only the selected handle, persists stop intent, and makes no supervisor call to cancel", async () => {
+    const w = world(); const { gate, d } = w.mk();
+    const first = await gate.submit(W, undefined, "first request"), sibling = await gate.submit(W, undefined, "second request");
+    const tool = w.tool(d, W, "wait_for_reply");
+    const before = w.calls.length;
+    const cancelled = await tool.handler({ handle: first.structured.handle, cancel_wait: true });
+    expect(cancelled.structured).toMatchObject({ reason: "wait_cancelled", tracking_only: true, agent_interrupted: false, complete: false });
+    const retry = await tool.handler({ handle: first.structured.handle, max_seconds: 1 });
+    expect(retry.structured).toMatchObject({ reason: "wait_cancelled", reply_available: false, waited_ms: 0 });
+    expect(w.calls.length).toBe(before);
+    const other = await tool.handler({ handle: sibling.structured.handle, max_seconds: 1 });
+    expect(other.structured.reason).not.toBe("wait_cancelled");
+    expect(other.structured.waited_ms).toBe(1000);
+    expect(w.posts()).toHaveLength(2);
+  });
+  it("does not let a different principal cancel an owned handle", async () => {
+    const w = world(); const { gate, d } = w.mk();
+    const owner = { ...W, principal: "oauth-owner" };
+    const ack = await gate.submit(owner, undefined, "first request");
+    const before = w.calls.length;
+    const thief = buildTools(d, { ...owner, principal: "oauth-other" }).find(t => t.name === "wait_for_reply")!;
+    const denied = await thief.handler({ handle: ack.structured.handle, cancel_wait: true });
+    expect(denied.structured).toMatchObject({ found: false, reason: "unknown_handle" });
+    expect(w.markers.resolve(owner.principal, String(ack.structured.handle))?.cancelledAt).toBeUndefined();
+    expect(w.calls.length).toBe(before);
+  });
+  it("releases cancellation subscriptions after completed reads", async () => {
+    const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "Candidate.")] } });
+    const { gate, d } = w.mk();
+    const handle = (await gate.submit(W, undefined, "first request")).structured.handle;
+    const tool = w.tool(d, W, "wait_for_reply");
+    for (let i = 0; i < 20; i++) expect((await tool.handler({ handle })).structured.reply_available).toBe(true);
+    expect((await tool.handler({ handle, cancel_wait: true })).structured.reason).toBe("wait_cancelled");
+    expect(w.posts()).toHaveLength(1);
+  });
+  it("observes cancellation during the poll sleep without further supervisor reads", async () => {
+    let handle: unknown, cancel: (() => Promise<unknown>) | undefined;
+    const w = world({ onSleep: () => { const once = cancel; cancel = undefined; void once?.(); } }); const { gate, d } = w.mk();
+    handle = (await gate.submit(W, undefined, "first request")).structured.handle;
+    const tool = w.tool(d, W, "wait_for_reply");
+    cancel = () => tool.handler({ handle, cancel_wait: true });
+    const r = await tool.handler({ handle, max_seconds: 10 });
+    expect(r.structured).toMatchObject({ reason: "wait_cancelled", waited_ms: 1500, agent_interrupted: false });
+    expect(w.calls.filter(c => c.path.endsWith("/transcript"))).toHaveLength(1);
+    expect(w.posts()).toHaveLength(1);
+  });
+
   it("waits past an acknowledged interim candidate; explicit cursors make lost-response retries repeatable", async () => {
     let publish = false;
     const w = world({ transcripts: { "gc2-wisp-www": [asst(T0 + 500, "I'll check.")] }, onSleep: t => {

@@ -191,8 +191,9 @@ causal completion signal or a guarantee of history beyond the available segment.
 
 Production startup stores bounded handle metadata in `reply-state.json` inside
 `GC_MCP_STATE_DIR` (maximum 500 handles, 24-hour logical expiry). The atomic,
-owner-private file contains only client/session IDs, send boundaries, expiry and
-first-candidate fingerprints; it contains no request/reply bodies or credentials.
+owner-private file contains only client/session IDs, send boundaries, expiry,
+first-candidate fingerprints and local cancellation state; it contains no
+request/reply bodies or credentials.
 Handles and candidate pins survive restart. Expiry, eviction or unavailable
 history remain explicit and never authorize resending. Corrupt/incompatible or
 nonprivate state refuses startup; a failed save disables continuation instead of
@@ -212,8 +213,16 @@ retry. These files have one server-process owner and contain no raw messages.
 This is bounded replay protection, **not indefinite or global exactly-once
 execution**. Expiry permits a fresh attempt; check results before sending again.
 Different explicit intents remain distinct. Memory-only embedding and the five
-domain writes retain process-local resend caches. Cancellation of wait interest
-is separate and must never interrupt agent work.
+domain writes retain process-local resend caches.
+
+`wait_for_reply(handle, cancel_wait:true)` cancels only that handle's tracking
+interest. It sends no supervisor mutation, aborts pending lookup/status/transcript
+reads, and stops further polling. Other handles and the agent's work continue
+independently. The cancellation flag persists until the handle's original expiry;
+reads and cancellation do not renew TTL. Repeated waits stay cancelled, including
+after restart. Use `latest_reply` / `read_more` to inspect later output without
+resending the original command. At most 16 concurrent wait subscriptions per
+handle are allowed and subscriptions are released when a call ends.
 `read_more(reply_id, offset)` continues that selected reply anywhere in the
 available segment, even when newer replies exist. Without `reply_id` it retains
 the legacy newest-reply default. Missing/edited/compacted selected replies return
