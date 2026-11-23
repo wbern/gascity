@@ -1,8 +1,8 @@
 // Bounded reply continuity metadata. No request/reply bodies or credentials belong here.
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { z } from "zod";
+import { loadPrivateJson, savePrivateJson, ReplyStateError } from "./private-json.js";
+export { ReplyStateError } from "./private-json.js";
 
 const record = z.object({
   handle: z.string().regex(/^h[0-9a-f-]{36}$/),
@@ -14,7 +14,6 @@ const record = z.object({
 }).strict();
 const snapshot = z.object({ version: z.literal(1), handles: z.array(record).max(500) }).strict();
 type Entry = z.infer<typeof record>;
-export class ReplyStateError extends Error {}
 export interface SendMarkerOptions { file?: string; now?: () => number; ttlMs?: number; maxHandles?: number }
 
 /** One server process owns this file. Expiry does not renew on reads or candidate pins. */
@@ -31,20 +30,15 @@ export class SendMarkers {
     this.maxHandles = o.maxHandles ?? 500;
     if (!Number.isInteger(this.ttlMs) || this.ttlMs < 1 || this.ttlMs > 7 * 86_400_000 || !Number.isInteger(this.maxHandles) || this.maxHandles < 1 || this.maxHandles > 500) throw new ReplyStateError("Invalid reply state bounds");
     if (!o.file) return;
-    let fd: number | undefined;
+    const raw = loadPrivateJson(o.file);
+    if (raw === undefined) return;
     try {
-      fd = fs.openSync(o.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid()) || stat.size > 1_000_000) throw new Error("invalid state file");
-      const saved = snapshot.parse(JSON.parse(fs.readFileSync(fd, "utf8")));
+      const saved = snapshot.parse(raw);
       for (const entry of saved.handles) {
         if (this.handles.has(entry.handle)) throw new Error("duplicate handle");
         this.handles.set(entry.handle, entry);
       }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw new ReplyStateError("Invalid reply state; refusing to discard continuity metadata");
-    } finally { if (fd !== undefined) fs.closeSync(fd); }
+    } catch { throw new ReplyStateError("Invalid reply state; refusing to discard continuity metadata"); }
     this.prune();
     for (const e of this.handles.values()) {
       const key = `${e.client}|${e.session}`;
@@ -56,23 +50,8 @@ export class SendMarkers {
   private save(next: Map<string, Entry>) {
     this.healthy();
     if (this.o.file) {
-      const file = this.o.file, temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      let fd: number | undefined;
-      try {
-        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-        fd = fs.openSync(temp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
-        fs.writeFileSync(fd, JSON.stringify({ version: 1, handles: [...next.values()] }));
-        fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
-        fs.renameSync(temp, file);
-        const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
-        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-      } catch {
-        this.failed = true;
-        throw new ReplyStateError("Reply state could not be saved; automatic continuation is disabled");
-      } finally {
-        if (fd !== undefined) fs.closeSync(fd);
-        try { fs.unlinkSync(temp); } catch { /* rename consumed it, or creation failed */ }
-      }
+      try { savePrivateJson(this.o.file, { version: 1, handles: [...next.values()] }); }
+      catch (e) { this.failed = true; throw e; }
     }
     this.handles = next;
   }

@@ -197,8 +197,23 @@ Handles and candidate pins survive restart. Expiry, eviction or unavailable
 history remain explicit and never authorize resending. Corrupt/incompatible or
 nonprivate state refuses startup; a failed save disables continuation instead of
 silently discarding state. `handle_persistence` distinguishes private-file from
-memory-only embedding/testing. This does **not** persist the send replay journal:
-retry deduplication remains process-local and bounded to its replay window.
+memory-only embedding/testing.
+
+Production startup also uses private `send-journal.json` for **session submit and
+respond only**. Before POST it saves the OAuth-principal-bound intent digest,
+original handle/key/target/boundary and expiry. A restart retry inside the
+configured replay window (default 60 seconds, including its boundary) replays a
+known acceptance or reports an unresolved outcome; it never blindly reposts a
+pending attempt. An alias or default moving to another session does not retarget
+that retry. At 200 unexpired entries new submits refuse rather than evict live
+guards. Post-POST save failure preserves the pending guard and disables automatic
+retry. These files have one server-process owner and contain no raw messages.
+
+This is bounded replay protection, **not indefinite or global exactly-once
+execution**. Expiry permits a fresh attempt; check results before sending again.
+Different explicit intents remain distinct. Memory-only embedding and the five
+domain writes retain process-local resend caches. Cancellation of wait interest
+is separate and must never interrupt agent work.
 `read_more(reply_id, offset)` continues that selected reply anywhere in the
 available segment, even when newer replies exist. Without `reply_id` it retains
 the legacy newest-reply default. Missing/edited/compacted selected replies return

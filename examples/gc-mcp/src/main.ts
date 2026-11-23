@@ -129,6 +129,7 @@ const { app } = createApp({
   dcr,
   stateFile: path.join(stateDir, "oauth-state.json"),
   replyStateFile: path.join(stateDir, "reply-state.json"),
+  sendJournalFile: path.join(stateDir, "send-journal.json"),
   controlDir: stateDir,
   auditFile: path.join(stateDir, "audit.jsonl"),
   trustProxy: net.trustProxy,

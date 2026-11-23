@@ -9,11 +9,13 @@ import path from "node:path";
 import { GcClient, GcError } from "./gc-client.js";
 import { RateLimiter, WRITE_SCOPE } from "./oauth.js";
 import { redactText } from "./redact.js";
-import { disambiguation, identifiers, labelOf, resolveSession, type SessionRef } from "./sessions.js";
+import { disambiguation, identifiers, labelOf, normalize, resolveSession, type SessionRef } from "./sessions.js";
 import { clip, speakName } from "./text.js";
 import type { AuditEvent } from "./audit.js";
 
 import { SendMarkers } from "./reply-state.js";
+import { SendJournal } from "./send-journal.js";
+import { ReplyStateError } from "./private-json.js";
 export { SendMarkers } from "./reply-state.js";
 export { WRITE_SCOPE };
 export const MAX_WRITE_TEXT = 4000;
@@ -59,6 +61,7 @@ export interface WriteConfig {
   perMinute?: number;         // default 20
   controlDir?: string;        // holds WRITES_DISABLED
   defaultSession?: string;    // what an omitted `session` means
+  journalFile?: string;       // private durable submit/respond intent guard; no payloads
   replayWindowMs?: number;    // default 60 s
   confirm?: (ctx: ConfirmCtx) => Promise<Confirmation>;
 }
@@ -73,11 +76,13 @@ export class WriteGate {
   private domainPending = new Map<string, Promise<WriteResult>>();
   private replays = new Map<string, { at: number; res: WriteResult }>();
   readonly markers: SendMarkers;
+  private journal?: SendJournal;
   constructor(private gc: GcClient, private cfg: WriteConfig, private audit: (e: AuditEvent) => void, private nowMs: () => number = Date.now, markers?: SendMarkers) {
     this.deny = validatePatterns(cfg.deny ?? DEFAULT_WRITE_DENY, "write deny list");
     this.allow = cfg.allow?.length ? validatePatterns(cfg.allow, "write allow list") : undefined;
     this.limiter = new RateLimiter(cfg.perMinute ?? 20, 60_000, nowMs);
     this.markers = markers ?? new SendMarkers();
+    this.journal = cfg.journalFile ? new SendJournal(cfg.journalFile, nowMs) : undefined;
   }
 
   /** Writes are on: enabled by config and the WRITES_DISABLED kill switch is absent. Reads are never affected by it. */
@@ -197,6 +202,7 @@ export class WriteGate {
     const now = this.nowMs();
     const windowMs = this.cfg.replayWindowMs ?? REPLAY_WINDOW_MS;
     const rkey = crypto.createHash("sha256").update([ctx.principal??ctx.client, kind, hit.id, intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
+    const requestDigest = crypto.createHash("sha256").update([ctx.principal??ctx.client, kind, query?.trim() ? normalize(query) : "$default", intent ?? "", extra?.action ?? "", extra?.requestId ?? "", text].join("\u0000")).digest("hex");
     for (const [k, v] of this.replays) if (now - v.at > windowMs) this.replays.delete(k);
     const seen = this.replays.get(rkey);
     if (seen) { log("replayed", seen.res.structured.sent === true, hit.id); return { text: seen.res.text, structured: { ...seen.res.structured, replayed: true } }; }
@@ -205,6 +211,13 @@ export class WriteGate {
       const result = await pending;
       log("replayed", result.structured.sent === true, hit.id);
       return { text: result.text, structured: { ...result.structured, replayed: true } };
+    }
+    const durable = this.journal?.lookup(ctx.principal??ctx.client, rkey, requestDigest);
+    if (durable) {
+      if (durable.session !== String(hit.id)) return refuse("retry_target_changed", "The earlier send belongs to a different session. I did not send to the replacement; check the original result.", durable.session, { handle: durable.handle, idempotency_key: durable.key, completion: "not_proven" });
+      const accepted = durable.outcome === "accepted";
+      log("replayed", accepted, hit.id);
+      return { text: accepted ? "Gas City already accepted that message. Completion is still unverified." : "The earlier send outcome is unknown. I did not resend it; check its result before any new send.", structured: { sent: accepted, ...(accepted ? {} : { reason: "outcome_unknown" }), session: durable.session, name: label, handle: durable.handle, marker: markerOf(durable.since), idempotency_key: durable.key, request_id: durable.requestId, status: accepted ? "accepted" : "unknown", completion: "not_proven", replayed: true, replay_source: "private_journal", handle_persistence: this.markers.persistent ? "private_file" : "process_memory" } };
     }
     const attempt = (async (): Promise<WriteResult> => {
       // 6. rate limit (a replay or a refusal above never spends it)
@@ -219,8 +232,12 @@ export class WriteGate {
       const handle = this.markers.create(ctx.principal??ctx.client, String(hit.id), sentAt);
       this.markers.set(ctx.principal??ctx.client, String(hit.id), sentAt);
       if (!this.active) return refuse("writes_disabled", "Writes are switched off by the owner.", hit.id);
+      this.journal?.begin({ digest: rkey, requestDigest, client: ctx.principal??ctx.client, operation: kind, session: String(hit.id), key, handle, since: sentAt, expiresAt: sentAt + windowMs });
+      if (!this.active) return refuse("writes_disabled", "Writes are switched off by the owner.", hit.id);
       try {
         const r = await send(String(hit.id), key);
+        const requestId = typeof r.request_id === "string" ? redactText(r.request_id) : undefined;
+        this.journal?.finish(ctx.principal??ctx.client, rkey, "accepted", requestId && REQUEST_ID.test(requestId) ? requestId : undefined);
         log("sent", true, hit.id);
         const queued = hit.running === false ? " The session is not running; delivery is not confirmed." : "";
         const said = speakName(label);   // "crm/steve" is spoken "crm slash steve"
@@ -233,10 +250,12 @@ export class WriteGate {
         if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value as string);
         return out;
       } catch (e) {
+        if (e instanceof ReplyStateError) throw e; // A post-POST save failure must leave the pre-POST pending guard intact.
+        this.journal?.finish(ctx.principal??ctx.client, rkey, "unknown");
         const status = e instanceof GcError ? e.status : 0;
         log(`error:${status || "no_response"}`, false, hit.id);
         const why = e instanceof GcError ? clip(redactText(e.message), 80) : "unexpected error";
-        const out: WriteResult = { text: clip(`Delivery to ${label} could not be confirmed (${status || "no response"}: ${why}). Check before sending again.`, 280), structured: { sent: false, reason: "outcome_unknown", status, handle, handle_persistence: this.markers.persistent ? "private_file" : "process_memory", marker: markerOf(sentAt), completion: "not_proven" } };
+        const out: WriteResult = { text: clip(`Delivery to ${label} could not be confirmed (${status || "no response"}: ${why}). Check before sending again.`, 280), structured: { sent: false, reason: "outcome_unknown", status, handle, idempotency_key: key, handle_persistence: this.markers.persistent ? "private_file" : "process_memory", marker: markerOf(sentAt), completion: "not_proven" } };
         this.replays.set(rkey, { at: now, res: out });
         if (this.replays.size > 200) this.replays.delete(this.replays.keys().next().value!);
         return out;

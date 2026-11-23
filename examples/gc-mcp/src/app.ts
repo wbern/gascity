@@ -29,6 +29,7 @@ export interface AppOpts {
   writes?: WriteConfig;        // Phase 4 write tools (send_to_session, respond_to_session): absent or enabled:false = read-only server, gc:write not advertised
   chatgpt?: ChatgptClientSpec; // optional second STATIC client for ChatGPT (exact https://chatgpt.com/ redirects; empty = cannot authorize)
   stateFile?: string;
+  sendJournalFile?: string;    // durable session submit/respond guard
   replyStateFile?: string;     // private handle/candidate metadata only; omit for memory-only embedding/tests
   controlDir?: string;         // holds the DISABLED and REVOKE_ALL flag files
   auditFile?: string | null;
@@ -60,7 +61,7 @@ export function createApp(o: AppOpts): { app: express.Express; provider: OwnerAp
   const markers = o.deps.markers ?? new SendMarkers({ file: o.replyStateFile, now });
   const briefings = o.deps.briefings ?? new Map<string, number>();
   const deps = writesOn
-    ? { ...o.deps, readDeny, markers, briefings, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
+    ? { ...o.deps, readDeny, markers, briefings, writes: new WriteGate(o.deps.gc, { ...o.writes!, controlDir: o.writes!.controlDir ?? o.controlDir, journalFile: o.writes!.journalFile ?? o.sendJournalFile, defaultSession: o.writes!.defaultSession ?? o.deps.defaultSession }, (e) => audit.write(e), now, markers) }
     : { ...o.deps, readDeny, markers, briefings };
   const provider = new OwnerApprovalProvider({
     writesEnabled: writesOn,

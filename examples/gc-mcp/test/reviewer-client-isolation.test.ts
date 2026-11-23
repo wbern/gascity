@@ -126,19 +126,21 @@ describe('OAuth client send-marker identity through HTTP MCP',()=>{
 });
 
 describe("persistent reply continuity through OAuth and HTTP MCP", () => {
- it("restores handles and pinned candidates across app restart without a resend or client identity collision", async () => {
+ for(const pendingSnapshot of [false,true]) it("restores handles and guards sends across restart; pending snapshot="+pendingSnapshot, async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"gc-reply-restart-"));cleanups.push(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const sent=1_800_000_000_000;
   const clock={t:sent+5000,now(){return this.t;},async sleep(ms:number){this.t+=ms;}};
+  let pendingJournal:string|undefined;
+  const sendJournalFile=path.join(dir,"send-journal.json");
   let posts=0,turns=[{role:"assistant",text:"Original candidate.",timestamp:new Date(sent+1000).toISOString()}];
   const fetchImpl=(async(url:string,init:RequestInit)=>{
    const p=new URL(url).pathname;
-   if(init.method==="POST"){posts++;return new Response(JSON.stringify({status:"accepted"}));}
+   if(init.method==="POST"){posts++;pendingJournal=fs.readFileSync(sendJournalFile,"utf8");return new Response(JSON.stringify({status:"accepted"}));}
    const body=p.endsWith("/sessions")?{total:1,items:[{id:"s1",alias:"agent",state:"active",running:true}]}
     :p.endsWith("/transcript")?{turns}:{id:"s1",state:"active"};
    return new Response(JSON.stringify(body));
   })as typeof fetch;
-  const opts={allowDcr:true,writes:{enabled:true},stateFile:path.join(dir,"oauth.json"),replyStateFile:path.join(dir,"reply-state.json"),deps:{gc:new GcClient({baseUrl:"http://127.0.0.1:1",city:"gc2",fetchImpl}),mailAgent:"human",now:()=>new Date(sent),clock}};
+  const opts={allowDcr:true,writes:{enabled:true},sendJournalFile,stateFile:path.join(dir,"oauth.json"),replyStateFile:path.join(dir,"reply-state.json"),deps:{gc:new GcClient({baseUrl:"http://127.0.0.1:1",city:"gc2",fetchImpl}),mailAgent:"human",now:()=>new Date(sent),clock}};
   const first=await boot(opts);
   const a=await first.registered([CLAUDE_CB],{client_name:"Same label"}),b=await first.registered([CLAUDE_CB],{client_name:"Same label"});
   const login=await first.login(a.client_id,CLAUDE_CB,"gc:read gc:write");
@@ -152,10 +154,16 @@ describe("persistent reply continuity through OAuth and HTTP MCP", () => {
   const before=await call(first.res,login.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
   expect(before.page).toBe("Original candidate.");
   await first.stop();
+  if(pendingSnapshot){expect(pendingJournal).toBeTypeOf("string");fs.writeFileSync(sendJournalFile,pendingJournal!);}
   const second=await boot(opts);
   const owner=await second.login(a.client_id,CLAUDE_CB,"gc:read gc:write"),other=await second.login(b.client_id,CLAUDE_CB,"gc:read gc:write");
   const restored=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
   expect(restored).toMatchObject({reply_id:before.reply_id,page:"Original candidate.",complete:false});
+  const sendRetry=await call(second.res,owner.token.access_token,"send_to_session",{session:"agent",text:"Check the result"});
+  expect(sendRetry).toMatchObject({replayed:true,handle:ack.handle,idempotency_key:ack.idempotency_key,completion:"not_proven"});
+  if(pendingSnapshot)expect(sendRetry).toMatchObject({sent:false,reason:"outcome_unknown"});else expect(sendRetry.sent).toBe(true);
+  expect(posts).toBe(1);
+  expect(fs.readFileSync(sendJournalFile,"utf8")).not.toContain("Check the result");
   const denied=await call(second.res,other.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
   expect(denied).toMatchObject({found:false,reason:"unknown_handle"});
   turns=[{role:"assistant",text:"Different segment.",timestamp:new Date(sent+2000).toISOString()}];
