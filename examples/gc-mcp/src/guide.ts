@@ -1,6 +1,7 @@
 // Curated operational standards are trusted, versioned product guidance. Observed agent data is not.
 // No runtime filesystem access, private prompt projection, guessed role assignment or free-form path.
 import {z} from 'zod';
+import {connectionIdentity,cityPolicy} from './city-policy.js';
 import {roleFor,publicRole,publicRoleCatalog} from './role-contracts.js';
 import {GUIDE_SOURCES} from './guide-sources.js';
 import {GcError} from './gc-client.js';
@@ -9,7 +10,7 @@ import {readVerdict} from './access.js';
 import {clip,untrusted} from './text.js';
 import type {Deps,ToolDef} from './tools.js';
 import type {WriteCtx} from './writes.js';
-export const GUIDE_VERSION='2026-11-22.2';
+export const GUIDE_VERSION='2026-11-23.1';
 const TOPICS=['overview','roles','work','communication','operations','capabilities'] as const;
 type Topic=typeof TOPICS[number];
 type Source=keyof typeof GUIDE_SOURCES;
@@ -90,8 +91,8 @@ async function observeCapabilities(d:Deps,who:WriteCtx|undefined,query?:string):
 }
 export function buildGuideTools(d:Deps,who?:WriteCtx):ToolDef[]{return [{
  name:'city_guide',title:'Understand the city and its operating rules',
- description:'Use before the first operational action, or when asked how agents, work, ownership and handoffs function. Choose a topic; roles and capabilities can inspect a named agent. Unknown purpose or support stays explicit.',
- inputShape:{topic:z.enum(TOPICS).optional(),agent:z.string().min(1).max(128).optional()},
+ description:'Use before the first operational action, or when asked how agents, work, ownership and handoffs function. Choose a topic; roles and capabilities inspect a named agent, while work can filter city review policy by repository and review_context. Unknown purpose, defaults or support stay explicit.',
+ inputShape:{topic:z.enum(TOPICS).optional(),agent:z.string().min(1).max(128).optional(),repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(128).optional(),review_context:z.string().min(1).max(64).optional()},
  annotations:{readOnlyHint:true,destructiveHint:false,openWorldHint:false},
  handler:async(a={})=>{
   const topic:Topic=a.topic??'overview';
@@ -103,9 +104,10 @@ export function buildGuideTools(d:Deps,who?:WriteCtx):ToolDef[]{return [{
   // The public source digests are protocol metadata, not credentials. Redact/label observations
   // before returning them; do not run static digests through the credential-shaped-text filter.
   const contract=role_contract as ReturnType<typeof publicRole>|undefined;
-  const text=contract?clip(`Verified default role snapshot: ${contract.purpose}. ${contract.standards[0]} Current assignment is separate.`,280):'Use the guide to check current ownership, roles and evidence before acting. Accepted input is not completed work; unknown roles and completion signals stay explicit.';
+  const connection=connectionIdentity(d.guideProfile),policy=topic==='work'?cityPolicy(d.guideProfile,a.repository,a.review_context):undefined;
+  const text=contract?clip(`Verified default role snapshot: ${contract.purpose}. ${contract.standards[0]} Current assignment is separate.`,280):connection.verified?(topic==='work'?'GC3 uses its configured worker selector and repository/context review owner. Provider defaults remain unverified when installed files drift from committed source.':'Connected to GC3 on clodcod; API city gc2. Read the work guide before routing or review. Current holds and ownership remain authoritative.'):'This connection has no verified host/city profile. Core mechanics are available; installed city routing and review policy remain unknown.';
   return {text,
-   structured:{version:GUIDE_VERSION,topic,origin:'curated_operating_guide',rules:g.rules,role_contract,role_catalog,provenance:g.sources.map(s=>GUIDE_SOURCES[s]),
+   structured:{version:GUIDE_VERSION,topic,origin:'curated_operating_guide',rules_scope:'core mechanics and curated safety; installed city policy is separate',connection,city_policy:policy,rules:g.rules,role_contract,role_catalog,provenance:g.sources.map(s=>GUIDE_SOURCES[s]),
     observation:observation?{untrusted:true,...observed,observed_at:d.now().toISOString()}:undefined}};
  },
 }];}

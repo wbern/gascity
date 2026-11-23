@@ -273,3 +273,34 @@ With the profile enabled, `city_guide` roles without a name first returns a
 bounded catalogue of verified role purposes and configured targets, so names need
 not be known beforehand. Query one target to read its standards/provenance. Only
 contracts matching currently observed allowed identities enter that catalogue.
+
+
+### Connection identity and installed city policy
+
+With the matching verified deployment profile, `city_guide` distinguishes the
+operator label GC3, connector host clodcod, and shared API city name gc2.
+The name gc2 alone does not identify the Mac or GC3. Without a matching profile,
+connection identity and installed policy stay unverified.
+
+The work topic separates core mechanics from the city-policy snapshot. Optional
+`repository` and `review_context` select committed review-lane ownership; unknown
+pairs have no guessed fallback. Code and UX reviews keep distinct owning orders.
+Current holds, runtime admission and concrete claim/publication still need fresh
+reads; a policy owner is not evidence that work was claimed or merged.
+
+City implementation guidance names the configured `worker-level-sling.py`
+selector and preserves level/provider and capacity-refusal constraints. The core
+`bead_sling` transport does not run that external selector. Source/installed
+selector or routing drift is explicit; this snapshot does not teach unverified
+provider defaults. No raw config, prompts or secrets enter runtime guidance, and
+runtime code never opens these author-side files.
+
+Author verification uses Python 3.11+ and fixed public source inputs:
+
+```
+python3 scripts/gen-city-policy.py --infra-root /path/to/gas-city-infra --city-root /path/to/city --check
+```
+
+The generated snapshot records immutable per-file revisions/digests and verified
+curated clauses. Drift requires review before regeneration. The live operator
+checks are separate from a model/phone evaluation, which remains not run.
