@@ -68,14 +68,24 @@ async function observeAgents(d:Deps,who:WriteCtx|undefined,query?:string):Promis
   state:untrusted(a.state,32),running:typeof a.running==='boolean'?a.running:undefined,
  }))};
 }
+/** Only declared capability axes are exposed; future or malformed values stay unknown. */
+function turnEvidence(r:any):Record<string,unknown>{
+ const known=(value:unknown,values:string[])=>typeof value==='string'&&values.includes(value)?value:'unknown';
+ const c=r?.capabilities;
+ return {source:known(r?.source,['protocol','transcript','none']),observation:known(r?.observation,['observed','unavailable','unsupported']),
+  capabilities:{start:known(c?.start,['none','boundary','recorded']),end:known(c?.end,['none','boundary','inferred','recorded']),
+   fence:known(c?.fence,['none','checked','atomic']),link:known(c?.link,['none','correlated','exact']),
+   lossless:typeof c?.lossless==='boolean'?c.lossless:'unknown',interrupt:known(c?.interrupt,['keystroke','protocol','unsupported'])},
+  task_completion:'not_proven'};
+}
 async function observeCapabilities(d:Deps,who:WriteCtx|undefined,query?:string):Promise<Record<string,unknown>>{
  const r=await resolveSession(d.gc,query,d.defaultSession);
  if(r.kind!=='one')return {checked:false,reason:r.kind,completion:'not_proven'};
  const verdict=readVerdict(d,who,r.hit);if(!verdict.ok)return {checked:false,reason:verdict.reason,completion:'not_proven'};
  const id=encodeURIComponent(r.hit.id),s=await d.gc.get<Record<string,unknown>>(`/session/${id}`);
- let turn='available';
- try{await d.gc.get(`/session/${id}/turn`);}catch(e){if(!(e instanceof GcError))throw e;turn=e.status===404?'not_available_404':`unavailable_${e.kind}`;}
- return {checked:true,target:untrusted(r.hit.alias??r.hit.id,48),turn_endpoint:turn,
+ let turn='available',evidence:Record<string,unknown>|undefined;
+ try{evidence=turnEvidence(await d.gc.get(`/session/${id}/turn`));}catch(e){if(!(e instanceof GcError))throw e;turn=e.status===404?'not_available_404':`unavailable_${e.kind}`;}
+ return {checked:true,target:untrusted(r.hit.alias??r.hit.id,48),turn_endpoint:turn,turn_evidence:evidence,
   available_signals:['state','running','activity','program_status','turn','submission_capabilities'].filter(k=>s[k]!==undefined),completion:'not_proven'};
 }
 export function buildGuideTools(d:Deps,who?:WriteCtx):ToolDef[]{return [{

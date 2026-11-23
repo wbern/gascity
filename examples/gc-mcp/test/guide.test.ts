@@ -48,6 +48,22 @@ describe('bounded operational orientation',()=>{
   expect(r.structured.observation).toMatchObject({turn_endpoint:'not_available_404',completion:'not_proven',available_signals:['state','running']});
   expect(r.structured.observation).not.toHaveProperty('completed',true);expect(calls.slice(-3)).toEqual(['/sessions','/session/s1','/session/s1/turn']);
  });
+ it('grades observed turn evidence without claiming accepted task completion',async()=>{
+  const caps={start:'recorded',end:'recorded',fence:'checked',link:'correlated',lossless:false,interrupt:'keystroke'};
+  const gc=client(p=>p==='/sessions'?{items:[{id:'s1',alias:'worker'}],total:1}:p==='/session/s1'?{id:'s1',activity:'working'}:{source:'transcript',observation:'observed',capabilities:caps,recent:[{end:'completed',text:'PRIVATE TRANSCRIPT'}]});
+  const r=await guide(gc).handler({topic:'capabilities',agent:'worker'});
+  expect((r.structured.observation as any).turn_evidence).toMatchObject({source:'transcript',observation:'observed',capabilities:caps,task_completion:'not_proven'});
+  expect(JSON.stringify(r)).not.toContain('PRIVATE TRANSCRIPT');
+  expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(4096);
+ });
+ it('keeps unavailable or unknown turn observations unknown rather than idle',async()=>{
+  for(const observation of ['unavailable','unsupported','UNTRUSTED OVERRIDE']){
+   const gc=client(p=>p==='/sessions'?{items:[{id:'s1',alias:'worker'}],total:1}:p==='/session/s1'?{id:'s1',state:'active'}:{source:'protocol',observation,capabilities:{start:'recorded',end:'recorded',link:'exact',lossless:'forged'},detail:'PRIVATE DETAIL'});
+   const r=await guide(gc).handler({topic:'capabilities',agent:'worker'});
+   expect((r.structured.observation as any).turn_evidence).toMatchObject({source:'protocol',observation:observation==='UNTRUSTED OVERRIDE'?'unknown':observation,task_completion:'not_proven',capabilities:{lossless:'unknown'}});
+   expect(JSON.stringify(r)).not.toMatch(/PRIVATE DETAIL|UNTRUSTED OVERRIDE|idle/);
+  }
+ });
  it('keeps unsupported/missing roles and incomplete discovery explicit',async()=>{
   const gc=client(()=>({items:[{name:'worker'}],total:2,partial:true}));
   const r=await guide(gc).handler({topic:'roles',agent:'worker'});expect(r.structured.observation).toMatchObject({complete:false,reason:'incomplete_agents'});

@@ -156,7 +156,10 @@ Only names, reported pool membership, running/state and explicit unknown-purpose
 markers are projected. Names do not establish role powers or persistence.
 Incomplete directory reads do not authorize a guessed match. Capabilities can
 probe one named/default session and its turn endpoint; missing installed routes
-and missing completion signals stay explicit. Curated standards and untrusted
+and missing completion signals stay explicit. When the turn route is present,
+capabilities report its source, observation and declared start/end/link/lossless
+axes; unknown values stay unknown. Recorded turn ends, even with an exact or
+correlated delivery link, do not establish accepted-task completion. Curated standards and untrusted
 runtime observations are separate fields, with observation time and a bounded
 4096-byte structured response. No write is added or gated by a new approval.
 
