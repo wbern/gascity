@@ -4,7 +4,7 @@ import {buildTools} from '../dist/tools.js';
 import {GcClient} from '../dist/gc-client.js';
 import {redactText} from '../dist/redact.js';
 const reports=[['short report',('PR #2740 — show/hide Övrigt column.\nEvidence https://example.com/pr/2740\n').repeat(60)],['long report',('## Evidence\n\nPR #2774 — review packet infrastructure\n- Preserve this paragraph and exact identifier.\n').repeat(320)],['Unicode report',('漢字 😀 — quoted evidence\n  "keep formatting"\n').repeat(400)]];
-function fixture(text){let reads=0;const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:async url=>{reads++;return Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'fixture'}],total:1}:{id:'s1',turns:[{id:'e1',role:'assistant',text,timestamp:'2026-11-23T12:48:07Z'}]});}});const d={gc,mailAgent:'human',defaultSession:'fixture',now:()=>new Date()};return {tool:name=>buildTools(d,{client:'fixture',scopes:['gc:read']}).find(t=>t.name===name),reads:()=>reads};}
+function fixture(text){let reads=0;const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:async url=>{reads++;return Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'fixture'}],total:1}:{id:'s1',format:'conversation',turns:[{id:'e1',role:'assistant',text,timestamp:'2026-11-23T12:48:07Z'}]});}});const d={gc,mailAgent:'human',defaultSession:'fixture',now:()=>new Date()};return {tool:name=>buildTools(d,{client:'fixture',scopes:['gc:read']}).find(t=>t.name===name),reads:()=>reads};}
 const results=[];
 for(const[label,text]of reports){
  const old=fixture(text);let r=await old.tool('latest_reply').handler({}),oldCalls=1;

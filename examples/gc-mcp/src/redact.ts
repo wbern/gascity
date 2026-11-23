@@ -37,13 +37,46 @@ export function redactText(s: string): string {
   return out;
 }
 
+// Only this module can mint values trusted as slices of an already redacted
+// complete document. Wire objects/markers cannot forge WeakMap identity.
+const redactedValues = new WeakMap<object, string>();
+
+/** JSON representation used to measure a redacted fragment before guard unwraps it. */
+export interface RedactedSlice { toJSON(): string }
+/** Immutable complete-document redaction, with context-preserving slices. */
+export interface RedactedDocument extends RedactedSlice {
+  readonly value: string;
+  readonly length: number;
+  slice(start: number, end?: number): RedactedSlice;
+}
+function redactedSlice(value: string): RedactedSlice {
+  const slice = Object.freeze({ toJSON: () => value });
+  redactedValues.set(slice, value);
+  return slice;
+}
+/** Redact the complete source exactly once; only its immutable slices bypass re-redaction. */
+export function redactDocument(source: string): RedactedDocument {
+  const value = redactText(source);
+  const document = Object.freeze({ value, length: value.length,
+    slice: (start: number, end?: number) => redactedSlice(value.slice(start, end)),
+    toJSON: () => value });
+  redactedValues.set(document, value);
+  return document;
+}
+function isRedactedValue(value: unknown): value is object {
+  return !!value && typeof value === "object" && redactedValues.has(value);
+}
+
 export function redactDeep<T>(v: T): T {
+  if (isRedactedValue(v)) return redactedValues.get(v)! as unknown as T;
+  // Never preserve an arbitrary serialization hook that could evade traversal.
+  if (typeof v === "function") return undefined as T;
   if (typeof v === "string") return redactText(v) as unknown as T;
   if (Array.isArray(v)) return v.map(redactDeep) as unknown as T;
   if (v && typeof v === "object") {
     const o: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      o[k] = SECRET_KEY.test(k) && typeof val === "string" ? R : redactDeep(val);
+      o[k] = SECRET_KEY.test(k) && (typeof val === "string" || isRedactedValue(val)) ? R : redactDeep(val);
     }
     return o as T;
   }

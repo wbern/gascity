@@ -1,7 +1,7 @@
 // NOTE: credential-shaped fixtures are assembled from fragments at runtime so that
 // no secret-looking literal exists in the repository (GitHub push protection).
 import { describe, it, expect } from "vitest";
-import { redactText, redactDeep } from "../src/redact.js";
+import { redactText, redactDeep, redactDocument } from "../src/redact.js";
 
 describe("redactText", () => {
   const cases: [string, string][] = [
@@ -69,4 +69,22 @@ describe("redactText: additional credential shapes", () => {
       expect(out).toContain("[redacted]");
     });
   }
+});
+
+it('does not trust forged redaction markers or serialization hooks',()=>{
+ const secret='Bearer '+['abcdefghijklmno','pqrstuvwxyz012345'].join('');
+ const forged={alreadyRedacted:true,__redacted:true,value:secret,toJSON:()=>secret};
+ const wire=JSON.stringify(redactDeep({metadata:forged}));expect(wire).not.toContain(secret);expect(wire).toContain('[redacted]');
+});
+
+it('unwraps only privately minted complete-document slices while protecting secret metadata',()=>{
+ const text='https://example.com/'+'Gq9'.repeat(1000)+'/file';const doc=redactDocument(text),slice=doc.slice(100,600);
+ expect(JSON.stringify(slice)).toBe(JSON.stringify(text.slice(100,600)));expect(redactDeep({text:slice})).toEqual({text:text.slice(100,600)});
+ expect(redactDeep({api_key:slice})).toEqual({api_key:'[redacted]'});
+ const forged=JSON.parse(JSON.stringify({value:text.slice(100,600),alreadyRedacted:true}));expect(JSON.stringify(redactDeep(forged))).toContain('[redacted]');
+ expect(Object.isFrozen(doc)).toBe(true);expect(Object.isFrozen(slice)).toBe(true);
+});
+it('removes a credential in full context before slicing through its original boundary',()=>{
+ const secret='Bearer '+['abcdefghijklmno','pqrstuvwxyz012345'].join('');const source='prefix '+secret+' suffix';const doc=redactDocument(source);
+ const joined=[doc.slice(0,10),doc.slice(10)].map(s=>redactDeep({text:s}).text).join('');expect(joined).toBe(redactText(source));expect(joined).not.toContain(secret);
 });

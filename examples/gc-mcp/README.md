@@ -358,7 +358,9 @@ through `gc_api_list_operations` and `gc_api_read`.
 Cursor pages refer to an immutable redacted snapshot, so transcript growth or
 compaction cannot change the next passage or a cursor retry. `snapshot_end` means
 the selected window ended, not that the whole conversation ended or work
-completed. `history.omitted_in_segment` counts entries before the selected window;
+completed. `history.older_omitted_in_segment` counts excluded older entries;
+`newer_omitted_in_segment` counts excluded newer entries. `omitted_in_segment`
+is their neutral total, not an older-history count;
 `older_read` starts a fresh observed snapshot before a native entry reference.
 Missing native IDs, expired history and uncertain source coverage remain explicit.
 New reads/older reads are fresh observations; only continuation within a snapshot
@@ -407,3 +409,17 @@ responses, before buffering the remainder. Unicode is decoded incrementally.
 Deadline/cancellation cancels a body that stalls after headers, not only the
 initial fetch. Declared-size refusal and observed-byte overflow cancel the body
 and remain `too_large`, distinct from deadline/availability errors.
+
+The faithful reader requires explicit upstream `format:conversation` provenance.
+The core's `format:text` terminal-pane fallback (up to 100 pane lines) is refused
+with `conversation_unavailable`, not labelled as original transcript/history.
+Missing and unsupported formats are also refused; `peek_session` remains an
+explicit preview path.
+
+Whole-document redaction produces an immutable private document. Only slices
+minted from that document carry an unforgeable in-process identity that the
+response guard unwraps without re-redacting at a new fragment boundary. Final
+JSON serialization is used for byte measurement. Metadata, errors and ordinary
+objects still undergo normal redaction; arbitrary serialization hooks and forged
+redaction markers cannot bypass it. This preserves legitimate context-sensitive
+text (including very long URLs) without retaining credentials split across pages.

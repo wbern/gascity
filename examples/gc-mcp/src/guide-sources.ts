@@ -28,7 +28,7 @@ export const GUIDE_SOURCES = {
   "mcp": {
     "repository": "wbern/gascity",
     "path": "examples/gc-mcp/README.md",
-    "sha256": "1d7974093773fac65b071465d0b480de3b49208d657334f4ad23caa26d92412d"
+    "sha256": "cbc4b3e3b2d7a3682c81969288cfe99c58e22d26ca37b963d49aa0bb97a53a9d"
   },
   "reply": {
     "repository": "wbern/gascity",

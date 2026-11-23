@@ -7,12 +7,13 @@ import {redactText} from '../src/redact.js';
 const row=(id:string,text:string)=>({id,role:'assistant',text,timestamp:'2026-11-23T12:48:07Z'});
 function world(rows:any[]){
  let now=1800000000000;const calls:URL[]=[];const sessions=[{id:'s1',alias:'helper',state:'active'}];
- const state={rows};
+ const state:{rows:any[];format?:string;response?:unknown}={rows,format:"conversation"};
  const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:(async(url:any)=>{
   const u=new URL(url);calls.push(u);
   if(u.pathname.endsWith('/sessions'))return Response.json({items:sessions,total:sessions.length});
+  if('response'in state)return Response.json(state.response);
   const before=u.searchParams.get('before');if(before&&!state.rows.some(r=>r.id===before))return Response.json({detail:'cursor invalidated'},{status:409});const source=before?state.rows.slice(0,state.rows.findIndex(r=>r.id===before)):state.rows;
-  return Response.json({id:'s1',turns:source,pagination:{has_older_messages:false,total_message_count:source.length,returned_message_count:source.length}});
+  return Response.json({id:'s1',format:state.format,turns:source,pagination:{has_older_messages:false,total_message_count:source.length,returned_message_count:source.length}});
  })as typeof fetch});
  const d:Deps={gc,mailAgent:'human',now:()=>new Date(now),defaultSession:'helper'};
  const tool=(principal='a',deps=d)=>{const t=buildTools(deps,{client:'same display',principal,scopes:['gc:read']}).find(t=>t.name==='read_session');expect(t,'faithful reader is discoverable').toBeDefined();return t!;};
@@ -85,4 +86,32 @@ it('reports an invalidated older-history boundary separately from an empty/end s
  const w=world([row('a','older'),row('b','latest')]);const first=await w.tool().handler({last:1});const args=(first.structured.older_read as any).arguments;
  w.state.rows=[row('replacement','compacted segment')];const gone=await w.tool().handler(args);
  expect(gone.structured).toMatchObject({found:false,reason:'history_unavailable'});expect(gone.structured.snapshot_end).toBeUndefined();expect(gone.structured.messages).toBeUndefined();
+});
+
+it('reconstructs context-sensitive redaction boundaries without losing long URL text',async()=>{
+ const text='https://example.com/'+'Gq9'.repeat(10000)+'/file';expect(redactText(text)).toBe(text);
+ for(const page_bytes of [8192,16384,32768]){
+  const w=world([row('e',text)]);let r=await w.tool().handler({last:1,page_bytes}),joined='',pages=0;
+  for(;;){expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(page_bytes);for(const m of r.structured.messages as any[]){expect(m.offset).toBe(joined.length);joined+=m.text;expect(m.next_offset).toBe(joined.length);}if(r.structured.snapshot_end)break;r=await w.tool().handler((r.structured.continue_read as any).arguments);expect(++pages).toBeLessThan(20);}
+  expect(joined).toBe(text);
+ }
+});
+it('refuses terminal-pane fallbacks and unsupported or missing projection provenance',async()=>{
+ for(const format of ['text','raw','structured',undefined]){
+  const w=world([{role:'output',text:'A clipped terminal-pane preview'}]);w.state.format=format;
+  const r=await w.tool().handler({});expect(r.structured).toMatchObject({found:false,reason:'conversation_unavailable'});
+  expect(r.structured.messages).toBeUndefined();expect(r.structured.snapshot_end).toBeUndefined();expect(r.structured.history).toBeUndefined();
+ }
+ const malformed=world([]);malformed.state.response=null;expect((await malformed.tool().handler({})).structured.reason).toBe('conversation_unavailable');
+});
+it('separates excluded older entries from newer entries when selecting a reply',async()=>{
+ const w=world([row('a','first'),row('b','second')]);const r=await w.tool().handler({reply_id:replyId('2026-11-23T12:48:07Z','first')});
+ expect(r.structured.history).toMatchObject({omitted_in_segment:1,older_omitted_in_segment:0,newer_omitted_in_segment:1,older_history:'none_reported'});
+ expect(r.structured.older_read).toBeUndefined();
+});
+it('measures the final guarded representation when clipped metadata expands under redaction',async()=>{
+ const w=world([{...row('e','readable words '.repeat(3000)),role:'r'.repeat(17)+' token: fixture-value'}]);
+ const r=await w.tool().handler({last:1,page_bytes:8192});
+ expect(Buffer.byteLength(JSON.stringify(r.structured))).toBeLessThanOrEqual(8192);
+ expect(JSON.stringify(r.structured)).not.toContain('fixture-value');
 });

@@ -186,8 +186,8 @@ describe("persistent reply continuity through OAuth and HTTP MCP", () => {
 
 describe('faithful reader through real DCR, PKCE, OAuth and HTTP MCP',()=>{
  it('preserves long original text, repeats cursor pages and isolates same-name clients',async()=>{
-  const original='PR #2740 — show/hide Övrigt column.\n\n'+('Evidence with https://example.com/pr/2740 and formatting.\n'.repeat(700));
-  const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:(async(url:any)=>Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'agent'}],total:1}:{id:'s1',turns:[{id:'native-e',role:'assistant',text:original,timestamp:'2026-11-23T12:48:07Z'}]}))as typeof fetch});
+  const original='PR #2740 — show/hide Övrigt column.\n\n'+('Evidence with https://example.com/pr/2740 and formatting.\n'.repeat(700))+'https://example.com/'+'Gq9'.repeat(10000)+'/file';
+  const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:(async(url:any)=>Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'agent'}],total:1}:{id:'s1',format:'conversation',turns:[{id:'native-e',role:'assistant',text:original,timestamp:'2026-11-23T12:48:07Z'}]}))as typeof fetch});
   const s=await boot({allowDcr:true,deps:{gc,mailAgent:'human',now:()=>new Date()}});
   const a=await s.registered([CLAUDE_CB],{client_name:'Identical App'}),b=await s.registered([CLAUDE_CB],{client_name:'Identical App'});
   const ta=await s.login(a.client_id,CLAUDE_CB,'gc:read'),tb=await s.login(b.client_id,CLAUDE_CB,'gc:read');
