@@ -304,3 +304,16 @@ python3 scripts/gen-city-policy.py --infra-root /path/to/gas-city-infra --city-r
 The generated snapshot records immutable per-file revisions/digests and verified
 curated clauses. Drift requires review before regeneration. The live operator
 checks are separate from a model/phone evaluation, which remains not run.
+
+Wait transcript reads use conversation text, not structured tool/metadata blocks.
+Within one wait call, when the installed API supplies unique entry IDs, later
+reads use a fixed `after` anchor before the earliest relevant output (retaining
+one preceding entry). The anchor never advances while polling, so mutable tail
+text and all candidate successors are re-read. No cursor or text is shared
+between calls/clients; retries begin with a fresh snapshot. Missing IDs retain
+legacy snapshot reads. Cursor invalidation or an inconsistent cursor response
+reports unknown continuity without falling back to a newer reply. The first
+snapshot still reads one compaction segment, not a bounded number of messages;
+the existing byte cap, three-read ceiling, total wait deadline and cancellation
+remain in force. This reduces repeated transfer, not core parsing cost or
+provider history loss; it does not establish lossless reply correlation.

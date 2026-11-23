@@ -2,6 +2,7 @@
 // and the full text in structuredContent. Nothing here ever waits unboundedly: wait_for_reply is capped at 20 seconds so it returns before
 // a chat client's tool timeout. Replies are agent output, therefore untrusted: redacted, links dropped, labelled.
 import { z } from "zod";
+import { waitTranscript } from "./wait-transcript.js";
 import crypto from "node:crypto";
 import { GcError, TRANSCRIPT_MAX_BYTES } from "./gc-client.js";
 import { disambiguation, labelOf, resolveSession, type SessionRef } from "./sessions.js";
@@ -195,9 +196,10 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
           let seen = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false, cursorMissing = false, candidateMissing = false;
           // The session record is small; a transcript segment can be hundreds of KB. So poll the record to notice change and read the transcript only when
           // something changed, at least every 7.5 s, and never more than 3 times per call.
+          const readTranscript = waitTranscript(d.gc, hit.id, since);
           const fetchReply = async (): Promise<void> => {
             fetches++; lastFetchAt = clock.now(); dirty = false;
-            const turns = assistantTurns(await transcript(d, hit.id, readBudget(4000), cancellation?.signal));
+            const turns = assistantTurns(await readTranscript(readBudget(4000), cancellation?.signal));
             const fresh = turns.filter((t) => Date.parse(String(t.timestamp ?? "")) > since);
             // The caller acknowledges a particular candidate explicitly, never server-side.
             // Choosing the first following candidate makes retrying a lost response repeatable
@@ -226,7 +228,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
             if (sig !== lastSig) { lastSig = sig; dirty = true; }
             if (fetches < MAX_TRANSCRIPT_FETCHES && (fetches === 0 || dirty || clock.now() - lastFetchAt >= RECHECK_MS)) {
               try { await fetchReply(); }
-              catch (e) { const stopped = trackingStatus(); if (stopped) return stopped; if (e instanceof GcError && e.kind === "timeout") return timedOut(); throw e; }
+              catch (e) { const stopped = trackingStatus(); if (stopped) return stopped; if (e instanceof GcError && e.kind === "timeout") return timedOut(); if (e instanceof GcError && e.status === 409) return { text: "The transcript cursor is unavailable. Continuity is unknown; do not resend automatically.", structured: { found: true, complete: false, completion: "not_proven", reply_available: false, reason: "reply_cursor_unavailable", handle: a.handle, waited_ms: clock.now() - start } }; throw e; }
               const stoppedAfterTranscript = trackingStatus(); if (stoppedAfterTranscript) return stoppedAfterTranscript;
               if (clock.now() >= deadline) break;
               if (seen) {   // Transcript text proves only that output exists, never task completion.
