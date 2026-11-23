@@ -28,12 +28,12 @@ export const GUIDE_SOURCES = {
   "mcp": {
     "repository": "wbern/gascity",
     "path": "examples/gc-mcp/README.md",
-    "sha256": "93c296e75e9f0a14b0eff4d1e42db0fbd28b4d873d4c0db7dca7ee7f67f3955a"
+    "sha256": "1eb9aa3b0cb0954e7e506a104f0131b16f4cb07c0739fd4b865a09cb17a3c16b"
   },
   "reply": {
     "repository": "wbern/gascity",
     "path": "examples/gc-mcp/src/voice.ts",
-    "sha256": "311bb48016fb6e299b8fcf23e6f45e1abc629655b39d5e4d35a21c9ce3fd537b"
+    "sha256": "2856fc186d050af44a40f19470e78a78c9c24825c890ecbde29f43a0216458ff"
   },
   "agents": {
     "repository": "wbern/gascity",

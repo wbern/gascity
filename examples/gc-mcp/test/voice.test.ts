@@ -227,6 +227,43 @@ describe("session_state: working | idle | waiting for input", () => {
   });
 });
 
+describe("session observation authority", () => {
+  it("does not infer idle from a running active session without observed activity", async () => {
+    const w=world({detail:{"gc2-wisp-s1":{activity:null,turn:null,program_status:null}}});
+    const r=await w.tool(w.mk().d,R,"session_state").handler({session:"steve"});
+    expect(r.structured.state).toBe("unknown");expect(r.text).not.toMatch(/is idle/);
+  });
+  it("preserves an explicit program error as an observation, not task failure or idle", async () => {
+    const w=world({detail:{"gc2-wisp-s1":{program_status:{state:"error"},activity:"idle"}}});
+    const r=await w.tool(w.mk().d,R,"session_state").handler({session:"steve"});
+    expect(r.structured).toMatchObject({state:"reporting an error",source:"program_status"});
+    expect(r.text).toContain("reporting an error");expect(r.text).not.toMatch(/task failed|is idle/);
+  });
+});
+
+describe("wait observation boundaries",()=>{
+ it("stops on a reported input blocker or program error without claiming task failure or cancelling work",async()=>{
+  for(const [state,reason] of [["blocked","agent_needs_input"],["error","agent_reported_error"]]){
+   const detail={program_status:{state,kind:"permission"}};
+   const w=world({detail:{"gc2-wisp-www":detail}});
+   const {gate,d}=w.mk();const sent=await gate.submit(W,undefined,"check fixture");
+   const r=await w.tool(d,R,"wait_for_reply").handler({handle:sent.structured.handle,max_seconds:20});
+   expect(r.structured).toMatchObject({reason,complete:false,completion:"not_proven",reply_available:false,wait_stopped:true});
+   expect(r.structured.waited_ms).toBe(0);expect(w.posts()).toHaveLength(1);
+   expect(w.markers.resolve(R.client,String(sent.structured.handle))?.cancelledAt).toBeUndefined();
+   detail.program_status.state="working";w.transcripts["gc2-wisp-www"]=[asst(T0+1,"Resumed output")];
+   const resumed=await w.tool(d,R,"wait_for_reply").handler({handle:sent.structured.handle,max_seconds:1});
+   expect(resumed.structured).toMatchObject({page:"Resumed output",complete:false});expect(w.posts()).toHaveLength(1);
+  }
+ });
+ it("preserves an available candidate and reports the concurrent input blocker separately",async()=>{
+  const w=world({detail:{"gc2-wisp-www":{program_status:{state:"blocked",kind:"question"}}},transcripts:{"gc2-wisp-www":[asst(T0+1,"Which branch?")]}});
+  const {gate,d}=w.mk();const sent=await gate.submit(W,undefined,"check fixture");
+  const r=await w.tool(d,R,"wait_for_reply").handler({handle:sent.structured.handle,max_seconds:20});
+  expect(r.structured).toMatchObject({page:"Which branch?",complete:false,agent_observation:{state:"waiting for input",source:"program_status",kind:"question"}});
+ });
+});
+
 describe("wait_for_reply: bounded, since the send, never unbounded", () => {
   it("cancels only the selected handle, persists stop intent, and makes no supervisor call to cancel", async () => {
     const w = world(); const { gate, d } = w.mk();

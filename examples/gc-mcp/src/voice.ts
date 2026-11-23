@@ -45,7 +45,7 @@ export function stateSource(full: any, waiting: boolean): string {
   if (full?.activity) return "activity";
   return "state";
 }
-export type AgentState = "waiting for input" | "stuck" | "not running" | "working" | "idle" | "unknown";
+export type AgentState = "waiting for input" | "stuck" | "not running" | "working" | "idle" | "reporting an error" | "unknown";
 /** One place that decides working / idle / waiting / stuck / not running from what the supervisor reports about a session. */
 export function deriveState(full: any, hit: SessionRef, waiting: boolean): AgentState {
   const ps = full?.program_status?.state as string | undefined;
@@ -53,8 +53,9 @@ export function deriveState(full: any, hit: SessionRef, waiting: boolean): Agent
   if (waiting || ps === "blocked") return "waiting for input";
   if (/strand|fail|error|crash|stuck|quarantin|dead/i.test(raw)) return "stuck";
   if (full?.running === false || hit.running === false || /asleep|closed|stopp|suspend|creating|drain/i.test(raw)) return "not running";
+  if (ps === "error") return "reporting an error";
   if (ps === "working" || full?.turn?.state === "running" || /work|busy|think|tool|turn/i.test(String(full?.activity ?? ""))) return "working";
-  if (ps === "idle" || ps === "done" || ps === "error" || full?.turn?.state === "ended" || /idle|wait|ready/i.test(String(full?.activity ?? "")) || /active/i.test(raw)) return "idle";
+  if (ps === "idle" || ps === "done" || full?.turn?.state === "ended" || /idle|wait|ready/i.test(String(full?.activity ?? ""))) return "idle";
   return "unknown";
 }
 
@@ -224,6 +225,11 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
             try { detail = await d.gc.get(`/session/${encodeURIComponent(hit.id)}`, {}, readBudget(3000), undefined, cancellation?.signal); } catch { /* the transcript read below still tells */ }
             const stoppedAfterRead = trackingStatus(); if (stoppedAfterRead) return stoppedAfterRead;
             if (clock.now() >= deadline) break;
+            const programState = detail?.program_status?.state;
+            const blocker = programState === "blocked" || programState === "error" ? {
+              state: programState === "blocked" ? "waiting for input" : "reporting an error", source: "program_status",
+              kind: programState === "blocked" && ["permission", "question", "auth"].includes(detail?.program_status?.kind) ? detail.program_status.kind : undefined,
+            } : undefined;
             const sig = `${detail?.last_active}|${detail?.activity}|${detail?.turn?.state}|${detail?.program_status?.state}|${detail?.state}`;
             if (sig !== lastSig) { lastSig = sig; dirty = true; }
             if (fetches < MAX_TRANSCRIPT_FETCHES && (fetches === 0 || dirty || clock.now() - lastFetchAt >= RECHECK_MS)) {
@@ -232,9 +238,14 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
               const stoppedAfterTranscript = trackingStatus(); if (stoppedAfterTranscript) return stoppedAfterTranscript;
               if (clock.now() >= deadline) break;
               if (seen) {   // Transcript text proves only that output exists, never task completion.
-                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
+                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", agent_observation: blocker, handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
               }
             }
+            if (blocker) return {
+              text: clip(`${speakName(label)} is ${blocker.state}. Check session_state for the current request or error. Task completion is unverified; do not resend automatically.`, SPOKEN_MAX),
+              structured: { found: true, id: hit.id, name: label, complete: false, completion: "not_proven", reply_available: false, page: "", wait_stopped: true,
+                reason: programState === "blocked" ? "agent_needs_input" : "agent_reported_error", agent_observation: blocker, handle: a.handle, waited_ms: clock.now() - start, polls, fetches },
+            };
             const remaining = deadline - clock.now();
             if (remaining <= 0) break;
             await clock.sleep(Math.min(POLL_MS, remaining));

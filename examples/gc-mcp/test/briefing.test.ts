@@ -226,9 +226,11 @@ describe("briefing on a noisy real-world city: calm, not alarming", () => {
     const holds = await city({ ...noisy, sessions: [S("gc2-wisp-a1", { alias: "crm/steve", activity: "idle", active_bead: "gcw-a111" }), S("gc2-wisp-a2", { alias: "gc-architect", activity: "in-turn" }),
       S("gc2-wisp-a3", { alias: "devops", activity: "idle" }), S("gc2-wisp-a4", { alias: "marketer" })], inprogress: [{ assignee: "devops", title: "Renew the certificate", updated_at: iso(T0) }] }).brief();
     expect(holds.text).toMatch(/3 agents are working: crm steve on Fix the login redirect.*devops on Renew the certificate|3 agents are working: devops on Renew the certificate.*crm steve on Fix the login redirect/);
-    expect((holds.structured as any).counts).toMatchObject({ working: 3, idle: 1 });
+    expect((holds.structured as any).counts).toMatchObject({ working: 3, idle: 0, unknown: 1 });
     const nobody = await city({ ...noisy, sessions: [S("gc2-wisp-a3", { alias: "devops", activity: "idle" }), S("gc2-wisp-a4", { alias: "marketer" })] }).brief();
-    expect(nobody.text).toContain("Nobody is working right now.");
+    expect(nobody.text).toContain("unknown activity");
+    const idle = await city({ ...noisy, sessions: [S("gc2-wisp-a3", { alias: "devops", activity: "idle" })], inprogress: [] }).brief();
+    expect(idle.text).toContain("Nobody is working right now.");
   });
   it("stays within 400 characters, in the order needs, working, finished, with no ellipsis characters and no ids", async () => {
     const r = await city(noisy).brief();
@@ -312,3 +314,10 @@ describe("tool titles and descriptions are plain spoken intent", () => {
     expect(by.latest_reply).toMatch(/last said|newest/i);
   });
 });
+
+ it("keeps unknown activity and reported program errors out of idle and completed work",async()=>{
+  const r=await city({sessions:[S('unknown',{alias:'uncertain'}),S('error',{alias:'reporter',program_status:{state:'error'}})],pending:[],gates:[],events:[],mail:{items:[]}}).brief();
+  expect(r.structured.counts).toMatchObject({unknown:1,reported_error:1,idle:0,working:0});
+  expect((r.structured.attention as any[]).some(a=>a.kind==='reported_error')).toBe(true);
+  expect(r.text).toMatch(/reported an error/);expect(r.text).not.toMatch(/Nobody is working/);
+ });

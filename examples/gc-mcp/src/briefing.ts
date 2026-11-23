@@ -102,16 +102,18 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
         // ---- classify sessions (waiting > stuck > not running > working > idle). An agent in a turn, or holding a bead, is working, never idle.
         const sessions: SessionRef[] = sess ? itemsOf(sess) : [];
         const waitingIds = new Set<string>(itemsOf(pend).map((p: any) => String(p.session_id)));
-        const counts = { working: 0, idle: 0, waiting: 0, stuck: 0, not_running: 0 };
-        const working: { s: SessionRef; title: string }[] = [], waiting: SessionRef[] = [], stuck: SessionRef[] = [];
+        const counts = { working: 0, idle: 0, waiting: 0, stuck: 0, not_running: 0, reported_error: 0, unknown: 0 };
+        const working: { s: SessionRef; title: string }[] = [], waiting: SessionRef[] = [], stuck: SessionRef[] = [], reportedErrors: SessionRef[] = [];
         for (const s of sessions) {
           const st = deriveState(s, s, waitingIds.has(s.id));
           const heldTitle = holds(s, assignees);
           if (st === "waiting for input") { counts.waiting++; waiting.push(s); }
           else if (st === "stuck") { counts.stuck++; stuck.push(s); }
+          else if (st === "reporting an error") { counts.reported_error++; reportedErrors.push(s); }
           else if (st === "not running") counts.not_running++;
           else if (st === "working" || s.active_bead || heldTitle) { counts.working++; working.push({ s, title: isReadDenied(d, s) ? "" : (heldTitle ?? "") }); }   // a protected session may be named as busy, but what it works on is not ours to say
-          else counts.idle++;
+          else if (st === "idle") counts.idle++;
+          else counts.unknown++;
         }
         for (const id of waitingIds) if (!sessions.some((s) => s.id === id)) { counts.waiting++; waiting.push({ id }); }
         working.sort((a, b) => String(b.s.last_active).localeCompare(String(a.s.last_active)));
@@ -151,6 +153,7 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
         if (waiting.length) attention.push({ kind: "waiting_for_input", count: waiting.length, items: waiting.map(spokenName) });
         const stuckCount = Math.max(stuck.length, quarantined);
         if (stuckCount) attention.push({ kind: "stuck", count: stuckCount, items: stuck.map(spokenName) });
+        if (reportedErrors.length) attention.push({ kind: "reported_error", count: reportedErrors.length, items: reportedErrors.map(spokenName) });
         if (flagged.length) attention.push({ kind: "mail", count: flagged.length, items: flagged.slice(0, 2).map((m: any) => `${spokenTitle(m.subject, 40)} from ${spokenName({ id: "", alias: String(m.from ?? "") })}`) });
 
         // ---- sentences, in order: needs you, who is working, what finished, mail (only if useful)
@@ -162,13 +165,14 @@ export function buildBriefingTools(d: Deps, who?: WriteCtx): ToolDef[] {
               : `${atLeast}${plural(a.count, "decision")}${list ? `, newest first: ${list}` : ""}`;
           }
           if (a.kind === "waiting_for_input") return `${plural(a.count, "agent")} waiting for input${a.items.length ? ` (${[...new Set(a.items)].slice(0, 2).join(", ")})` : ""}`;
+          if (a.kind === "reported_error") return `${plural(a.count, "agent")} reported an error${a.items.length ? ` (${[...new Set(a.items)].slice(0, 2).join(", ")})` : ""}`;
           if (a.kind === "stuck") return `${a.count} stuck${a.items.length ? ` (${[...new Set(a.items)].slice(0, 2).join(", ")})` : ""}`;
           return `mail about ${a.items[0]}`;
         });
         const needs = (n: number) => attention.length ? `Needs you: ${needsFor(n).join("; ")}.` : (gates && pend && sess ? "Nothing needs you right now." : "");
         const workLine = (n: number) => {
           if (!sess) return "";
-          if (!working.length) return counts.idle ? "Nobody is working right now." : "";
+          if (!working.length) return counts.unknown ? `No confirmed working activity; ${plural(counts.unknown, "agent")} with unknown activity.` : counts.idle ? "Nobody is working right now." : "";
           const xs = shown.slice(0, n).map((w) => (w.title ? `${spokenName(w.s)} on ${w.title}` : spokenName(w.s)));
           const rest = working.length - xs.length;
           return `${working.length === 1 ? "1 agent is" : `${working.length} agents are`} working: ${rest > 0 ? `${xs.join(", ")} and ${rest} more` : andList(xs)}.`;

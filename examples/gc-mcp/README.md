@@ -317,3 +317,16 @@ snapshot still reads one compaction segment, not a bounded number of messages;
 the existing byte cap, three-read ceiling, total wait deadline and cancellation
 remain in force. This reduces repeated transfer, not core parsing cost or
 provider history loss; it does not establish lossless reply correlation.
+
+Session observations distinguish an active/running registry record from observed
+activity. With no activity/turn/program report, state is unknown rather than idle.
+An explicit program error is reported as such; it does not establish that the
+accepted task failed (the core may still treat it as an input boundary). Briefings
+keep unknown and reported-error counts separate from idle and completed work.
+
+A wait returns early on a current explicit program input blocker or error,
+after checking for available candidate text. Candidate text retains priority
+and carries that concurrent observation separately. No new supervisor read or
+mutation is added; absence of a program report stays unknown. Early return
+does not cancel the handle or agent work, prove a request-specific failure,
+or prevent a later authorized wait after the blocker is resolved.
