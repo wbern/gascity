@@ -10,6 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createApp, listen, type AppOpts } from "../src/app.js";
 import { GcClient } from "../src/gc-client.js";
 import { hashPassphrase } from "../src/oauth.js";
+import { SendMarkers } from "../src/writes.js";
 import * as F from "./fixtures/index.js";
 
 const PASS = "correct horse battery staple";
@@ -115,6 +116,39 @@ describe("authorization-code + PKCE flow", () => {
     const r = await client.callTool({ name: "city_status", arguments: {} });
     expect((r.content as { text: string }[])[0].text).toMatch(/23 of 40 agents running/);
     await client.close();
+  });
+  it("resumes a pending wait through a fresh authenticated MCP connection using only returned arguments", async () => {
+    const markers = new SendMarkers();
+    const since = Date.now();
+    const handle = markers.create(CID, "s1", since);
+    let turns: { role: string; text: string; timestamp: string }[] = [];
+    const methods: string[] = [];
+    const gc = new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl: (async (url: string, init: RequestInit) => {
+      methods.push(String(init.method));
+      const pathname = new URL(url).pathname;
+      return Response.json(pathname.endsWith("/sessions")
+        ? { total: 1, items: [{ id: "s1", alias: "agent", running: true }] }
+        : pathname.endsWith("/transcript") ? { id: "s1", turns } : { id: "s1", state: "active" });
+    }) as typeof fetch });
+    const s = await boot({ callsPerMinute: 30, deps: { gc, markers, mailAgent: "human", now: () => new Date() } });
+    const { access_token } = await s.login();
+    const check = async (name: string, args: Record<string, unknown>) => {
+      const client = new Client({ name: "reply-check", version: "1" });
+      try {
+        await client.connect(new StreamableHTTPClientTransport(new URL(s.res), { requestInit: { headers: { authorization: `Bearer ${access_token}` } } }));
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).not.toBe(true);
+        return result.structuredContent as Record<string, unknown>;
+      } finally { await client.close(); }
+    };
+    const pending = await check("wait_for_reply", { handle, max_seconds: 1 });
+    expect(pending).toMatchObject({ reply_available: false, complete: false });
+    const next = pending.continue_wait as { tool: string; arguments: Record<string, unknown> };
+    expect(next).toEqual({ tool: "wait_for_reply", arguments: { handle, max_seconds: 1 } });
+    turns = [{ role: "assistant", text: "Delayed reply is ready.", timestamp: new Date(since + 1000).toISOString() }];
+    const result = await check(next.tool, next.arguments);
+    expect(result).toMatchObject({ reply_available: true, page: "Delayed reply is ready.", completion: "not_proven" });
+    expect(new Set(methods)).toEqual(new Set(["GET"]));
   });
   it("wrong passphrase issues no code; deny returns access_denied", async () => {
     const s = await boot();

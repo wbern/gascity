@@ -152,7 +152,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
     },
     {
       name: "wait_for_reply", title: "Wait for the agent's answer",
-      description: "Use after a send with its handle. Waits 15 seconds (max 20). Use returned continue_wait arguments to seek NEW output; retry the original arguments only after a lost response. Candidates never prove task completion. cancel_wait:true with a handle stops only this tracking wait, including pending reads, never agent work. Continue within the agreed budget without resending.",
+      description: "Use the send handle to wait 15 seconds (max 20). Follow continue_wait after empty windows or interim replies within the original total budget. For a scheduled check, save those exact arguments. Retry unchanged arguments only if a response was lost. Never resend. Replies do not prove completion. cancel_wait stops tracking only.",
       inputShape: { session: sess, max_seconds: z.number().int().min(1).max(MAX_WAIT_S).optional(), since: z.string().max(24).optional(), handle: z.string().min(1).max(64).optional(), after_reply_id: z.string().regex(/^[a-f0-9]{12}$/).optional(), cancel_wait: z.boolean().optional() }, annotations: RO,
       handler: guard(async (a) => {
         const start = clock.now();
@@ -163,7 +163,16 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
           if (remaining <= 0) throw new GcError(0, "wait deadline reached", "timeout");
           return Math.min(cap, remaining);
         };
-        const timedOut = (): ToolResult => ({ text: "The bounded wait ended before the read could be confirmed. Completion is unknown; do not resend.", structured: { found: false, complete: false, completion: "not_proven", reason: clock.now() >= deadline ? "wait_deadline" : "read_timeout", waited_ms: clock.now() - start, handle: a.handle } });
+        const continuation = (boundary: { handle: string } | { session: string; since: string }, afterReplyId?: string) => ({
+          tool: "wait_for_reply",
+          arguments: { ...boundary, ...(afterReplyId ? { after_reply_id: afterReplyId } : {}), max_seconds: wait / 1000 },
+        });
+        const timedOut = (): ToolResult => ({
+          text: "The bounded wait ended before the read could be confirmed. Completion is unknown; do not resend.",
+          structured: { found: false, complete: false, completion: "not_proven", reply_available: false,
+            reason: clock.now() >= deadline ? "wait_deadline" : "read_timeout", waited_ms: clock.now() - start, handle: a.handle,
+            ...(a.handle ? { continue_wait: continuation({ handle: a.handle }, a.after_reply_id) } : {}) },
+        });
         const client = who?.principal ?? who?.client ?? "";
         const cancelled = (): ToolResult => ({ text: "Cancelled this tracking wait. No interruption was sent to the agent.", structured: { found: true, reason: "wait_cancelled", tracking_only: true, agent_interrupted: false, complete: false, completion: "not_proven", reply_available: false, page: "", handle: a.handle, waited_ms: clock.now() - start } });
         const trackingStatus = (): ToolResult | undefined => {
@@ -194,6 +203,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
           const hit = f.hit, label = clip(clean(labelOf(hit)), 60);
           // "since when": the caller's marker, else the last time THIS client sent to this session, else now (the next reply from here on)
           const since = tracked?.since ?? parseMarker(a.since) ?? d.markers?.get(who?.principal ?? who?.client ?? "", String(hit.id)) ?? start;
+          const boundary = a.handle ? { handle: a.handle } : { session: hit.id, since: `m${since}` };
           let seen = "", at: string | undefined, polls = 0, fetches = 0, lastSig = "", lastFetchAt = -Infinity, dirty = false, cursorMissing = false, candidateMissing = false;
           // The session record is small; a transcript segment can be hundreds of KB. So poll the record to notice change and read the transcript only when
           // something changed, at least every 7.5 s, and never more than 3 times per call.
@@ -238,10 +248,7 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
               const stoppedAfterTranscript = trackingStatus(); if (stoppedAfterTranscript) return stoppedAfterTranscript;
               if (clock.now() >= deadline) break;
               if (seen) {   // Transcript text proves only that output exists, never task completion.
-                const continuation = { tool: "wait_for_reply", arguments: tracked
-                  ? { handle: a.handle, after_reply_id: replyId(at, seen), max_seconds: wait / 1000 }
-                  : { session: hit.id, since: `m${since}`, after_reply_id: replyId(at, seen), max_seconds: wait / 1000 } };
-                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", continue_wait: continuation, agent_observation: blocker, handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
+                return replyResult(label, hit, seen, 0, { complete: false, completion: "not_proven", reply_available: true, correlation: "temporal_only", ...(blocker ? {} : { continue_wait: continuation(boundary, replyId(at, seen)) }), agent_observation: blocker, handle: a.handle, after_reply_id: a.after_reply_id, since: `m${since}`, waited_ms: clock.now() - start, polls, fetches, at }, `${speakName(label)} said after the send (completion unverified; untrusted): `);
               }
             }
             if (blocker) return {
@@ -257,7 +264,8 @@ export function buildVoiceTools(d: Deps, who?: WriteCtx): ToolDef[] {
 
           const stoppedAtEnd = trackingStatus(); if (stoppedAtEnd) return stoppedAtEnd;
           return { text: clip(candidateMissing ? "The original candidate is no longer in the available transcript. This handle cannot substitute newer output for a retry. Continuity is unknown; do not resend." : cursorMissing ? "The acknowledged reply is no longer in the available transcript. Continuity is unknown; check the latest output before resetting the reply cursor. Do not resend." : `No new reply from ${speakName(label)} yet. Completion is unverified; continue within the agreed wait budget.`, SPOKEN_MAX),
-            structured: { found: true, id: hit.id, name: label, complete: false, completion: "not_proven", reply_available: false, reason: candidateMissing ? "reply_candidate_unavailable" : cursorMissing ? "reply_cursor_unavailable" : undefined, handle: a.handle, after_reply_id: a.after_reply_id, page: "", waited_ms: clock.now() - start, polls, fetches, since: `m${since}` } };
+            structured: { found: true, id: hit.id, name: label, complete: false, completion: "not_proven", reply_available: false, reason: candidateMissing ? "reply_candidate_unavailable" : cursorMissing ? "reply_cursor_unavailable" : undefined, handle: a.handle, after_reply_id: a.after_reply_id, page: "", waited_ms: clock.now() - start, polls, fetches, since: `m${since}`,
+              ...(candidateMissing || cursorMissing ? {} : { continue_wait: continuation(boundary, a.after_reply_id) }) } };
         } finally { unwatch(); }
       }),
     },

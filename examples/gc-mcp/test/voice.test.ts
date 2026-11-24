@@ -328,8 +328,11 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     const unchanged = await tool.handler(nextArgs);
     expect(unchanged.structured).toMatchObject({ reply_available: false, page: "", waited_ms: 3000, after_reply_id: interim.structured.reply_id });
     expect(unchanged.text).not.toContain("I'll check");
+    expect(unchanged.structured.continue_wait).toEqual({ tool: "wait_for_reply", arguments: nextArgs });
     publish = true;
-    const next = await tool.handler(nextArgs);
+    // A fresh tool invocation can resume using only the previous response.
+    const resumed = w.tool(d, W, "wait_for_reply");
+    const next = await resumed.handler((unchanged.structured.continue_wait as { arguments: typeof nextArgs }).arguments);
     expect(next.structured.page).toContain("Tests now pass");
     expect(next.structured.reply_id).not.toBe(interim.structured.reply_id);
     expect(next.structured).toMatchObject({ complete: false, completion: "not_proven" });
@@ -346,16 +349,19 @@ describe("wait_for_reply: bounded, since the send, never unbounded", () => {
     const tool = w.tool(d, W, "wait_for_reply");
     const first = await tool.handler({ handle: ack.structured.handle });
     const started = w.clock.t;
-    for (let i = 0; i < 8; i++) {
-      const next = await tool.handler({ handle: ack.structured.handle, after_reply_id: first.structured.reply_id, max_seconds: 15 });
-      expect(next.structured).toMatchObject({ page: "", reply_available: false, waited_ms: 15000 });
-      expect(next.text).not.toContain("I'll check");
+    let response = first;
+    while (w.clock.t - started < 120_000) {
+      const continuation = response.structured.continue_wait as { arguments: Record<string, unknown> };
+      response = await tool.handler(continuation.arguments);
+      expect(response.structured).toMatchObject({ page: "", reply_available: false, waited_ms: 15000 });
+      expect(response.text).not.toContain("I'll check");
     }
     expect(w.clock.t - started).toBe(120000);
     w.transcripts["gc2-wisp-www"] = [asst(w.clock.t, "The prior segment has disappeared.")];
     const gap = await tool.handler({ handle: ack.structured.handle, after_reply_id: first.structured.reply_id, max_seconds: 1 });
     expect(gap.structured).toMatchObject({ reason: "reply_cursor_unavailable", reply_available: false, page: "", complete: false });
     expect(gap.text).toContain("Continuity is unknown");
+    expect(gap.structured.continue_wait).toBeUndefined();
     expect(w.posts()).toHaveLength(1);
   });
   it("a handle-only retry never silently substitutes output when its first candidate was compacted away", async () => {

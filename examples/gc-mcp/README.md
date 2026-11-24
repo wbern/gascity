@@ -176,6 +176,16 @@ clients remain supported. After receiving a candidate, pass its `reply_id` as
 `after_reply_id` on the next wait to suppress that unchanged candidate and wait
 boundedly for different output. Keep arguments unchanged when retrying a lost
 response: reading never consumes or advances a server-side acknowledgement.
+A pending window returns exact `continue_wait.arguments`; callers can use them
+without asking the user again until the original total deadline. A continuity
+gap, reported blocker, cancellation or access denial stops automatic waiting.
+Use the returned arguments as a read-only check in a scheduled task when the
+host supports connected-app scheduling and uses the original authenticated
+principal. Save the arguments in the task prompt so the check does not depend
+on voice chat context. A scheduled check reports a reply candidate, a blocker,
+or that the reply is still pending. Confirm task creation through the host.
+Scheduling and notification delivery belong to the host client.
+
 A single deadline starts before session lookup and is carried through every
 lookup page, status read, transcript read and sleep. Each transport read aborts
 at its remaining budget; `waited_ms` includes lookup. No background read races
