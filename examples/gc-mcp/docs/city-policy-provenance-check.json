@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "disposition": "author-side evidence only; no new runtime policy enabled",
+  "verified_at": "2026-11-23T00:49:44.822588+00:00",
+  "connection": {
+    "operator_label": "GC3",
+    "host": "clodcod",
+    "internal_city": "gc2",
+    "basis": "existing verified host/city profile; internal gc2 name alone is not unique"
+  },
+  "committed_review_manifest": {
+    "repository": "wbern/gas-city-infra",
+    "path": "config/review-lane-ownership.toml",
+    "revision": "ee4cd06f4fe1e1b55ebaa1233ae190776c9db70a",
+    "sha256": "fc871f782d066e59e5467e1dc8fb98cdbd5af7d9ad54d106ccafc4ab1356bee7",
+    "working_matches_commit": true,
+    "lanes": [
+      {
+        "repository": "wbern/gascity",
+        "review_context": "code-review",
+        "owner_city": "gc3",
+        "owner_order": "gas-city-wbern-pr-review"
+      },
+      {
+        "repository": "wbern/gas-city-infra",
+        "review_context": "code-review",
+        "owner_city": "gc3",
+        "owner_order": "gas-city-infra-pr-review"
+      },
+      {
+        "repository": "wbern/crm",
+        "review_context": "code-review",
+        "owner_city": "gc3",
+        "owner_order": "crm-pr-review"
+      },
+      {
+        "repository": "wbern/crm",
+        "review_context": "ux-review",
+        "owner_city": "gc3",
+        "owner_order": "crm-ux-review"
+      }
+    ]
+  },
+  "observed_owner_orders": [
+    {
+      "name": "gas-city-infra-pr-review",
+      "enabled": true
+    },
+    {
+      "name": "gas-city-wbern-pr-review",
+      "enabled": true
+    },
+    {
+      "name": "crm-pr-review",
+      "enabled": true
+    },
+    {
+      "name": "crm-ux-review",
+      "enabled": true
+    }
+  ],
+  "order_list_coverage": {
+    "count": 144,
+    "enabled": 99,
+    "disabled": 45,
+    "total": 144,
+    "filter": "all"
+  },
+  "verified_public_skills": [
+    {
+      "repository": "wbern/gas-city-infra",
+      "path": "city-template/skills/gc-dispatch/SKILL.md",
+      "revision": "ee4cd06f4fe1e1b55ebaa1233ae190776c9db70a",
+      "sha256": "884380bc051d4dd3053eda5d5b9ef5dee986effc8cb2472766c083c50c8bdc97",
+      "installed_match": true
+    },
+    {
+      "repository": "wbern/gas-city-infra",
+      "path": "city-template/packs/gas-city-basics/skills/gas-city-pr-review/SKILL.md",
+      "revision": "ee4cd06f4fe1e1b55ebaa1233ae190776c9db70a",
+      "sha256": "42822b5c918cc14a8942484f4edce14940c64ed4648688bf5b65b1520e1b933a",
+      "installed_match": true
+    }
+  ],
+  "dispatch_provenance": {
+    "routing_source_path": "city-template/config/worker-level-routing-v1.toml",
+    "committed_routing_sha256": "30509e19c9ef3695f2baf0f1ca3acee3c8654434083240ebf0db2a57c38da41e",
+    "working_template_sha256": "9b7c185ab33ec934dd985092ce2073293a252f78bf4acfa87d73a31deb8ac9ea",
+    "installed_routing_sha256": "5b5ceb6bcdcb36a71657d0980f1c609e0d0db3941bec84d45f4e222730f0a1e2",
+    "committed_template_matches_installed": false,
+    "working_template_matches_installed": false,
+    "selector_path": "scripts/worker-level-sling.py",
+    "committed_selector_sha256": "7a0f5bfbc69710dc4d656b82fa09e3f9909d354194e5a1a3116f2e33b21ec607",
+    "installed_selector_sha256": "3b105cb9fc8e7bc6d27e1b39b5bca6c448e275356b68bf18ce9c07a5063a8042",
+    "selector_matches_commit": false,
+    "observed_profile_levels": {
+      "default": [
+        "codex",
+        "gemini"
+      ],
+      "stronger": [
+        "codex",
+        "gemini"
+      ]
+    },
+    "observed_crm_default_provider": "claude",
+    "status": "partial provenance; installed override and selector differ from committed source; not a verified committed default"
+  },
+  "next_scope": {
+    "implementable": "bounded host/city identity and committed review-lane custody; dispatch constraints only where independently verified",
+    "qualification_needed": "approved authoritative source/revision for current installed CRM provider override and modified selector",
+    "connector_boundary": "core bead_sling transport does not itself execute the city worker-level selector",
+    "deferred": "efficient structured transcript cursor work; coordinator prioritized city-policy provenance"
+  }
+}

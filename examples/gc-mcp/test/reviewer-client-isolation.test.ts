@@ -1,0 +1,205 @@
+import { describe, it, expect, afterAll } from "vitest";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { createApp, listen, type AppOpts } from "../src/app.js";
+import { GcClient } from "../src/gc-client.js";
+import { hashPassphrase } from "../src/oauth.js";
+import { isSafeRedirect, validateExtraRedirects } from "../src/dcr.js";
+import * as F from "./fixtures/index.js";
+
+const PASS = "correct horse battery staple";
+const HASH = hashPassphrase(PASS);
+const CLAUDE_CB = "https://claude.ai/api/mcp/auth_callback";
+const CLAUDE_CB2 = "https://claude.com/api/mcp/auth_callback";
+const GPT_CB = "https://chatgpt.com/connector/oauth/cb_123-AB";
+const GPT_PLATFORM = "https://chatgpt.com/connector_platform_oauth_redirect";
+const LOOP = "http://127.0.0.1:53682/callback";
+const b64u = (b: Buffer) => b.toString("base64url");
+const cleanups: (() => void)[] = [];
+afterAll(() => cleanups.forEach((f) => f()));
+const fetchImpl = (async (url: string) => new Response(JSON.stringify(new URL(url).pathname.endsWith("/usage") ? F.usage : F.status), { status: 200 })) as unknown as typeof fetch;
+const freePort = () => new Promise<number>((res) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => res(p)); }); });
+
+async function boot(over: Partial<AppOpts> = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gcmcp-dcr-"));
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const res = `${base}/mcp`;
+  const clock = { t: 1_800_000_000_000 };
+  const { app, provider } = createApp({
+    deps: { gc: new GcClient({ baseUrl: "http://127.0.0.1:1", city: "gc2", fetchImpl }), mailAgent: "human", now: () => new Date() },
+    publicUrl: new URL(base), ownerHash: HASH, staticClientId: "static-claude-id-0123456789",
+    stateFile: path.join(dir, "state.json"), auditFile: path.join(dir, "audit.jsonl"), controlDir: dir, now: () => clock.t, ...over,
+  });
+  const srv = await listen(app, port);
+  cleanups.push(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const register = (body: object, raw?: string) => fetch(`${base}/register`, { method: "POST", headers: { "content-type": "application/json" }, body: raw ?? JSON.stringify(body) });
+  const reg = async (uris: string[], extra: object = {}) => register({ redirect_uris: uris, client_name: "Some App", token_endpoint_auth_method: "none", ...extra });
+  const registered = async (uris: string[], extra: object = {}) => { const r = await reg(uris, extra); expect(r.status, JSON.stringify(uris)).toBe(201); return (await r.json()) as any; };
+  const authorize = (cid: string, redirect: string, scope?: string) => {
+    const verifier = b64u(crypto.randomBytes(32));
+    const u = new URL(`${base}/authorize`);
+    const q: Record<string, string> = { response_type: "code", client_id: cid, redirect_uri: redirect, code_challenge: b64u(crypto.createHash("sha256").update(verifier).digest()), code_challenge_method: "S256", state: "s", resource: res };
+    if (scope) q.scope = scope;
+    Object.entries(q).forEach(([k, v]) => u.searchParams.set(k, v));
+    return fetch(u, { redirect: "manual" }).then((r) => ({ r, verifier }));
+  };
+  const form = (b: Record<string, string>) => ({ method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(b) });
+  const consent = (html: string, passphrase = PASS) => fetch(`${base}/consent`, { ...form({ rid: /name=rid value="([^"]+)"/.exec(html)![1], passphrase, decision: "approve" }), redirect: "manual" });
+  // the whole flow for a registered client: returns the page, the consent response and (when approved) the token
+  const login = async (cid: string, redirect: string, scope?: string) => {
+    const { r, verifier } = await authorize(cid, redirect, scope);
+    const html = await r.text();
+    expect(r.status).toBe(200);
+    const c = await consent(html);
+    const code = new URL(c.headers.get("location")!).searchParams.get("code")!;
+    const t = await fetch(`${base}/token`, form({ grant_type: "authorization_code", client_id: cid, code, code_verifier: verifier, redirect_uri: redirect, resource: res }));
+    return { html, csp: r.headers.get("content-security-policy"), token: (await t.json()) as any };
+  };
+  const meta = async () => (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as any;
+  const state = () => (fs.existsSync(path.join(dir, "state.json")) ? JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")) : { clients: {} });
+  return { base, dir, clock, provider, register, reg, registered, authorize, consent, login, form, meta, state, res, stop: () => new Promise<void>((resolve, reject) => srv.close(e => e ? reject(e) : resolve())) };
+}
+const ON = { allowDcr: true };
+
+
+describe("review: OAuth client identity through HTTP MCP",()=>{
+ it("does not let two registered clients with the same display name share cursor state",async()=>{
+  const fetchImpl=(async()=>new Response(JSON.stringify({items:[{description:"ordinary words here ".repeat(900)}]}))) as typeof fetch;
+  const s=await boot({allowDcr:true,deps:{gc:new GcClient({baseUrl:"http://127.0.0.1:1",city:"gc2",fetchImpl}),mailAgent:"human",now:()=>new Date()}});
+  const a=await s.registered([CLAUDE_CB],{client_name:"Identical name"});
+  const b=await s.registered([CLAUDE_CB],{client_name:"Identical name"});
+  expect(a.client_id).not.toBe(b.client_id);
+  const ta=await s.login(a.client_id,CLAUDE_CB),tb=await s.login(b.client_id,CLAUDE_CB);
+  const call=async(token:string,args:object)=>{
+   const r=await fetch(s.res,{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream",authorization:"Bearer "+token},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"gc_api_read",arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split("\n").find(x=>x.startsWith("data:"));
+   return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const page=await call(ta.token.access_token,{operation:"get-v0-city-by-city-name-beads"});
+  expect(page.next_cursor).toBeTypeOf("string");
+  const stolen=await call(tb.token.access_token,{cursor:page.next_cursor});
+  expect(stolen.error).toBe(true);
+  const continued=await call(ta.token.access_token,{cursor:page.next_cursor});
+  expect(continued.error).not.toBe(true);
+  expect(continued.page).toContain("ordinary words here");
+ });
+});
+
+describe('OAuth client send-marker identity through HTTP MCP',()=>{
+ it('only the client that sent sees replies between its send and the next wait',async()=>{
+  const sent=1_800_000_000_000,waitStart=sent+5000;
+  const clock={t:waitStart,now(){return this.t;},async sleep(ms:number){this.t+=ms;}};
+  let posts=0;
+  const fetchImpl=(async(url:string,init:RequestInit)=>{
+   const p=new URL(url).pathname;
+   if(init.method==='POST'){posts++;return new Response(JSON.stringify({status:'accepted'}));}
+   const body=p.endsWith('/sessions')?{total:1,items:[{id:'s1',alias:'agent',state:'active',running:true}]}
+    :p.endsWith('/transcript')?{turns:[{role:'assistant',text:'Reply for the sending client.',timestamp:new Date(sent+1000).toISOString()}]}
+    :{state:'active',program_status:{state:'idle'},last_active:new Date(sent+1000).toISOString()};
+   return new Response(JSON.stringify(body));
+  })as typeof fetch;
+  const s=await boot({allowDcr:true,writes:{enabled:true},deps:{gc:new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl}),mailAgent:'human',now:()=>new Date(sent),clock}});
+  const a=await s.registered([CLAUDE_CB],{client_name:'Same display name'}),b=await s.registered([CLAUDE_CB],{client_name:'Same display name'});
+  const ta=await s.login(a.client_id,CLAUDE_CB,'gc:read gc:write'),tb=await s.login(b.client_id,CLAUDE_CB,'gc:read gc:write');
+  const call=async(token:string,name:string,args:object)=>{
+   const r=await fetch(s.res,{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:'Bearer '+token},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split('\n').find(x=>x.startsWith('data:'));
+   return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const ack=await call(ta.token.access_token,'send_to_session',{session:'agent',text:'Hello'});
+  expect(ack.sent).toBe(true);expect(ack.handle).toMatch(/^h/);
+  const stolen=await call(tb.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(stolen).toMatchObject({found:false,reason:'unknown_handle'});
+  const tracked=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(tracked).toMatchObject({reply_available:true,complete:false,completion:'not_proven',handle:ack.handle});
+  const unchanged=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,after_reply_id:tracked.reply_id,max_seconds:1});
+  expect(unchanged).toMatchObject({reply_available:false,page:'',waited_ms:1000,after_reply_id:tracked.reply_id});
+  const lostResponseRetry=await call(ta.token.access_token,'wait_for_reply',{handle:ack.handle,max_seconds:1});
+  expect(lostResponseRetry.reply_id).toBe(tracked.reply_id);
+  const own=await call(ta.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(own.page).toContain('Reply for the sending client.');
+  const otherStart=clock.t;const other=await call(tb.token.access_token,'wait_for_reply',{session:'agent',max_seconds:1});expect(other.page).toBe('');expect(other.since).toBe('m'+otherStart);expect(posts).toBe(1);
+ });
+});
+
+describe("persistent reply continuity through OAuth and HTTP MCP", () => {
+ for(const pendingSnapshot of [false,true]) it("restores handles and guards sends across restart; pending snapshot="+pendingSnapshot, async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"gc-reply-restart-"));cleanups.push(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const sent=1_800_000_000_000;
+  const clock={t:sent+5000,now(){return this.t;},async sleep(ms:number){this.t+=ms;}};
+  let pendingJournal:string|undefined;
+  const sendJournalFile=path.join(dir,"send-journal.json");
+  let posts=0,reads=0,turns=[{role:"assistant",text:"Original candidate.",timestamp:new Date(sent+1000).toISOString()}];
+  const fetchImpl=(async(url:string,init:RequestInit)=>{
+   const p=new URL(url).pathname;
+   if(init.method==="POST"){posts++;pendingJournal=fs.readFileSync(sendJournalFile,"utf8");return new Response(JSON.stringify({status:"accepted"}));}
+   reads++;
+   const body=p.endsWith("/sessions")?{total:1,items:[{id:"s1",alias:"agent",state:"active",running:true}]}
+    :p.endsWith("/transcript")?{turns}:{id:"s1",state:"active"};
+   return new Response(JSON.stringify(body));
+  })as typeof fetch;
+  const opts={allowDcr:true,writes:{enabled:true},sendJournalFile,stateFile:path.join(dir,"oauth.json"),replyStateFile:path.join(dir,"reply-state.json"),deps:{gc:new GcClient({baseUrl:"http://127.0.0.1:1",city:"gc2",fetchImpl}),mailAgent:"human",now:()=>new Date(sent),clock}};
+  const first=await boot(opts);
+  const a=await first.registered([CLAUDE_CB],{client_name:"Same label"}),b=await first.registered([CLAUDE_CB],{client_name:"Same label"});
+  const login=await first.login(a.client_id,CLAUDE_CB,"gc:read gc:write");
+  const call=async(res:string,token:string,name:string,args:object)=>{
+   const r=await fetch(res,{method:"POST",headers:{"content-type":"application/json",accept:"application/json, text/event-stream",authorization:"Bearer "+token},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split("\n").find(x=>x.startsWith("data:"));
+   return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const ack=await call(first.res,login.token.access_token,"send_to_session",{session:"agent",text:"Check the result"});
+  expect(ack.handle_persistence).toBe("private_file");
+  const before=await call(first.res,login.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(before.page).toBe("Original candidate.");
+  await first.stop();
+  if(pendingSnapshot){expect(pendingJournal).toBeTypeOf("string");fs.writeFileSync(sendJournalFile,pendingJournal!);}
+  const second=await boot(opts);
+  const owner=await second.login(a.client_id,CLAUDE_CB,"gc:read gc:write"),other=await second.login(b.client_id,CLAUDE_CB,"gc:read gc:write");
+  const restored=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(restored).toMatchObject({reply_id:before.reply_id,page:"Original candidate.",complete:false});
+  const sendRetry=await call(second.res,owner.token.access_token,"send_to_session",{session:"agent",text:"Check the result"});
+  expect(sendRetry).toMatchObject({replayed:true,handle:ack.handle,idempotency_key:ack.idempotency_key,completion:"not_proven"});
+  if(pendingSnapshot)expect(sendRetry).toMatchObject({sent:false,reason:"outcome_unknown"});else expect(sendRetry.sent).toBe(true);
+  expect(posts).toBe(1);
+  expect(fs.readFileSync(sendJournalFile,"utf8")).not.toContain("Check the result");
+  const denied=await call(second.res,other.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(denied).toMatchObject({found:false,reason:"unknown_handle"});
+  turns=[{role:"assistant",text:"Different segment.",timestamp:new Date(sent+2000).toISOString()}];
+  const compacted=await call(second.res,owner.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(compacted).toMatchObject({reply_available:false,reason:"reply_candidate_unavailable",complete:false});
+  expect(posts).toBe(1);
+  const readOnlyOwner=await second.login(a.client_id,CLAUDE_CB,"gc:read");
+  const beforeCancelReads=reads;
+  const cancelled=await call(second.res,readOnlyOwner.token.access_token,"wait_for_reply",{handle:ack.handle,cancel_wait:true});
+  expect(cancelled).toMatchObject({reason:"wait_cancelled",tracking_only:true,agent_interrupted:false});
+  expect(reads).toBe(beforeCancelReads);
+  await second.stop();
+  const third=await boot(opts),thirdLogin=await third.login(a.client_id,CLAUDE_CB,"gc:read");
+  const afterRestart=await call(third.res,thirdLogin.token.access_token,"wait_for_reply",{handle:ack.handle,max_seconds:1});
+  expect(afterRestart).toMatchObject({reason:"wait_cancelled",reply_available:false,complete:false});
+  expect(reads).toBe(beforeCancelReads);expect(posts).toBe(1);
+ });
+});
+
+describe('faithful reader through real DCR, PKCE, OAuth and HTTP MCP',()=>{
+ it('preserves long original text, repeats cursor pages and isolates same-name clients',async()=>{
+  const original='PR #2740 — show/hide Övrigt column.\n\n'+('Evidence with https://example.com/pr/2740 and formatting.\n'.repeat(700))+'https://example.com/'+'Gq9'.repeat(10000)+'/file';
+  const gc=new GcClient({baseUrl:'http://127.0.0.1:1',city:'gc2',fetchImpl:(async(url:any)=>Response.json(new URL(url).pathname.endsWith('/sessions')?{items:[{id:'s1',alias:'agent'}],total:1}:{id:'s1',format:'conversation',turns:[{id:'native-e',role:'assistant',text:original,timestamp:'2026-11-23T12:48:07Z'}]}))as typeof fetch});
+  const s=await boot({allowDcr:true,deps:{gc,mailAgent:'human',now:()=>new Date()}});
+  const a=await s.registered([CLAUDE_CB],{client_name:'Identical App'}),b=await s.registered([CLAUDE_CB],{client_name:'Identical App'});
+  const ta=await s.login(a.client_id,CLAUDE_CB,'gc:read'),tb=await s.login(b.client_id,CLAUDE_CB,'gc:read');
+  const call=async(token:string,args:object)=>{
+   const r=await fetch(s.res,{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream',authorization:'Bearer '+token},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'read_session',arguments:args}})});
+   expect(r.status).toBe(200);const text=await r.text(),line=text.split('\n').find(x=>x.startsWith('data:'));return JSON.parse(line?line.slice(5):text).result.structuredContent;
+  };
+  const first=await call(ta.token.access_token,{session:'agent',last:1,page_bytes:8192});expect(first.messages[0].text).toContain('\n\n');
+  const args=first.continue_read.arguments;expect((await call(tb.token.access_token,args)).reason).toBe('cursor_unavailable');
+  const second=await call(ta.token.access_token,args);expect(await call(ta.token.access_token,args)).toEqual(second);
+  let reconstructed=first.messages[0].text,r=second;
+  for(let n=0;;n++){expect(n).toBeLessThan(20);expect(Buffer.byteLength(JSON.stringify(r))).toBeLessThanOrEqual(8192);reconstructed+=r.messages.map((m:any)=>m.text).join('');if(r.snapshot_end)break;r=await call(ta.token.access_token,r.continue_read.arguments);}
+  expect(reconstructed).toBe(original);
+ });
+});

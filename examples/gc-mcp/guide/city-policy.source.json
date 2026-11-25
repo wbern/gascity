@@ -1,0 +1,32 @@
+{
+  "id": "gc3-city-policy-2026-11-23",
+  "profile": "gc3-2026-11-22",
+  "host": "clodcod",
+  "city": "gc2",
+  "label": "GC3",
+  "version": "2026-11-23.1",
+  "dispatch_rules": [
+    {
+      "text": "For implementation routing, use the configured worker-level selector and preserve the requested level/provider constraints.",
+      "anchor": "preserve the fixed-profile selector and requested level"
+    },
+    {
+      "text": "On capacity refusal, retain and retry the same request; never silently downgrade or bypass the selector.",
+      "anchor": "Exit 75 means retain and retry the same request"
+    },
+    {
+      "text": "Treat routing, readiness and concrete claims separately; a valid configured pool need not have a live worker.",
+      "anchor": "A pool is a valid target without a live worker session"
+    }
+  ],
+  "review_rules": [
+    {
+      "text": "The repository and review context select the owning city/order. Check that order on its execution city; another city's old order is not a fallback.",
+      "anchor": "Another city's old order is not a fallback"
+    },
+    {
+      "text": "The claimed formula owns publication and closure. Require matching exact-head GitHub readback; do not synthesize review beads or hand-publish verdicts.",
+      "anchor": "Never close the review bead"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+# OAuth discovery end-to-end evidence (reference MCP client -> real nginx -> real gc-mcp).
+# FINAL SHAPE (William): ONE host per server, NO path prefix. Host mcp.gc3.enmansbyra.se, issuer = host root, endpoint exactly /mcp, resource/audience https://<host>/mcp.
+# Reproduce: npm run build && node scripts/discovery-e2e.mjs --generator <infra>/scripts/gc-mcp-nginx-vhost.py --host mcp.gc3.enmansbyra.se
+# The port is random per run. NOT proven here: Claude's own connector (needs the live URL; Claude has open reports that only an endpoint at exactly /mcp connects reliably, anthropics/claude-ai-mcp #878).
+# Edge contract: the generated vhost mirrors the existing public edge's (CRM ADR-0092 R5): 405 for any other method, upstream CORS stripped, 195s timeouts.
+
+# discovery e2e: host=mcp.gc3.enmansbyra.se endpoint=/mcp issuer=host root (public URL https://mcp.gc3.enmansbyra.se:39609/mcp)
+PASS  401 carries resource_metadata at the path-inserted URL  -> Bearer error="invalid_token", error_description="Missing Authorization header", scope="gc:read", resource_metadata="https://mcp.gc3.enmansbyra.se:3960
+PASS  protected-resource document: resource equals the exact URL the user types  -> https://mcp.gc3.enmansbyra.se:39609/mcp
+PASS  issuer is the host root (no path)  -> https://mcp.gc3.enmansbyra.se:39609/
+PASS  AS metadata document: issuer matches the URL it was discovered at (RFC 8414)  -> https://mcp.gc3.enmansbyra.se:39609/
+PASS  AS metadata: /authorize and /token at the root (so a client that falls back to {issuer}/authorize still lands right), no registration endpoint
+PASS  client starts the flow and asks for a browser redirect
+PASS  consent page is served through nginx and shows the redirect target
+PASS  owner passphrase approves and the callback carries a code
+PASS  token exchange succeeds (PKCE, audience-bound to the exact /mcp resource)
+PASS  tools/list over /mcp returns 13 read-only tools (no write tool without gc:write): bead_show, briefing, city_status, latest_reply, list_sessions, mail_inbox, peek_session, read_more, ready_work, session_state, wait_for_reply, what_is_working_on, whats_new
+PASS  tools/call city_status answers  -> gc3: 23 of 40 agents running; 5 in progress, 12 ready; 3 unread mail. 
+PASS  GET on the MCP URL answers 405 with Allow: POST (no GET stream)  -> 405 POST
+PASS  host-root protected-resource alias answers with the same resource  -> https://mcp.gc3.enmansbyra.se:39609/mcp
+PASS  OIDC discovery path answers with the same issuer  -> 200
+PASS  GET / is not served  -> 404
+PASS  GET /healthz is not served  -> 404
+PASS  GET /register is not served  -> 404
+PASS  GET /admin is not served  -> 404
+PASS  GET /mcp/ is not served  -> 404
+PASS  GET /mcp/x is not served  -> 404
+PASS  GET /mcp2 is not served  -> 404
+PASS  GET /gc3 is not served  -> 404
+PASS  GET /gc3/authorize is not served  -> 404
+PASS  GET /gc2 is not served  -> 404
+PASS  GET /gc2/authorize is not served  -> 404
+PASS  GET /authorize/x is not served  -> 404
+PASS  GET /.well-known/jwks.json is not served  -> 404
+PASS  GET /.well-known/oauth-authorization-server/mcp is not served  -> 404
+PASS  GET /.well-known/oauth-protected-resource/other is not served  -> 404
+
+nginx access log (method path status), in order:
+  
+
+RESULT: PASS

@@ -1,0 +1,11 @@
+# GC3 live supervisor read recording
+UTC: 2026-11-22T19:27:13.113Z
+Host: clodcod; city: gc2; Batch 2 on base 7a2386696; no deploy.
+Actual GcClient and tool handlers against loopback; no fixtures. Aggregate fields only.
+get-v0-city-by-city-name-status: {"name":"gc2","uptime_sec":330289}
+get-v0-city-by-city-name-sessions: {"total":26,"next_cursor":"bc24f911-1317-4a00-963c-35ecd55988e7"}
+API cursor round trip: PASS
+get-v0-city-by-city-name-beads: {"total":1016,"next_cursor":"ca7e480d-0553-48ba-9667-ad5033840d46"}
+API cursor round trip: PASS
+276 vitest tests PASS; tsc build PASS; real nginx + SDK OAuth discovery PASS.
+Mutation checks: redaction, response size cap (escaped content), cursor client binding and optional read policy all caught by assertions.
